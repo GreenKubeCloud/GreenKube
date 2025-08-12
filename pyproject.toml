@@ -1,0 +1,63 @@
+# Central configuration file for the GreenKube project
+# Uses PEP 621 standard for project metadata
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "greenkube"
+version = "0.1.0" # Initial MVP version
+authors = [
+  { name = "Hugo Lelievre", email = "hugo.lelievre.56@gmail.com" },
+]
+description = "Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Monitoring",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+
+# Production dependencies
+# These are the libraries required for the tool to run
+dependencies = [
+    "typer[all]>=0.9.0", # For building a clean command-line interface (CLI)
+    "requests>=2.31.0",  # For making HTTP requests to APIs (Kepler, carbon intensity)
+    "pydantic>=2.4.0",   # For data validation and modeling
+    "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
+]
+
+[project.urls]
+"Homepage" = "https://github.com/GreenKubeCloud/greenkube"
+"Bug Tracker" = "https://github.com/GreenKubeCloud/greenkube/issues"
+
+# CLI entry point
+# This creates the `greenkube` command in the user's terminal
+[project.scripts]
+greenkube = "greenkube.cli:app"
+
+# Development tool configuration (optional but recommended)
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+
+[tool.hatch.version]
+path = "src/greenkube/__init__.py"
+
+[tool.ruff]
+# Formatting and linting rules for clean code
+line-length = 88
+select = ["E", "F", "W", "I"] # Basic rule selection
