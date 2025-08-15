@@ -18,7 +18,7 @@ class EnergyMetric(BaseModel):
     pod_name: str = Field(..., description="The name of the Kubernetes pod.")
     namespace: str = Field(..., description="The namespace the pod belongs to.")
     joules: float = Field(..., description="The energy consumed by the pod in Joules over a period.")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc), description="The timestamp of the measurement.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the measurement.")
 
 class CostMetric(BaseModel):
     """
@@ -30,7 +30,7 @@ class CostMetric(BaseModel):
     cpu_cost: float = Field(..., description="The calculated cost of CPU usage for the pod.")
     ram_cost: float = Field(..., description="The calculated cost of RAM usage for the pod.")
     total_cost: float = Field(..., description="The total cost for the pod (CPU + RAM + other costs).")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc), description="The timestamp of the cost calculation.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the cost calculation.")
 
 class CarbonEmissionMetric(BaseModel):
     """
@@ -40,5 +40,5 @@ class CarbonEmissionMetric(BaseModel):
     pod_name: str = Field(..., description="The name of the Kubernetes pod.")
     namespace: str = Field(..., description="The namespace the pod belongs to.")
     co2e_grams: float = Field(..., description="The calculated carbon emissions in grams of CO2 equivalent.")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc), description="The timestamp of the calculation.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the calculation.")
 
