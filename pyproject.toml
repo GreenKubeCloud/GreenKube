@@ -54,6 +54,9 @@ testpaths = [
     "tests",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.hatch.version]
 path = "src/greenkube/__init__.py"
 
