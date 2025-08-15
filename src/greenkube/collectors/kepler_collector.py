@@ -37,7 +37,7 @@ class KeplerCollector(BaseCollector):
         # This simulates the kind of raw data we might get from Kepler's API
         mock_api_response = [
             {"pod_name": "frontend-abc", "namespace": "e-commerce", "joules": 1250.5},
-            {"pod_name": "backend-xyz", "namespace": "e-commerce", "joules": 3400.0},
+            {"pod_name": "backend-xyz", "namespace": "e-commerce", "joules": 3600000.0},
             {"pod_name": "database-123", "namespace": "e-commerce", "joules": 8950.2},
             {"pod_name": "auth-service-fgh", "namespace": "security", "joules": 1500.7},
         ]
