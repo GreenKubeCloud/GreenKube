@@ -42,3 +42,11 @@ class CarbonEmissionMetric(BaseModel):
     co2e_grams: float = Field(..., description="The calculated carbon emissions in grams of CO2 equivalent.")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the calculation.")
 
+class CombinedMetric(BaseModel):
+    """
+    A combined data model for reporting, linking cost and carbon data for a pod.
+    """
+    pod_name: str
+    namespace: str
+    total_cost: float
+    co2e_grams: float
