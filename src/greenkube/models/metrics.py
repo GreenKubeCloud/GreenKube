@@ -20,6 +20,17 @@ class EnergyMetric(BaseModel):
     joules: float = Field(..., description="The energy consumed by the pod in Joules over a period.")
     timestamp: datetime = Field(default_factory=datetime.now(timezone.utc), description="The timestamp of the measurement.")
 
+class CostMetric(BaseModel):
+    """
+    Represents a single cost data point, typically collected from a source
+    like OpenCost.
+    """
+    pod_name: str = Field(..., description="The name of the Kubernetes pod.")
+    namespace: str = Field(..., description="The namespace the pod belongs to.")
+    cpu_cost: float = Field(..., description="The calculated cost of CPU usage for the pod.")
+    ram_cost: float = Field(..., description="The calculated cost of RAM usage for the pod.")
+    total_cost: float = Field(..., description="The total cost for the pod (CPU + RAM + other costs).")
+    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc), description="The timestamp of the cost calculation.")
 
 class CarbonEmissionMetric(BaseModel):
     """
