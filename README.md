@@ -45,7 +45,7 @@ cd greenkube
 pip install -e .
 ```
 
-### Utilisation de base
+### Basic Usage
 
 ```bash
 # Display a summary carbon footprint report for all namespaces
@@ -58,7 +58,7 @@ greenkube report --namespace my-production-app
 greenkube export --format csv --output report.csv
 ```
 
-## 🤝 Contribution
+## 🤝 Contributing
 GreenKube is a community-driven project, and we welcome all contributions! Check out our upcoming **CONTRIBUTING.md** file to learn how to get involved.
 
 * **Report Bugs**: Open an "Issue" with a detailed description.
