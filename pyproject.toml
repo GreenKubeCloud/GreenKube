@@ -35,6 +35,8 @@ dependencies = [
     "requests>=2.31.0",  # For making HTTP requests to APIs (Kepler, carbon intensity)
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
+    "python-dotenv>=1.0.0", # For loading environment variables from .env files
+    "psycopg2-binary >=2.9.0", # PostgreSQL database adapter
 ]
 
 [project.urls]
