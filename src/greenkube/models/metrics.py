@@ -6,19 +6,20 @@ single source of truth for our data structures, ensuring type safety and
 consistency across all modules (collectors, calculators, reporters).
 """
 from pydantic import BaseModel, Field
-from datetime import datetime
-from datetime import timezone
-from typing import List
+from datetime import datetime, timezone
+from typing import Optional
 
 class EnergyMetric(BaseModel):
     """
     Represents a single energy consumption data point, typically collected
-    from a source like Kepler.
+    from a source like Kepler. Now includes metadata for granular calculations.
     """
     pod_name: str = Field(..., description="The name of the Kubernetes pod.")
     namespace: str = Field(..., description="The namespace the pod belongs to.")
     joules: float = Field(..., description="The energy consumed by the pod in Joules over a period.")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the measurement.")
+    node: Optional[str] = Field(None, description="The node where the pod is running.")
+    region: Optional[str] = Field(None, description="The cloud region of the node.")
 
 class CostMetric(BaseModel):
     """
@@ -50,3 +51,12 @@ class CombinedMetric(BaseModel):
     namespace: str
     total_cost: float
     co2e_grams: float
+    pue: float
+    grid_intensity: float
+
+class EnvironmentalMetric(BaseModel):
+    """
+    Holds environmental factors for a specific location (e.g., a cloud region).
+    """
+    pue: float = Field(..., description="Power Usage Effectiveness of the data center.")
+    grid_intensity: float = Field(..., description="Carbon intensity of the grid in gCO2e/kWh.")

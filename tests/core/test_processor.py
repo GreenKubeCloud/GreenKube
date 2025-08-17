@@ -13,16 +13,17 @@ class TestDataProcessor(unittest.TestCase):
     """
     Test suite for the DataProcessor.
     """
-    def test_run_pipeline(self):
+    def test_run_pipeline_with_multi_region_data(self):
         """
-        Tests that the processor correctly runs the pipeline and combines data.
+        Tests that the processor correctly runs the full pipeline and
+        combines data, including detailed environmental metrics, from a
+        simulated multi-region environment.
         """
         # 1. Arrange
-        # Use our real mocked collectors and calculator
         processor = DataProcessor(
             energy_collector=KeplerCollector(),
             cost_collector=OpenCostCollector(),
-            calculator=CarbonCalculator(pue=1.5, grid_intensity_gco2e_per_kwh=50.0)
+            calculator=CarbonCalculator()
         )
 
         # 2. Act
@@ -30,12 +31,24 @@ class TestDataProcessor(unittest.TestCase):
 
         # 3. Assert
         self.assertIsInstance(results, list)
-        self.assertTrue(all(isinstance(item, CombinedMetric) for item in results))
         self.assertEqual(len(results), 4)
 
-        # Check a specific, predictable result (backend-xyz pod)
-        backend_pod_metric = next(item for item in results if item.pod_name == "backend-xyz")
-        self.assertEqual(backend_pod_metric.total_cost, 1.15)
-        self.assertAlmostEqual(backend_pod_metric.co2e_grams, 75.0, places=5)
-        print("\nTestDataProcessor: All assertions passed! ✅")
+        # Check a pod from the "us-east-1" region (higher carbon)
+        backend_pod = next(item for item in results if item.pod_name == "backend-xyz")
+        self.assertEqual(backend_pod.total_cost, 1.15)
+        # Expected: (3.6M Joules / 3.6M) * 1.6 PUE * 450 g/kWh = 720.0 grams
+        self.assertAlmostEqual(backend_pod.co2e_grams, 720.0, places=5)
+        # Assert the new detailed fields are correct
+        self.assertEqual(backend_pod.pue, 1.6)
+        self.assertEqual(backend_pod.grid_intensity, 450.0)
 
+        # Check a pod from the "eu-west-1" region (greener)
+        auth_pod = next(item for item in results if item.pod_name == "auth-service-fgh")
+        self.assertEqual(auth_pod.total_cost, 0.65)
+        # Expected: (1500.7 Joules / 3.6M) * 1.2 PUE * 50 g/kWh = 0.0250 grams
+        self.assertAlmostEqual(auth_pod.co2e_grams, 0.0250, places=4)
+        # Assert the new detailed fields are correct
+        self.assertEqual(auth_pod.pue, 1.2)
+        self.assertEqual(auth_pod.grid_intensity, 50.0)
+        
+        print("\nTestDataProcessor: All assertions passed! ✅")

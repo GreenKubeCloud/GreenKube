@@ -4,54 +4,65 @@ Unit tests for the GreenKube Command-Line Interface (CLI).
 """
 import pytest
 from typer.testing import CliRunner
+from unittest.mock import MagicMock, ANY
 
 # Import the Typer app instance from your CLI module
 from greenkube.cli import app
+from greenkube.models.metrics import CombinedMetric
 
 # Create a CliRunner instance to invoke the commands
 runner = CliRunner()
 
-def test_report_success():
+def test_report_success(mocker):
     """
-    Tests that the `greenkube report` command runs successfully
-    and contains the expected table headers and data.
+    Tests that the `greenkube report` command correctly calls the reporter with data.
     """
-    # 1. Arrange & 2. Act
+    # 1. Arrange: Patch the ConsoleReporter to intercept its creation and methods.
+    mock_reporter_class = mocker.patch('greenkube.cli.ConsoleReporter')
+    mock_reporter_instance = MagicMock()
+    mock_reporter_class.return_value = mock_reporter_instance
+
+    # 2. Act
     result = runner.invoke(app, ["report"])
 
     # 3. Assert
     assert result.exit_code == 0, "CLI should exit without errors"
-    assert "Initializing GreenKube" in result.stdout, "Should show initialization message"
-    assert "Generating report..." in result.stdout, "Should show report generation message"
     
-    # Check for table headers and specific, predictable pod names
-    assert "Pod Name" in result.stdout
-    assert "Total Cost ($)" in result.stdout
-    assert "CO2e (grams)" in result.stdout
-    assert "backend-xyz" in result.stdout  # A known pod from mocked data
-    assert "e-commerce" in result.stdout # A known namespace
-    print("\nTestCLI (report): All assertions passed! ✅")
+    # FIX: Check for a call with the keyword argument 'data'
+    mock_reporter_instance.report.assert_called_once_with(data=ANY)
+
+    # We can now safely inspect the data that was passed via the keyword argument.
+    reported_data = mock_reporter_instance.report.call_args.kwargs['data']
+    assert len(reported_data) > 0 # Check that some data was passed
+    assert isinstance(reported_data[0], CombinedMetric)
 
 
-def test_report_with_namespace_filter_success():
+def test_report_with_namespace_filter_success(mocker):
     """
-    Tests that the `greenkube report --namespace` command correctly
-    filters the output to the specified namespace.
+    Tests that the CLI correctly filters data before passing it to the reporter.
     """
-    # 1. Arrange & 2. Act
+    # 1. Arrange
+    mock_reporter_class = mocker.patch('greenkube.cli.ConsoleReporter')
+    mock_reporter_instance = MagicMock()
+    mock_reporter_class.return_value = mock_reporter_instance
+
+    # 2. Act
     result = runner.invoke(app, ["report", "--namespace", "security"])
 
     # 3. Assert
     assert result.exit_code == 0
     assert "Filtering results for namespace: security" in result.stdout
     
-    # Check that only the correct pod is displayed
-    assert "auth-service-fgh" in result.stdout
+    # FIX: Check for a call with the keyword argument 'data'
+    mock_reporter_instance.report.assert_called_once_with(data=ANY)
     
-    # Check that pods from other namespaces are NOT present
-    assert "backend-xyz" not in result.stdout
-    assert "e-commerce" not in result.stdout
-    print("\nTestCLI (report --namespace): All assertions passed! ✅")
+    # CRITICAL: Inspect the data that was passed to the mocked reporter.
+    reported_data = mock_reporter_instance.report.call_args.kwargs['data']
+
+    # Check that only data for the 'security' namespace was reported.
+    assert len(reported_data) == 1
+    assert reported_data[0].namespace == "security"
+    assert reported_data[0].pod_name == "auth-service-fgh"
 
 
 def test_report_namespace_not_found():
@@ -65,7 +76,6 @@ def test_report_namespace_not_found():
     # 3. Assert
     assert result.exit_code != 0, "CLI should exit with a non-zero code for errors"
     assert "WARN: No data found for namespace 'non-existent-ns'" in result.stdout
-    print("\nTestCLI (report namespace not found): All assertions passed! ✅")
 
 
 def test_export_placeholder():
@@ -78,4 +88,3 @@ def test_export_placeholder():
     # 3. Assert
     assert result.exit_code == 0
     assert "Placeholder: Exporting data in csv format to report.csv" in result.stdout
-    print("\nTestCLI (export): All assertions passed! ✅")

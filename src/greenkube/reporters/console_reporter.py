@@ -15,21 +15,27 @@ class ConsoleReporter(BaseReporter):
     """
     def report(self, data: List[CombinedMetric]):
         """
-        Displays the combined metrics in a rich table.
+        Displays the combined metrics in a rich, detailed table.
         """
+        print("INFO: Generating report...")
         console = Console()
-        table = Table(show_header=True, header_style="bold magenta")
+        table = Table(show_header=True, header_style="bold magenta", title="GreenKube FinGreenOps Report")
+        
         table.add_column("Namespace", style="dim")
         table.add_column("Pod Name")
         table.add_column("Total Cost ($)", justify="right")
         table.add_column("CO2e (grams)", justify="right")
+        table.add_column("PUE", justify="right")
+        table.add_column("Grid Intensity (gCO2e/kWh)", justify="right")
 
         for item in data:
             table.add_row(
                 item.namespace,
                 item.pod_name,
                 f"{item.total_cost:.4f}",
-                f"{item.co2e_grams:.4f}"
+                f"{item.co2e_grams:.4f}",
+                f"{item.pue:.2f}",
+                f"{item.grid_intensity:.1f}"
             )
 
         console.print(table)
