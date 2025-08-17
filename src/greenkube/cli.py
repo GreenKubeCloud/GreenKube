@@ -8,14 +8,12 @@ It orchestrates the collection, processing, and reporting of FinGreenOps data.
 import typer
 from typing_extensions import Annotated
 
-# Import the core components of the application
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
 from .core.calculator import CarbonCalculator
 from .core.processor import DataProcessor
 from .reporters.console_reporter import ConsoleReporter
 
-# Create a Typer application instance
 app = typer.Typer(
     name="greenkube",
     help="Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure.",
@@ -38,11 +36,8 @@ def report(
     # API endpoints, authentication, etc. For now, they use mocked data.
     kepler_collector = KeplerCollector()
     opencost_collector = OpenCostCollector()
+    carbon_calculator = CarbonCalculator()
     
-    # These values would typically come from a configuration file or cloud provider metadata
-    carbon_calculator = CarbonCalculator(pue=1.5, grid_intensity_gco2e_per_kwh=50.0)
-    
-    # The DataProcessor orchestrates the entire workflow
     processor = DataProcessor(
         energy_collector=kepler_collector,
         cost_collector=opencost_collector,
@@ -65,10 +60,7 @@ def report(
         print(f"WARN: No data found for namespace '{namespace}'. Please check if the namespace is correct and has active workloads.")
         raise typer.Exit(code=1)
         
-    print("INFO: Generating report...")
-    console_reporter.report(data=combined_data)
-        
-    print("INFO: Generating report...")
+    print("INFO: Calling the reporter...")
     console_reporter.report(data=combined_data)
 
 

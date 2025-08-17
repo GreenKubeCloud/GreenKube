@@ -5,8 +5,7 @@ consumption data from the Kepler API. Kepler provides highly granular,
 pod-level energy metrics by leveraging eBPF.
 """
 from typing import List
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 
 # Import the base class and the model from our other files
 from .base_collector import BaseCollector
@@ -34,21 +33,22 @@ class KeplerCollector(BaseCollector):
         print("INFO: Collecting data from KeplerCollector (using mocked data)...")
 
         # --- MOCKED DATA ---
-        # This simulates the kind of raw data we might get from Kepler's API
+        # This simulates data from a cluster spanning two regions
         mock_api_response = [
-            {"pod_name": "frontend-abc", "namespace": "e-commerce", "joules": 1250.5},
-            {"pod_name": "backend-xyz", "namespace": "e-commerce", "joules": 3600000.0},
-            {"pod_name": "database-123", "namespace": "e-commerce", "joules": 8950.2},
-            {"pod_name": "auth-service-fgh", "namespace": "security", "joules": 1500.7},
+            {"pod_name": "frontend-abc", "namespace": "e-commerce", "joules": 1250.5, "node": "node-1", "region": "us-east-1"},
+            {"pod_name": "backend-xyz", "namespace": "e-commerce", "joules": 3600000.0, "node": "node-1", "region": "us-east-1"},
+            {"pod_name": "database-123", "namespace": "e-commerce", "joules": 8950.2, "node": "node-2", "region": "eu-west-1"},
+            {"pod_name": "auth-service-fgh", "namespace": "security", "joules": 1500.7, "node": "node-2", "region": "eu-west-1"},
         ]
 
-        # Use a list comprehension to convert the raw data into our Pydantic models
         collected_metrics = [
             EnergyMetric(
                 pod_name=item["pod_name"],
                 namespace=item["namespace"],
                 joules=item["joules"],
-                timestamp=datetime.now(timezone.utc)
+                timestamp=datetime.now(timezone.utc),
+                node=item["node"],
+                region=item["region"]
             )
             for item in mock_api_response
         ]
