@@ -36,7 +36,8 @@ dependencies = [
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
     "python-dotenv>=1.0.0", # For loading environment variables from .env files
-    "psycopg2-binary >=2.9.0", # PostgreSQL database adapter
+    "psycopg2-binary>=2.9.0", # PostgreSQL database adapter
+    "schedule>=1.2.1", # For scheduling periodic tasks
 ]
 
 [project.urls]
