@@ -9,14 +9,22 @@ import typer
 from typing_extensions import Annotated
 import time
 
+# --- GreenKube Core Imports ---
+from .core.db import get_db_connection
+from .core.config import config
+from .core.scheduler import Scheduler
+
+# --- GreenKube Collector Imports ---
+from .collectors.electricity_maps_collector import ElectricityMapsCollector
+from .collectors.node_collector import NodeCollector # Import the new collector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
+
+# --- GreenKube Reporting and Processing Imports ---
 from .core.calculator import CarbonCalculator
 from .core.processor import DataProcessor
 from .reporters.console_reporter import ConsoleReporter
-# By importing from the db module, we trigger the global DatabaseManager instance,
-# which connects to the database and initializes the schema upon script startup.
-from .core.db import get_db_connection
+
 
 app = typer.Typer(
     name="greenkube",
@@ -24,38 +32,58 @@ app = typer.Typer(
     add_completion=False
 )
 
+def collect_carbon_intensity_for_all_zones():
+    """
+    Orchestrates the collection of carbon intensity data for all discovered zones.
+    """
+    typer.echo("--- Starting hourly carbon intensity collection task ---")
+    node_collector = NodeCollector()
+    unique_zones = node_collector.get_zones()
+
+    if not unique_zones:
+        typer.secho("Warning: No node zones discovered. Skipping carbon intensity collection.", fg=typer.colors.YELLOW)
+        return
+
+    for zone in unique_zones:
+        try:
+            em_collector = ElectricityMapsCollector(zone=zone)
+            em_collector.collect()
+        except Exception as e:
+            typer.secho(f"Failed to collect data for zone {zone}: {e}", fg=typer.colors.RED)
+    typer.echo("--- Finished carbon intensity collection task ---")
+
+
 @app.command()
 def start():
     """
-    Initialize the database and start the GreenKube service.
-
-    This command ensures the database is connected and the schema is correctly
-    set up. It will be the future home for the scheduled data collectors.
+    Initialize the database and start the GreenKube data collection service.
     """
     typer.echo("🚀 Initializing GreenKube...")
     try:
-        # The import above has already triggered the database setup.
-        # We can get the connection here to confirm it was successful.
+        # Database connection is triggered by the initial import
         conn = get_db_connection()
         if conn:
             typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
         else:
-            # This case should ideally be caught by an exception during initialization
             typer.secho("❌ Failed to establish database connection.", fg=typer.colors.RED)
             raise typer.Exit(code=1)
 
-        typer.echo("📈 Starting collectors... (Scheduler to be implemented in a future step)")
-        # --- FUTURE IMPLEMENTATION ---
-        # scheduler = Scheduler()
-        # scheduler.add_job(kepler_collector.collect, 'interval', minutes=5)
-        # scheduler.add_job(opencost_collector.collect, 'interval', hours=1)
-        # scheduler.add_job(electricity_maps_collector.collect, 'interval', hours=1)
-        # scheduler.start()
-        # ---------------------------
-
+        # --- Initialize and Configure Scheduler ---
+        scheduler = Scheduler()
+        # Schedule the master collection function to run every hour
+        scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
+        
+        typer.echo("📈 Starting scheduler...")
         typer.echo("\nGreenKube is running. Press CTRL+C to exit.")
-        # This loop simulates a running service and keeps the script alive.
+        
+        # --- Run Initial Collection Immediately on Startup ---
+        typer.echo("Running initial data collection for all zones...")
+        collect_carbon_intensity_for_all_zones()
+        typer.echo("Initial collection complete.")
+
+        # --- Main Service Loop ---
         while True:
+            scheduler.run_pending()
             time.sleep(1)
 
     except KeyboardInterrupt:
@@ -76,36 +104,23 @@ def report(
     Displays a summary carbon footprint and cost report for all namespaces.
     """
     print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
-
-    # --- 1. Initialization of Components ---
-    # In a real-world scenario, these components would be configured with
-    # API endpoints, authentication, etc. For now, they use mocked data.
     kepler_collector = KeplerCollector()
     opencost_collector = OpenCostCollector()
     carbon_calculator = CarbonCalculator()
-    
     processor = DataProcessor(
         energy_collector=kepler_collector,
         cost_collector=opencost_collector,
         calculator=carbon_calculator
     )
-    
     console_reporter = ConsoleReporter()
-
-    # --- 2. Run the Data Processing Pipeline ---
     print("INFO: Running the data processing pipeline...")
     combined_data = processor.run()
-
-    # --- 3. Filter Data if a Namespace is Specified ---
     if namespace:
         print(f"INFO: Filtering results for namespace: {namespace}...")
         combined_data = [item for item in combined_data if item.namespace == namespace]
-
-    # --- 4. Report the Final Data ---
     if not combined_data:
         print(f"WARN: No data found for namespace '{namespace}'. Please check if the namespace is correct and has active workloads.")
         raise typer.Exit(code=1)
-        
     print("INFO: Calling the reporter...")
     console_reporter.report(data=combined_data)
 
