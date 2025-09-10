@@ -14,7 +14,6 @@ class OpenCostCollector(BaseCollector):
     """
     Collects cost allocation data from an OpenCost service via an Ingress.
     """
-    # On peut garder HTTPS, mais on va désactiver la vérification SSL
     OPENCOST_API_URL = "https://opencost.greenkube.cloud/allocation/compute"
 
     def collect(self) -> List[CostMetric]:
@@ -32,30 +31,24 @@ class OpenCostCollector(BaseCollector):
         }
 
         try:
-            # --- MODIFICATIONS CI-DESSOUS ---
-            # 1. Ajout de verify=False pour ignorer les erreurs de certificat SSL local.
-            # 2. Ajout d'un avertissement si la vérification est désactivée.
             import warnings
             from requests.packages.urllib3.exceptions import InsecureRequestWarning
             
-            # Supprimer les avertissements de requêtes non sécurisées dans la console
             warnings.simplefilter('ignore', InsecureRequestWarning)
             
             response = requests.get(self.OPENCOST_API_URL, params=params, timeout=10, verify=False)
             
-            response.raise_for_status() # Lève une exception si erreur (4xx/5xx)
+            response.raise_for_status()
 
-            # --- AJOUT POUR LE DÉBOGAGE ---
-            # Affiche le contenu brut si ce n'est pas du JSON valide, pour aider à diagnostiquer.
             try:
                 response_data = response.json().get("data")
             except requests.exceptions.JSONDecodeError:
                 print(f"ERROR: Failed to decode JSON. Server sent non-JSON response.")
-                print(f"DEBUG: Raw response content: {response.text[:500]}...") # Affiche les 500 premiers caractères
+                print(f"DEBUG: Raw response content: {response.text[:500]}...")
                 return []
 
             if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
-                print("WARN: OpenCost API returned no data.")
+                print("WARN: OpenCost API returned no data. This can happen if the cluster is new.")
                 return []
             
             cost_data = response_data[0]
@@ -64,16 +57,23 @@ class OpenCostCollector(BaseCollector):
             print(f"ERROR: Could not connect to OpenCost API via Ingress: {e}")
             return []
 
-        # --- TRAITEMENT DE LA RÉPONSE ---
+        # --- TRAITEMENT DE LA RÉPONSE (CORRIGÉ) ---
         collected_metrics = []
         now = datetime.now(timezone.utc)
         
         for resource_id, item in cost_data.items():
-            parts = resource_id.split('/')
-            if len(parts) != 2:
-                continue
+            # Le nom du pod et le namespace sont à l'intérieur de l'objet 'properties'.
+            properties = item.get("properties", {})
+            pod_name = properties.get("pod")
+            namespace = properties.get("namespace")
+
+            # Si la propriété "pod" n'existe pas, on utilise la clé comme nom de pod.
+            if not pod_name:
+                pod_name = resource_id
             
-            namespace, pod_name = parts
+            if not namespace:
+                print(f"WARN: Skipping metric for '{pod_name}' because namespace is missing.")
+                continue
 
             metric = CostMetric(
                 pod_name=pod_name,
