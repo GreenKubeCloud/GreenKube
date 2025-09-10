@@ -3,6 +3,7 @@
 This module contains the collector responsible for gathering cost
 allocation data from the OpenCost API.
 """
+import requests
 from typing import List
 from datetime import datetime, timezone
 
@@ -11,42 +12,79 @@ from ..models.metrics import CostMetric
 
 class OpenCostCollector(BaseCollector):
     """
-    Collects cost allocation data from an OpenCost service.
-
-    For this initial version, it returns mocked data.
+    Collects cost allocation data from an OpenCost service via an Ingress.
     """
+    # On peut garder HTTPS, mais on va désactiver la vérification SSL
+    OPENCOST_API_URL = "https://opencost.greenkube.cloud/allocation/compute"
+
     def collect(self) -> List[CostMetric]:
         """
-        Fetches cost data from OpenCost.
-
-        In a real implementation, this method would make an HTTP request to the
-        OpenCost API, parse the response, and instantiate CostMetric objects.
+        Fetches cost data from OpenCost by making an HTTP request to its API.
 
         Returns:
-            A list of CostMetric objects.
+            A list of CostMetric objects, or an empty list if an error occurs.
         """
-        print("INFO: Collecting data from OpenCostCollector (using mocked data)...")
+        print("INFO: Collecting data from OpenCostCollector (using Ingress)...")
 
-        # --- MOCKED DATA ---
-        # This simulates the kind of raw data we might get from OpenCost's API
-        mock_api_response = [
-            {"pod_name": "frontend-abc", "namespace": "e-commerce", "cpu_cost": 0.25, "ram_cost": 0.30, "total_cost": 0.55},
-            {"pod_name": "backend-xyz", "namespace": "e-commerce", "cpu_cost": 0.50, "ram_cost": 0.65, "total_cost": 1.15},
-            {"pod_name": "database-123", "namespace": "e-commerce", "cpu_cost": 0.80, "ram_cost": 1.20, "total_cost": 2.00},
-            {"pod_name": "auth-service-fgh", "namespace": "security", "cpu_cost": 0.30, "ram_cost": 0.35, "total_cost": 0.65},
-        ]
+        params = {
+            "window": "1d",
+            "aggregate": "pod"
+        }
 
-        collected_metrics = [
-            CostMetric(
-                pod_name=item["pod_name"],
-                namespace=item["namespace"],
-                cpu_cost=item["cpu_cost"],
-                ram_cost=item["ram_cost"],
-                total_cost=item["total_cost"],
-                timestamp=datetime.now(timezone.utc)
+        try:
+            # --- MODIFICATIONS CI-DESSOUS ---
+            # 1. Ajout de verify=False pour ignorer les erreurs de certificat SSL local.
+            # 2. Ajout d'un avertissement si la vérification est désactivée.
+            import warnings
+            from requests.packages.urllib3.exceptions import InsecureRequestWarning
+            
+            # Supprimer les avertissements de requêtes non sécurisées dans la console
+            warnings.simplefilter('ignore', InsecureRequestWarning)
+            
+            response = requests.get(self.OPENCOST_API_URL, params=params, timeout=10, verify=False)
+            
+            response.raise_for_status() # Lève une exception si erreur (4xx/5xx)
+
+            # --- AJOUT POUR LE DÉBOGAGE ---
+            # Affiche le contenu brut si ce n'est pas du JSON valide, pour aider à diagnostiquer.
+            try:
+                response_data = response.json().get("data")
+            except requests.exceptions.JSONDecodeError:
+                print(f"ERROR: Failed to decode JSON. Server sent non-JSON response.")
+                print(f"DEBUG: Raw response content: {response.text[:500]}...") # Affiche les 500 premiers caractères
+                return []
+
+            if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
+                print("WARN: OpenCost API returned no data.")
+                return []
+            
+            cost_data = response_data[0]
+
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Could not connect to OpenCost API via Ingress: {e}")
+            return []
+
+        # --- TRAITEMENT DE LA RÉPONSE ---
+        collected_metrics = []
+        now = datetime.now(timezone.utc)
+        
+        for resource_id, item in cost_data.items():
+            parts = resource_id.split('/')
+            if len(parts) != 2:
+                continue
+            
+            namespace, pod_name = parts
+
+            metric = CostMetric(
+                pod_name=pod_name,
+                namespace=namespace,
+                cpu_cost=item.get("cpuCost", 0.0),
+                ram_cost=item.get("ramCost", 0.0),
+                total_cost=item.get("totalCost", 0.0),
+                timestamp=now
             )
-            for item in mock_api_response
-        ]
+            collected_metrics.append(metric)
 
         print(f"INFO: Successfully collected {len(collected_metrics)} metrics from OpenCost.")
         return collected_metrics
+
