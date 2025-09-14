@@ -16,7 +16,7 @@ from .core.scheduler import Scheduler
 
 # --- GreenKube Collector Imports ---
 from .collectors.electricity_maps_collector import ElectricityMapsCollector
-from .collectors.node_collector import NodeCollector # Import the new collector
+from .collectors.node_collector import NodeCollector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
 
