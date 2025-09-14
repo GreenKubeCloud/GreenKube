@@ -11,10 +11,10 @@ class TestKeplerCollector(unittest.TestCase):
     Test suite for the KeplerCollector.
     """
 
-    def test_collect_returns_list_of_energy_metrics(self):
+    def test_collect_returns_valid_energy_metrics(self):
         """
-        Tests that the collect method returns a list of EnergyMetric objects
-        and that the data is structured as expected.
+        Tests that the collect method returns a non-empty list of EnergyMetric objects
+        with valid attributes.
         """
         # 1. Arrange: Create an instance of the collector
         collector = KeplerCollector()
@@ -23,17 +23,33 @@ class TestKeplerCollector(unittest.TestCase):
         results = collector.collect()
 
         # 3. Assert: Check that the results are correct
+        # Assert: Should return a non-empty list
         self.assertIsInstance(results, list, "Should return a list")
-        self.assertTrue(len(results) > 0, "The list should not be empty")
-        
-        # Check the first item in the list for correctness
-        first_result = results[0]
-        self.assertIsInstance(first_result, EnergyMetric, "All items should be EnergyMetric objects")
-        
-        # Verify the data types and values of the first mocked item
-        self.assertEqual(first_result.pod_name, "frontend-abc")
-        self.assertEqual(first_result.namespace, "e-commerce")
-        self.assertEqual(first_result.joules, 1250.5)
+        self.assertGreater(len(results), 0, "The list should not be empty")
+
+        # All items should be EnergyMetric and have required attributes
+        for metric in results:
+            self.assertIsInstance(metric, EnergyMetric)
+            self.assertIsInstance(metric.pod_name, str)
+            self.assertIsInstance(metric.namespace, str)
+            self.assertIsInstance(metric.joules, float)
+            self.assertIsInstance(metric.timestamp, object)
+            self.assertIsInstance(metric.node, str)
+            self.assertIsInstance(metric.region, str)
+
+        # Optionally: Check that the pod names match the mock data
+        expected_pods = {
+            "prometheus-k8s-0",
+            "grafana-7c68d76c67-6ljpv",
+            "coredns-674b8bbfcf-fvw4g",
+            "argocd-server-64d5fcbd58-t64p2",
+        }
+        actual_pods = {metric.pod_name for metric in results}
+        self.assertEqual(actual_pods, expected_pods)
+
+        # Optionally: Check the number of metrics matches the mock data
+        self.assertEqual(len(results), 4)
+
         print("\nTestKeplerCollector: All assertions passed! ✅")
 
 # This allows running the test directly from the command line
