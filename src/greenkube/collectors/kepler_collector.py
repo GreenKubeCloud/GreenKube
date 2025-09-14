@@ -21,24 +21,41 @@ class KeplerCollector(BaseCollector):
     def collect(self) -> List[EnergyMetric]:
         """
         Fetches energy data from Kepler.
-
-        In a real implementation, this method would make an HTTP request to the
-        Kepler Prometheus-compatible API endpoint, parse the response, and
-        instantiate EnergyMetric objects.
-
-        Returns:
-            A list of EnergyMetric objects representing the latest energy
-            consumption data for various pods.
         """
-        print("INFO: Collecting data from KeplerCollector (using mocked data)...")
+        print("INFO: Collecting data from KeplerCollector (using realistic mocked data)...")
 
-        # --- MOCKED DATA ---
-        # This simulates data from a cluster spanning two regions
+        # --- DONNÉES MOCK MISES À JOUR ---
+        # Ces données utilisent des noms de pods et de namespaces réels de votre cluster
+        # pour permettre une fusion correcte avec les données d'OpenCost.
         mock_api_response = [
-            {"pod_name": "frontend-abc", "namespace": "e-commerce", "joules": 1250.5, "node": "node-1", "region": "us-east-1"},
-            {"pod_name": "backend-xyz", "namespace": "e-commerce", "joules": 3600000.0, "node": "node-1", "region": "us-east-1"},
-            {"pod_name": "database-123", "namespace": "e-commerce", "joules": 8950.2, "node": "node-2", "region": "eu-west-1"},
-            {"pod_name": "auth-service-fgh", "namespace": "security", "joules": 1500.7, "node": "node-2", "region": "eu-west-1"},
+            {
+                "pod_name": "prometheus-k8s-0", 
+                "namespace": "monitoring", 
+                "joules": 4500000.0, # ~1.25 kWh
+                "node": "node-1", 
+                "region": "us-east-1"
+            },
+            {
+                "pod_name": "grafana-7c68d76c67-6ljpv", 
+                "namespace": "monitoring", 
+                "joules": 900000.0, # ~0.25 kWh
+                "node": "node-1", 
+                "region": "us-east-1"
+            },
+            {
+                "pod_name": "coredns-674b8bbfcf-fvw4g", 
+                "namespace": "kube-system", 
+                "joules": 18000.0, 
+                "node": "node-2", 
+                "region": "eu-west-1"
+            },
+            {
+                "pod_name": "argocd-server-64d5fcbd58-t64p2", 
+                "namespace": "argocd", 
+                "joules": 7200.0, 
+                "node": "node-2", 
+                "region": "eu-west-1"
+            },
         ]
 
         collected_metrics = [
@@ -55,3 +72,4 @@ class KeplerCollector(BaseCollector):
 
         print(f"INFO: Successfully collected {len(collected_metrics)} metrics from Kepler.")
         return collected_metrics
+
