@@ -1,49 +1,35 @@
 # tests/core/test_calculator.py
-"""
-Unit tests for the CarbonCalculator.
-"""
 import unittest
-from greenkube.core.calculator import CarbonCalculator
-from greenkube.models.metrics import EnergyMetric, CarbonEmissionMetric, EnvironmentalMetric
+from unittest.mock import MagicMock
+from src.greenkube.core.calculator import CarbonCalculator
+from src.greenkube.models.metrics import EnergyMetric
 
 class TestCarbonCalculator(unittest.TestCase):
     """
     Test suite for the CarbonCalculator.
     """
 
-    def test_calculate_carbon_emissions_multi_region(self):
+    def test_calculate_emissions(self):
         """
-        Tests the carbon calculation with inputs from multiple regions,
-        ensuring the correct environmental data is used for each.
+        Tests the carbon calculation with a mocked repository.
         """
         # 1. Arrange
-        calculator = CarbonCalculator()
-        
-        # Sample energy metrics from two different regions
-        sample_metrics = [
-            EnergyMetric(pod_name="pod-us", namespace="test-ns", joules=3600000.0, region="us-east-1"), # 1 kWh
-            EnergyMetric(pod_name="pod-eu", namespace="test-ns", joules=7200000.0, region="eu-west-1")  # 2 kWh
-        ]
-        
-        # Corresponding environmental data for each region
-        environmental_data = {
-            "us-east-1": EnvironmentalMetric(pue=1.5, grid_intensity=500.0),
-            "eu-west-1": EnvironmentalMetric(pue=1.2, grid_intensity=50.0)
-        }
+        # Créer un faux repository qui retourne des valeurs contrôlées
+        mock_repo = MagicMock()
+        mock_repo.get_latest_for_zone.side_effect = lambda zone: 500.0 if zone == "us-east-1" else 50.0
 
+        # Injecter le faux repository dans le calculateur
+        calculator = CarbonCalculator(repository=mock_repo)
+        
         # 2. Act
-        results = calculator.calculate_carbon_emissions(sample_metrics, environmental_data)
+        result_us = calculator.calculate_emissions(joules=3600000.0, zone="us-east-1") # 1 kWh
+        result_eu = calculator.calculate_emissions(joules=7200000.0, zone="eu-west-1") # 2 kWh
 
         # 3. Assert
-        self.assertEqual(len(results), 2)
+        # Attendu pour us-east-1: (1 kWh * 1.5 PUE) * 500 g/kWh = 750.0 grams
+        self.assertAlmostEqual(result_us["co2e_grams"], 750.0)
         
-        result_us = next(r for r in results if r.pod_name == "pod-us")
-        result_eu = next(r for r in results if r.pod_name == "pod-eu")
-        
-        # Expected for us-east-1: (1 kWh * 1.5 PUE) * 500 g/kWh = 750.0 grams
-        self.assertAlmostEqual(result_us.co2e_grams, 750.0, places=5)
-        
-        # Expected for eu-west-1: (2 kWh * 1.2 PUE) * 50 g/kWh = 120.0 grams
-        self.assertAlmostEqual(result_eu.co2e_grams, 120.0, places=5)
+        # Attendu pour eu-west-1: (2 kWh * 1.5 PUE) * 50 g/kWh = 150.0 grams
+        self.assertAlmostEqual(result_eu["co2e_grams"], 150.0)
 
         print("\nTestCarbonCalculator: All assertions passed! ✅")

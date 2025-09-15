@@ -1,44 +1,59 @@
 # src/greenkube/collectors/node_collector.py
 
+from kubernetes import client, config
 from .base_collector import BaseCollector
 
 class NodeCollector(BaseCollector):
     """
-    A collector responsible for discovering the geographical zones of Kubernetes nodes.
+    Collecte les informations de localisation (région/zone) des nœuds 
+    directement depuis l'API Kubernetes.
     """
-    
-    def collect(self):
+
+    def __init__(self, kubeconfig_path=None):
         """
-        Get all nodes in the cluster.
+        Initialise le client Kubernetes.
+        Tente de se connecter de deux manières :
+        1. In-cluster: si l'application tourne dans un pod Kubernetes.
+        2. Kubeconfig: si l'application tourne en local (comme sur votre Mac).
         """
-        # TODO - Implement actual node discovery logic.
-        pass
+        try:
+            # Idéal pour le déploiement via Helm
+            config.load_incluster_config()
+        except config.ConfigException:
+            # Idéal pour le développement local avec kind
+            config.load_kube_config(config_file=kubeconfig_path)
+        
+        self.core_v1 = client.CoreV1Api()
+        # Le label standard pour la zone géographique sur la plupart des clouds.
+        self.zone_label = "topology.kubernetes.io/zone"
 
-    def get_zones(self) -> list[str]:
+    def collect(self) -> list[str]:
         """
-        Retrieves a list of unique geographical zones for all nodes in the cluster.
+        Interroge l'API Kubernetes pour lister tous les nœuds et
+        extrait la valeur de leur label de zone.
 
-        **Placeholder Implementation:**
-        In a real-world scenario, this method would query the Kubernetes API or a
-        cloud provider's API to get node labels that specify the region/zone
-        (e.g., 'topology.kubernetes.io/zone' or 'failure-domain.beta.kubernetes.io/zone').
-
-        For now, it returns a hardcoded list for demonstration purposes.
-
-        Returns:
-            list[str]: A list of unique zone identifiers (e.g., ['FR', 'DE']).
+        :return: Une liste de zones uniques (ex: ['europe-west1-b', 'europe-west1-c']).
         """
-        print("Discovering node zones... (using placeholder data)")
-        # TODO: Replace this with actual cloud/Kubernetes API calls.
-        # Example hardcoded zones for a multi-region cluster:
-        discovered_zones = [
-            "FR",  # A node in France
-            "DE",  # A node in Germany
-            "FR"   # Another node in France
-        ]
+        print("Collecting node zones from Kubernetes API...")
+        zones = set()  # Utiliser un set pour éviter les doublons
+        try:
+            node_list = self.core_v1.list_node()
+            for node in node_list.items:
+                node_labels = node.metadata.labels
+                if self.zone_label in node_labels:
+                    zone = node_labels[self.zone_label]
+                    zones.add(zone)
+                    print(f"  -> Found node '{node.metadata.name}' in zone '{zone}'")
+                else:
+                    print(f"  -> Warning: Node '{node.metadata.name}' has no zone label ('{self.zone_label}').")
+            
+            if not zones:
+                print("  -> No zones found on any node. Defaulting to 'local-dev'.")
+                return ["local-dev"] # Fournit une valeur par défaut pour les clusters locaux
 
-        # Return only the unique zones
-        unique_zones = list(set(discovered_zones))
-        print(f"Found unique zones: {unique_zones}")
-        return unique_zones
+            return list(zones)
 
+        except Exception as e:
+            print(f"Error while collecting node data from Kubernetes API: {e}")
+            # En cas d'erreur, on retourne une valeur par défaut pour ne pas crasher
+            return ["error-collecting"]

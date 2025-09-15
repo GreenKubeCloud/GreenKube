@@ -1,70 +1,78 @@
 # src/greenkube/core/processor.py
-"""
-This module acts as the orchestrator, tying together the collectors,
-calculator, and reporters to execute the main application logic.
-"""
-from typing import List, Dict
+
+# --- Imports des utilitaires, modèles et collecteurs ---
+from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from ..collectors.base_collector import BaseCollector
-from ..core.calculator import CarbonCalculator
-from ..models.metrics import CombinedMetric, EnvironmentalMetric, EnergyMetric
+from ..collectors.node_collector import NodeCollector
+from ..models.metrics import CombinedMetric, EnergyMetric, CostMetric
+from .calculator import CarbonCalculator
 
 class DataProcessor:
-    """
-    Orchestrates the data collection and processing pipeline.
-    """
     def __init__(self, energy_collector: BaseCollector, cost_collector: BaseCollector, calculator: CarbonCalculator):
-        self.energy_collector = energy_collector
+        """
+        Initialise le processeur avec ses dépendances (collecteurs, calculateur).
+        """
+        self.node_collector = NodeCollector()
+        self.energy_collector = energy_collector 
         self.cost_collector = cost_collector
         self.calculator = calculator
 
-    def run(self) -> List[CombinedMetric]:
+    def run(self):
         """
-        Executes the full data processing pipeline.
-        1. Collects energy, cost, and environmental data.
-        2. Calculates carbon emissions from energy data using environmental context.
-        3. Combines cost and carbon data into a unified report.
+        Orchestre la collecte, la combinaison et le calcul des données.
         """
-        # In the future, this data will come from new dedicated collectors.
-        # For now, we mock it here to simulate a multi-region environment.
-        environmental_data: Dict[str, EnvironmentalMetric] = {
-            "us-east-1": EnvironmentalMetric(pue=1.6, grid_intensity=450.0),
-            "eu-west-1": EnvironmentalMetric(pue=1.2, grid_intensity=50.0)
-        }
+        print("INFO: Starting data processing cycle...")
 
-        energy_data = self.energy_collector.collect()
-        cost_data = self.cost_collector.collect()
-        carbon_data = self.calculator.calculate_carbon_emissions(energy_data, environmental_data)
+        # --- Étape 1: Collecte des données brutes ---
+        cloud_zones = self.node_collector.collect()
+        if not cloud_zones:
+            print("WARN: No cloud zones found. Cannot determine carbon intensity.")
+            return []
 
-        # Create lookup maps for easy data access
-        cost_map: Dict[str, float] = {metric.pod_name: metric.total_cost for metric in cost_data}
-        carbon_map: Dict[str, float] = {metric.pod_name: metric.co2e_grams for metric in carbon_data}
-        # Create a new map to look up the original energy metric for a pod
-        energy_map: Dict[str, EnergyMetric] = {metric.pod_name: metric for metric in energy_data}
+        # Pour le MVP, on suppose une seule région pour tout le cluster
+        emaps_zone = get_emaps_zone_from_cloud_zone(cloud_zones[0])
+        
+        energy_metrics: list[EnergyMetric] = self.energy_collector.collect()
+        cost_metrics: list[CostMetric] = self.cost_collector.collect()
 
-        combined_metrics: List[CombinedMetric] = []
-        all_pod_names = set(cost_map.keys()) | set(carbon_map.keys())
-
-        for pod_name in sorted(list(all_pod_names)):
-            namespace = next((m.namespace for m in cost_data + carbon_data if m.pod_name == pod_name), "unknown")
+        if not energy_metrics:
+            print("WARN: Energy collector returned no data.")
+            return []
             
-            # Find the original energy metric to get the region
-            original_energy_metric = energy_map.get(pod_name)
-            pue = 0.0
-            grid_intensity = 0.0
-            if original_energy_metric and original_energy_metric.region in environmental_data:
-                env_metric = environmental_data[original_energy_metric.region]
-                pue = env_metric.pue
-                grid_intensity = env_metric.grid_intensity
+        # --- Étape 2: Optimisation de la recherche des coûts ---
+        # On transforme la liste des coûts en dictionnaire pour un accès instantané.
+        # La clé est le nom du pod.
+        cost_map = {metric.pod_name: metric for metric in cost_metrics}
+
+        # --- Étape 3: Combinaison et calcul des métriques ---
+        combined_metrics = []
+        for energy_metric in energy_metrics:
+            # CORRECTION : On accède aux attributs directement (ex: .pod_name)
+            # au lieu d'utiliser .get("pod_name")
+            pod_name = energy_metric.pod_name
+            
+            # On cherche le coût correspondant dans notre dictionnaire optimisé
+            cost_metric = cost_map.get(pod_name)
+            total_cost = cost_metric.total_cost if cost_metric else 0.0
+
+            # Le calculateur utilise les joules pour calculer les émissions
+            # et récupère l'intensité carbone la plus récente de la BDD.
+            carbon_result = self.calculator.calculate_emissions(
+                joules=energy_metric.joules,
+                zone=emaps_zone
+            )
 
             combined_metrics.append(
                 CombinedMetric(
                     pod_name=pod_name,
-                    namespace=namespace,
-                    total_cost=cost_map.get(pod_name, 0.0),
-                    co2e_grams=carbon_map.get(pod_name, 0.0),
-                    pue=pue,
-                    grid_intensity=grid_intensity
+                    namespace=energy_metric.namespace,
+                    total_cost=total_cost,
+                    co2e_grams=carbon_result["co2e_grams"],
+                    pue=carbon_result["pue"], # PUE utilisé pour le calcul
+                    grid_intensity=carbon_result["grid_intensity"] # Intensité utilisée
                 )
             )
         
+        print(f"INFO: Processing complete. Found {len(combined_metrics)} combined metrics.")
         return combined_metrics
+

@@ -1,128 +1,60 @@
 # tests/collectors/test_electricity_maps_collector.py
 
-import pytest
 import requests
 from unittest.mock import patch, MagicMock
 from src.greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
-from src.greenkube.core.db import DatabaseManager
 
 # A sample successful API response for mocking
 MOCK_API_RESPONSE = {
   "zone": "FR",
   "history": [
-    {
-      "carbonIntensity": 23,
-      "datetime": "2025-08-16T16:00:00.000Z",
-      "updatedAt": "2025-08-16T18:43:16.594Z",
-      "createdAt": "2025-08-13T16:43:55.718Z",
-      "emissionFactorType": "lifecycle",
-      "isEstimated": False,
-      "estimationMethod": None
-    },
-    {
-      "carbonIntensity": 27,
-      "datetime": "2025-08-16T17:00:00.000Z",
-      "updatedAt": "2025-08-16T19:38:32.161Z",
-      "createdAt": "2025-08-13T17:43:43.588Z",
-      "emissionFactorType": "lifecycle",
-      "isEstimated": False,
-      "estimationMethod": None
-    }
+    {"carbonIntensity": 23, "datetime": "2025-08-16T16:00:00.000Z"},
+    {"carbonIntensity": 27, "datetime": "2025-08-16T17:00:00.000Z"}
   ]
 }
 
 @patch('requests.get')
-def test_collect_success(mock_get, test_db_connection):
+@patch('src.greenkube.collectors.electricity_maps_collector.config')
+def test_collect_success(mock_config, mock_get):
     """
-    Tests the happy path: the collector successfully fetches data from the API
-    and saves it to the database.
+    Teste que le collecteur appelle correctement l'API et retourne les données.
     """
     # Arrange
-    # Configure the mock to return a successful response
+    # On simule la présence du token API
+    mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
+    
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = MOCK_API_RESPONSE
     mock_get.return_value = mock_response
 
-    # Initialize the schema in our in-memory test database
-    db_manager = DatabaseManager()
-    db_manager.connection = test_db_connection
-    db_manager.init_schema()
-
-    collector = ElectricityMapsCollector(zone="FR")
-    collector.db_connection = test_db_connection
+    collector = ElectricityMapsCollector()
 
     # Act
-    collector.collect()
+    result = collector.collect(zone="FR")
 
     # Assert
-    # Verify that requests.get was called correctly
-    mock_get.assert_called_once()
-    # Verify that the data was inserted into the database
-    cursor = test_db_connection.cursor()
-    cursor.execute("SELECT * FROM carbon_intensity")
-    results = cursor.fetchall()
-    assert len(results) == 2
-    assert results[0][3] == "2025-08-16T16:00:00.000Z" # Check datetime of first entry
-    assert results[1][2] == 27 # Check carbon intensity of second entry
+    mock_get.assert_called_once_with(
+        "https://api.electricitymaps.com/v3/carbon-intensity/history?zone=FR",
+        headers={"auth-token": "test-token"}
+    )
+    assert result == MOCK_API_RESPONSE["history"]
 
 @patch('requests.get')
-def test_collect_is_idempotent(mock_get, test_db_connection):
+@patch('src.greenkube.collectors.electricity_maps_collector.config')
+def test_collect_api_error(mock_config, mock_get):
     """
-    Tests that collecting the same data twice does not create duplicate entries
-    in the database, thanks to the UNIQUE constraint.
-    """
-    # Arrange
-    mock_response = MagicMock()
-    mock_response.json.return_value = MOCK_API_RESPONSE
-    mock_get.return_value = mock_response
-
-    db_manager = DatabaseManager()
-    db_manager.connection = test_db_connection
-    db_manager.init_schema()
-
-    collector = ElectricityMapsCollector(zone="FR")
-    collector.db_connection = test_db_connection
-
-    # Act
-    # Call collect twice with the same mock data
-    collector.collect()
-    collector.collect()
-
-    # Assert
-    # The API should have been called twice
-    assert mock_get.call_count == 2
-    # But the database should still only contain 2 unique records
-    cursor = test_db_connection.cursor()
-    cursor.execute("SELECT COUNT(*) FROM carbon_intensity")
-    count = cursor.fetchone()[0]
-    assert count == 2
-
-@patch('requests.get')
-def test_collect_handles_api_error(mock_get, test_db_connection):
-    """
-    Tests that the collector handles an API error gracefully and does not
-    insert any data into the database.
+    Teste que le collecteur retourne une liste vide en cas d'erreur API.
     """
     # Arrange
-    # Configure the mock to simulate an HTTP error
-    mock_response = MagicMock()
-    mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("404 Not Found")
-    mock_get.return_value = mock_response
-
-    db_manager = DatabaseManager()
-    db_manager.connection = test_db_connection
-    db_manager.init_schema()
-
-    collector = ElectricityMapsCollector(zone="FR")
-    collector.db_connection = test_db_connection
+    mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
+    mock_get.side_effect = requests.exceptions.RequestException("API Error")
+    
+    collector = ElectricityMapsCollector()
 
     # Act
-    collector.collect()
+    result = collector.collect(zone="FR")
 
     # Assert
-    # Verify no data was inserted into the database
-    cursor = test_db_connection.cursor()
-    cursor.execute("SELECT COUNT(*) FROM carbon_intensity")
-    count = cursor.fetchone()[0]
-    assert count == 0
+    assert result == []
+
