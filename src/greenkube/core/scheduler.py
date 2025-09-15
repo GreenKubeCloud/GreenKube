@@ -3,6 +3,7 @@
 import schedule
 import time
 from typing import Callable
+from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 class Scheduler:
     """

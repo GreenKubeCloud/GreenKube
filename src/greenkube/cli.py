@@ -11,7 +11,6 @@ import time
 
 # --- GreenKube Core Imports ---
 from .core.db import get_db_connection
-from .core.config import config
 from .core.scheduler import Scheduler
 
 # --- GreenKube Collector Imports ---
@@ -20,10 +19,14 @@ from .collectors.node_collector import NodeCollector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
 
+# --- GreenKube Storage Imports (NOUVEAU) ---
+from .storage.sqlite_repository import SQLiteCarbonIntensityRepository
+
 # --- GreenKube Reporting and Processing Imports ---
 from .core.calculator import CarbonCalculator
 from .core.processor import DataProcessor
 from .reporters.console_reporter import ConsoleReporter
+from .utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 
 app = typer.Typer(
@@ -34,22 +37,41 @@ app = typer.Typer(
 
 def collect_carbon_intensity_for_all_zones():
     """
-    Orchestrates the collection of carbon intensity data for all discovered zones.
+    Orchestre la collecte et la sauvegarde des données d'intensité carbone.
     """
     typer.echo("--- Starting hourly carbon intensity collection task ---")
+    
+    # --- Initialisation des composants nécessaires ---
     node_collector = NodeCollector()
-    unique_zones = node_collector.get_zones()
+    em_collector = ElectricityMapsCollector()
+    # On instancie le repository qui va gérer la sauvegarde
+    repository = SQLiteCarbonIntensityRepository()
 
-    if not unique_zones:
-        typer.secho("Warning: No node zones discovered. Skipping carbon intensity collection.", fg=typer.colors.YELLOW)
+    # --- Logique de traduction (inchangée) ---
+    cloud_zones = node_collector.collect()
+    if not cloud_zones:
+        typer.secho("Warning: No node zones discovered.", fg=typer.colors.YELLOW)
         return
 
-    for zone in unique_zones:
+    emaps_zones = {get_emaps_zone_from_cloud_zone(cz) for cz in cloud_zones if get_emaps_zone_from_cloud_zone(cz) != "unknown"}
+    if not emaps_zones:
+        typer.secho("Warning: Could not map any cloud zone.", fg=typer.colors.YELLOW)
+        return
+
+    # --- Nouvelle logique : Collecter PUIS Sauvegarder ---
+    for zone in emaps_zones:
         try:
-            em_collector = ElectricityMapsCollector(zone=zone)
-            em_collector.collect()
+            # 1. Le collecteur récupère les données
+            history_data = em_collector.collect(zone=zone)
+            if history_data:
+                # 2. Le repository sauvegarde les données
+                saved_count = repository.save_history(history_data, zone=zone)
+                typer.echo(f"Successfully saved {saved_count} new records for zone: {zone}")
+            else:
+                typer.echo(f"No new data to save for zone: {zone}")
         except Exception as e:
-            typer.secho(f"Failed to collect data for zone {zone}: {e}", fg=typer.colors.RED)
+            typer.secho(f"Failed to process data for zone {zone}: {e}", fg=typer.colors.RED)
+            
     typer.echo("--- Finished carbon intensity collection task ---")
 
 
@@ -58,30 +80,22 @@ def start():
     """
     Initialize the database and start the GreenKube data collection service.
     """
+    # ... (Cette fonction n'a pas besoin de changer)
     typer.echo("🚀 Initializing GreenKube...")
     try:
-        # Database connection is triggered by the initial import
-        conn = get_db_connection()
-        if conn:
-            typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
-        else:
-            typer.secho("❌ Failed to establish database connection.", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
-
-        # --- Initialize and Configure Scheduler ---
+        get_db_connection()
+        typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
+        
         scheduler = Scheduler()
-        # Schedule the master collection function to run every hour
         scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
         
         typer.echo("📈 Starting scheduler...")
         typer.echo("\nGreenKube is running. Press CTRL+C to exit.")
         
-        # --- Run Initial Collection Immediately on Startup ---
         typer.echo("Running initial data collection for all zones...")
         collect_carbon_intensity_for_all_zones()
         typer.echo("Initial collection complete.")
 
-        # --- Main Service Loop ---
         while True:
             scheduler.run_pending()
             time.sleep(1)
@@ -101,44 +115,49 @@ def report(
     )] = None
 ):
     """
-    Displays a summary carbon footprint and cost report for all namespaces.
+    Affiche un rapport combiné des coûts et de l'empreinte carbone.
     """
     print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
+    
+    # --- INJECTION DE DÉPENDANCES ---
+    # 1. On crée le repository
+    sqlite_repo = SQLiteCarbonIntensityRepository()
+    
+    # 2. On injecte le repository dans le calculateur
+    carbon_calculator = CarbonCalculator(repository=sqlite_repo)
+
+    # 3. On injecte le calculateur dans le processeur
     kepler_collector = KeplerCollector()
     opencost_collector = OpenCostCollector()
-    carbon_calculator = CarbonCalculator()
     processor = DataProcessor(
         energy_collector=kepler_collector,
         cost_collector=opencost_collector,
         calculator=carbon_calculator
     )
+    
     console_reporter = ConsoleReporter()
+    
+    # --- Le reste de la logique est inchangé ---
     print("INFO: Running the data processing pipeline...")
     combined_data = processor.run()
     if namespace:
         print(f"INFO: Filtering results for namespace: {namespace}...")
         combined_data = [item for item in combined_data if item.namespace == namespace]
     if not combined_data:
-        print(f"WARN: No data found for namespace '{namespace}'. Please check if the namespace is correct and has active workloads.")
+        print(f"WARN: No data found for namespace '{namespace}'.")
         raise typer.Exit(code=1)
+    
     print("INFO: Calling the reporter...")
     console_reporter.report(data=combined_data)
 
-
+# ... (La commande export ne change pas)
 @app.command()
 def export(
     format: str = typer.Option("csv", help="The output format (e.g., 'csv', 'json')."),
     output: str = typer.Option("report.csv", help="The path to the output file.")
 ):
-    """
-    Export raw data in a specified format (e.g., CSV, JSON).
-    
-    (This is a placeholder for a future implementation)
-    """
     typer.echo(f"Placeholder: Exporting data in {format} format to {output}")
-    # In a real implementation, you would run the processor and then have
-    # different reporters (e.g., CsvReporter, JsonReporter) to handle the export.
-
 
 if __name__ == "__main__":
     app()
+
