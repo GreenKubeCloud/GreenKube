@@ -1,78 +1,73 @@
 # src/greenkube/core/processor.py
 
-# --- Imports des utilitaires, modèles et collecteurs ---
-from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
-from ..collectors.base_collector import BaseCollector
+from ..models.metrics import CombinedMetric
+from ..collectors.kepler_collector import KeplerCollector
+from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.node_collector import NodeCollector
-from ..models.metrics import CombinedMetric, EnergyMetric, CostMetric
-from .calculator import CarbonCalculator
+from ..core.calculator import CarbonCalculator
+from ..utils.mapping_translator import oci_region_to_electricity_maps_zone
 
 class DataProcessor:
-    def __init__(self, energy_collector: BaseCollector, cost_collector: BaseCollector, calculator: CarbonCalculator):
-        """
-        Initialise le processeur avec ses dépendances (collecteurs, calculateur).
-        """
-        self.node_collector = NodeCollector()
-        self.energy_collector = energy_collector 
+    """
+    Orchestre la collecte de données, le traitement et le calcul des émissions de carbone.
+    """
+    def __init__(self, energy_collector, cost_collector, calculator: CarbonCalculator):
+        # Use generic names to match tests and CLI expectations
+        self.energy_collector = energy_collector
         self.cost_collector = cost_collector
         self.calculator = calculator
+        self.node_collector = NodeCollector()
 
-    def run(self):
+    def run(self) -> list[CombinedMetric]:
         """
-        Orchestre la collecte, la combinaison et le calcul des données.
+        Exécute le pipeline de traitement des données.
         """
         print("INFO: Starting data processing cycle...")
-
-        # --- Étape 1: Collecte des données brutes ---
+        
+        # 1. Obtenir les zones des nœuds du cluster
         cloud_zones = self.node_collector.collect()
         if not cloud_zones:
-            print("WARN: No cloud zones found. Cannot determine carbon intensity.")
+            print("WARN: Could not determine node zones. Carbon intensity will be 0.")
             return []
 
-        # Pour le MVP, on suppose une seule région pour tout le cluster
-        emaps_zone = get_emaps_zone_from_cloud_zone(cloud_zones[0])
-        
-        energy_metrics: list[EnergyMetric] = self.energy_collector.collect()
-        cost_metrics: list[CostMetric] = self.cost_collector.collect()
+        # Pour l'instant, on suppose que tous les nœuds sont dans la même zone.
+        # C'est une simplification qui devra être améliorée.
+        emaps_zone = oci_region_to_electricity_maps_zone(cloud_zones[0])
 
-        if not energy_metrics:
-            print("WARN: Energy collector returned no data.")
-            return []
-            
-        # --- Étape 2: Optimisation de la recherche des coûts ---
-        # On transforme la liste des coûts en dictionnaire pour un accès instantané.
-        # La clé est le nom du pod.
+        # 2. Collecter les métriques d'énergie et de coût
+        energy_metrics = self.energy_collector.collect()
+        cost_metrics = self.cost_collector.collect()
+
+        # 3. Créer un dictionnaire pour un accès rapide aux coûts par pod
         cost_map = {metric.pod_name: metric for metric in cost_metrics}
 
-        # --- Étape 3: Combinaison et calcul des métriques ---
+        # 4. Combiner les données
         combined_metrics = []
         for energy_metric in energy_metrics:
-            # CORRECTION : On accède aux attributs directement (ex: .pod_name)
-            # au lieu d'utiliser .get("pod_name")
             pod_name = energy_metric.pod_name
-            
-            # On cherche le coût correspondant dans notre dictionnaire optimisé
-            cost_metric = cost_map.get(pod_name)
-            total_cost = cost_metric.total_cost if cost_metric else 0.0
+            if pod_name in cost_map:
+                cost_metric = cost_map[pod_name]
+                total_cost = cost_metric.total_cost
 
-            # Le calculateur utilise les joules pour calculer les émissions
-            # et récupère l'intensité carbone la plus récente de la BDD.
-            carbon_result = self.calculator.calculate_emissions(
-                joules=energy_metric.joules,
-                zone=emaps_zone
-            )
-
-            combined_metrics.append(
-                CombinedMetric(
-                    pod_name=pod_name,
-                    namespace=energy_metric.namespace,
-                    total_cost=total_cost,
-                    co2e_grams=carbon_result["co2e_grams"],
-                    pue=carbon_result["pue"], # PUE utilisé pour le calcul
-                    grid_intensity=carbon_result["grid_intensity"] # Intensité utilisée
+                # Le calculateur utilise les joules pour calculer les émissions
+                # et récupère l'intensité carbone la plus récente de la BDD.
+                carbon_result = self.calculator.calculate_emissions(
+                    joules=energy_metric.joules,
+                    zone=emaps_zone,
+                    timestamp=energy_metric.timestamp.isoformat()
                 )
-            )
-        
+
+                combined_metrics.append(
+                    CombinedMetric(
+                        pod_name=pod_name,
+                        namespace=energy_metric.namespace,
+                        total_cost=total_cost,
+                        co2e_grams=carbon_result.co2e_grams,
+                        pue=self.calculator.pue,
+                        grid_intensity=carbon_result.grid_intensity
+                    )
+                )
+
         print(f"INFO: Processing complete. Found {len(combined_metrics)} combined metrics.")
         return combined_metrics
 

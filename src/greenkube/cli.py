@@ -12,6 +12,7 @@ import time
 # --- GreenKube Core Imports ---
 from .core.db import get_db_connection
 from .core.scheduler import Scheduler
+from .core.config import config # Import de la config
 
 # --- GreenKube Collector Imports ---
 from .collectors.electricity_maps_collector import ElectricityMapsCollector
@@ -19,8 +20,10 @@ from .collectors.node_collector import NodeCollector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
 
-# --- GreenKube Storage Imports (NOUVEAU) ---
+# --- GreenKube Storage Imports (MISE À JOUR) ---
+from .storage.base_repository import CarbonIntensityRepository
 from .storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from .storage.elasticsearch_repository import ElasticsearchCarbonIntensityRepository
 
 # --- GreenKube Reporting and Processing Imports ---
 from .core.calculator import CarbonCalculator
@@ -35,6 +38,21 @@ app = typer.Typer(
     add_completion=False
 )
 
+def get_repository() -> CarbonIntensityRepository:
+    """
+    Factory function to get the appropriate repository based on config.
+    """
+    if config.DB_TYPE == "elasticsearch":
+        typer.echo("Using Elasticsearch repository.")
+        return ElasticsearchCarbonIntensityRepository()
+    elif config.DB_TYPE == "sqlite":
+        typer.echo("Using SQLite repository.")
+        return SQLiteCarbonIntensityRepository()
+    else:
+        # Gérer le cas de postgres ou autre si nécessaire
+        raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
+
+
 def collect_carbon_intensity_for_all_zones():
     """
     Orchestre la collecte et la sauvegarde des données d'intensité carbone.
@@ -44,8 +62,8 @@ def collect_carbon_intensity_for_all_zones():
     # --- Initialisation des composants nécessaires ---
     node_collector = NodeCollector()
     em_collector = ElectricityMapsCollector()
-    # On instancie le repository qui va gérer la sauvegarde
-    repository = SQLiteCarbonIntensityRepository()
+    # On utilise la factory pour obtenir le bon repository
+    repository = get_repository()
 
     # --- Logique de traduction (inchangée) ---
     cloud_zones = node_collector.collect()
@@ -58,13 +76,11 @@ def collect_carbon_intensity_for_all_zones():
         typer.secho("Warning: Could not map any cloud zone.", fg=typer.colors.YELLOW)
         return
 
-    # --- Nouvelle logique : Collecter PUIS Sauvegarder ---
+    # --- Logique de collecte et sauvegarde (inchangée) ---
     for zone in emaps_zones:
         try:
-            # 1. Le collecteur récupère les données
             history_data = em_collector.collect(zone=zone)
             if history_data:
-                # 2. Le repository sauvegarde les données
                 saved_count = repository.save_history(history_data, zone=zone)
                 typer.echo(f"Successfully saved {saved_count} new records for zone: {zone}")
             else:
@@ -80,11 +96,12 @@ def start():
     """
     Initialize the database and start the GreenKube data collection service.
     """
-    # ... (Cette fonction n'a pas besoin de changer)
     typer.echo("🚀 Initializing GreenKube...")
     try:
-        get_db_connection()
-        typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
+        # Pour SQLite, on continue d'initialiser la BDD au cas où
+        if config.DB_TYPE == "sqlite":
+            get_db_connection()
+            typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
         
         scheduler = Scheduler()
         scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
@@ -119,14 +136,14 @@ def report(
     """
     print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
     
-    # --- INJECTION DE DÉPENDANCES ---
-    # 1. On crée le repository
-    sqlite_repo = SQLiteCarbonIntensityRepository()
+    # --- INJECTION DE DÉPENDANCES (MISE À JOUR) ---
+    # 1. On utilise la factory pour obtenir le bon repository
+    repository = get_repository()
     
     # 2. On injecte le repository dans le calculateur
-    carbon_calculator = CarbonCalculator(repository=sqlite_repo)
+    carbon_calculator = CarbonCalculator(repository=repository)
 
-    # 3. On injecte le calculateur dans le processeur
+    # 3. Le reste est inchangé
     kepler_collector = KeplerCollector()
     opencost_collector = OpenCostCollector()
     processor = DataProcessor(
@@ -137,7 +154,6 @@ def report(
     
     console_reporter = ConsoleReporter()
     
-    # --- Le reste de la logique est inchangé ---
     print("INFO: Running the data processing pipeline...")
     combined_data = processor.run()
     if namespace:
@@ -150,7 +166,6 @@ def report(
     print("INFO: Calling the reporter...")
     console_reporter.report(data=combined_data)
 
-# ... (La commande export ne change pas)
 @app.command()
 def export(
     format: str = typer.Option("csv", help="The output format (e.g., 'csv', 'json')."),
@@ -160,4 +175,3 @@ def export(
 
 if __name__ == "__main__":
     app()
-
