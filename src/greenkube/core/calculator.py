@@ -1,74 +1,67 @@
 # src/greenkube/core/calculator.py
-"""
-Le cerveau de GreenKube. Ce module contient la logique de base pour transformer
-les métriques énergétiques brutes en données significatives sur les émissions de carbone.
-"""
+
 from dataclasses import dataclass
 from ..storage.base_repository import CarbonIntensityRepository
-
-# Constantes de conversion
-JOULES_PER_KWH = 3.6e6
-GRAMS_PER_KG = 1000
+# --- Import the config object ---
+from .config import config
+# --------------------------------
 
 @dataclass
 class CarbonCalculationResult:
-    """Représente le résultat d'un calcul d'émissions de carbone."""
+    """ Holds the results of a carbon emission calculation. """
     co2e_grams: float
-    grid_intensity: float # en gCO2e/kWh
+    grid_intensity: float
 
 class CarbonCalculator:
-    """
-    Calcule les émissions de CO2e à partir de la consommation d'énergie
-    et de l'intensité carbone du réseau électrique.
-    """
-    def __init__(self, repository: CarbonIntensityRepository, pue: float = 1.5):
+    """ Calculates CO2e emissions based on energy consumption and grid carbon intensity. """
+
+    def __init__(self, repository: CarbonIntensityRepository, pue: float = config.DEFAULT_PUE):
+        """
+        Initializes the CarbonCalculator.
+
+        Args:
+            repository: An object that adheres to the CarbonIntensityRepository interface,
+                        used to fetch grid carbon intensity data.
+            pue: The Power Usage Effectiveness factor for the data center. Defaults to config.DEFAULT_PUE.
+        """
         self.repository = repository
-        self.pue = pue # Power Usage Effectiveness
+        self.pue = pue # Store PUE for use in calculations
 
     def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> CarbonCalculationResult:
         """
-        Calcule les émissions de CO2e pour une consommation d'énergie donnée.
+        Calculates CO2 equivalent emissions for a given energy consumption.
 
         Args:
-            joules: L'énergie consommée en joules.
-            zone: La zone géographique (ex: 'FR', 'US-CA').
-            timestamp: L'horodatage de la mesure au format ISO.
+            joules: Energy consumed in Joules.
+            zone: The electricity map zone (e.g., 'FR', 'DE').
+            timestamp: The timestamp (ISO format string) when the energy consumption occurred.
 
         Returns:
-            Un objet CarbonCalculationResult avec les grammes de CO2e et l'intensité du réseau.
+            A CarbonCalculationResult containing the calculated CO2e in grams
+            and the grid intensity value used for the calculation.
         """
-        # Le calculateur ne sait pas d'où viennent les données (SQLite, ES...),
-        # il demande simplement ce dont il a besoin. Certains tests/mocks expose
-        # une méthode `get_latest_for_zone(zone)` while real repositories may
-        # expose `get_for_zone_at_time(zone, timestamp)`; support both.
-        grid_intensity = None
-        if hasattr(self.repository, 'get_latest_for_zone'):
-            try:
-                grid_intensity = self.repository.get_latest_for_zone(zone)
-            except Exception:
-                grid_intensity = None
-        if grid_intensity is None and hasattr(self.repository, 'get_for_zone_at_time'):
-            try:
-                grid_intensity = self.repository.get_for_zone_at_time(zone, timestamp)
-            except Exception:
-                grid_intensity = None
+        # --- Fetch intensity data using the timestamp ---
+        grid_intensity_value = self.repository.get_for_zone_at_time(zone, timestamp)
+        # ---------------------------------------------
 
-        if grid_intensity is None:
-            print(f"WARN: Aucune donnée d'intensité carbone trouvée via le repository pour la zone '{zone}' à l'instant {timestamp}.")
-            grid_intensity = 0.0
+        # --- Handle missing intensity data using the default from config ---
+        if grid_intensity_value is None:
+            print(f"WARN: Carbon intensity data not found for zone '{zone}' at {timestamp}. Using default value: {config.DEFAULT_INTENSITY} gCO2e/kWh.")
+            grid_intensity_value = config.DEFAULT_INTENSITY # Use configured default
+        # ------------------------------------------------------------------
 
-        # 1. Convertir les joules en kWh
-        kwh = joules / JOULES_PER_KWH
+        if joules == 0.0:
+            # If no energy was consumed, CO2e is 0, but we still return the grid intensity
+            return CarbonCalculationResult(co2e_grams=0.0, grid_intensity=grid_intensity_value)
 
-        # 2. Appliquer le PUE pour obtenir l'énergie totale consommée par le data center
-        total_kwh = kwh * self.pue
+        # Convert Joules to kWh
+        kwh = joules / config.JOULES_PER_KWH
 
-        # 3. Calculer les émissions de CO2e en grammes
-        # (gCO2e/kWh) * kWh = gCO2e
-        co2e_grams = grid_intensity * total_kwh
+        # Apply PUE factor
+        kwh_adjusted_for_pue = kwh * self.pue
 
-        return CarbonCalculationResult(
-            co2e_grams=co2e_grams,
-            grid_intensity=grid_intensity
-        )
+        # Calculate CO2e in grams (kWh * gCO2e/kWh)
+        co2e_grams = kwh_adjusted_for_pue * grid_intensity_value
+
+        return CarbonCalculationResult(co2e_grams=co2e_grams, grid_intensity=grid_intensity_value)
 
