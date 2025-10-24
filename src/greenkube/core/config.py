@@ -30,7 +30,7 @@ class Config:
     ELASTICSEARCH_USER = os.getenv("ELASTICSEARCH_USER")
     ELASTICSEARCH_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
     ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in ("true", "1", "t", "y", "yes")
-
+    ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", 'carbon_intensity')
 
     @classmethod
     def validate(cls):

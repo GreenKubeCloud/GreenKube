@@ -44,6 +44,17 @@ def get_repository() -> CarbonIntensityRepository:
     """
     if config.DB_TYPE == "elasticsearch":
         typer.echo("Using Elasticsearch repository.")
+        # Ensure the Elasticsearch connection is configured before creating the repository.
+        try:
+            # Import locally to avoid import-time side-effects in other contexts/tests
+            from .storage import elasticsearch_repository as es_mod
+            # Attempt to set up connections (this will use config values)
+            es_mod.setup_connection()
+        except Exception as e:
+            typer.secho(f"ERROR: Failed to setup Elasticsearch connection: {e}", fg=typer.colors.RED)
+            # Let the repository constructor handle missing connection if needed,
+            # but we return the repository instance so code paths that catch
+            # repository-level errors can continue to run.
         return ElasticsearchCarbonIntensityRepository()
     elif config.DB_TYPE == "sqlite":
         typer.echo("Using SQLite repository.")
