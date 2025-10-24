@@ -1,4 +1,3 @@
-# src/greenkube/cli.py
 """
 This module provides the command-line interface (CLI) for GreenKube,
 powered by the Typer library.
@@ -10,8 +9,8 @@ from typing_extensions import Annotated
 import time
 
 # --- GreenKube Core Imports ---
-from .core.db import get_db_connection
 from .core.scheduler import Scheduler
+from .core.config import config
 
 # --- GreenKube Collector Imports ---
 from .collectors.electricity_maps_collector import ElectricityMapsCollector
@@ -19,14 +18,18 @@ from .collectors.node_collector import NodeCollector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
 
-# --- GreenKube Storage Imports (NOUVEAU) ---
+# --- GreenKube Storage Imports ---
+from .storage.base_repository import CarbonIntensityRepository
 from .storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from .storage.elasticsearch_repository import ElasticsearchCarbonIntensityRepository
 
 # --- GreenKube Reporting and Processing Imports ---
 from .core.calculator import CarbonCalculator
 from .core.processor import DataProcessor
 from .reporters.console_reporter import ConsoleReporter
+# --- Use the correct translator function name ---
 from .utils.mapping_translator import get_emaps_zone_from_cloud_zone
+# ----------------------------------------------
 
 
 app = typer.Typer(
@@ -35,43 +38,94 @@ app = typer.Typer(
     add_completion=False
 )
 
+def get_repository() -> CarbonIntensityRepository:
+    """
+    Factory function to get the appropriate repository based on config.
+    """
+    if config.DB_TYPE == "elasticsearch":
+        typer.echo("Using Elasticsearch repository.")
+        # Ensure the Elasticsearch connection is configured before creating the repository.
+        try:
+            # Import locally to avoid import-time side-effects in other contexts/tests
+            from .storage import elasticsearch_repository as es_mod
+            # Attempt to set up connections (this will use config values)
+            es_mod.setup_connection()
+        except Exception as e:
+            typer.secho(f"ERROR: Failed to setup Elasticsearch connection: {e}", fg=typer.colors.RED)
+            # Let the repository constructor handle missing connection if needed,
+            # but we return the repository instance so code paths that catch
+            # repository-level errors can continue to run.
+        return ElasticsearchCarbonIntensityRepository()
+    elif config.DB_TYPE == "sqlite":
+        typer.echo("Using SQLite repository.")
+        # --- Need to pass the connection for SQLite ---
+        from .core.db import db_manager # Import db_manager locally for SQLite
+        return SQLiteCarbonIntensityRepository(db_manager.get_connection())
+        # ---------------------------------------------
+    else:
+        # Handle postgres or other cases if needed
+        raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
+
+
 def collect_carbon_intensity_for_all_zones():
     """
-    Orchestre la collecte et la sauvegarde des données d'intensité carbone.
+    Orchestrates the collection and saving of carbon intensity data.
     """
     typer.echo("--- Starting hourly carbon intensity collection task ---")
-    
-    # --- Initialisation des composants nécessaires ---
+
+    # --- Initialize necessary components ---
     node_collector = NodeCollector()
     em_collector = ElectricityMapsCollector()
-    # On instancie le repository qui va gérer la sauvegarde
-    repository = SQLiteCarbonIntensityRepository()
+    # Use the factory to get the correct repository
+    try:
+        repository = get_repository()
+    except Exception as e:
+        typer.secho(f"ERROR: Failed to initialize repository: {e}", fg=typer.colors.RED)
+        return # Stop if repository fails
 
-    # --- Logique de traduction (inchangée) ---
-    cloud_zones = node_collector.collect()
-    if not cloud_zones:
-        typer.secho("Warning: No node zones discovered.", fg=typer.colors.YELLOW)
-        return
+    # --- Mapping logic (unchanged) ---
+    try:
+        nodes_zones_map = node_collector.collect() # Renamed variable for clarity
+        if not nodes_zones_map:
+            typer.secho("Warning: No node zones discovered.", fg=typer.colors.YELLOW)
+            # Decide if we should try a default zone or stop
+            # For now, let's stop if no nodes are found.
+            return
+    except Exception as e:
+         typer.secho(f"ERROR: Failed to collect node zones: {e}", fg=typer.colors.RED)
+         return # Stop if node collection fails
 
-    emaps_zones = {get_emaps_zone_from_cloud_zone(cz) for cz in cloud_zones if get_emaps_zone_from_cloud_zone(cz) != "unknown"}
+    # Extract unique cloud zones from the values of the map
+    unique_cloud_zones = set(nodes_zones_map.values())
+    emaps_zones = set()
+    for cz in unique_cloud_zones:
+        emz = get_emaps_zone_from_cloud_zone(cz)
+        if emz and emz != "unknown": # Check for None and "unknown"
+             emaps_zones.add(emz)
+        else:
+            typer.secho(f"Warning: Could not map cloud zone '{cz}' to an Electricity Maps zone.", fg=typer.colors.YELLOW)
+
+
     if not emaps_zones:
-        typer.secho("Warning: Could not map any cloud zone.", fg=typer.colors.YELLOW)
-        return
+        typer.secho("Warning: No mappable Electricity Maps zones found based on node discovery.", fg=typer.colors.YELLOW)
+        # Optionally, fallback to config.DEFAULT_ZONE if desired
+        # emaps_zones = {config.DEFAULT_ZONE}
+        # typer.echo(f"Falling back to default zone: {config.DEFAULT_ZONE}")
+        return # Stop for now if no zones mapped
 
-    # --- Nouvelle logique : Collecter PUIS Sauvegarder ---
+
+    # --- Collection and saving logic (unchanged) ---
     for zone in emaps_zones:
         try:
-            # 1. Le collecteur récupère les données
             history_data = em_collector.collect(zone=zone)
             if history_data:
-                # 2. Le repository sauvegarde les données
                 saved_count = repository.save_history(history_data, zone=zone)
                 typer.echo(f"Successfully saved {saved_count} new records for zone: {zone}")
             else:
                 typer.echo(f"No new data to save for zone: {zone}")
         except Exception as e:
             typer.secho(f"Failed to process data for zone {zone}: {e}", fg=typer.colors.RED)
-            
+
     typer.echo("--- Finished carbon intensity collection task ---")
 
 
@@ -80,25 +134,30 @@ def start():
     """
     Initialize the database and start the GreenKube data collection service.
     """
-    # ... (Cette fonction n'a pas besoin de changer)
     typer.echo("🚀 Initializing GreenKube...")
     try:
-        get_db_connection()
-        typer.secho("✅ Database connection successful and schema is ready.", fg=typer.colors.GREEN)
-        
+        # For SQLite, initialize the DB schema if needed
+        if config.DB_TYPE == "sqlite":
+            # --- Import db_manager locally for SQLite ---
+            from .core.db import db_manager
+            # -----------------------------------------
+            db_manager.setup_sqlite() # Ensure schema exists
+            typer.secho("✅ SQLite Database connection successful and schema is ready.", fg=typer.colors.GREEN)
+        # Add checks or initial setup for Elasticsearch if necessary in the future
+
         scheduler = Scheduler()
         scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
-        
+
         typer.echo("📈 Starting scheduler...")
         typer.echo("\nGreenKube is running. Press CTRL+C to exit.")
-        
+
         typer.echo("Running initial data collection for all zones...")
         collect_carbon_intensity_for_all_zones()
         typer.echo("Initial collection complete.")
 
         while True:
             scheduler.run_pending()
-            time.sleep(1)
+            time.sleep(60) # Check every minute instead of every second
 
     except KeyboardInterrupt:
         typer.echo("\n🛑 Shutting down GreenKube service.")
@@ -115,48 +174,73 @@ def report(
     )] = None
 ):
     """
-    Affiche un rapport combiné des coûts et de l'empreinte carbone.
+    Displays a combined report of costs and carbon footprint.
     """
     print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
-    
-    # --- INJECTION DE DÉPENDANCES ---
-    # 1. On crée le repository
-    sqlite_repo = SQLiteCarbonIntensityRepository()
-    
-    # 2. On injecte le repository dans le calculateur
-    carbon_calculator = CarbonCalculator(repository=sqlite_repo)
 
-    # 3. On injecte le calculateur dans le processeur
-    kepler_collector = KeplerCollector()
-    opencost_collector = OpenCostCollector()
-    processor = DataProcessor(
-        energy_collector=kepler_collector,
-        cost_collector=opencost_collector,
-        calculator=carbon_calculator
-    )
-    
-    console_reporter = ConsoleReporter()
-    
-    # --- Le reste de la logique est inchangé ---
-    print("INFO: Running the data processing pipeline...")
-    combined_data = processor.run()
-    if namespace:
-        print(f"INFO: Filtering results for namespace: {namespace}...")
-        combined_data = [item for item in combined_data if item.namespace == namespace]
-    if not combined_data:
-        print(f"WARN: No data found for namespace '{namespace}'.")
+    try: # Add error handling for initialization
+        # --- DEPENDENCY INJECTION (UPDATED) ---
+        # 1. Get the repository using the factory
+        repository = get_repository()
+
+        # 2. Instantiate all collectors
+        kepler_collector = KeplerCollector()
+        opencost_collector = OpenCostCollector()
+        node_collector = NodeCollector() # Instantiate NodeCollector
+
+        # 3. Instantiate the calculator, injecting the repository
+        carbon_calculator = CarbonCalculator(repository=repository)
+
+        # 4. Instantiate the processor, injecting all dependencies
+        processor = DataProcessor(
+            kepler_collector=kepler_collector,     # Renamed argument
+            opencost_collector=opencost_collector, # Renamed argument
+            node_collector=node_collector,         # Add NodeCollector
+            repository=repository,                 # Add Repository
+            calculator=carbon_calculator           # Pass Calculator instance
+        )
+
+        console_reporter = ConsoleReporter()
+        # --- END DEPENDENCY INJECTION ---
+
+        print("INFO: Running the data processing pipeline...")
+        combined_data = processor.run() # This now handles internal errors more gracefully
+
+        if not combined_data:
+             print("WARN: No combined data was generated by the processor.")
+             # Decide if this is an error or just an empty report state
+             raise typer.Exit(code=0) # Exit cleanly if no data
+
+
+        if namespace:
+            print(f"INFO: Filtering results for namespace: {namespace}...")
+            original_count = len(combined_data)
+            combined_data = [item for item in combined_data if item.namespace == namespace]
+            if not combined_data:
+                # Use typer.secho for warnings/errors
+                typer.secho(f"WARN: No data found for namespace '{namespace}' after processing {original_count} total items.", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=0) # Exit cleanly, just no data for this namespace
+
+        print("INFO: Calling the reporter...")
+        console_reporter.report(data=combined_data)
+
+    except Exception as e:
+        # Catch errors during initialization or processing
+        typer.secho(f"❌ An error occurred during report generation: {e}", fg=typer.colors.RED)
+        # Optionally add more specific error handling based on exception types
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
         raise typer.Exit(code=1)
-    
-    print("INFO: Calling the reporter...")
-    console_reporter.report(data=combined_data)
 
-# ... (La commande export ne change pas)
+
 @app.command()
 def export(
     format: str = typer.Option("csv", help="The output format (e.g., 'csv', 'json')."),
     output: str = typer.Option("report.csv", help="The path to the output file.")
 ):
+    """ Exports the combined report data to a file. (Placeholder) """
     typer.echo(f"Placeholder: Exporting data in {format} format to {output}")
+    # Implementation would be similar to 'report', but using a file exporter instead of ConsoleReporter
 
 if __name__ == "__main__":
     app()

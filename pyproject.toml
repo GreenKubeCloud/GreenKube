@@ -38,7 +38,9 @@ dependencies = [
     "python-dotenv>=1.0.0", # For loading environment variables from .env files
     "psycopg2-binary>=2.9.0", # PostgreSQL database adapter
     "schedule>=1.2.1", # For scheduling periodic tasks
-    "kubernetes"
+    "kubernetes",
+    "elasticsearch>=8.10.0", # Ajout du client Elasticsearch
+    "elasticsearch-dsl>=8.10.0" # Ajout de l'ORM pour Elasticsearch
 ]
 
 [project.urls]
