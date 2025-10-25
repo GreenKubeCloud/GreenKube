@@ -1,18 +1,15 @@
 # src/greenkube/core/processor.py
-
+import logging
+from collections import defaultdict
 from ..collectors.kepler_collector import KeplerCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.node_collector import NodeCollector
+from ..collectors.pod_collector import PodCollector
 from ..storage.base_repository import CarbonIntensityRepository
 from ..models.metrics import CombinedMetric
 from ..core.calculator import CarbonCalculator
-# --- Import the config object for default values ---
 from ..core.config import config
-# -------------------------------------------------
-# --- Correct import name for the mapping translator ---
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
-# -----------------------------------------------------
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +20,13 @@ class DataProcessor:
                  kepler_collector: KeplerCollector,
                  opencost_collector: OpenCostCollector,
                  node_collector: NodeCollector,
+                 pod_collector: PodCollector,
                  repository: CarbonIntensityRepository,
                  calculator: CarbonCalculator):
         self.kepler_collector = kepler_collector
         self.opencost_collector = opencost_collector
         self.node_collector = node_collector
+        self.pod_collector = pod_collector
         self.repository = repository
         self.calculator = calculator
 
@@ -57,69 +56,82 @@ class DataProcessor:
         try:
             cost_metrics = self.opencost_collector.collect()
             logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
-            # Convert list to dict for efficient lookup
             cost_map = {metric.pod_name: metric for metric in cost_metrics if metric.pod_name}
         except Exception as e:
             logger.error("Failed to collect data from OpenCost: %s", e)
-            cost_map = {} # Continue with empty map if OpenCost fails
+            cost_map = {}
 
+        # 4. Collect Pod Request Data from K8s API
+        try:
+            pod_metrics = self.pod_collector.collect()
+            logger.info("Successfully collected %d pod request metrics.", len(pod_metrics))
+            
+            # Aggregate container requests up to the pod level
+            pod_request_map = defaultdict(lambda: {"cpu": 0, "memory": 0})
+            for pod_metric in pod_metrics:
+                key = (pod_metric.namespace, pod_metric.pod_name)
+                pod_request_map[key]["cpu"] += pod_metric.cpu_request
+                pod_request_map[key]["memory"] += pod_metric.memory_request
+            
+        except Exception as e:
+            logger.error("Failed to collect data from PodCollector: %s", e)
+            pod_request_map = {}
 
-        # 4. Combine and Calculate
+        # 5. Combine and Calculate
         for energy_metric in energy_metrics:
             pod_name = energy_metric.pod_name
+            namespace = energy_metric.namespace
+            pod_key = (namespace, pod_name)
 
-            # Find corresponding cost metric, use default if missing
+            # Find corresponding cost metric
             cost_metric = cost_map.get(pod_name)
-            if cost_metric:
-                total_cost = cost_metric.total_cost
-                cost_timestamp = cost_metric.timestamp # Use cost timestamp if available
-            else:
-                logger.warning("Cost data not found for pod '%s'. Using default cost: %s.", pod_name, config.DEFAULT_COST)
-                total_cost = config.DEFAULT_COST
-                cost_timestamp = energy_metric.timestamp # Fallback to energy timestamp
+            total_cost = cost_metric.total_cost if cost_metric else config.DEFAULT_COST
 
-            # Determine Electricity Maps Zone based on node region or default
-            node_name = energy_metric.node # Assuming Kepler provides the node name
+            # Find corresponding pod requests
+            pod_requests = pod_request_map.get(pod_key, {"cpu": 0, "memory": 0})
+
+            # Determine Electricity Maps Zone
+            node_name = energy_metric.node
             cloud_zone = cloud_zones_map.get(node_name) if cloud_zones_map else None
+            emaps_zone = config.DEFAULT_ZONE
 
             if cloud_zone:
-                emaps_zone = get_emaps_zone_from_cloud_zone(cloud_zone)
-                if not emaps_zone:
-                     logger.warning("Could not map cloud zone '%s' for node '%s' to Electricity Maps zone. Using default: '%s'.", cloud_zone, node_name, config.DEFAULT_ZONE)
-                     emaps_zone = config.DEFAULT_ZONE
+                mapped_zone = get_emaps_zone_from_cloud_zone(cloud_zone)
+                if mapped_zone:
+                    emaps_zone = mapped_zone
+                else:
+                     logger.warning("Could not map cloud zone '%s' for node '%s'. Using default: '%s'.", cloud_zone, node_name, config.DEFAULT_ZONE)
             else:
-                # Use default zone if node zone couldn't be determined earlier or isn't in the map
-                if node_name and cloud_zones_map: # Check if map was loaded but node wasn't found
+                if node_name and cloud_zones_map:
                      logger.warning("Zone not found for node '%s'. Using default zone '%s'.", node_name, config.DEFAULT_ZONE)
-                # If cloud_zones_map is empty, the warning was already printed.
                 emaps_zone = config.DEFAULT_ZONE
 
-            # Calculate Carbon Emissions using the energy metric's timestamp
+            # Calculate Carbon Emissions
             try:
                 carbon_result = self.calculator.calculate_emissions(
                     joules=energy_metric.joules,
                     zone=emaps_zone,
-                    timestamp=energy_metric.timestamp # Pass the timestamp
+                    timestamp=energy_metric.timestamp
                 )
             except Exception as e:
                  logger.error("Failed to calculate emissions for pod '%s': %s", pod_name, e)
-                 carbon_result = None # Handle calculation errors gracefully
+                 carbon_result = None
 
             if carbon_result:
                 combined = CombinedMetric(
                     pod_name=pod_name,
-                    namespace=energy_metric.namespace,
+                    namespace=namespace,
                     total_cost=total_cost,
                     co2e_grams=carbon_result.co2e_grams,
-                    pue=self.calculator.pue, # Get PUE from the calculator instance
-                    grid_intensity=carbon_result.grid_intensity
+                    pue=self.calculator.pue,
+                    grid_intensity=carbon_result.grid_intensity,
+                    joules=energy_metric.joules,
+                    cpu_request=pod_requests["cpu"],
+                    memory_request=pod_requests["memory"]
                 )
                 combined_metrics.append(combined)
             else:
-                 # Optionally create a metric with defaults even if calculation fails
                  logger.info("Skipping combined metric for pod '%s' due to calculation error.", pod_name)
-
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
         return combined_metrics
-
