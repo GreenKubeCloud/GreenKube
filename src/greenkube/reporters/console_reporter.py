@@ -5,9 +5,12 @@ A reporter that displays the final data in a formatted table in the console.
 from typing import List
 from rich.console import Console
 from rich.table import Table
+import logging
 
 from .base_reporter import BaseReporter
 from ..models.metrics import CombinedMetric
+
+logger = logging.getLogger(__name__)
 
 class ConsoleReporter(BaseReporter):
     """
@@ -17,7 +20,7 @@ class ConsoleReporter(BaseReporter):
         """
         Displays the combined metrics in a rich, detailed table.
         """
-        print("INFO: Generating report...")
+        logger.info("Generating report...")
         console = Console()
         table = Table(show_header=True, header_style="bold magenta", title="GreenKube FinGreenOps Report")
         

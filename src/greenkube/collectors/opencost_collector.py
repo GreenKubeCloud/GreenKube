@@ -6,9 +6,12 @@ allocation data from the OpenCost API.
 import requests
 from typing import List
 from datetime import datetime, timezone
+import logging
 
 from .base_collector import BaseCollector
 from ..models.metrics import CostMetric
+
+logger = logging.getLogger(__name__)
 
 class OpenCostCollector(BaseCollector):
     """
@@ -23,7 +26,7 @@ class OpenCostCollector(BaseCollector):
         Returns:
             A list of CostMetric objects, or an empty list if an error occurs.
         """
-        print("INFO: Collecting data from OpenCostCollector (using Ingress)...")
+        logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
         params = {
             "window": "1d",
@@ -43,18 +46,18 @@ class OpenCostCollector(BaseCollector):
             try:
                 response_data = response.json().get("data")
             except requests.exceptions.JSONDecodeError:
-                print(f"ERROR: Failed to decode JSON. Server sent non-JSON response.")
-                print(f"DEBUG: Raw response content: {response.text[:500]}...")
+                logger.error("Failed to decode JSON. Server sent non-JSON response.")
+                logger.debug("Raw response content: %s", response.text[:500])
                 return []
 
             if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
-                print("WARN: OpenCost API returned no data. This can happen if the cluster is new.")
+                logger.warning("OpenCost API returned no data. This can happen if the cluster is new.")
                 return []
             
             cost_data = response_data[0]
 
         except requests.exceptions.RequestException as e:
-            print(f"ERROR: Could not connect to OpenCost API via Ingress: {e}")
+            logger.error("Could not connect to OpenCost API via Ingress: %s", e)
             return []
 
         # --- TRAITEMENT DE LA RÉPONSE (CORRIGÉ) ---
@@ -72,7 +75,7 @@ class OpenCostCollector(BaseCollector):
                 pod_name = resource_id
             
             if not namespace:
-                print(f"WARN: Skipping metric for '{pod_name}' because namespace is missing.")
+                logger.warning("Skipping metric for '%s' because namespace is missing.", pod_name)
                 continue
 
             metric = CostMetric(
@@ -85,6 +88,6 @@ class OpenCostCollector(BaseCollector):
             )
             collected_metrics.append(metric)
 
-        print(f"INFO: Successfully collected {len(collected_metrics)} metrics from OpenCost.")
+        logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
 
