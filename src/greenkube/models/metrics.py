@@ -8,6 +8,7 @@ consistency across all modules (collectors, calculators, reporters).
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 from typing import Optional
+from enum import Enum
 
 class EnergyMetric(BaseModel):
     """
@@ -43,16 +44,54 @@ class CarbonEmissionMetric(BaseModel):
     co2e_grams: float = Field(..., description="The calculated carbon emissions in grams of CO2 equivalent.")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="The timestamp of the calculation.")
 
+class PodMetric(BaseModel):
+    """
+    Resource requests for a specific container, collected from K8s API.
+    """
+    pod_name: str = Field(..., description="The name of the Kubernetes pod.")
+    namespace: str = Field(..., description="The namespace the pod belongs to.")
+    container_name: str = Field(..., description="The name of the container within the pod.")
+    cpu_request: int = Field(..., description="CPU request in millicores.")
+    memory_request: int = Field(..., description="Memory request in bytes.")
+
+class RecommendationType(str, Enum):
+    """Enumeration of possible recommendation types."""
+    ZOMBIE_POD = "ZOMBIE_POD"
+    RIGHTSIZING_CPU = "RIGHTSIZING_CPU"
+    RIGHTSIZING_MEMORY = "RIGHTSIZING_MEMORY" # Placeholder for future implementation
+
+class Recommendation(BaseModel):
+    """Represents a single actionable optimization recommendation."""
+    pod_name: str = Field(..., description="The name of the target pod.")
+    namespace: str = Field(..., description="The namespace of the target pod.")
+    type: RecommendationType = Field(..., description="The category of the recommendation.")
+    description: str = Field(..., description="A human-readable description of the recommendation.")
+
 class CombinedMetric(BaseModel):
     """
-    A combined data model for reporting, linking cost and carbon data for a pod.
+    A combined data model for reporting AND analysis.
+    This links all collected and calculated data for a single pod.
     """
     pod_name: str
     namespace: str
-    total_cost: float
-    co2e_grams: float
-    pue: float
-    grid_intensity: float
+    
+    # From CostMetric
+    total_cost: float = 0.0
+    
+    # From CarbonEmissionMetric
+    co2e_grams: float = 0.0
+    
+    # From EnvironmentalMetric
+    pue: float = 1.0
+    grid_intensity: float = 0.0
+    
+    # From EnergyMetric
+    joules: float = 0.0
+    
+    # From PodMetric (Note: This may be an aggregation of containers)
+    cpu_request: int = 0  # in millicores
+    memory_request: int = 0 # in bytes
+    
 
 class EnvironmentalMetric(BaseModel):
     """

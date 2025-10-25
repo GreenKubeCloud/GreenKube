@@ -1,3 +1,4 @@
+# src/greenkube/cli.py
 """
 This module provides the command-line interface (CLI) for GreenKube,
 powered by the Typer library.
@@ -7,16 +8,22 @@ It orchestrates the collection, processing, and reporting of FinGreenOps data.
 import typer
 from typing_extensions import Annotated
 import time
+import logging
+import traceback
 
 # --- GreenKube Core Imports ---
 from .core.scheduler import Scheduler
 from .core.config import config
+from .core.calculator import CarbonCalculator
+from .core.processor import DataProcessor
+from .core.recommender import Recommender
 
 # --- GreenKube Collector Imports ---
 from .collectors.electricity_maps_collector import ElectricityMapsCollector
 from .collectors.node_collector import NodeCollector
 from .collectors.kepler_collector import KeplerCollector
 from .collectors.opencost_collector import OpenCostCollector
+from .collectors.pod_collector import PodCollector
 
 # --- GreenKube Storage Imports ---
 from .storage.base_repository import CarbonIntensityRepository
@@ -24,13 +31,11 @@ from .storage.sqlite_repository import SQLiteCarbonIntensityRepository
 from .storage.elasticsearch_repository import ElasticsearchCarbonIntensityRepository
 
 # --- GreenKube Reporting and Processing Imports ---
-from .core.calculator import CarbonCalculator
-from .core.processor import DataProcessor
 from .reporters.console_reporter import ConsoleReporter
-# --- Use the correct translator function name ---
 from .utils.mapping_translator import get_emaps_zone_from_cloud_zone
-# ----------------------------------------------
 
+# --- Setup Logger ---
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="greenkube",
@@ -44,27 +49,51 @@ def get_repository() -> CarbonIntensityRepository:
     """
     if config.DB_TYPE == "elasticsearch":
         typer.echo("Using Elasticsearch repository.")
-        # Ensure the Elasticsearch connection is configured before creating the repository.
         try:
-            # Import locally to avoid import-time side-effects in other contexts/tests
             from .storage import elasticsearch_repository as es_mod
-            # Attempt to set up connections (this will use config values)
             es_mod.setup_connection()
         except Exception as e:
             typer.secho(f"ERROR: Failed to setup Elasticsearch connection: {e}", fg=typer.colors.RED)
-            # Let the repository constructor handle missing connection if needed,
-            # but we return the repository instance so code paths that catch
-            # repository-level errors can continue to run.
         return ElasticsearchCarbonIntensityRepository()
     elif config.DB_TYPE == "sqlite":
         typer.echo("Using SQLite repository.")
-        # --- Need to pass the connection for SQLite ---
-        from .core.db import db_manager # Import db_manager locally for SQLite
+        from .core.db import db_manager
         return SQLiteCarbonIntensityRepository(db_manager.get_connection())
-        # ---------------------------------------------
     else:
-        # Handle postgres or other cases if needed
         raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
+
+def get_processor() -> DataProcessor:
+    """
+    Factory function to instantiate and return a fully configured DataProcessor.
+    """
+    typer.echo("INFO: Initializing data collectors and processor...")
+    try:
+        # 1. Get the repository
+        repository = get_repository()
+
+        # 2. Instantiate all collectors
+        kepler_collector = KeplerCollector()
+        opencost_collector = OpenCostCollector()
+        node_collector = NodeCollector()
+        pod_collector = PodCollector()
+
+        # 3. Instantiate the calculator
+        carbon_calculator = CarbonCalculator(repository=repository)
+
+        # 4. Instantiate and return the processor
+        processor = DataProcessor(
+            kepler_collector=kepler_collector,
+            opencost_collector=opencost_collector,
+            node_collector=node_collector,
+            pod_collector=pod_collector,
+            repository=repository,
+            calculator=carbon_calculator
+        )
+        return processor
+    except Exception as e:
+        typer.secho(f"❌ An error occurred during processor initialization: {e}", fg=typer.colors.RED)
+        logger.error("Processor initialization failed: %s", traceback.format_exc())
+        raise typer.Exit(code=1)
 
 
 def collect_carbon_intensity_for_all_zones():
@@ -72,18 +101,15 @@ def collect_carbon_intensity_for_all_zones():
     Orchestrates the collection and saving of carbon intensity data.
     """
     typer.echo("--- Starting hourly carbon intensity collection task ---")
-
-    # --- Initialize necessary components ---
-    node_collector = NodeCollector()
-    em_collector = ElectricityMapsCollector()
-    # Use the factory to get the correct repository
     try:
         repository = get_repository()
+        node_collector = NodeCollector()
+        em_collector = ElectricityMapsCollector()
     except Exception as e:
-        typer.secho(f"ERROR: Failed to initialize repository: {e}", fg=typer.colors.RED)
-        return # Stop if repository fails
+        typer.secho(f"ERROR: Failed to initialize components for intensity collection: {e}", fg=typer.colors.RED)
+        return
 
-    # --- Mapping logic (unchanged) ---
+    # ... (rest of the function is unchanged) ...
     try:
         nodes_zones_map = node_collector.collect() # Renamed variable for clarity
         if not nodes_zones_map:
@@ -104,7 +130,6 @@ def collect_carbon_intensity_for_all_zones():
              emaps_zones.add(emz)
         else:
             typer.secho(f"Warning: Could not map cloud zone '{cz}' to an Electricity Maps zone.", fg=typer.colors.YELLOW)
-
 
     if not emaps_zones:
         typer.secho("Warning: No mappable Electricity Maps zones found based on node discovery.", fg=typer.colors.YELLOW)
@@ -157,13 +182,14 @@ def start():
 
         while True:
             scheduler.run_pending()
-            time.sleep(60) # Check every minute instead of every second
+            time.sleep(60)
 
     except KeyboardInterrupt:
         typer.echo("\n🛑 Shutting down GreenKube service.")
         raise typer.Exit()
     except Exception as e:
         typer.secho(f"❌ An unexpected error occurred during startup: {e}", fg=typer.colors.RED)
+        logger.error("Startup failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
 
@@ -178,58 +204,90 @@ def report(
     """
     print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
 
-    try: # Add error handling for initialization
-        # --- DEPENDENCY INJECTION (UPDATED) ---
-        # 1. Get the repository using the factory
-        repository = get_repository()
-
-        # 2. Instantiate all collectors
-        kepler_collector = KeplerCollector()
-        opencost_collector = OpenCostCollector()
-        node_collector = NodeCollector() # Instantiate NodeCollector
-
-        # 3. Instantiate the calculator, injecting the repository
-        carbon_calculator = CarbonCalculator(repository=repository)
-
-        # 4. Instantiate the processor, injecting all dependencies
-        processor = DataProcessor(
-            kepler_collector=kepler_collector,     # Renamed argument
-            opencost_collector=opencost_collector, # Renamed argument
-            node_collector=node_collector,         # Add NodeCollector
-            repository=repository,                 # Add Repository
-            calculator=carbon_calculator           # Pass Calculator instance
-        )
-
+    try:
+        processor = get_processor()
         console_reporter = ConsoleReporter()
-        # --- END DEPENDENCY INJECTION ---
 
         print("INFO: Running the data processing pipeline...")
         combined_data = processor.run() # This now handles internal errors more gracefully
 
         if not combined_data:
              print("WARN: No combined data was generated by the processor.")
-             # Decide if this is an error or just an empty report state
-             raise typer.Exit(code=0) # Exit cleanly if no data
-
+             raise typer.Exit(code=0)
 
         if namespace:
             print(f"INFO: Filtering results for namespace: {namespace}...")
             original_count = len(combined_data)
             combined_data = [item for item in combined_data if item.namespace == namespace]
             if not combined_data:
-                # Use typer.secho for warnings/errors
                 typer.secho(f"WARN: No data found for namespace '{namespace}' after processing {original_count} total items.", fg=typer.colors.YELLOW)
                 raise typer.Exit(code=0) # Exit cleanly, just no data for this namespace
 
         print("INFO: Calling the reporter...")
         console_reporter.report(data=combined_data)
 
+    except typer.Exit:
+        raise
     except Exception as e:
         # Catch errors during initialization or processing
         typer.secho(f"❌ An error occurred during report generation: {e}", fg=typer.colors.RED)
-        # Optionally add more specific error handling based on exception types
-        import traceback
-        traceback.print_exc() # Print full traceback for debugging
+        logger.error("Report generation failed: %s", traceback.format_exc())
+        raise typer.Exit(code=1)
+
+@app.command()
+def recommend(
+    namespace: Annotated[str, typer.Option(
+        help="Display recommendations for a specific namespace."
+    )] = None
+):
+    """
+    Analyzes data and provides optimization recommendations.
+    """
+    print("INFO: Initializing GreenKube Recommender...")
+
+    try:
+        # 1. Get the processed data
+        processor = get_processor()
+        print("INFO: Running the data processing pipeline...")
+        combined_data = processor.run()
+
+        if not combined_data:
+             print("WARN: No combined data was generated by the processor. Cannot generate recommendations.")
+             raise typer.Exit(code=0)
+
+        # 2. Filter by namespace if provided
+        if namespace:
+            print(f"INFO: Filtering results for namespace: {namespace}...")
+            combined_data = [item for item in combined_data if item.namespace == namespace]
+            if not combined_data:
+                typer.secho(f"WARN: No data found for namespace '{namespace}'.", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=0)
+
+        # 3. Instantiate Recommender and Reporter
+        recommender = Recommender() # Uses default thresholds
+        console_reporter = ConsoleReporter()
+
+        print("INFO: Generating recommendations...")
+        
+        # 4. Generate recommendations
+        zombie_recs = recommender.generate_zombie_recommendations(combined_data)
+        rightsizing_recs = recommender.generate_rightsizing_recommendations(combined_data)
+        
+        all_recs = zombie_recs + rightsizing_recs
+
+        if not all_recs:
+            typer.secho("\n✅ All systems look optimized! No recommendations to display.", fg=typer.colors.GREEN)
+            return
+        # 5. Report recommendations
+        print(f"INFO: Found {len(all_recs)} recommendations.")
+        # Use the unified report method which can accept recommendations
+        console_reporter.report(data=combined_data, recommendations=all_recs)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.secho(f"❌ An error occurred during recommendation generation: {e}", fg=typer.colors.RED)
+        logger.error("Recommendation generation failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
 

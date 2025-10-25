@@ -86,7 +86,8 @@ def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metri
 
     result = runner.invoke(app, ["report", "--namespace", "non-existent-ns"])
 
-    assert result.exit_code != 0, "CLI should exit with a non-zero code for errors"
+    # The CLI now exits cleanly with code 0 when a namespace has no data
+    assert result.exit_code == 0
     assert "WARN: No data found for namespace 'non-existent-ns'" in result.stdout
 
 def test_export_placeholder():
@@ -96,3 +97,36 @@ def test_export_placeholder():
     result = runner.invoke(app, ["export"])
     assert result.exit_code == 0
     assert "Placeholder: Exporting data in csv format to report.csv" in result.stdout
+
+
+def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sample_combined_metrics):
+    """Ensure `greenkube recommend` generates recommendations and calls reporter.report with recommendations."""
+    # Patch DataProcessor.run to return data
+    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+
+    # Patch Recommender to return a sample recommendation list
+    sample_rec = mocker.patch('greenkube.cli.Recommender')
+    rec_instance = sample_rec.return_value
+    rec_instance.generate_zombie_recommendations.return_value = [
+        mocker.MagicMock(pod_name='pod-y', namespace='monitoring', type=mocker.MagicMock(value='ZOMBIE_POD'), description='idle')
+    ]
+    rec_instance.generate_rightsizing_recommendations.return_value = []
+
+    result = runner.invoke(app, ['recommend'])
+    assert result.exit_code == 0
+    # ConsoleReporter.report should be called with data and recommendations
+    mock_reporter.report.assert_called_once()
+    # Validate that call included 'recommendations' keyword
+    kwargs = mock_reporter.report.call_args.kwargs
+    assert 'recommendations' in kwargs
+    assert isinstance(kwargs['recommendations'], list)
+
+
+def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_combined_metrics):
+    """When namespace filter yields no data, recommend exits cleanly."""
+    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+
+    result = runner.invoke(app, ['recommend', '--namespace', 'non-existent-ns'])
+    assert result.exit_code == 0
+    # Reporter shouldn't be called
+    mock_reporter.report.assert_not_called()

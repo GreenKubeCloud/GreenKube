@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from src.greenkube.core.processor import DataProcessor
 from src.greenkube.models.metrics import EnergyMetric, CostMetric, CombinedMetric
+from src.greenkube.models.metrics import PodMetric
 from src.greenkube.core.calculator import CarbonCalculationResult
 # --- Import the config object for default values ---
 from src.greenkube.core.config import config
@@ -57,6 +58,14 @@ def mock_node_collector():
     mock.collect.return_value = SAMPLE_NODE_ZONES
     return mock
 
+
+@pytest.fixture
+def mock_pod_collector():
+    """ Provides a mock PodCollector. """
+    mock = MagicMock()
+    mock.collect.return_value = []
+    return mock
+
 # --- ADDED: Fixtures for repository and calculator ---
 @pytest.fixture
 def mock_repository():
@@ -91,7 +100,7 @@ def mock_calculator():
 # ------------------------------------------------------
 
 @pytest.fixture
-def data_processor(mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+def data_processor(mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_pod_collector, mock_repository, mock_calculator):
     """
     Provides an instance of DataProcessor with mocked dependencies.
     Injects the new mock_repository and mock_calculator.
@@ -100,6 +109,7 @@ def data_processor(mock_kepler_collector, mock_opencost_collector, mock_node_col
         kepler_collector=mock_kepler_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
+        pod_collector=mock_pod_collector,
         repository=mock_repository,       # Pass the mock repository
         calculator=mock_calculator        # Pass the mock calculator
     )
@@ -237,6 +247,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(mock_translator, moc
         kepler_collector=mock_kepler_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector_instance, # Use the configured instance
+        pod_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator
     )
@@ -349,4 +360,63 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
 
     # Verify calculator was called 4 times (even though one failed)
     assert mock_calculator.calculate_emissions.call_count == 4
+
+
+@patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
+def test_processor_aggregates_pod_requests(mock_translator, mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+    """Ensure PodCollector request aggregation is applied to combined metrics."""
+    # Arrange: create a pod_collector mock that returns per-container PodMetric entries
+    pod_metrics = [
+        PodMetric(pod_name='pod-A', namespace='ns-1', container_name='c1', cpu_request=100, memory_request=128 * 1024 * 1024),
+        PodMetric(pod_name='pod-A', namespace='ns-1', container_name='c2', cpu_request=200, memory_request=64 * 1024 * 1024),
+    ]
+
+    from unittest.mock import MagicMock
+    mock_pod_collector = MagicMock()
+    mock_pod_collector.collect.return_value = pod_metrics
+
+    dp = DataProcessor(
+        kepler_collector=mock_kepler_collector,
+        opencost_collector=mock_opencost_collector,
+        node_collector=mock_node_collector,
+        pod_collector=mock_pod_collector,
+        repository=mock_repository,
+        calculator=mock_calculator,
+    )
+
+    # Translator stub
+    mock_translator.return_value = 'US-CISO-NE'
+
+    # Act
+    combined = dp.run()
+
+    # Assert: find pod-A and verify cpu_request and memory_request are summed
+    metric_a = next((m for m in combined if m.pod_name == 'pod-A'), None)
+    assert metric_a is not None
+    assert metric_a.cpu_request == 300
+    assert metric_a.memory_request == (128 + 64) * 1024 * 1024
+
+
+@patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
+def test_processor_handles_missing_pod_requests(mock_translator, mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+    """If PodCollector returns empty or fails, cpu_request and memory_request should be zero for combined metrics."""
+    from unittest.mock import MagicMock
+    mock_pod_collector = MagicMock()
+    mock_pod_collector.collect.return_value = []
+
+    dp = DataProcessor(
+        kepler_collector=mock_kepler_collector,
+        opencost_collector=mock_opencost_collector,
+        node_collector=mock_node_collector,
+        pod_collector=mock_pod_collector,
+        repository=mock_repository,
+        calculator=mock_calculator,
+    )
+
+    mock_translator.return_value = 'US-CISO-NE'
+
+    combined = dp.run()
+    for m in combined:
+        assert m.cpu_request == 0 or isinstance(m.cpu_request, int)
+        assert m.memory_request == 0 or isinstance(m.memory_request, int)
 
