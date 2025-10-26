@@ -43,6 +43,11 @@ dependencies = [
     "elasticsearch-dsl>=8.10.0" # Ajout de l'ORM pour Elasticsearch
 ]
 
+[project.optional-dependencies]
+test = [
+    "requests-mock",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/GreenKubeCloud/greenkube"
 "Bug Tracker" = "https://github.com/GreenKubeCloud/greenkube/issues"
