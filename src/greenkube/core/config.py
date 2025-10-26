@@ -1,6 +1,7 @@
 # src/greenkube/core/config.py
 
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file located in the project root
@@ -18,6 +19,9 @@ class Config:
     DEFAULT_INTENSITY = 0.1
     JOULES_PER_KWH = 3.6e6
     GRAMS_PER_KG = 1000
+
+    # --- Logging variables ---
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
     # --- Database variables ---
     DB_TYPE = os.getenv("DB_TYPE", "sqlite")
@@ -46,7 +50,7 @@ class Config:
         if cls.DB_TYPE == "postgres" and not cls.DB_CONNECTION_STRING:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
         if not cls.ELECTRICITY_MAPS_TOKEN:
-            print("Warning: ELECTRICITY_MAPS_TOKEN is not set.")
+            logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
 
 # Instantiate the config to be imported by other modules
 config = Config()

@@ -35,6 +35,7 @@ from .reporters.console_reporter import ConsoleReporter
 from .utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 # --- Setup Logger ---
+logging.basicConfig(level=config.LOG_LEVEL.upper(), format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(
@@ -48,15 +49,15 @@ def get_repository() -> CarbonIntensityRepository:
     Factory function to get the appropriate repository based on config.
     """
     if config.DB_TYPE == "elasticsearch":
-        typer.echo("Using Elasticsearch repository.")
+        logger.info("Using Elasticsearch repository.")
         try:
             from .storage import elasticsearch_repository as es_mod
             es_mod.setup_connection()
         except Exception as e:
-            typer.secho(f"ERROR: Failed to setup Elasticsearch connection: {e}", fg=typer.colors.RED)
+            logger.error(f"Failed to setup Elasticsearch connection: {e}")
         return ElasticsearchCarbonIntensityRepository()
     elif config.DB_TYPE == "sqlite":
-        typer.echo("Using SQLite repository.")
+        logger.info("Using SQLite repository.")
         from .core.db import db_manager
         return SQLiteCarbonIntensityRepository(db_manager.get_connection())
     else:
@@ -66,7 +67,7 @@ def get_processor() -> DataProcessor:
     """
     Factory function to instantiate and return a fully configured DataProcessor.
     """
-    typer.echo("INFO: Initializing data collectors and processor...")
+    logger.info("Initializing data collectors and processor...")
     try:
         # 1. Get the repository
         repository = get_repository()
@@ -91,7 +92,7 @@ def get_processor() -> DataProcessor:
         )
         return processor
     except Exception as e:
-        typer.secho(f"❌ An error occurred during processor initialization: {e}", fg=typer.colors.RED)
+        logger.error(f"An error occurred during processor initialization: {e}")
         logger.error("Processor initialization failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
@@ -100,25 +101,25 @@ def collect_carbon_intensity_for_all_zones():
     """
     Orchestrates the collection and saving of carbon intensity data.
     """
-    typer.echo("--- Starting hourly carbon intensity collection task ---")
+    logger.info("--- Starting hourly carbon intensity collection task ---")
     try:
         repository = get_repository()
         node_collector = NodeCollector()
         em_collector = ElectricityMapsCollector()
     except Exception as e:
-        typer.secho(f"ERROR: Failed to initialize components for intensity collection: {e}", fg=typer.colors.RED)
+        logger.error(f"Failed to initialize components for intensity collection: {e}")
         return
 
     # ... (rest of the function is unchanged) ...
     try:
         nodes_zones_map = node_collector.collect() # Renamed variable for clarity
         if not nodes_zones_map:
-            typer.secho("Warning: No node zones discovered.", fg=typer.colors.YELLOW)
+            logger.warning("No node zones discovered.")
             # Decide if we should try a default zone or stop
             # For now, let's stop if no nodes are found.
             return
     except Exception as e:
-         typer.secho(f"ERROR: Failed to collect node zones: {e}", fg=typer.colors.RED)
+         logger.error(f"Failed to collect node zones: {e}")
          return # Stop if node collection fails
 
     # Extract unique cloud zones from the values of the map
@@ -129,13 +130,13 @@ def collect_carbon_intensity_for_all_zones():
         if emz and emz != "unknown": # Check for None and "unknown"
              emaps_zones.add(emz)
         else:
-            typer.secho(f"Warning: Could not map cloud zone '{cz}' to an Electricity Maps zone.", fg=typer.colors.YELLOW)
+            logger.warning(f"Could not map cloud zone '{cz}' to an Electricity Maps zone.")
 
     if not emaps_zones:
-        typer.secho("Warning: No mappable Electricity Maps zones found based on node discovery.", fg=typer.colors.YELLOW)
+        logger.warning("No mappable Electricity Maps zones found based on node discovery.")
         # Optionally, fallback to config.DEFAULT_ZONE if desired
         # emaps_zones = {config.DEFAULT_ZONE}
-        # typer.echo(f"Falling back to default zone: {config.DEFAULT_ZONE}")
+        # logger.info(f"Falling back to default zone: {config.DEFAULT_ZONE}")
         return # Stop for now if no zones mapped
 
 
@@ -145,13 +146,13 @@ def collect_carbon_intensity_for_all_zones():
             history_data = em_collector.collect(zone=zone)
             if history_data:
                 saved_count = repository.save_history(history_data, zone=zone)
-                typer.echo(f"Successfully saved {saved_count} new records for zone: {zone}")
+                logger.info(f"Successfully saved {saved_count} new records for zone: {zone}")
             else:
-                typer.echo(f"No new data to save for zone: {zone}")
+                logger.info(f"No new data to save for zone: {zone}")
         except Exception as e:
-            typer.secho(f"Failed to process data for zone {zone}: {e}", fg=typer.colors.RED)
+            logger.error(f"Failed to process data for zone {zone}: {e}")
 
-    typer.echo("--- Finished carbon intensity collection task ---")
+    logger.info("--- Finished carbon intensity collection task ---")
 
 
 @app.command()
@@ -159,7 +160,7 @@ def start():
     """
     Initialize the database and start the GreenKube data collection service.
     """
-    typer.echo("🚀 Initializing GreenKube...")
+    logger.info("🚀 Initializing GreenKube...")
     try:
         # For SQLite, initialize the DB schema if needed
         if config.DB_TYPE == "sqlite":
@@ -167,28 +168,28 @@ def start():
             from .core.db import db_manager
             # -----------------------------------------
             db_manager.setup_sqlite() # Ensure schema exists
-            typer.secho("✅ SQLite Database connection successful and schema is ready.", fg=typer.colors.GREEN)
+            logger.info("✅ SQLite Database connection successful and schema is ready.")
         # Add checks or initial setup for Elasticsearch if necessary in the future
 
         scheduler = Scheduler()
         scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
 
-        typer.echo("📈 Starting scheduler...")
-        typer.echo("\nGreenKube is running. Press CTRL+C to exit.")
+        logger.info("📈 Starting scheduler...")
+        logger.info("\nGreenKube is running. Press CTRL+C to exit.")
 
-        typer.echo("Running initial data collection for all zones...")
+        logger.info("Running initial data collection for all zones...")
         collect_carbon_intensity_for_all_zones()
-        typer.echo("Initial collection complete.")
+        logger.info("Initial collection complete.")
 
         while True:
             scheduler.run_pending()
             time.sleep(60)
 
     except KeyboardInterrupt:
-        typer.echo("\n🛑 Shutting down GreenKube service.")
+        logger.info("\n🛑 Shutting down GreenKube service.")
         raise typer.Exit()
     except Exception as e:
-        typer.secho(f"❌ An unexpected error occurred during startup: {e}", fg=typer.colors.RED)
+        logger.error(f"❌ An unexpected error occurred during startup: {e}")
         logger.error("Startup failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
@@ -202,35 +203,35 @@ def report(
     """
     Displays a combined report of costs and carbon footprint.
     """
-    print("INFO: Initializing GreenKube FinGreenOps reporting tool...")
+    logger.info("Initializing GreenKube FinGreenOps reporting tool...")
 
     try:
         processor = get_processor()
         console_reporter = ConsoleReporter()
 
-        print("INFO: Running the data processing pipeline...")
+        logger.info("Running the data processing pipeline...")
         combined_data = processor.run() # This now handles internal errors more gracefully
 
         if not combined_data:
-             print("WARN: No combined data was generated by the processor.")
+             logger.warning("No combined data was generated by the processor.")
              raise typer.Exit(code=0)
 
         if namespace:
-            print(f"INFO: Filtering results for namespace: {namespace}...")
+            logger.info(f"Filtering results for namespace: {namespace}...")
             original_count = len(combined_data)
             combined_data = [item for item in combined_data if item.namespace == namespace]
             if not combined_data:
-                typer.secho(f"WARN: No data found for namespace '{namespace}' after processing {original_count} total items.", fg=typer.colors.YELLOW)
+                logger.warning(f"No data found for namespace '{namespace}' after processing {original_count} total items.")
                 raise typer.Exit(code=0) # Exit cleanly, just no data for this namespace
 
-        print("INFO: Calling the reporter...")
+        logger.info("Calling the reporter...")
         console_reporter.report(data=combined_data)
 
     except typer.Exit:
         raise
     except Exception as e:
         # Catch errors during initialization or processing
-        typer.secho(f"❌ An error occurred during report generation: {e}", fg=typer.colors.RED)
+        logger.error(f"An error occurred during report generation: {e}")
         logger.error("Report generation failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
@@ -243,31 +244,31 @@ def recommend(
     """
     Analyzes data and provides optimization recommendations.
     """
-    print("INFO: Initializing GreenKube Recommender...")
+    logger.info("Initializing GreenKube Recommender...")
 
     try:
         # 1. Get the processed data
         processor = get_processor()
-        print("INFO: Running the data processing pipeline...")
+        logger.info("Running the data processing pipeline...")
         combined_data = processor.run()
 
         if not combined_data:
-             print("WARN: No combined data was generated by the processor. Cannot generate recommendations.")
+             logger.warning("No combined data was generated by the processor. Cannot generate recommendations.")
              raise typer.Exit(code=0)
 
         # 2. Filter by namespace if provided
         if namespace:
-            print(f"INFO: Filtering results for namespace: {namespace}...")
+            logger.info(f"Filtering results for namespace: {namespace}...")
             combined_data = [item for item in combined_data if item.namespace == namespace]
             if not combined_data:
-                typer.secho(f"WARN: No data found for namespace '{namespace}'.", fg=typer.colors.YELLOW)
+                logger.warning(f"No data found for namespace '{namespace}'.")
                 raise typer.Exit(code=0)
 
         # 3. Instantiate Recommender and Reporter
         recommender = Recommender() # Uses default thresholds
         console_reporter = ConsoleReporter()
 
-        print("INFO: Generating recommendations...")
+        logger.info("Generating recommendations...")
         
         # 4. Generate recommendations
         zombie_recs = recommender.generate_zombie_recommendations(combined_data)
@@ -276,17 +277,17 @@ def recommend(
         all_recs = zombie_recs + rightsizing_recs
 
         if not all_recs:
-            typer.secho("\n✅ All systems look optimized! No recommendations to display.", fg=typer.colors.GREEN)
+            logger.info("\n✅ All systems look optimized! No recommendations to display.")
             return
         # 5. Report recommendations
-        print(f"INFO: Found {len(all_recs)} recommendations.")
+        logger.info(f"Found {len(all_recs)} recommendations.")
         # Use the unified report method which can accept recommendations
         console_reporter.report(data=combined_data, recommendations=all_recs)
 
     except typer.Exit:
         raise
     except Exception as e:
-        typer.secho(f"❌ An error occurred during recommendation generation: {e}", fg=typer.colors.RED)
+        logger.error(f"An error occurred during recommendation generation: {e}")
         logger.error("Recommendation generation failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
 
@@ -297,7 +298,7 @@ def export(
     output: str = typer.Option("report.csv", help="The path to the output file.")
 ):
     """ Exports the combined report data to a file. (Placeholder) """
-    typer.echo(f"Placeholder: Exporting data in {format} format to {output}")
+    logger.info(f"Placeholder: Exporting data in {format} format to {output}")
     # Implementation would be similar to 'report', but using a file exporter instead of ConsoleReporter
 
 if __name__ == "__main__":
