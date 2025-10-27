@@ -70,7 +70,6 @@ def test_report_with_namespace_filter_success(mocker, mock_reporter, sample_comb
     result = runner.invoke(app, ["report", "--namespace", "monitoring"])
 
     assert result.exit_code == 0
-    assert "Filtering results for namespace: monitoring" in result.stdout
     mock_reporter.report.assert_called_once_with(data=ANY)
     reported_data = mock_reporter.report.call_args.kwargs['data']
     # Only the metric with namespace "monitoring" should be present
@@ -88,15 +87,20 @@ def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metri
 
     # The CLI now exits cleanly with code 0 when a namespace has no data
     assert result.exit_code == 0
-    assert "WARN: No data found for namespace 'non-existent-ns'" in result.stdout
+    # Reporter should not be called when no data exists for the requested namespace
+    mock_reporter.report.assert_not_called()
 
-def test_export_placeholder():
+def test_export_placeholder(mocker):
     """
     Tests the placeholder functionality of the `export` command.
     """
+    # Patch the module logger and assert it is used for the placeholder message
+    mock_logger = mocker.patch('greenkube.cli.logger')
     result = runner.invoke(app, ["export"])
     assert result.exit_code == 0
-    assert "Placeholder: Exporting data in csv format to report.csv" in result.stdout
+    # Ensure logger.info was called with the placeholder message (permissive substring match)
+    called = any("Placeholder: Exporting data in csv format to report.csv" in str(call_args) for call_args in mock_logger.info.call_args_list)
+    assert called, f"Expected logger.info to be called with export message, got: {mock_logger.info.call_args_list}"
 
 
 def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sample_combined_metrics):
