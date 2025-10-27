@@ -1,4 +1,4 @@
-# src/greenkube/models/prometheus.py
+# src/greenkube/models/prometheus_metrics.py
 """
 Pydantic models for structured data returned from the PrometheusCollector.
 """
@@ -12,6 +12,7 @@ class PodCPUUsage(BaseModel):
     namespace: str
     pod: str
     container: str
+    node: str = Field(..., description="The node on which the pod is running")
     cpu_usage_cores: float = Field(..., description="Average CPU usage in cores")
 
 class NodeInstanceType(BaseModel):

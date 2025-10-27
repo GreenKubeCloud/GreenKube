@@ -6,6 +6,7 @@ We will mock all HTTP requests to the Prometheus API.
 """
 import pytest
 import requests
+import urllib.parse
 from requests_mock import ANY
 from pydantic import ValidationError
 
@@ -24,7 +25,8 @@ MOCK_CPU_USAGE_RESPONSE = {
                 "metric": {
                     "container": "app",
                     "namespace": "prod",
-                    "pod": "api-deployment-12345"
+                    "pod": "api-deployment-12345",
+                    "node": "node-1"
                 },
                 "value": [1678886400, "0.5"] # 0.5 cores
             },
@@ -32,7 +34,8 @@ MOCK_CPU_USAGE_RESPONSE = {
                 "metric": {
                     "container": "db",
                     "namespace": "prod",
-                    "pod": "db-deployment-67890"
+                    "pod": "db-deployment-67890",
+                    "node": "node-2"
                 },
                 "value": [1678886400, "1.2"] # 1.2 cores
             },
@@ -40,15 +43,26 @@ MOCK_CPU_USAGE_RESPONSE = {
                 "metric": {
                     # Missing 'pod' label, should be skipped
                     "container": "sidecar",
-                    "namespace": "default"
+                    "namespace": "default",
+                    "node": "node-1"
                 },
                 "value": [1678886400, "0.1"]
             },
             {
                 "metric": {
+                    # Missing 'node' label, should be skipped
+                    "container": "missing-node-container",
+                    "namespace": "prod",
+                    "pod": "api-deployment-77777"
+                },
+                "value": [1678886400, "0.2"]
+            },
+            {
+                "metric": {
                     "container": "nan-value-container",
                     "namespace": "prod",
-                    "pod": "api-deployment-99999"
+                    "pod": "api-deployment-99999",
+                    "node": "node-2"
                 },
                 "value": [1678886400, "NaN"] # Should be skipped
             }
@@ -91,11 +105,13 @@ MOCK_EMPTY_RESPONSE = {"status": "success", "data": {"resultType": "vector", "re
 # --- Pytest Fixtures ---
 
 @pytest.fixture
-def mock_config(monkeypatch):
+def mock_config():
     """Fixture to create a Config instance and patch its attributes for tests."""
-    monkeypatch.setattr(Config, "PROMETHEUS_URL", "http://mock-prometheus:9090")
-    monkeypatch.setattr(Config, "PROMETHEUS_QUERY_RANGE_STEP", "5m")
-    return Config()
+
+    config = Config()
+    config.PROMETHEUS_URL = "http://mock-prometheus:9090"
+    config.PROMETHEUS_QUERY_RANGE_STEP = "5m"
+    return config
 
 @pytest.fixture
 def collector(mock_config):
@@ -109,19 +125,29 @@ def test_collect_success(collector, requests_mock):
     Test the happy path: Prometheus is reachable and returns valid data.
     """
     mock_url = collector.base_url
-    requests_mock.get(f"{mock_url}/api/v1/query?query={collector.cpu_usage_query}", json=MOCK_CPU_USAGE_RESPONSE)
-    requests_mock.get(f"{mock_url}/api/v1/query?query={collector.node_labels_query}", json=MOCK_NODE_LABELS_RESPONSE)
+    # Note: the query has changed, requests_mock will find it dynamically
+    query_params_cpu = {'query': collector.cpu_usage_query}
+    url_cpu = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_cpu)}"
+    requests_mock.get(url_cpu, json=MOCK_CPU_USAGE_RESPONSE)
+
+    query_params_node = {'query': collector.node_labels_query}
+    url_node = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_node)}"
+    requests_mock.get(url_node, json=MOCK_NODE_LABELS_RESPONSE)
 
     result = collector.collect()
 
     assert isinstance(result, PrometheusMetric)
     
-    # Check CPU data (2 valid, 2 invalid entries in mock)
+    # Check CPU data (2 valid, 3 invalid entries in mock)
     assert len(result.pod_cpu_usage) == 2
     assert result.pod_cpu_usage[0].namespace == "prod"
     assert result.pod_cpu_usage[0].pod == "api-deployment-12345"
     assert result.pod_cpu_usage[0].container == "app"
+    assert result.pod_cpu_usage[0].node == "node-1" # Assert node
     assert result.pod_cpu_usage[0].cpu_usage_cores == 0.5
+    
+    assert result.pod_cpu_usage[1].pod == "db-deployment-67890"
+    assert result.pod_cpu_usage[1].node == "node-2" # Assert node
     assert result.pod_cpu_usage[1].cpu_usage_cores == 1.2
 
     # Check Node data (2 valid, 1 invalid entry in mock)
@@ -131,13 +157,13 @@ def test_collect_success(collector, requests_mock):
     assert result.node_instance_types[1].node == "node-2"
     assert result.node_instance_types[1].instance_type == "t3.medium"
 
-def test_collect_no_url_configured(monkeypatch):
+def test_collect_no_url_configured():
     """
     Test behavior when PROMETHEUS_URL is not set.
     """
-    monkeypatch.setattr(Config, "PROMETHEUS_URL", None)
-    settings = Config()
-    collector = PrometheusCollector(settings=settings)
+    config = Config()
+    config.PROMETHEUS_URL = None
+    collector = PrometheusCollector(settings=config)
     
     result = collector.collect()
     
@@ -190,7 +216,7 @@ def test_parsing_malformed_cpu_data(collector):
     Test that malformed data is gracefully handled and returns None.
     """
     # This mock data has a string for value, but it's not a float
-    malformed_cpu_data = {"metric": {"namespace": "n", "pod": "p", "container": "c"}, "value": [0, "not-a-float"]}
+    malformed_cpu_data = {"metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"}, "value": [0, "not-a-float"]}
     
     assert collector._parse_cpu_data(malformed_cpu_data) is None
 
@@ -199,8 +225,13 @@ def test_parsing_missing_cpu_labels(collector):
     Test that the parser returns None if key labels are missing.
     """
     # Missing 'pod'
-    missing_label_data = {"metric": {"namespace": "n", "container": "c"}, "value": [0, "0.5"]}
+    missing_label_data = {"metric": {"namespace": "n", "container": "c", "node": "n1"}, "value": [0, "0.5"]}
     assert collector._parse_cpu_data(missing_label_data) is None
+
+    # Missing 'node'
+    missing_label_data_2 = {"metric": {"namespace": "n", "pod": "p", "container": "c"}, "value": [0, "0.5"]}
+    assert collector._parse_cpu_data(missing_label_data_2) is None
+
 
 def test_parsing_missing_node_labels(collector):
     """
@@ -214,5 +245,5 @@ def test_parsing_nan_value(collector):
     """
     Test that values of 'NaN' are gracefully skipped.
     """
-    nan_data = {"metric": {"namespace": "n", "pod": "p", "container": "c"}, "value": [0, "NaN"]}
+    nan_data = {"metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"}, "value": [0, "NaN"]}
     assert collector._parse_cpu_data(nan_data) is None

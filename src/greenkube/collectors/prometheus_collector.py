@@ -32,7 +32,7 @@ class PrometheusCollector(BaseCollector):
         # We filter for containers with a name, which is standard.
         self.cpu_usage_query = (
             f"sum(rate(container_cpu_usage_seconds_total{{container!=''}}[{self.query_range_step}])) "
-            "by (namespace, pod, container)"
+            "by (namespace, pod, container, node)"
         )
         
         # Query for node labels to find the instance type.
@@ -116,6 +116,7 @@ class PrometheusCollector(BaseCollector):
                 "namespace": metric["namespace"],
                 "pod": metric["pod"],
                 "container": metric["container"],
+                "node": metric["node"],
                 "cpu_usage_cores": float(value_str)
             }
             
