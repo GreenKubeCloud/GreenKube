@@ -247,3 +247,51 @@ def test_parsing_nan_value(collector):
     """
     nan_data = {"metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"}, "value": [0, "NaN"]}
     assert collector._parse_cpu_data(nan_data) is None
+
+
+def test_collect_ignores_non_pod_series(collector, requests_mock):
+    """
+    Ensure collect() ignores node-level/non-pod series and only returns pod-level entries.
+    """
+    mock_url = collector.base_url
+    # Build CPU response mixing node-level and pod-level series
+    mixed_result = {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [
+                {"metric": {"node": "node-1"}, "value": [1678886400, "0.5"]},  # node-level
+                {"metric": {"namespace": "prod", "pod": "p1", "container": "c1", "node": "node-1"}, "value": [1678886400, "0.7"]},
+            ]
+        }
+    }
+
+    query_params_cpu = {'query': collector.cpu_usage_query}
+    url_cpu = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_cpu)}"
+    requests_mock.get(url_cpu, json=mixed_result)
+
+    # Node labels empty to avoid interfering
+    query_params_node = {'query': collector.node_labels_query}
+    url_node = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_node)}"
+    requests_mock.get(url_node, json=MOCK_EMPTY_RESPONSE)
+
+    result = collector.collect()
+    # Only one pod-level entry should be returned
+    assert len(result.pod_cpu_usage) == 1
+    assert result.pod_cpu_usage[0].pod == "p1"
+
+
+def test_parse_pod_series_variants(collector):
+    """
+    Ensure parsing helpers accept pod-level series both with and without 'container' label.
+    """
+    pod_with_container = {"metric": {"namespace": "ns", "pod": "p-a", "container": "ctr", "node": "n1"}, "value": [0, "0.25"]}
+    pod_without_container = {"metric": {"namespace": "ns", "pod": "p-b", "node": "n1"}, "value": [0, "0.5"]}
+
+    p1 = collector._parse_cpu_data(pod_with_container)
+    assert isinstance(p1, PodCPUUsage)
+    assert p1.container == "ctr"
+
+    p2 = collector._parse_cpu_data_no_container(pod_without_container)
+    assert isinstance(p2, PodCPUUsage)
+    assert p2.container == ""
