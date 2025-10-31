@@ -2,25 +2,26 @@
 
 from kubernetes import client, config
 from .base_collector import BaseCollector
-import logging # Use logging instead of print for errors/warnings
+import logging
+from greenkube.core.config import config as global_config
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
 
 class NodeCollector(BaseCollector):
-    """ Collects node zone information from the Kubernetes cluster. """
+    """ Collects node zone information and instance types from the Kubernetes cluster. """
 
     def __init__(self):
         try:
             # Try loading incluster config first, then kubeconfig
             config.load_incluster_config()
-            logging.info("Loaded in-cluster Kubernetes configuration.")
+            logger.info("Loaded in-cluster Kubernetes configuration.")
         except config.ConfigException:
             try:
                 config.load_kube_config()
-                logging.info("Loaded Kubernetes configuration from kubeconfig file.")
+                logger.info("Loaded Kubernetes configuration from kubeconfig file.")
             except config.ConfigException as e:
-                logging.error(f"Could not configure Kubernetes client: {e}")
+                logger.error("Could not configure Kubernetes client: %s", e)
                 raise  # Re-raise the exception to signal failure
 
         self.v1 = client.CoreV1Api()
@@ -31,36 +32,70 @@ class NodeCollector(BaseCollector):
 
         Returns:
             dict: A dictionary mapping node names to their zone labels.
-                  Returns an empty dictionary if no nodes or zones are found,
-                  or if an error occurs.
         """
         nodes_zones_map = {}
         try:
-            # print("Collecting node zones from Kubernetes API...") # Use logging
             nodes = self.v1.list_node(watch=False)
             if not nodes.items:
-                logging.warning("No nodes found in the cluster.")
-                return nodes_zones_map # Return empty dict
+                logger.warning("No nodes found in the cluster.")
+                return nodes_zones_map
 
             for node in nodes.items:
                 node_name = node.metadata.name
-                zone = node.metadata.labels.get('topology.kubernetes.io/zone')
+                zone = None
+                # Prefer the standard topology label, fall back to legacy if needed
+                if node.metadata.labels:
+                    zone = node.metadata.labels.get('topology.kubernetes.io/zone') or node.metadata.labels.get('failure-domain.beta.kubernetes.io/zone')
+
                 if zone:
                     nodes_zones_map[node_name] = zone
-                    logging.info(f" -> Found node '{node_name}' in zone '{zone}'")
+                    logger.info(" -> Found node '%s' in zone '%s'", node_name, zone)
                 else:
-                    logging.warning(f" -> Zone label 'topology.kubernetes.io/zone' not found for node '{node_name}'.")
+                    logger.warning(" -> Zone label not found for node '%s'", node_name)
 
             if not nodes_zones_map:
-                 logging.warning("No nodes with a 'topology.kubernetes.io/zone' label were found.")
+                logger.warning("No nodes with a zone label were found.")
 
         except client.ApiException as e:
-            logging.error(f"Kubernetes API error while listing nodes: {e}")
-            # Depending on the error, you might want to return {} or raise it
-            return {} # Return empty dict on API error for resilience
+            logger.error("Kubernetes API error while listing nodes: %s", e)
+            return {}
         except Exception as e:
-             logging.error(f"An unexpected error occurred while collecting node zones: {e}")
-             return {} # Return empty dict on other errors
-
+            logger.error("An unexpected error occurred while collecting node zones: %s", e)
+            return {}
 
         return nodes_zones_map
+
+    def collect_instance_types(self) -> dict:
+        """
+        Collect node -> instance_type mapping using Kubernetes node labels.
+        The label key is configurable via `global_config.PROMETHEUS_NODE_INSTANCE_LABEL`.
+
+        Returns:
+            dict: node name -> instance_type (only entries where instance type label exists)
+        """
+        label_key = getattr(global_config, 'PROMETHEUS_NODE_INSTANCE_LABEL', 'label_node_kubernetes_io_instance_type')
+        node_instance_map = {}
+
+        try:
+            nodes = self.v1.list_node(watch=False)
+            if not nodes.items:
+                logger.debug("No nodes found when collecting instance types.")
+                return node_instance_map
+
+            for node in nodes.items:
+                node_name = node.metadata.name
+                if not node.metadata.labels:
+                    continue
+                instance_type = node.metadata.labels.get(label_key)
+                if instance_type:
+                    node_instance_map[node_name] = instance_type
+                    logger.info("Found instance type for node '%s': %s", node_name, instance_type)
+
+        except client.ApiException as e:
+            logger.error("Kubernetes API error while listing nodes for instance types: %s", e)
+            return {}
+        except Exception as e:
+            logger.error("Unexpected error while collecting node instance types: %s", e)
+            return {}
+
+        return node_instance_map

@@ -17,6 +17,17 @@ def create_mock_node(name, zone_label_value=None):
         node.metadata.labels['topology.kubernetes.io/zone'] = zone_label_value
     return node
 
+
+def create_mock_node_with_instance(name, instance_label_value=None):
+    """ Helper to create a mock V1Node with an instance-type label. """
+    node = MagicMock(spec=client.V1Node)
+    node.metadata = MagicMock(spec=client.V1ObjectMeta)
+    node.metadata.name = name
+    node.metadata.labels = {}
+    if instance_label_value:
+        node.metadata.labels['label_node_kubernetes_io_instance_type'] = instance_label_value
+    return node
+
 # --- Test Cases ---
 
 @patch('src.greenkube.collectors.node_collector.config') # Mock config loading
@@ -147,6 +158,93 @@ def test_collect_unexpected_error(mock_core_v1_api, mock_k8s_config):
 
     # Assert
     assert result == {} # Expect an empty dictionary on other errors
+    mock_api_instance.list_node.assert_called_once_with(watch=False)
+
+
+@patch('src.greenkube.collectors.node_collector.config')
+@patch('src.greenkube.collectors.node_collector.client.CoreV1Api')
+def test_collect_instance_types_success(mock_core_v1_api, mock_k8s_config):
+    """Tests successful collection of instance types when nodes expose the label."""
+    mock_api_instance = mock_core_v1_api.return_value
+    mock_node_list = client.V1NodeList(items=[
+        create_mock_node_with_instance("node-1", "m5.large"),
+        create_mock_node_with_instance("node-2", "n1-standard-4")
+    ])
+    mock_api_instance.list_node.return_value = mock_node_list
+
+    collector = NodeCollector()
+
+    result = collector.collect_instance_types()
+
+    assert result == {"node-1": "m5.large", "node-2": "n1-standard-4"}
+    mock_api_instance.list_node.assert_called_once_with(watch=False)
+
+
+@patch('src.greenkube.collectors.node_collector.config')
+@patch('src.greenkube.collectors.node_collector.client.CoreV1Api')
+def test_collect_instance_types_partial(mock_core_v1_api, mock_k8s_config):
+    """Tests collection when some nodes have instance-type labels and others don't."""
+    mock_api_instance = mock_core_v1_api.return_value
+    mock_node_list = client.V1NodeList(items=[
+        create_mock_node_with_instance("node-1", "m5.large"),
+        create_mock_node("node-no-instance")
+    ])
+    mock_api_instance.list_node.return_value = mock_node_list
+
+    collector = NodeCollector()
+
+    result = collector.collect_instance_types()
+
+    assert result == {"node-1": "m5.large"}
+    mock_api_instance.list_node.assert_called_once_with(watch=False)
+
+
+@patch('src.greenkube.collectors.node_collector.config')
+@patch('src.greenkube.collectors.node_collector.client.CoreV1Api')
+def test_collect_instance_types_no_instances(mock_core_v1_api, mock_k8s_config):
+    """Tests collection when no nodes expose instance-type labels."""
+    mock_api_instance = mock_core_v1_api.return_value
+    mock_node_list = client.V1NodeList(items=[
+        create_mock_node("node-no-label-1"),
+        create_mock_node("node-no-label-2")
+    ])
+    mock_api_instance.list_node.return_value = mock_node_list
+
+    collector = NodeCollector()
+
+    result = collector.collect_instance_types()
+
+    assert result == {}
+    mock_api_instance.list_node.assert_called_once_with(watch=False)
+
+
+@patch('src.greenkube.collectors.node_collector.config')
+@patch('src.greenkube.collectors.node_collector.client.CoreV1Api')
+def test_collect_instance_types_api_error(mock_core_v1_api, mock_k8s_config):
+    """Tests that API errors are handled gracefully when collecting instance types."""
+    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance.list_node.side_effect = client.ApiException(status=403, reason="Forbidden")
+
+    collector = NodeCollector()
+
+    result = collector.collect_instance_types()
+
+    assert result == {}
+    mock_api_instance.list_node.assert_called_once_with(watch=False)
+
+
+@patch('src.greenkube.collectors.node_collector.config')
+@patch('src.greenkube.collectors.node_collector.client.CoreV1Api')
+def test_collect_instance_types_unexpected_error(mock_core_v1_api, mock_k8s_config):
+    """Tests that unexpected errors are handled gracefully when collecting instance types."""
+    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance.list_node.side_effect = Exception("boom")
+
+    collector = NodeCollector()
+
+    result = collector.collect_instance_types()
+
+    assert result == {}
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
