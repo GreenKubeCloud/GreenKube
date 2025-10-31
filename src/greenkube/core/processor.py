@@ -49,7 +49,7 @@ class DataProcessor:
             logger.error("Failed to collect node zones: %s. Using default zone '%s' for Electricity Maps lookup.", e, config.DEFAULT_ZONE)
             cloud_zones_map = {} # Ensure it's iterable
 
-        # 2. Collect Prometheus metrics and estimate energy using the estimator
+        # 2. Collect Prometheus metrics
         try:
             prom_metrics = self.prometheus_collector.collect()
             # If Prometheus did not return any node instance types, attempt a
@@ -75,6 +75,63 @@ class DataProcessor:
                         logger.info("Used NodeCollector to populate %d instance-type(s) as fallback.", len(node_instances))
                 except Exception as e:
                     logger.debug("NodeCollector instance-type fallback failed: %s", e)
+
+            # Collect pod requests early so we can use them as a fallback when
+            # Prometheus reports extremely low node CPU usage (which can make
+            # energy attribution unstable).
+            try:
+                pod_metrics = self.pod_collector.collect()
+                # Build a simple map (namespace,pod) -> requested cores
+                pod_request_map = { (pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics }
+            except Exception:
+                pod_request_map = {}
+
+            # If Prometheus reports very small total CPU per node, replace or
+            # augment per-pod cpu_usage_cores with the pod request value to
+            # avoid giving every pod the node's minWatts energy.
+            try:
+                # Compute node totals from prom_metrics
+                node_totals = {}
+                for item in prom_metrics.pod_cpu_usage:
+                    node_totals.setdefault(item.node, 0.0)
+                    node_totals[item.node] += item.cpu_usage_cores
+
+                # Threshold in cores below which Prometheus totals are considered too small
+                LOW_NODE_CPU_THRESHOLD = 0.05  # 50 millicores
+                if node_totals:
+                    # Precompute total requests per node
+                    node_request_totals = {}
+                    for (ns, pn), req in pod_request_map.items():
+                        # Find node for this pod in prom_metrics if available
+                        # Build a quick mapping pod->node
+                        pass
+
+                    # Build mapping pod->node (from prom_metrics) and node->list(items)
+                    pod_to_items = {}
+                    node_to_items = {}
+                    for item in prom_metrics.pod_cpu_usage:
+                        pod_key = (item.namespace, item.pod)
+                        pod_to_items[pod_key] = item
+                        node_to_items.setdefault(item.node, []).append(item)
+
+                    for node, total_cpu in node_totals.items():
+                        if total_cpu < LOW_NODE_CPU_THRESHOLD:
+                            # Sum requests for pods on this node
+                            total_reqs = 0.0
+                            for itm in node_to_items.get(node, []):
+                                total_reqs += pod_request_map.get((itm.namespace, itm.pod), 0.0)
+
+                            if total_reqs > 0:
+                                # Replace per-pod usage with request cores to compute
+                                # node utilization from declared requests rather than
+                                # noisy Prometheus usage.
+                                for itm in node_to_items.get(node, []):
+                                    req = pod_request_map.get((itm.namespace, itm.pod), 0.0)
+                                    if req:
+                                        itm.cpu_usage_cores = req
+            except Exception:
+                # If anything goes wrong, proceed with original prom_metrics
+                pass
 
             # The estimator converts PrometheusMetric -> List[EnergyMetric]
             energy_metrics = self.estimator.estimate(prom_metrics)

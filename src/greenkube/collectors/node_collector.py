@@ -84,12 +84,27 @@ class NodeCollector(BaseCollector):
 
             for node in nodes.items:
                 node_name = node.metadata.name
-                if not node.metadata.labels:
-                    continue
-                instance_type = node.metadata.labels.get(label_key)
+                labels = node.metadata.labels or {}
+                instance_type = labels.get(label_key)
                 if instance_type:
                     node_instance_map[node_name] = instance_type
                     logger.info("Found instance type for node '%s': %s", node_name, instance_type)
+                    continue
+
+                # If explicit instance-type label is not available, attempt to
+                # infer instance size from the node capacity (number of CPUs).
+                # This helps produce more realistic energy estimates when
+                # cloud instance labels are absent.
+                try:
+                    capacity = getattr(node, 'status', None) and getattr(node.status, 'capacity', None)
+                    if capacity and 'cpu' in capacity:
+                        cpu_cores = int(str(capacity['cpu']))
+                        inferred_label = f"cpu-{cpu_cores}"
+                        node_instance_map[node_name] = inferred_label
+                        logger.info("Inferred instance cores for node '%s': %s cores", node_name, cpu_cores)
+                except Exception:
+                    # If anything goes wrong parsing capacity, skip silently.
+                    logger.debug("Could not infer instance type from capacity for node '%s'", node_name)
 
         except client.ApiException as e:
             logger.error("Kubernetes API error while listing nodes for instance types: %s", e)

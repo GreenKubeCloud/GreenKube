@@ -91,11 +91,39 @@ class BasicEstimator:
             profile = self.instance_profiles.get(instance_type)
             if profile:
                 node_to_profile[node] = profile
-            else:
-                if node not in self._warned_nodes:
-                    logger.warning(f"No power profile found for instance type: {instance_type} (node: {node}). Using DEFAULT_INSTANCE_PROFILE instead.")
-                    self._warned_nodes.add(node)
-                node_to_profile[node] = self.DEFAULT_INSTANCE_PROFILE
+                continue
+
+            # Support inferred labels like 'cpu-4' produced by NodeCollector when
+            # instance-type labels are missing. Create a simple profile assuming
+            # per-core min/max wattage derived from defaults.
+            if isinstance(instance_type, str) and instance_type.startswith('cpu-'):
+                try:
+                    cores = int(instance_type.split('-', 1)[1])
+                    # Derive per-core wattage from DEFAULT_INSTANCE_PROFILE
+                    default_vcores = self.DEFAULT_INSTANCE_PROFILE['vcores']
+                    # Protect division by zero
+                    if default_vcores <= 0:
+                        per_core_min = self.DEFAULT_INSTANCE_PROFILE['minWatts']
+                        per_core_max = self.DEFAULT_INSTANCE_PROFILE['maxWatts']
+                    else:
+                        per_core_min = self.DEFAULT_INSTANCE_PROFILE['minWatts'] / default_vcores
+                        per_core_max = self.DEFAULT_INSTANCE_PROFILE['maxWatts'] / default_vcores
+
+                    inferred_profile = {
+                        'vcores': cores,
+                        'minWatts': per_core_min * cores,
+                        'maxWatts': per_core_max * cores,
+                    }
+                    node_to_profile[node] = inferred_profile
+                    logger.info("Built inferred power profile for node '%s' from %d cores", node, cores)
+                    continue
+                except Exception:
+                    pass
+
+            if node not in self._warned_nodes:
+                logger.warning(f"No power profile found for instance type: {instance_type} (node: {node}). Using DEFAULT_INSTANCE_PROFILE instead.")
+                self._warned_nodes.add(node)
+            node_to_profile[node] = self.DEFAULT_INSTANCE_PROFILE
 
         # 3. Aggregate CPU usage by Pod
         # Prometheus metrics are per *container*. We aggregate them
@@ -111,52 +139,59 @@ class BasicEstimator:
             if pod_key not in pod_to_node_map:
                 pod_to_node_map[pod_key] = item.node
 
-        # 4. Calculate energy for each pod
+        # 4. Calculate energy for each node once, then distribute to pods
         energy_metrics: List[EnergyMetric] = []
-        
-        for (namespace, pod_name), cpu_cores in pod_cpu_usage.items():
-            pod_key = (namespace, pod_name)
-            node_name = pod_to_node_map.get(pod_key)
 
-            if not node_name:
-                logger.warning(f"No node found for pod {namespace}/{pod_name}. Skipping.")
+        # Compute total CPU usage per node
+        node_total_cpu: Dict[str, float] = defaultdict(float)
+        node_pod_map: Dict[str, List[tuple]] = defaultdict(list)  # node -> list of (pod_key, cpu_cores)
+        for pod_key, cpu in pod_cpu_usage.items():
+            node = pod_to_node_map.get(pod_key)
+            if not node:
                 continue
+            node_total_cpu[node] += cpu
+            node_pod_map[node].append((pod_key, cpu))
 
+        # For each node compute node-level power and split it among pods proportionally
+        for node_name, pods_on_node in node_pod_map.items():
             profile = node_to_profile.get(node_name)
             if not profile:
-                # As a last resort, use the default profile. Warn once per node.
                 if node_name not in self._warned_nodes:
-                    logger.warning(f"No power profile for node {node_name} (pod: {namespace}/{pod_name}). Using DEFAULT_INSTANCE_PROFILE.")
+                    logger.warning(f"No power profile for node {node_name}. Using DEFAULT_INSTANCE_PROFILE.")
                     self._warned_nodes.add(node_name)
                 profile = self.DEFAULT_INSTANCE_PROFILE
-            
-            # 5. Apply the estimation formula (Linear Interpolation)
+
             vcores = profile['vcores']
             min_watts = profile['minWatts']
             max_watts = profile['maxWatts']
 
-            # Calculate the % CPU utilization relative to the instance total
-            # Note: This is an approximation. CPU usage is attributed to the pod.
-            cpu_utilization = cpu_cores / vcores
-            # Cap at 100% in case Prometheus data is strange
-            cpu_utilization = min(cpu_utilization, 1.0) 
+            total_cpu = node_total_cpu.get(node_name, 0.0)
 
-            # Formula: Power = Idle + %Usage * (Max - Idle)
-            power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
+            # Node utilization relative to instance capacity
+            node_util = (total_cpu / vcores) if vcores > 0 else 0.0
+            node_util = min(node_util, 1.0)
 
-            # 6. Convert Power (Watts) to Energy (Joules)
-            # Energy (Joules) = Power (Watts) * Time (Seconds)
-            energy_joules = power_draw_watts * self.query_range_step_sec
+            node_power_watts = min_watts + (node_util * (max_watts - min_watts))
 
-            energy_metrics.append(
-                EnergyMetric(
-                    pod_name=pod_name,
-                    namespace=namespace,
-                    joules=energy_joules,
-                    node=node_name
-                    # region and timestamp will be added by the DataProcessor later
-                )
-            )
+            # If no pods report CPU on this node (total_cpu == 0), fall back to
+            # per-pod calculation using the pod's own cpu_cores to avoid dividing by zero.
+            if total_cpu <= 0:
+                for pod_key, cpu_cores in pods_on_node:
+                    namespace, pod_name = pod_key
+                    # fallback per-pod utilization
+                    cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
+                    cpu_utilization = min(cpu_utilization, 1.0)
+                    power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
+                    energy_joules = power_draw_watts * self.query_range_step_sec
+                    energy_metrics.append(EnergyMetric(pod_name=pod_name, namespace=namespace, joules=energy_joules, node=node_name))
+            else:
+                # Distribute node_power proportionally to each pod's share of CPU
+                for pod_key, cpu_cores in pods_on_node:
+                    namespace, pod_name = pod_key
+                    share = cpu_cores / total_cpu if total_cpu > 0 else 0.0
+                    pod_power = node_power_watts * share
+                    energy_joules = pod_power * self.query_range_step_sec
+                    energy_metrics.append(EnergyMetric(pod_name=pod_name, namespace=namespace, joules=energy_joules, node=node_name))
 
         logger.info(f"Energy estimation complete. {len(energy_metrics)} pod metrics created.")
         return energy_metrics
