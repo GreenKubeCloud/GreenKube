@@ -44,8 +44,8 @@ class Recommender:
         Joules-per-requested-millicore ratio is "fully utilized".
         All other pods are scaled relative to this benchmark.
         
-        NOTE: This is an estimation. A more accurate approach would be to
-        correlate Joules with CPU seconds from Kepler if available.
+    NOTE: This is an estimation. A more accurate approach would be to
+    correlate Joules with CPU seconds from Prometheus or fine-grained metrics if available.
         """
         if metric.cpu_request == 0:
             return 0.0 # Cannot calculate usage % without a request

@@ -17,6 +17,7 @@ from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import PrometheusMetric
 from greenkube.models.metrics import EnergyMetric
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
+from greenkube.core.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,29 @@ class BasicEstimator:
         # Converts the string (e.g., "5m") into seconds
         self.query_range_step_sec = self._parse_step_to_seconds(settings.PROMETHEUS_QUERY_RANGE_STEP)
         self.instance_profiles = INSTANCE_PROFILES
+        # Track nodes for which we've already emitted a missing-profile warning
+        # to avoid spamming the logs when many pods run on the same node.
+        self._warned_nodes = set()
+
+        # Default instance profile to use when instance type is unknown
+        # Prefer values from the provided `settings` if available (useful for tests),
+        # otherwise fall back to the global config values.
+        vcores = getattr(settings, 'DEFAULT_INSTANCE_VCORES', None)
+        min_watts = getattr(settings, 'DEFAULT_INSTANCE_MIN_WATTS', None)
+        max_watts = getattr(settings, 'DEFAULT_INSTANCE_MAX_WATTS', None)
+
+        if vcores is None:
+            vcores = config.DEFAULT_INSTANCE_VCORES
+        if min_watts is None:
+            min_watts = config.DEFAULT_INSTANCE_MIN_WATTS
+        if max_watts is None:
+            max_watts = config.DEFAULT_INSTANCE_MAX_WATTS
+
+        self.DEFAULT_INSTANCE_PROFILE = {
+            'vcores': int(vcores),
+            'minWatts': float(min_watts),
+            'maxWatts': float(max_watts),
+        }
 
     def _parse_step_to_seconds(self, step_str: str) -> int:
         """Converts a Prometheus duration string (like '5m', '1h') to seconds."""
@@ -68,7 +92,10 @@ class BasicEstimator:
             if profile:
                 node_to_profile[node] = profile
             else:
-                logger.warning(f"No power profile found for instance type: {instance_type} (node: {node}). This node will be skipped.")
+                if node not in self._warned_nodes:
+                    logger.warning(f"No power profile found for instance type: {instance_type} (node: {node}). Using DEFAULT_INSTANCE_PROFILE instead.")
+                    self._warned_nodes.add(node)
+                node_to_profile[node] = self.DEFAULT_INSTANCE_PROFILE
 
         # 3. Aggregate CPU usage by Pod
         # Prometheus metrics are per *container*. We aggregate them
@@ -97,8 +124,11 @@ class BasicEstimator:
 
             profile = node_to_profile.get(node_name)
             if not profile:
-                logger.warning(f"No power profile for node {node_name} (pod: {namespace}/{pod_name}). Skipping.")
-                continue
+                # As a last resort, use the default profile. Warn once per node.
+                if node_name not in self._warned_nodes:
+                    logger.warning(f"No power profile for node {node_name} (pod: {namespace}/{pod_name}). Using DEFAULT_INSTANCE_PROFILE.")
+                    self._warned_nodes.add(node_name)
+                profile = self.DEFAULT_INSTANCE_PROFILE
             
             # 5. Apply the estimation formula (Linear Interpolation)
             vcores = profile['vcores']

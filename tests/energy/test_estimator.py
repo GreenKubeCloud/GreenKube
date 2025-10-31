@@ -1,5 +1,6 @@
+# tests/energy/test_estimator.py
 """
-Tests for the BasicEstimator (TDD).
+Tests for the BasicEstimator.
 
 These tests verify that the estimation engine correctly converts
 Prometheus metrics into energy estimations (Joules) using
@@ -72,7 +73,9 @@ def test_estimator_calculates_energy_correctly(estimator, sample_prometheus_metr
     energy_results = estimator.estimate(sample_prometheus_metrics)
 
     # Assert
-    assert len(energy_results) == 2 # Only pods 1 and 2 can be calculated
+    # Now estimator uses a DEFAULT_INSTANCE_PROFILE for unknown or missing instance types,
+    # so all 4 pods should be processed.
+    assert len(energy_results) == 4
 
     # 1. Check Pod 1 ("api-pod" on "m5.large")
     pod1_result = next(m for m in energy_results if m.pod_name == "api-pod")
@@ -144,11 +147,13 @@ def test_estimator_handles_missing_profiles_and_nodes(estimator):
     )
 
     # Act & Assert
+    # Estimator now falls back to the default instance profile when a profile is missing,
+    # so both cases should produce a result.
     results_1 = estimator.estimate(metrics_1)
-    assert len(results_1) == 0 # Skipped because g1-small has no profile
+    assert len(results_1) == 1
 
     results_2 = estimator.estimate(metrics_2)
-    assert len(results_2) == 0 # Skipped because node-2 has no instance_type
+    assert len(results_2) == 1
 
 
 def test_estimator_handles_cpu_utilization_over_100(estimator):

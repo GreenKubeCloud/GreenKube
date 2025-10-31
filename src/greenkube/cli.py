@@ -21,7 +21,7 @@ from .core.recommender import Recommender
 # --- GreenKube Collector Imports ---
 from .collectors.electricity_maps_collector import ElectricityMapsCollector
 from .collectors.node_collector import NodeCollector
-from .collectors.kepler_collector import KeplerCollector
+from .collectors.prometheus_collector import PrometheusCollector
 from .collectors.opencost_collector import OpenCostCollector
 from .collectors.pod_collector import PodCollector
 
@@ -33,6 +33,7 @@ from .storage.elasticsearch_repository import ElasticsearchCarbonIntensityReposi
 # --- GreenKube Reporting and Processing Imports ---
 from .reporters.console_reporter import ConsoleReporter
 from .utils.mapping_translator import get_emaps_zone_from_cloud_zone
+from .energy.estimator import BasicEstimator
 
 # --- Setup Logger ---
 logging.basicConfig(level=config.LOG_LEVEL.upper(), format='%(asctime)s - %(levelname)s - %(message)s')
@@ -73,22 +74,24 @@ def get_processor() -> DataProcessor:
         repository = get_repository()
 
         # 2. Instantiate all collectors
-        kepler_collector = KeplerCollector()
+        prometheus_collector = PrometheusCollector(settings=config)
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
 
-        # 3. Instantiate the calculator
+        # 3. Instantiate the calculator and estimator
         carbon_calculator = CarbonCalculator(repository=repository)
+        estimator = BasicEstimator(settings=config)
 
         # 4. Instantiate and return the processor
         processor = DataProcessor(
-            kepler_collector=kepler_collector,
+            prometheus_collector=prometheus_collector,
             opencost_collector=opencost_collector,
             node_collector=node_collector,
             pod_collector=pod_collector,
             repository=repository,
-            calculator=carbon_calculator
+            calculator=carbon_calculator,
+            estimator=estimator,
         )
         return processor
     except Exception as e:

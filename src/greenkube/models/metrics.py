@@ -13,7 +13,7 @@ from enum import Enum
 class EnergyMetric(BaseModel):
     """
     Represents a single energy consumption data point, typically collected
-    from a source like Kepler. Now includes metadata for granular calculations.
+    via Prometheus and estimated by the in-repo estimator. Now includes metadata for granular calculations.
     """
     pod_name: str = Field(..., description="The name of the Kubernetes pod.")
     namespace: str = Field(..., description="The namespace the pod belongs to.")

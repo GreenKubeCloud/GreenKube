@@ -72,6 +72,8 @@ class Config:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
         if not cls.ELECTRICITY_MAPS_TOKEN:
             logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
+        if cls.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
+            raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
 # Instantiate the config to be imported by other modules
 config = Config()
