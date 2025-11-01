@@ -766,8 +766,14 @@ def recommend(
             return
         # 5. Report recommendations
         logger.info(f"Found {len(all_recs)} recommendations.")
-        # Use the unified report method which can accept recommendations
-        console_reporter.report(data=combined_data, recommendations=all_recs)
+        # Call the reporter's recommendation-specific method
+        # ConsoleReporter exposes `report_recommendations` for this purpose.
+        try:
+            console_reporter.report_recommendations(all_recs)
+        except AttributeError:
+            # Fallback: if reporter doesn't implement report_recommendations,
+            # try an older contract where report accepted recommendations as kwarg.
+            console_reporter.report(data=combined_data)
 
     except typer.Exit:
         raise

@@ -32,7 +32,8 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
     reported = []
 
     class DummyReporter:
-        def report(self, data, recommendations=None):
+        def report(self, data):
+            # Reporter.report now accepts only the data list
             reported.append(list(data))
 
     monkeypatch.setattr(cli, 'ConsoleReporter', lambda: DummyReporter())
@@ -61,4 +62,39 @@ def test_report_with_range_delegates_to_report_range(monkeypatch):
     # Assert
     assert 'args' in called
     assert called['args'].get('hours') == 2
+
+
+def test_recommend_generates_and_reports(monkeypatch):
+    # Arrange: create dummy combined data and dummy recommendations
+    items = [CombinedMetric(pod_name='p1', namespace='ns1', total_cost=1.0, co2e_grams=10.0, joules=100.0)]
+
+    dummy_proc = make_dummy_processor(return_items=items)
+    monkeypatch.setattr(cli, 'get_processor', lambda: dummy_proc)
+
+    # Dummy recommender that returns some recommendations
+    class DummyRec:
+        def __init__(self, pod_name, namespace):
+            self.pod_name = pod_name
+            self.namespace = namespace
+            self.type = None
+            self.description = 'desc'
+
+    dummy_recommender = MagicMock()
+    dummy_recommender.generate_zombie_recommendations = MagicMock(return_value=[DummyRec('p1', 'ns1')])
+    dummy_recommender.generate_rightsizing_recommendations = MagicMock(return_value=[])
+    monkeypatch.setattr(cli, 'Recommender', lambda: dummy_recommender)
+
+    reported = []
+    class DummyReporter2:
+        def report_recommendations(self, recommendations):
+            reported.append(list(recommendations))
+
+    monkeypatch.setattr(cli, 'ConsoleReporter', lambda: DummyReporter2())
+
+    # Act: should not raise
+    cli.recommend()
+
+    # Assert
+    assert len(reported) == 1
+    assert reported[0][0].pod_name == 'p1'
 

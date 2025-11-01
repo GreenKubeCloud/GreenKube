@@ -46,6 +46,8 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "requests-mock",
+    "pytest>=7.0",
+    "pytest-mock",
 ]
 
 [project.urls]
