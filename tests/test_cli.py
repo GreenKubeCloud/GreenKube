@@ -134,3 +134,61 @@ def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_c
     assert result.exit_code == 0
     # Reporter shouldn't be called
     mock_reporter.report.assert_not_called()
+
+
+def test_report_range_today_no_results(mocker, mock_reporter):
+    """Tests the report-range --today path with no Prometheus results (mocked)."""
+    # Mock requests.get used in report_range
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {'data': {'result': []}}
+    mock_resp.raise_for_status.return_value = None
+    mocker.patch('requests.get', return_value=mock_resp)
+
+    result = runner.invoke(app, ['report-range', '--today'])
+    assert result.exit_code == 0
+    # Reporter should have been called (with empty list)
+    mock_reporter.report.assert_called_once()
+
+
+def test_help_command_outputs_commands(capsys):
+    """The dynamic help command should list available commands."""
+    result = runner.invoke(app, ['help'])
+    assert result.exit_code == 0
+    assert 'GreenKube available commands' in result.output
+
+
+def test_unknown_command_shows_help():
+    """When an unknown command is provided, the CLI should print help-like output."""
+    result = runner.invoke(app, ['no-such-command'])
+    # Our wrapper exits with non-zero for unknown commands but prints available commands
+    assert result.exit_code != 0
+    assert 'GreenKube available commands' in result.output
+
+
+def test_report_range_monthly_flag(mocker, mock_reporter):
+    """Tests that --monthly aggregates are accepted and reporter called."""
+    mock_resp = MagicMock()
+    # Provide a single sample with ISO timestamps spanning two months
+    mock_resp.json.return_value = {'data': {'result': [
+        {'metric': {'namespace': 'default', 'pod': 'p1'}, 'values': [['1696118400', '0.1']]},
+    ]}}
+    mock_resp.raise_for_status.return_value = None
+    mocker.patch('requests.get', return_value=mock_resp)
+
+    result = runner.invoke(app, ['report-range', '--monthly'])
+    assert result.exit_code == 0
+    mock_reporter.report.assert_called_once()
+
+
+def test_report_range_yearly_flag(mocker, mock_reporter):
+    """Tests that --yearly aggregates are accepted and reporter called."""
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {'data': {'result': [
+        {'metric': {'namespace': 'default', 'pod': 'p1'}, 'values': [['1696118400', '0.1']]},
+    ]}}
+    mock_resp.raise_for_status.return_value = None
+    mocker.patch('requests.get', return_value=mock_resp)
+
+    result = runner.invoke(app, ['report-range', '--yearly'])
+    assert result.exit_code == 0
+    mock_reporter.report.assert_called_once()

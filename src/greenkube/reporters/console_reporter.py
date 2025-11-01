@@ -31,8 +31,12 @@ class ConsoleReporter(BaseReporter):
             return
 
         table = Table(title="GreenKube FinGreenOps Report", header_style="bold magenta", show_lines=True)
+        # If any item has a period, include a Period column
+        has_period = any(getattr(item, 'period', None) for item in data)
         table.add_column("Pod Name", style="cyan")
         table.add_column("Namespace", style="cyan")
+        if has_period:
+            table.add_column("Period", style="magenta")
         table.add_column("Total Cost ($)", style="green", justify="right")
         table.add_column("CO2e (g)", style="red", justify="right")
         table.add_column("Energy (Joules)", style="yellow", justify="right")
@@ -41,10 +45,15 @@ class ConsoleReporter(BaseReporter):
         table.add_column("Grid Intensity (g/kWh)", style="dim", justify="right")
         table.add_column("PUE", style="dim", justify="right")
 
-        # Aggregate by namespace+pod to avoid duplicate entries
+        # Aggregate by (namespace, pod, period) when period is present, otherwise by (namespace, pod)
         aggregated = {}
         for item in data:
-            key = (item.namespace, item.pod_name)
+            period = getattr(item, 'period', None)
+            if period:
+                key = (item.namespace, item.pod_name, period)
+            else:
+                key = (item.namespace, item.pod_name)
+
             if key not in aggregated:
                 aggregated[key] = {
                     "cost": 0.0,
@@ -54,6 +63,7 @@ class ConsoleReporter(BaseReporter):
                     "mem_req": item.memory_request,
                     "intensity": item.grid_intensity,
                     "pue": item.pue,
+                    "period": period,
                 }
             aggregated[key]["cost"] += item.total_cost
             aggregated[key]["co2e"] += item.co2e_grams
@@ -62,13 +72,22 @@ class ConsoleReporter(BaseReporter):
         # Sort by CO2e descending
         sorted_keys = sorted(aggregated.keys(), key=lambda k: aggregated[k]["co2e"], reverse=True)
 
-        for ns, pod in sorted_keys:
-            item = aggregated[(ns, pod)]
+        for key in sorted_keys:
+            item = aggregated[key]
             mem_mib = item["mem_req"] / (1024 * 1024) if item["mem_req"] else 0.0
+            if len(key) == 3:
+                ns, pod, period = key
+            else:
+                ns, pod = key
+                period = None
 
-            table.add_row(
+            row = [
                 pod,
                 ns,
+            ]
+            if has_period:
+                row.append(period or "")
+            row.extend([
                 f"{item['cost']:.4f}",
                 f"{item['co2e']:.2f}",
                 f"{item['joules']:.0f}",
@@ -76,7 +95,9 @@ class ConsoleReporter(BaseReporter):
                 f"{mem_mib:.1f}",
                 f"{item['intensity']:.2f}",
                 f"{item['pue']:.2f}",
-            )
+            ])
+
+            table.add_row(*row)
 
         self.console.print(table)
 
