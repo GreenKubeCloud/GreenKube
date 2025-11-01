@@ -11,7 +11,7 @@ class BaseReporter(ABC):
     Abstract Base Class for all reporters.
     """
     @abstractmethod
-    def report(self, data: List[CombinedMetric]):
+    def report(self, data: List[CombinedMetric], group_by: str = "namespace", sort_by: str = "cost", recommendations=None):
         """
         Takes the final processed data and presents it in a specific format
         (e.g., console, CSV, JSON).

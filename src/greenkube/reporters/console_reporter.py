@@ -21,13 +21,16 @@ class ConsoleReporter(BaseReporter):
     def __init__(self):
         self.console = Console()
 
-    def report(self, data: List[CombinedMetric]):
+    def report(self, data: List[CombinedMetric], group_by: str = "namespace", sort_by: str = "cost", recommendations=None):
         """
         Displays the combined metrics in a rich, detailed table.
         Shows CPU and Memory requests in the report.
         """
         if not data:
             self.console.print("No data to report.", style="yellow")
+            # still allow printing recommendations if provided
+            if recommendations:
+                self.report_recommendations(recommendations)
             return
 
         table = Table(title="GreenKube FinGreenOps Report", header_style="bold magenta", show_lines=True)
@@ -131,4 +134,5 @@ class ConsoleReporter(BaseReporter):
             table.add_row(f"[{style}]{type_str}[/]", rec.namespace, rec.pod_name, rec.description)
 
         self.console.print(table)
+
 
