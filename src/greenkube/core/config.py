@@ -1,6 +1,7 @@
 # src/greenkube/core/config.py
 
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file located in the project root
@@ -19,6 +20,9 @@ class Config:
     JOULES_PER_KWH = 3.6e6
     GRAMS_PER_KG = 1000
 
+    # --- Logging variables ---
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
     # --- Database variables ---
     DB_TYPE = os.getenv("DB_TYPE", "sqlite")
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
@@ -32,6 +36,31 @@ class Config:
     ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in ("true", "1", "t", "y", "yes")
     ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", 'carbon_intensity')
 
+    # -- Prometheus variables ---
+    PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-kube-prometheus-prometheus.monitoring.service.svc.cluster.local:9090")
+    PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
+
+    # --- Prometheus connection options ---
+    # Whether to verify TLS certificates when connecting to PROMETHEUS_URL
+    PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in ("true", "1", "t", "y", "yes")
+    # Optional bearer token for Prometheus (useful for external or secured endpoints)
+    PROMETHEUS_BEARER_TOKEN = os.getenv("PROMETHEUS_BEARER_TOKEN")
+    # Optional basic auth credentials
+    PROMETHEUS_USERNAME = os.getenv("PROMETHEUS_USERNAME")
+    PROMETHEUS_PASSWORD = os.getenv("PROMETHEUS_PASSWORD")
+
+    # Prometheus label for instance type mapping. Some setups use different label keys.
+    PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv("PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type")
+
+    # --- Default instance profile (used when instance type unknown) ---
+    DEFAULT_INSTANCE_VCORES = int(os.getenv("DEFAULT_INSTANCE_VCORES", "1"))
+    DEFAULT_INSTANCE_MIN_WATTS = float(os.getenv("DEFAULT_INSTANCE_MIN_WATTS", "1.0"))
+    DEFAULT_INSTANCE_MAX_WATTS = float(os.getenv("DEFAULT_INSTANCE_MAX_WATTS", "10.0"))
+
+    # Normalization granularity for carbon intensity lookups and cache keys.
+    # Allowed values: 'hour', 'day', 'none'
+    NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
+
     @classmethod
     def validate(cls):
         """
@@ -42,7 +71,9 @@ class Config:
         if cls.DB_TYPE == "postgres" and not cls.DB_CONNECTION_STRING:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
         if not cls.ELECTRICITY_MAPS_TOKEN:
-            print("Warning: ELECTRICITY_MAPS_TOKEN is not set.")
+            logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
+        if cls.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
+            raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
 # Instantiate the config to be imported by other modules
 config = Config()

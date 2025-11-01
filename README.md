@@ -23,7 +23,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 ## ✨ Features (Community Edition v0.1)
 
 * **Carbon Footprint Reporting**: Calculates CO2e emissions per pod, namespace, and for the entire cluster.
-* **Kepler Integration**: Uses granular energy consumption metrics from the CNCF project [Kepler](https://github.com/sustainable-computing-io/kepler).
+* **Prometheus-based Estimation**: Estimates energy consumption by querying Prometheus (for CPU usage and node instance labels) and converting those metrics into Joules using instance power profiles. The estimator falls back to a conservative default instance profile when an instance type is unknown.
 * **OpenCost Alignment**: Aligns with industry standards for cost visibility.
 * **Carbon Intensity Data**: Integrates with public APIs to fetch real-time carbon intensity from the local power grid.
 * **Command-Line Export**: Generates simple and clear reports directly from your terminal.
@@ -33,7 +33,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 ### Prerequisites
 
 1.  Python 3.9+
-2.  A Kubernetes cluster with [Kepler](https://github.com/sustainable-computing-io/kepler) installed and exporting its metrics via a Prometheus service.
+2.  A Kubernetes cluster with Prometheus metrics available (the estimator uses CPU usage and node labels exposed via Prometheus).
 
 ### Installation
 
@@ -59,7 +59,7 @@ greenkube export --format csv --output report.csv
 ```
 
 ## 🤝 Contributing
-GreenKube is a community-driven project, and we welcome all contributions! Check out our upcoming **CONTRIBUTING.md** file to learn how to get involved.
+GreenKube is a community-driven project, and we welcome all contributions! Check out our upcoming `CONTRIBUTING.md` file to learn how to get involved.
 
 * **Report Bugs**: Open an "Issue" with a detailed description.
 
@@ -68,6 +68,30 @@ GreenKube is a community-driven project, and we welcome all contributions! Check
 * **Submit Code**: Make a "Pull Request"!
 
 
+## Architecture Summary
+
+GreenKube is composed of:
+
+- Collectors: PrometheusCollector, NodeCollector, PodCollector, OpenCostCollector
+- Estimator: converts Prometheus metrics into EnergyMetric objects (Joules)
+- Processor: groups metrics by Electricity Maps zone, prefetches intensities
+	per zone per run, and orchestrates final combination
+- Calculator: converts Joules→kWh→CO2e and uses a per-run cache to avoid
+	repeated intensity lookups
+
+Key configuration:
+
+- NORMALIZATION_GRANULARITY: 'hour' (default) | 'day' | 'none' — determines
+	how timestamps are rounded before cache/repository lookups
+- PROMETHEUS_URL and auth settings — to connect to the Prometheus API
+- DEFAULT instance-profile values — used when an instance type is unknown
+
+Goals:
+
+- Replace Kepler with Prometheus-based estimation where possible
+- Be robust to external Prometheus endpoints and provide diagnostics
+- Reduce external grid-intensity lookups by grouping metrics and caching
+
 ## 📄 Licence
 
-This project is licensed under the **Apache 2.0 License**. See the LICENSE file for more details.
+This project is licensed under the `Apache 2.0 License`. See the `LICENSE` file for more details.

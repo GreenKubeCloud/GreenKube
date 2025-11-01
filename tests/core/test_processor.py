@@ -6,9 +6,9 @@ from src.greenkube.core.processor import DataProcessor
 from src.greenkube.models.metrics import EnergyMetric, CostMetric, CombinedMetric
 from src.greenkube.models.metrics import PodMetric
 from src.greenkube.core.calculator import CarbonCalculationResult
-# --- Import the config object for default values ---
 from src.greenkube.core.config import config
-# -------------------------------------------------
+from src.greenkube.models.prometheus_metrics import PrometheusMetric
+from src.greenkube.energy.estimator import BasicEstimator
 
 # Sample data for mocking collectors
 SAMPLE_ENERGY_METRICS = [
@@ -39,9 +39,15 @@ SAMPLE_CALCULATION_RESULT_D = CarbonCalculationResult(co2e_grams=10.0, grid_inte
 # --- Fixtures for Mocks ---
 @pytest.fixture
 def mock_kepler_collector():
-    """ Provides a mock KeplerCollector. """
+    """ Provides a mock collector placeholder (was Kepler in older versions). """
     mock = MagicMock()
     mock.collect.return_value = SAMPLE_ENERGY_METRICS
+    return mock
+@pytest.fixture
+def mock_prometheus_collector():
+    """ Provides a mock PrometheusCollector that returns a PrometheusMetric placeholder."""
+    mock = MagicMock()
+    mock.collect.return_value = MagicMock(spec=PrometheusMetric)
     return mock
 
 @pytest.fixture
@@ -100,18 +106,23 @@ def mock_calculator():
 # ------------------------------------------------------
 
 @pytest.fixture
-def data_processor(mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_pod_collector, mock_repository, mock_calculator):
+def data_processor(mock_prometheus_collector, mock_opencost_collector, mock_node_collector, mock_pod_collector, mock_repository, mock_calculator):
     """
     Provides an instance of DataProcessor with mocked dependencies.
     Injects the new mock_repository and mock_calculator.
     """
+    # Build a basic estimator mock that will convert Prometheus metrics to SAMPLE_ENERGY_METRICS
+    estimator_mock = MagicMock(spec=BasicEstimator)
+    estimator_mock.estimate.return_value = SAMPLE_ENERGY_METRICS
+
     return DataProcessor(
-        kepler_collector=mock_kepler_collector,
+        prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         repository=mock_repository,       # Pass the mock repository
-        calculator=mock_calculator        # Pass the mock calculator
+        calculator=mock_calculator,       # Pass the mock calculator
+        estimator=estimator_mock,
     )
 
 # --- Test Cases ---
@@ -229,10 +240,8 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
 
 
 @patch('src.greenkube.core.processor.NodeCollector') # Patch NodeCollector instantiation
-# --- Patch the CORRECT translator function ---
 @patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
-# -------------------------------------------
-def test_processor_uses_default_zone_when_node_zone_missing(mock_translator, mock_node_collector_class, mock_kepler_collector, mock_opencost_collector, mock_repository, mock_calculator):
+def test_processor_uses_default_zone_when_node_zone_missing(mock_translator, mock_node_collector_class, mock_prometheus_collector, mock_opencost_collector, mock_repository, mock_calculator):
     """
     Tests that the processor uses the default zone for calculations
     when the NodeCollector fails or doesn't provide a zone for a node.
@@ -244,12 +253,13 @@ def test_processor_uses_default_zone_when_node_zone_missing(mock_translator, moc
 
     # Need to instantiate processor manually here because the fixture uses the class mock incorrectly
     data_processor = DataProcessor(
-        kepler_collector=mock_kepler_collector,
+        prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector_instance, # Use the configured instance
         pod_collector=MagicMock(),
         repository=mock_repository,
-        calculator=mock_calculator
+        calculator=mock_calculator,
+        estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
 
 
@@ -280,12 +290,12 @@ def test_processor_uses_default_zone_when_node_zone_missing(mock_translator, moc
     mock_translator.assert_not_called()
 
 
-def test_processor_handles_kepler_failure(data_processor, mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_calculator):
+def test_processor_handles_prometheus_failure(data_processor, mock_prometheus_collector, mock_opencost_collector, mock_node_collector, mock_calculator):
     """
-    Tests that the processor continues (returning empty results) if Kepler fails.
+    Tests that the processor continues (returning empty results) if Prometheus collection/estimation fails.
     """
     # Arrange
-    mock_kepler_collector.collect.side_effect = Exception("Kepler API down")
+    mock_prometheus_collector.collect.side_effect = Exception("Prometheus API down")
 
     # Act
     combined_results = data_processor.run()
@@ -363,7 +373,7 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
 
 
 @patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
-def test_processor_aggregates_pod_requests(mock_translator, mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+def test_processor_aggregates_pod_requests(mock_translator, mock_prometheus_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
     """Ensure PodCollector request aggregation is applied to combined metrics."""
     # Arrange: create a pod_collector mock that returns per-container PodMetric entries
     pod_metrics = [
@@ -376,12 +386,13 @@ def test_processor_aggregates_pod_requests(mock_translator, mock_kepler_collecto
     mock_pod_collector.collect.return_value = pod_metrics
 
     dp = DataProcessor(
-        kepler_collector=mock_kepler_collector,
+        prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         repository=mock_repository,
         calculator=mock_calculator,
+        estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
 
     # Translator stub
@@ -398,19 +409,20 @@ def test_processor_aggregates_pod_requests(mock_translator, mock_kepler_collecto
 
 
 @patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
-def test_processor_handles_missing_pod_requests(mock_translator, mock_kepler_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+def test_processor_handles_missing_pod_requests(mock_translator, mock_prometheus_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
     """If PodCollector returns empty or fails, cpu_request and memory_request should be zero for combined metrics."""
     from unittest.mock import MagicMock
     mock_pod_collector = MagicMock()
     mock_pod_collector.collect.return_value = []
 
     dp = DataProcessor(
-        kepler_collector=mock_kepler_collector,
+        prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         repository=mock_repository,
         calculator=mock_calculator,
+        estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
 
     mock_translator.return_value = 'US-CISO-NE'
@@ -419,4 +431,54 @@ def test_processor_handles_missing_pod_requests(mock_translator, mock_kepler_col
     for m in combined:
         assert m.cpu_request == 0 or isinstance(m.cpu_request, int)
         assert m.memory_request == 0 or isinstance(m.memory_request, int)
+
+
+@patch('src.greenkube.core.processor.get_emaps_zone_from_cloud_zone')
+def test_processor_nodecollector_instance_type_fallback(mock_translator, mock_prometheus_collector, mock_opencost_collector, mock_node_collector, mock_repository, mock_calculator):
+    """
+    If Prometheus returns no node instance types, DataProcessor should call
+    NodeCollector.collect_instance_types() and supply those to the estimator.
+    """
+    from src.greenkube.models.prometheus_metrics import PrometheusMetric, NodeInstanceType
+    from unittest.mock import MagicMock
+
+    # Build a PrometheusMetric with pod_cpu_usage but empty node_instance_types
+    prom_metric = PrometheusMetric()
+    prom_metric.pod_cpu_usage = []
+    prom_metric.node_instance_types = []
+
+    # Configure the mocked PrometheusCollector to return this metric
+    mock_prometheus_collector.collect.return_value = prom_metric
+
+    # Configure the NodeCollector instance to return instance types via collect_instance_types
+    node_instance_map = {'node-1': 'm5.large'}
+    mock_node_instance_collector = mock_node_collector
+    mock_node_instance_collector.collect_instance_types.return_value = node_instance_map
+
+    # Spy on the estimator to see the PrometheusMetric it receives
+    estimator_spy = MagicMock()
+    estimator_spy.estimate.return_value = []
+
+    dp = DataProcessor(
+        prometheus_collector=mock_prometheus_collector,
+        opencost_collector=mock_opencost_collector,
+        node_collector=mock_node_collector,
+        pod_collector=MagicMock(),
+        repository=mock_repository,
+        calculator=mock_calculator,
+        estimator=estimator_spy,
+    )
+
+    # Run
+    dp.run()
+
+    # Assert NodeCollector.collect_instance_types was called
+    mock_node_collector.collect_instance_types.assert_called_once()
+
+    # Assert estimator was called with a PrometheusMetric that now has node_instance_types populated
+    called_metric = estimator_spy.estimate.call_args[0][0]
+    assert isinstance(called_metric, PrometheusMetric)
+    assert any(isinstance(nt, NodeInstanceType) for nt in called_metric.node_instance_types)
+    assert called_metric.node_instance_types[0].node == 'node-1'
+    assert called_metric.node_instance_types[0].instance_type == 'm5.large'
 

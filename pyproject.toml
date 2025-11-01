@@ -32,7 +32,7 @@ classifiers = [
 # These are the libraries required for the tool to run
 dependencies = [
     "typer[all]>=0.9.0", # For building a clean command-line interface (CLI)
-    "requests>=2.31.0",  # For making HTTP requests to APIs (Kepler, carbon intensity)
+    "requests>=2.31.0",  # For making HTTP requests to APIs (Prometheus, carbon intensity)
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
     "python-dotenv>=1.0.0", # For loading environment variables from .env files
@@ -41,6 +41,11 @@ dependencies = [
     "kubernetes",
     "elasticsearch>=8.10.0", # Ajout du client Elasticsearch
     "elasticsearch-dsl>=8.10.0" # Ajout de l'ORM pour Elasticsearch
+]
+
+[project.optional-dependencies]
+test = [
+    "requests-mock",
 ]
 
 [project.urls]
