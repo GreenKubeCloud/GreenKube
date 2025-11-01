@@ -10,14 +10,15 @@ import logging
 
 from .base_collector import BaseCollector
 from ..models.metrics import CostMetric
+from ..core.config import config
 
 logger = logging.getLogger(__name__)
 
 class OpenCostCollector(BaseCollector):
     """
     Collects cost allocation data from an OpenCost service via an Ingress.
+    The endpoint URL is read from application configuration (`config.OPENCOST_API_URL`).
     """
-    OPENCOST_API_URL = "https://opencost.greenkube.cloud/allocation/compute"
 
     def collect(self) -> List[CostMetric]:
         """
@@ -39,7 +40,8 @@ class OpenCostCollector(BaseCollector):
             
             warnings.simplefilter('ignore', InsecureRequestWarning)
             
-            response = requests.get(self.OPENCOST_API_URL, params=params, timeout=10, verify=False)
+            # Use the configured OpenCost API URL (can be overridden via env var OPENCOST_API_URL)
+            response = requests.get(config.OPENCOST_API_URL, params=params, timeout=10, verify=False)
             
             response.raise_for_status()
 

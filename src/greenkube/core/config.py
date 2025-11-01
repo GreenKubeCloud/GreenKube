@@ -49,6 +49,9 @@ class Config:
     PROMETHEUS_USERNAME = os.getenv("PROMETHEUS_USERNAME")
     PROMETHEUS_PASSWORD = os.getenv("PROMETHEUS_PASSWORD")
 
+    # --- OpenCost API URL (used by OpenCostCollector) ---
+    OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
+
     # Prometheus label for instance type mapping. Some setups use different label keys.
     PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv("PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type")
 
