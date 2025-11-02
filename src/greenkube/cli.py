@@ -68,6 +68,66 @@ app = typer.Typer(
     cls=HelpOnUnknown,
 )
 
+# Register sub-apps
+from .commands import report as report_cmd
+from .commands import recommend as recommend_cmd
+# Register sub-apps under different names to avoid shadowing top-level commands
+app.add_typer(report_cmd.app, name="reports")
+app.add_typer(recommend_cmd.app, name="recommendations")
+
+
+@app.command()
+def report(
+    namespace: Annotated[Optional[str], typer.Option(help="Display a detailed report for a specific namespace.")] = None,
+    today: Annotated[bool, typer.Option(help="Report from midnight UTC to now")] = False,
+    days: Annotated[int, typer.Option(help="Number of days to include (integer)")] = 0,
+    hours: Annotated[int, typer.Option(help="Number of hours to include (integer)")] = 0,
+    minutes: Annotated[int, typer.Option(help="Number of minutes to include (integer)")] = 0,
+    weeks: Annotated[int, typer.Option(help="Number of weeks to include (integer)")] = 0,
+    monthly: Annotated[bool, typer.Option(help="Aggregate results by month (UTC)")] = False,
+    yearly: Annotated[bool, typer.Option(help="Aggregate results by year (UTC)")] = False,
+    format: Annotated[str, typer.Option(help="Output format when --output is provided (csv|json)")] = 'csv',
+    output: Annotated[Optional[str], typer.Option(help="Path to output file (CSV or JSON) when provided")] = None,
+):
+    """Backward-compatible top-level report command that delegates to the processor/reporter."""
+    # If user provided range-like flags, delegate to the new subcommand implementation
+    if any((today, days, hours, minutes, weeks, monthly, yearly, output)):
+        # delegate to subcommand
+        return report_cmd.report_range(namespace=namespace, today=today, days=days, hours=hours, minutes=minutes, weeks=weeks, monthly=monthly, yearly=yearly, format=format, output=output)
+
+    try:
+        processor = get_processor()
+        console_reporter = ConsoleReporter()
+        combined_data = processor.run()
+        if not combined_data:
+            raise typer.Exit(code=0)
+        if namespace:
+            combined_data = [item for item in combined_data if item.namespace == namespace]
+            if not combined_data:
+                raise typer.Exit(code=0)
+        console_reporter.report(data=combined_data)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        logger.error(f"An error occurred during report generation: {e}")
+        logger.error("Report generation failed: %s", traceback.format_exc())
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def recommend(
+    namespace: Annotated[str, typer.Option(help="Display recommendations for a specific namespace.")] = None
+):
+    """Backward-compatible top-level recommend command."""
+    try:
+        return recommend_cmd.recommend(namespace=namespace)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        logger.error(f"An error occurred during recommendation generation: {e}")
+        logger.error("Recommendation generation failed: %s", traceback.format_exc())
+        raise typer.Exit(code=1)
+
 def get_repository() -> CarbonIntensityRepository:
     """
     Factory function to get the appropriate repository based on config.

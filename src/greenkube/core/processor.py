@@ -351,24 +351,19 @@ class DataProcessor:
         chosen_step_sec = max(cfg_step_sec, min_step_needed, 1)
         chosen_step = f"{chosen_step_sec}s"
 
-        base = core_config.PROMETHEUS_URL.rstrip('/')
-        url = f"{base}/api/v1/query_range"
+        # Use the Prometheus collector to fetch range-series
         primary_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,container,node)"
-        fallback_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,node)"
-        params = {"query": primary_query, "start": iso_z(start), "end": iso_z(end), "step": chosen_step}
-
+        chosen_step = chosen_step
         try:
-            resp = requests.get(url, params=params, timeout=60, verify=core_config.PROMETHEUS_VERIFY_CERTS)
-            resp.raise_for_status()
-            results = resp.json().get('data', {}).get('result', [])
-            if not results:
-                raise ValueError("empty_result")
+            results = self.prometheus_collector.collect_range(start=start, end=end, step=chosen_step, query=primary_query)
         except Exception:
-            # try fallback
-            params = {"query": fallback_query, "start": iso_z(start), "end": iso_z(end), "step": chosen_step}
-            resp = requests.get(url, params=params, timeout=60, verify=core_config.PROMETHEUS_VERIFY_CERTS)
-            resp.raise_for_status()
-            results = resp.json().get('data', {}).get('result', [])
+            # If collector raises, fall back to empty results to continue pipeline
+            logger.warning("Prometheus collector failed to return range results; attempting fallback query via collector.")
+            try:
+                fallback_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,node)"
+                results = self.prometheus_collector.collect_range(start=start, end=end, step=chosen_step, query=fallback_query)
+            except Exception:
+                results = []
 
         # parse results into samples
         samples = defaultdict(lambda: defaultdict(float))

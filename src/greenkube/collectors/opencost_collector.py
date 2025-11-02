@@ -93,3 +93,15 @@ class OpenCostCollector(BaseCollector):
         logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
 
+    def collect_range(self, start, end) -> List[CostMetric]:
+        """Collect cost allocation data for a time range.
+
+        The OpenCost Ingress API used here does not always provide a direct
+        range endpoint; this method calls the same ingress but allows the
+        caller to provide start/end in case the backend supports it later.
+        Currently it proxies to `collect()` for compatibility.
+        """
+        # If the OpenCost API supported a range, we'd pass start/end params.
+        # For now, keep behavior identical to collect(), returning latest window.
+        return self.collect()
+
