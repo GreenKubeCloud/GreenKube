@@ -308,3 +308,248 @@ class DataProcessor:
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
         return combined_metrics
+
+    def run_range(self, start, end, step=None, namespace=None, monthly=False, yearly=False, output=None, fmt='csv'):
+        """Generate CombinedMetric list for a historical time range.
+
+        This method centralizes the logic previously located in the CLI. It
+        expects naive or aware datetimes (we treat them as UTC) and returns
+        a list of CombinedMetric objects for the requested range. Optional
+        parameters mirror the CLI behavior (namespace filter, monthly/yearly
+        aggregation, output file handling is left to the caller).
+        """
+        import math
+        import requests
+        from collections import defaultdict
+        from datetime import timezone
+        from ..models.metrics import CombinedMetric
+        from ..core.config import config as core_config
+
+        # Helper to format ISO with Z
+        def iso_z(dt):
+            return dt.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+        # Determine safe step if not provided
+        def parse_duration_to_seconds(s: str) -> int:
+            s = str(s).strip()
+            try:
+                if s.endswith('s'):
+                    return int(s[:-1])
+                if s.endswith('m'):
+                    return int(s[:-1]) * 60
+                if s.endswith('h'):
+                    return int(s[:-1]) * 3600
+                return int(s)
+            except Exception:
+                return 60
+
+        cfg_step_str = getattr(core_config, 'PROMETHEUS_QUERY_RANGE_STEP', None) or '60s'
+        cfg_step_sec = parse_duration_to_seconds(cfg_step_str)
+        duration_sec = max(1, int((end - start).total_seconds()))
+        max_points = getattr(core_config, 'PROMETHEUS_QUERY_RANGE_MAX_SAMPLES', 10000)
+        min_step_needed = int(math.ceil(duration_sec / float(max_points)))
+        chosen_step_sec = max(cfg_step_sec, min_step_needed, 1)
+        chosen_step = f"{chosen_step_sec}s"
+
+        # Use the Prometheus collector to fetch range-series
+        primary_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,container,node)"
+        chosen_step = chosen_step
+        try:
+            results = self.prometheus_collector.collect_range(start=start, end=end, step=chosen_step, query=primary_query)
+        except Exception:
+            # If collector raises, fall back to empty results to continue pipeline
+            logger.warning("Prometheus collector failed to return range results; attempting fallback query via collector.")
+            try:
+                fallback_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,node)"
+                results = self.prometheus_collector.collect_range(start=start, end=end, step=chosen_step, query=fallback_query)
+            except Exception:
+                results = []
+
+        # parse results into samples
+        samples = defaultdict(lambda: defaultdict(float))
+        pod_node_map_by_ts = defaultdict(dict)
+        for series in results:
+            metric = series.get('metric', {}) or {}
+            series_ns = metric.get('namespace') or metric.get('kubernetes_namespace') or metric.get('namespace_name')
+            pod = metric.get('pod') or metric.get('pod_name') or metric.get('kubernetes_pod_name') or metric.get('container')
+            node = metric.get('node') or metric.get('kubernetes_node') or ''
+            if not series_ns or not pod:
+                continue
+            for ts_val, val in series.get('values', []):
+                try:
+                    usage = float(val)
+                    ts_f = float(ts_val)
+                except Exception:
+                    continue
+                key = (series_ns, pod)
+                samples[ts_f][key] += usage
+                pod_node_map_by_ts[ts_f][key] = node
+
+        # Prepare processor components
+        estimator = self.estimator
+        calculator = self.calculator
+        repository = self.repository
+        node_collector = self.node_collector
+        pod_collector = self.pod_collector
+
+        # node instance types
+        try:
+            node_instance_map = node_collector.collect_instance_types() or {}
+        except Exception:
+            node_instance_map = {}
+
+        def profile_for_node(node_name: str):
+            inst = node_instance_map.get(node_name)
+            if inst:
+                profile = estimator.instance_profiles.get(inst)
+                if profile:
+                    return profile
+                if isinstance(inst, str) and inst.startswith('cpu-'):
+                    try:
+                        cores = int(inst.split('-', 1)[1])
+                        default_vcores = estimator.DEFAULT_INSTANCE_PROFILE['vcores']
+                        if default_vcores <= 0:
+                            per_core_min = estimator.DEFAULT_INSTANCE_PROFILE['minWatts']
+                            per_core_max = estimator.DEFAULT_INSTANCE_PROFILE['maxWatts']
+                        else:
+                            per_core_min = estimator.DEFAULT_INSTANCE_PROFILE['minWatts'] / default_vcores
+                            per_core_max = estimator.DEFAULT_INSTANCE_PROFILE['maxWatts'] / default_vcores
+                        return {'vcores': cores, 'minWatts': per_core_min * cores, 'maxWatts': per_core_max * cores}
+                    except Exception:
+                        pass
+            return estimator.DEFAULT_INSTANCE_PROFILE
+
+        # pod request maps
+        try:
+            pod_metrics_list = pod_collector.collect()
+            pod_request_map = { (p.namespace, p.pod_name): p.cpu_request for p in pod_metrics_list }
+            pod_mem_map = { (p.namespace, p.pod_name): p.memory_request for p in pod_metrics_list }
+        except Exception:
+            pod_request_map = {}
+            pod_mem_map = {}
+
+        all_energy_metrics = []
+        from datetime import datetime, timezone as _tz
+        for ts_f, pod_map in sorted(samples.items()):
+            sample_dt = datetime.fromtimestamp(ts_f, tz=_tz.utc)
+            pod_cpu_usage = pod_map
+            node_total_cpu = defaultdict(float)
+            node_pod_map = defaultdict(list)
+            for pod_key, cpu in pod_cpu_usage.items():
+                node = pod_node_map_by_ts.get(ts_f, {}).get(pod_key) or ''
+                node_total_cpu[node] += cpu
+                node_pod_map[node].append((pod_key, cpu))
+
+            for node_name, pods_on_node in node_pod_map.items():
+                profile = profile_for_node(node_name)
+                vcores = profile.get('vcores', 1)
+                min_watts = profile.get('minWatts', 1.0)
+                max_watts = profile.get('maxWatts', 1.0)
+                total_cpu = node_total_cpu.get(node_name, 0.0)
+                node_util = (total_cpu / vcores) if vcores > 0 else 0.0
+                node_util = min(node_util, 1.0)
+                node_power_watts = min_watts + (node_util * (max_watts - min_watts))
+
+                if total_cpu <= 0:
+                    for pod_key, cpu_cores in pods_on_node:
+                        em_namespace, pod = pod_key
+                        cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
+                        cpu_utilization = min(cpu_utilization, 1.0)
+                        power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
+                        joules = power_draw_watts * estimator.query_range_step_sec
+                        em = {
+                            'pod_name': pod,
+                            'namespace': em_namespace,
+                            'joules': joules,
+                            'node': node_name,
+                            'timestamp': sample_dt
+                        }
+                        all_energy_metrics.append(em)
+                else:
+                    for pod_key, cpu_cores in pods_on_node:
+                        em_namespace, pod = pod_key
+                        share = cpu_cores / total_cpu if total_cpu > 0 else 0.0
+                        pod_power = node_power_watts * share
+                        joules = pod_power * estimator.query_range_step_sec
+                        em = {
+                            'pod_name': pod,
+                            'namespace': em_namespace,
+                            'joules': joules,
+                            'node': node_name,
+                            'timestamp': sample_dt
+                        }
+                        all_energy_metrics.append(em)
+
+        # Prefetch intensities per zone/hour and populate calculator cache
+        try:
+            cloud_zones_map = node_collector.collect() or {}
+        except Exception:
+            cloud_zones_map = {}
+
+        node_emaps_map = {}
+        for node, cz in cloud_zones_map.items():
+            emz = get_emaps_zone_from_cloud_zone(cz) or config.DEFAULT_ZONE
+            node_emaps_map[node] = emz
+
+        zone_to_metrics = defaultdict(list)
+        skipped_carbon = 0
+        for em in all_energy_metrics:
+            node_name = em['node']
+            zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            zone_to_metrics[zone].append(em)
+
+        for zone, metrics in zone_to_metrics.items():
+            for m in metrics:
+                ts = m['timestamp']
+                key_dt = ts.replace(minute=0, second=0, microsecond=0)
+                key_dt_utc = key_dt.astimezone(_tz.utc).replace(microsecond=0)
+                key_plus = key_dt_utc.isoformat()
+                key_z = key_plus.replace('+00:00', 'Z')
+                cache_key_plus = (zone, key_plus)
+                cache_key_z = (zone, key_z)
+                if cache_key_plus not in calculator._intensity_cache and cache_key_z not in calculator._intensity_cache:
+                    try:
+                        intensity = repository.get_for_zone_at_time(zone, key_plus)
+                    except Exception:
+                        intensity = None
+                    calculator._intensity_cache[cache_key_plus] = intensity
+                    calculator._intensity_cache[cache_key_z] = intensity
+
+        # now build CombinedMetric list using calculator
+        combined = []
+        try:
+            cost_metrics = self.opencost_collector.collect()
+            cost_map = {c.pod_name: c for c in cost_metrics}
+        except Exception:
+            cost_map = {}
+
+        for em in all_energy_metrics:
+            pod_name = em['pod_name']
+            em_namespace = em['namespace']
+            node_name = em['node']
+            joules = em['joules']
+            ts = em['timestamp']
+            zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            try:
+                carbon_result = calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
+            except Exception:
+                carbon_result = None
+            if carbon_result is None:
+                skipped_carbon += 1
+
+            total_cost = cost_map.get(pod_name).total_cost if cost_map.get(pod_name) else config.DEFAULT_COST
+            cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
+            mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
+            if carbon_result:
+                period = None
+                if monthly:
+                    period = ts.strftime('%Y-%m')
+                elif yearly:
+                    period = ts.strftime('%Y')
+                combined.append(CombinedMetric(pod_name=pod_name, namespace=em_namespace, period=period, total_cost=total_cost, co2e_grams=carbon_result.co2e_grams, pue=calculator.pue, grid_intensity=carbon_result.grid_intensity, joules=joules, cpu_request=cpu_req, memory_request=mem_req))
+
+        # optional namespace filter
+        if namespace:
+            combined = [c for c in combined if c.namespace == namespace]
+
+        return combined

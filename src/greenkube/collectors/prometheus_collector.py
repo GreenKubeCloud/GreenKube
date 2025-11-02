@@ -279,3 +279,89 @@ class PrometheusCollector(BaseCollector):
         except ValidationError:
             return None
 
+    def collect_range(self, start, end, step: Optional[str] = None, query: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Query Prometheus `query_range` endpoint and return the raw series results.
+
+        Returns the list under data.result or [] on error. If query is not
+        provided, uses the standard CPU usage query. Falls back to a query
+        without the 'container' label when needed.
+        """
+        import math
+        if not self.base_url:
+            logger.warning("PROMETHEUS_URL is not set. Skipping Prometheus range collection.")
+            return []
+
+        step = step or self.query_range_step
+        q = query or self.cpu_usage_query
+
+        base = self.base_url.rstrip('/')
+        candidates = [
+            f"{base}/api/v1/query_range",
+            f"{base}/query_range",
+            f"{base}/prometheus/api/v1/query_range",
+        ]
+
+        params = {"query": q, "start": None, "end": None, "step": step}
+
+        # Accept aware or naive datetimes; normalize to Z-suffixed ISO
+        try:
+            params["start"] = start.replace(microsecond=0).astimezone(__import__('datetime').timezone.utc).isoformat().replace('+00:00', 'Z')
+            params["end"] = end.replace(microsecond=0).astimezone(__import__('datetime').timezone.utc).isoformat().replace('+00:00', 'Z')
+        except Exception:
+            # Fallback to string conversion
+            params["start"] = str(start)
+            params["end"] = str(end)
+
+        headers = {}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+
+        auth = None
+        if self.username and self.password:
+            auth = (self.username, self.password)
+
+        last_err = None
+        for query_url in candidates:
+            try:
+                logger.info("Querying Prometheus range at %s", query_url)
+                response = requests.get(
+                    query_url,
+                    params=params,
+                    headers=headers,
+                    auth=auth,
+                    timeout=self.timeout,
+                    verify=self.verify,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if data.get("status") != "success":
+                    logger.warning("Prometheus range returned non-success for %s: %s", query_url, data.get('error', 'Unknown'))
+                    continue
+
+                results = data.get('data', {}).get('result', [])
+                # If no results and we used the container query, try fallback
+                if not results and q == self.cpu_usage_query:
+                    fallback_query = (
+                        f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
+                        " by (namespace, pod, node)"
+                    )
+                    logger.info("Falling back to containerless grouped CPU query for range")
+                    return self.collect_range(start, end, step=step, query=fallback_query)
+
+                logger.info("Prometheus range at %s returned %d series", query_url, len(results))
+                return results
+            except requests.exceptions.RequestException as e:
+                last_err = e
+                logger.debug("Failed range query to Prometheus at %s: %s", query_url, e)
+                continue
+            except Exception as e:
+                last_err = e
+                logger.error("Unexpected error during Prometheus range query at %s: %s", query_url, e)
+                continue
+
+        if last_err:
+            logger.error("All Prometheus range endpoints failed. Last error: %s", last_err)
+        else:
+            logger.error("Prometheus range queries returned no results for query: %s", q)
+        return []
+
