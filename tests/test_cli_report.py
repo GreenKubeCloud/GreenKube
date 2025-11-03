@@ -98,3 +98,28 @@ def test_recommend_generates_and_reports(monkeypatch):
     assert len(reported) == 1
     assert reported[0][0].pod_name == 'p1'
 
+
+def test_report_range_with_output_exports(monkeypatch, tmp_path):
+    # Arrange: create dummy combined data
+    items = [CombinedMetric(pod_name='p1', namespace='ns1', total_cost=1.0, co2e_grams=10.0, joules=100.0)]
+    dummy_proc = make_dummy_processor(return_items=items)
+    monkeypatch.setattr(cli, 'get_processor', lambda: dummy_proc)
+
+    # Patch exporters to write to tmp_path and capture call
+    written = {}
+    class DummyExporter:
+        DEFAULT_FILENAME = 'greenkube-report.csv'
+        def export(self, data, path=None):
+            written['path'] = path
+            return path
+
+    import greenkube.exporters.csv_exporter as csv_mod
+    monkeypatch.setattr(csv_mod, 'CSVExporter', DummyExporter)
+
+    # Act: ask for monthly range and output csv (shortcut)
+    cli.report_range(monthly=True, output='csv')
+
+    # Assert: exporter was invoked and wrote to data folder path
+    assert 'path' in written
+    assert written['path'].endswith('greenkube-report.csv')
+
