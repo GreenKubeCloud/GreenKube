@@ -97,9 +97,9 @@ def test_export_placeholder(mocker):
     # Patch the module logger and assert it is used for the placeholder message
     mock_logger = mocker.patch('greenkube.cli.logger')
     result = runner.invoke(app, ["export"])
+    # Now exports actual data to disk; ensure exit_ok and that exporter logged the written path
     assert result.exit_code == 0
-    # Ensure logger.info was called with the placeholder message (permissive substring match)
-    called = any("Placeholder: Exporting data in csv format to report.csv" in str(call_args) for call_args in mock_logger.info.call_args_list)
+    called = any("Exported report to" in str(call_args) for call_args in mock_logger.info.call_args_list)
     assert called, f"Expected logger.info to be called with export message, got: {mock_logger.info.call_args_list}"
 
 
