@@ -1,5 +1,6 @@
 import csv
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 from .base_exporter import BaseExporter
 
 
@@ -29,7 +30,8 @@ class CSVExporter(BaseExporter):
 
         # Ensure parent directory exists
         import os
-        os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
         with open(out_path, "w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=headers)

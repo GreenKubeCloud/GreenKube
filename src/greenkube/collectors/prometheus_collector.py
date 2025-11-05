@@ -4,22 +4,30 @@
 PrometheusCollector fetches CPU usage and node instance type metrics.
 This data is the input for the BasicEstimator.
 """
-import requests
+
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
 from pydantic import ValidationError
 
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.core.config import Config
-from greenkube.models.prometheus_metrics import PrometheusMetric, PodCPUUsage, NodeInstanceType
+from greenkube.models.prometheus_metrics import (
+    NodeInstanceType,
+    PodCPUUsage,
+    PrometheusMetric,
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
 
 class PrometheusCollector(BaseCollector):
     """
     Collects essential metrics from Prometheus for the estimation engine.
     """
+
     def __init__(self, settings: Config):
         """
         Initializes the collector with settings and PromQL queries.
@@ -29,10 +37,10 @@ class PrometheusCollector(BaseCollector):
         self.timeout = 10
 
         # TLS verify and auth support
-        self.verify = getattr(settings, 'PROMETHEUS_VERIFY_CERTS', True)
-        self.bearer_token = getattr(settings, 'PROMETHEUS_BEARER_TOKEN', None)
-        self.username = getattr(settings, 'PROMETHEUS_USERNAME', None)
-        self.password = getattr(settings, 'PROMETHEUS_PASSWORD', None)
+        self.verify = getattr(settings, "PROMETHEUS_VERIFY_CERTS", True)
+        self.bearer_token = getattr(settings, "PROMETHEUS_BEARER_TOKEN", None)
+        self.username = getattr(settings, "PROMETHEUS_USERNAME", None)
+        self.password = getattr(settings, "PROMETHEUS_PASSWORD", None)
 
         # Query for average CPU usage in cores over the last step.
         # We filter for containers with a name, which is standard.
@@ -42,14 +50,18 @@ class PrometheusCollector(BaseCollector):
         )
 
         # Prometheus label key used to map node -> instance type may vary across setups.
-        self.node_instance_label_key = getattr(settings, 'PROMETHEUS_NODE_INSTANCE_LABEL', 'label_node_kubernetes_io_instance_type')
+        self.node_instance_label_key = getattr(
+            settings,
+            "PROMETHEUS_NODE_INSTANCE_LABEL",
+            "label_node_kubernetes_io_instance_type",
+        )
         # Build a query that filters nodes which have the configured instance-type label.
         self.node_labels_query = f"kube_node_labels{{{self.node_instance_label_key}!=''}}"
 
     def collect(self) -> PrometheusMetric:
         """
         Fetch all required metrics from Prometheus.
-        
+
         Returns a PrometheusMetric object containing lists of parsed data.
         """
         cpu_results = self._query_prometheus(self.cpu_usage_query)
@@ -57,8 +69,7 @@ class PrometheusCollector(BaseCollector):
         # try a fallback that doesn't require 'container' and groups only by namespace/pod/node.
         if not cpu_results:
             fallback_query = (
-                f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
-                " by (namespace, pod, node)"
+                f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
             )
             logger.info("Falling back to container_cpu_usage grouped without 'container' label")
             cpu_results = self._query_prometheus(fallback_query)
@@ -106,18 +117,29 @@ class PrometheusCollector(BaseCollector):
 
         if not parsed_node_types:
             logger.info(
-                "No node instance-type labels found in Prometheus using label '%s'; estimator will use default instance profile for unknown nodes.",
+                "No node instance-type labels found for label '%s'; using DEFAULT_INSTANCE_PROFILE",
                 self.node_instance_label_key,
             )
 
         if malformed_cpu_count:
-            logger.warning("Skipped %d malformed CPU metric item(s). Examples: %s", malformed_cpu_count, malformed_cpu_examples)
+            logger.warning(
+                "Skipped %d malformed CPU metric item(s). Examples: %s",
+                malformed_cpu_count,
+                malformed_cpu_examples,
+            )
 
         if non_pod_skipped:
-            logger.info("Skipped %d non-pod Prometheus series during CPU query (these are node-level or aggregate series).", non_pod_skipped)
+            logger.info(
+                "Skipped %d non-pod Prometheus series during CPU query (these are node-level or aggregate series).",
+                non_pod_skipped,
+            )
 
         if malformed_node_count:
-            logger.warning("Skipped %d malformed node metric item(s). Examples: %s", malformed_node_count, malformed_node_examples)
+            logger.warning(
+                "Skipped %d malformed node metric item(s). Examples: %s",
+                malformed_node_count,
+                malformed_node_examples,
+            )
 
         return PrometheusMetric(
             pod_cpu_usage=parsed_cpu_usage,
@@ -127,7 +149,7 @@ class PrometheusCollector(BaseCollector):
     def _query_prometheus(self, query: str) -> List[Dict[str, Any]]:
         """
         Internal helper to run a query against the Prometheus API.
-        
+
         Returns the 'result' list from the JSON response, or [] on failure.
         """
         if not self.base_url:
@@ -135,7 +157,7 @@ class PrometheusCollector(BaseCollector):
             return []
 
         # Normalize base URL and try a couple of common endpoint forms.
-        base = self.base_url.rstrip('/')
+        base = self.base_url.rstrip("/")
         candidates = [
             f"{base}/api/v1/query",
             f"{base}/query",
@@ -223,7 +245,7 @@ class PrometheusCollector(BaseCollector):
                 "pod": metric["pod"],
                 "container": metric["container"],
                 "node": metric["node"],
-                "cpu_usage_cores": float(value_str)
+                "cpu_usage_cores": float(value_str),
             }
             return PodCPUUsage(**data_to_validate)
         except (TypeError, ValueError, ValidationError):
@@ -273,20 +295,21 @@ class PrometheusCollector(BaseCollector):
         try:
             data_to_validate = {
                 "node": metric["node"],
-                "instance_type": metric[label_key]
+                "instance_type": metric[label_key],
             }
             return NodeInstanceType(**data_to_validate)
         except ValidationError:
             return None
 
-    def collect_range(self, start, end, step: Optional[str] = None, query: Optional[str] = None) -> List[Dict[str, Any]]:
+    def collect_range(
+        self, start, end, step: Optional[str] = None, query: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Query Prometheus `query_range` endpoint and return the raw series results.
 
         Returns the list under data.result or [] on error. If query is not
         provided, uses the standard CPU usage query. Falls back to a query
         without the 'container' label when needed.
         """
-        import math
         if not self.base_url:
             logger.warning("PROMETHEUS_URL is not set. Skipping Prometheus range collection.")
             return []
@@ -294,7 +317,7 @@ class PrometheusCollector(BaseCollector):
         step = step or self.query_range_step
         q = query or self.cpu_usage_query
 
-        base = self.base_url.rstrip('/')
+        base = self.base_url.rstrip("/")
         candidates = [
             f"{base}/api/v1/query_range",
             f"{base}/query_range",
@@ -305,8 +328,18 @@ class PrometheusCollector(BaseCollector):
 
         # Accept aware or naive datetimes; normalize to Z-suffixed ISO
         try:
-            params["start"] = start.replace(microsecond=0).astimezone(__import__('datetime').timezone.utc).isoformat().replace('+00:00', 'Z')
-            params["end"] = end.replace(microsecond=0).astimezone(__import__('datetime').timezone.utc).isoformat().replace('+00:00', 'Z')
+            params["start"] = (
+                start.replace(microsecond=0)
+                .astimezone(__import__("datetime").timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            params["end"] = (
+                end.replace(microsecond=0)
+                .astimezone(__import__("datetime").timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         except Exception:
             # Fallback to string conversion
             params["start"] = str(start)
@@ -335,10 +368,14 @@ class PrometheusCollector(BaseCollector):
                 response.raise_for_status()
                 data = response.json()
                 if data.get("status") != "success":
-                    logger.warning("Prometheus range returned non-success for %s: %s", query_url, data.get('error', 'Unknown'))
+                    logger.warning(
+                        "Prometheus range returned non-success for %s: %s",
+                        query_url,
+                        data.get("error", "Unknown"),
+                    )
                     continue
 
-                results = data.get('data', {}).get('result', [])
+                results = data.get("data", {}).get("result", [])
                 # If no results and we used the container query, try fallback
                 if not results and q == self.cpu_usage_query:
                     fallback_query = (
@@ -356,7 +393,11 @@ class PrometheusCollector(BaseCollector):
                 continue
             except Exception as e:
                 last_err = e
-                logger.error("Unexpected error during Prometheus range query at %s: %s", query_url, e)
+                logger.error(
+                    "Unexpected error during Prometheus range query at %s: %s",
+                    query_url,
+                    e,
+                )
                 continue
 
         if last_err:
@@ -364,4 +405,3 @@ class PrometheusCollector(BaseCollector):
         else:
             logger.error("Prometheus range queries returned no results for query: %s", q)
         return []
-

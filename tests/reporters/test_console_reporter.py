@@ -2,13 +2,14 @@
 """
 Unit tests for the ConsoleReporter class.
 """
-import pytest
+
 from unittest.mock import MagicMock, call
+
+from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 
 # We need to mock Table and Console from the reporter's namespace
 from greenkube.reporters.console_reporter import ConsoleReporter
-from greenkube.models.metrics import CombinedMetric
-from greenkube.models.metrics import Recommendation, RecommendationType
+
 
 def test_console_reporter_with_data(mocker):
     """
@@ -16,8 +17,8 @@ def test_console_reporter_with_data(mocker):
     This test mocks the Table and Console objects to verify their interactions.
     """
     # 1. Arrange: Mock both Console and Table in the reporter's module
-    mock_console_class = mocker.patch('greenkube.reporters.console_reporter.Console')
-    mock_table_class = mocker.patch('greenkube.reporters.console_reporter.Table')
+    mock_console_class = mocker.patch("greenkube.reporters.console_reporter.Console")
+    mock_table_class = mocker.patch("greenkube.reporters.console_reporter.Table")
 
     # Create mock instances that will be returned when the classes are instantiated
     mock_console_instance = MagicMock()
@@ -32,7 +33,7 @@ def test_console_reporter_with_data(mocker):
             total_cost=15.75,
             co2e_grams=250.5,
             pue=1.5,
-            grid_intensity=400.0
+            grid_intensity=400.0,
         ),
         CombinedMetric(
             namespace="security",
@@ -40,8 +41,8 @@ def test_console_reporter_with_data(mocker):
             total_cost=5.10,
             co2e_grams=80.2,
             pue=1.5,
-            grid_intensity=400.0
-        )
+            grid_intensity=400.0,
+        ),
     ]
     reporter = ConsoleReporter()
 
@@ -52,8 +53,8 @@ def test_console_reporter_with_data(mocker):
     # Assert Table was instantiated and includes our title and header style
     assert mock_table_class.call_count == 1
     call_kwargs = mock_table_class.call_args.kwargs
-    assert call_kwargs.get('title') == "GreenKube FinGreenOps Report"
-    assert call_kwargs.get('header_style') == "bold magenta"
+    assert call_kwargs.get("title") == "GreenKube FinGreenOps Report"
+    assert call_kwargs.get("header_style") == "bold magenta"
 
     # Assert that the columns were added correctly to the table instance
     expected_column_calls = [
@@ -72,8 +73,28 @@ def test_console_reporter_with_data(mocker):
     # Assert that the rows were added with the correct, formatted data
     # For our sample CombinedMetric defaults, joules/cpu/mem/intensity may be 0
     expected_row_calls = [
-        call("backend-xyz", "e-commerce", "15.7500", "250.50", "0", "0", "0.0", "400.00", "1.50"),
-        call("auth-service-fgh", "security", "5.1000", "80.20", "0", "0", "0.0", "400.00", "1.50"),
+        call(
+            "backend-xyz",
+            "e-commerce",
+            "15.7500",
+            "250.50",
+            "0",
+            "0",
+            "0.0",
+            "400.00",
+            "1.50",
+        ),
+        call(
+            "auth-service-fgh",
+            "security",
+            "5.1000",
+            "80.20",
+            "0",
+            "0",
+            "0.0",
+            "400.00",
+            "1.50",
+        ),
     ]
     mock_table_instance.add_row.assert_has_calls(expected_row_calls, any_order=False)
 
@@ -83,8 +104,8 @@ def test_console_reporter_with_data(mocker):
 
 def test_console_reporter_includes_cpu_and_memory(mocker):
     """Ensure report shows CPU and memory columns and formats memory in Mi."""
-    mock_console_class = mocker.patch('greenkube.reporters.console_reporter.Console')
-    mock_table_class = mocker.patch('greenkube.reporters.console_reporter.Table')
+    mock_console_class = mocker.patch("greenkube.reporters.console_reporter.Console")
+    mock_table_class = mocker.patch("greenkube.reporters.console_reporter.Table")
     mock_console_instance = MagicMock()
     mock_table_instance = MagicMock()
     mock_console_class.return_value = mock_console_instance
@@ -100,7 +121,7 @@ def test_console_reporter_includes_cpu_and_memory(mocker):
             grid_intensity=200.0,
             joules=1000,
             cpu_request=250,
-            memory_request=50 * 1024 * 1024, # 50 Mi
+            memory_request=50 * 1024 * 1024,  # 50 Mi
         )
     ]
 
@@ -117,26 +138,36 @@ def test_console_reporter_includes_cpu_and_memory(mocker):
     found = False
     for call_args in added_rows:
         args = call_args.args
-        if 'pod-1' in args:
+        if "pod-1" in args:
             # memory is at position 6 (0-based): pod, ns, cost, co2e, joules, cpu, mem, intensity, pue
             mem_str = args[6]
-            assert mem_str == '50.0' or mem_str.startswith('50.0')
+            assert mem_str == "50.0" or mem_str.startswith("50.0")
             found = True
     assert found, "Row for pod-1 not found in calls"
 
 
 def test_console_reporter_recommendations(mocker):
     """Ensure recommendations are printed properly in a second table."""
-    mock_console_class = mocker.patch('greenkube.reporters.console_reporter.Console')
-    mock_table_class = mocker.patch('greenkube.reporters.console_reporter.Table')
+    mock_console_class = mocker.patch("greenkube.reporters.console_reporter.Console")
+    mock_table_class = mocker.patch("greenkube.reporters.console_reporter.Table")
     mock_console_instance = MagicMock()
     mock_table_instance = MagicMock()
     mock_console_class.return_value = mock_console_instance
     mock_table_class.return_value = mock_table_instance
 
     recs = [
-        Recommendation(pod_name='z', namespace='default', type=RecommendationType.ZOMBIE_POD, description='idle'),
-        Recommendation(pod_name='o', namespace='prod', type=RecommendationType.RIGHTSIZING_CPU, description='rightsizing')
+        Recommendation(
+            pod_name="z",
+            namespace="default",
+            type=RecommendationType.ZOMBIE_POD,
+            description="idle",
+        ),
+        Recommendation(
+            pod_name="o",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="rightsizing",
+        ),
     ]
 
     reporter = ConsoleReporter()
@@ -153,8 +184,8 @@ def test_console_reporter_with_no_data(mocker):
     creating a table with headers but adding no rows.
     """
     # 1. Arrange
-    mock_console_class = mocker.patch('greenkube.reporters.console_reporter.Console')
-    mock_table_class = mocker.patch('greenkube.reporters.console_reporter.Table')
+    mock_console_class = mocker.patch("greenkube.reporters.console_reporter.Console")
+    mock_table_class = mocker.patch("greenkube.reporters.console_reporter.Table")
     mock_console_instance = MagicMock()
     mock_table_instance = MagicMock()
     mock_console_class.return_value = mock_console_instance

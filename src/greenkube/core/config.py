@@ -1,22 +1,26 @@
 # src/greenkube/core/config.py
 
-import os
 import logging
+import os
+
 from dotenv import load_dotenv
 
 # Import datacenter PUE profiles
 from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
 
 # Load environment variables from a .env file located in the project root
-dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '.env')
+dotenv_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
 load_dotenv(dotenv_path=dotenv_path)
+
 
 class Config:
     """
     Handles the application's configuration by loading values from environment variables.
     """
+
     # --- Default variables ---
     DEFAULT_COST = 0.0
+
     # CLOUD_PROVIDER and DEFAULT_PUE are provided as properties so their
     # values are resolved at access time (reading environment variables and
     # DATACENTER_PUE_PROFILES). This avoids binding a stale value at import
@@ -39,6 +43,7 @@ class Config:
             )
             return fallback
         return pue
+
     DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
     DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 0.1))
     JOULES_PER_KWH = 3.6e6
@@ -56,17 +61,34 @@ class Config:
     ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
     ELASTICSEARCH_USER = os.getenv("ELASTICSEARCH_USER")
     ELASTICSEARCH_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
-    ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in ("true", "1", "t", "y", "yes")
-    ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", 'carbon_intensity')
+    ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
+        "true",
+        "1",
+        "t",
+        "y",
+        "yes",
+    )
+    ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", "carbon_intensity")
 
     # -- Prometheus variables ---
-    PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-kube-prometheus-prometheus.monitoring.service.svc.cluster.local:9090")
+    PROMETHEUS_URL = os.getenv(
+        "PROMETHEUS_URL",
+        "http://prometheus-kube-prometheus-prometheus.monitoring.service.svc.cluster.local:9090",
+    )
     PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
-    PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in ("true", "1", "t", "y", "yes")
+    PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
+        "true",
+        "1",
+        "t",
+        "y",
+        "yes",
+    )
     PROMETHEUS_BEARER_TOKEN = os.getenv("PROMETHEUS_BEARER_TOKEN")
     PROMETHEUS_USERNAME = os.getenv("PROMETHEUS_USERNAME")
     PROMETHEUS_PASSWORD = os.getenv("PROMETHEUS_PASSWORD")
-    PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv("PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type")
+    PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
+        "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
+    )
 
     # --- OpenCost API URL (used by OpenCostCollector) ---
     OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
@@ -94,7 +116,7 @@ class Config:
         if cls.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
+
 # Instantiate the config to be imported by other modules
 config = Config()
 config.validate()
-

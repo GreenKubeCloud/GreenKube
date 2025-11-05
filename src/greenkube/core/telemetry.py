@@ -2,27 +2,27 @@
 """Initialise les services OpenTelemetry pour l'application GreenKube."""
 
 import os
-from opentelemetry import trace, metrics
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+from opentelemetry import metrics, trace
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 # Variable d'environnement pour l'endpoint du collecteur OTel
 # Par défaut : http://localhost:4318. En k8s, ce sera http://otel-collector.default.svc.cluster.local:4318
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+
 
 def initialize_telemetry():
     """
     Configure et initialise le TracerProvider et le MeterProvider pour OpenTelemetry.
     Les données seront exportées via OTLP/HTTP.
     """
-    resource = Resource(attributes={
-        SERVICE_NAME: "greenkube-app"
-    })
+    resource = Resource(attributes={SERVICE_NAME: "greenkube-app"})
 
     # --- Configuration du Tracing ---
     tracer_provider = TracerProvider(resource=resource)
@@ -38,7 +38,7 @@ def initialize_telemetry():
     metrics.set_meter_provider(meter_provider)
     print(f"OpenTelemetry initialisé. Export vers : {OTEL_EXPORTER_OTLP_ENDPOINT}")
 
+
 # Rendre le tracer et le meter accessibles globalement
 tracer = trace.get_tracer("greenkube.tracer")
 meter = metrics.get_meter("greenkube.meter")
-

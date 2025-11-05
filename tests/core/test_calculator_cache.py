@@ -1,6 +1,7 @@
 # tests/core/test_calculator.py
 
 from unittest.mock import MagicMock
+
 from src.greenkube.core.calculator import CarbonCalculator
 from src.greenkube.core.config import config
 

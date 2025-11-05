@@ -1,8 +1,9 @@
 # tests/conftest.py
 
-import pytest
 import sqlite3
-from unittest.mock import patch
+
+import pytest
+
 
 @pytest.fixture(scope="function")
 def test_db_connection():
@@ -21,6 +22,7 @@ def test_db_connection():
     yield conn
     conn.close()
 
+
 @pytest.fixture(autouse=True)
 def mock_settings_env_vars(monkeypatch):
     """
@@ -31,5 +33,5 @@ def mock_settings_env_vars(monkeypatch):
     config is predictable and isolated from the actual environment.
     """
     monkeypatch.setenv("DB_TYPE", "sqlite")
-    monkeypatch.setenv("DB_PATH", ":memory:") # Ensure config points to an in-memory db
+    monkeypatch.setenv("DB_PATH", ":memory:")  # Ensure config points to an in-memory db
     monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "test-token")

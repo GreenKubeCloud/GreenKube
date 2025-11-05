@@ -3,16 +3,19 @@
 This module contains the collector responsible for gathering cost
 allocation data from the OpenCost API.
 """
-import requests
-from typing import List
-from datetime import datetime, timezone
-import logging
 
-from .base_collector import BaseCollector
-from ..models.metrics import CostMetric
+import logging
+from datetime import datetime, timezone
+from typing import List
+
+import requests
+
 from ..core.config import config
+from ..models.metrics import CostMetric
+from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
+
 
 class OpenCostCollector(BaseCollector):
     """
@@ -29,20 +32,18 @@ class OpenCostCollector(BaseCollector):
         """
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
-        params = {
-            "window": "1d",
-            "aggregate": "pod"
-        }
+        params = {"window": "1d", "aggregate": "pod"}
 
         try:
             import warnings
+
             from requests.packages.urllib3.exceptions import InsecureRequestWarning
-            
-            warnings.simplefilter('ignore', InsecureRequestWarning)
-            
+
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+
             # Use the configured OpenCost API URL (can be overridden via env var OPENCOST_API_URL)
             response = requests.get(config.OPENCOST_API_URL, params=params, timeout=10, verify=False)
-            
+
             response.raise_for_status()
 
             try:
@@ -55,7 +56,7 @@ class OpenCostCollector(BaseCollector):
             if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
                 logger.warning("OpenCost API returned no data. This can happen if the cluster is new.")
                 return []
-            
+
             cost_data = response_data[0]
 
         except requests.exceptions.RequestException as e:
@@ -65,7 +66,7 @@ class OpenCostCollector(BaseCollector):
         # --- TRAITEMENT DE LA RÉPONSE (CORRIGÉ) ---
         collected_metrics = []
         now = datetime.now(timezone.utc)
-        
+
         for resource_id, item in cost_data.items():
             # Le nom du pod et le namespace sont à l'intérieur de l'objet 'properties'.
             properties = item.get("properties", {})
@@ -75,7 +76,7 @@ class OpenCostCollector(BaseCollector):
             # Si la propriété "pod" n'existe pas, on utilise la clé comme nom de pod.
             if not pod_name:
                 pod_name = resource_id
-            
+
             if not namespace:
                 logger.warning("Skipping metric for '%s' because namespace is missing.", pod_name)
                 continue
@@ -86,7 +87,7 @@ class OpenCostCollector(BaseCollector):
                 cpu_cost=item.get("cpuCost", 0.0),
                 ram_cost=item.get("ramCost", 0.0),
                 total_cost=item.get("totalCost", 0.0),
-                timestamp=now
+                timestamp=now,
             )
             collected_metrics.append(metric)
 
@@ -104,4 +105,3 @@ class OpenCostCollector(BaseCollector):
         # If the OpenCost API supported a range, we'd pass start/end params.
         # For now, keep behavior identical to collect(), returning latest window.
         return self.collect()
-

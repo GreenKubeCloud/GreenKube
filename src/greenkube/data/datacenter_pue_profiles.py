@@ -13,15 +13,10 @@ OVHcloud : https://corporate.ovhcloud.com/en/sustainability/environment/
 DATACENTER_PUE_PROFILES = {
     # --- AWS ---
     "default_aws": 1.15,
-
     # --- GCP ---
     "default_gcp": 1.09,
-
     # --- Azure ---
     "default_azure": 1.18,
-
     # --- OVHcloud ---
     "default_ovh": 1.26,
-
 }
-

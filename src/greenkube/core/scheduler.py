@@ -1,9 +1,9 @@
 # src/greenkube/core/scheduler.py
 
-import schedule
-import time
 from typing import Callable
-from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
+
+import schedule
+
 
 class Scheduler:
     """
@@ -30,4 +30,3 @@ class Scheduler:
         This method should be called in a loop.
         """
         schedule.run_pending()
-

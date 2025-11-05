@@ -75,5 +75,6 @@ path = "src/greenkube/__init__.py"
 
 [tool.ruff]
 # Formatting and linting rules for clean code
-line-length = 88
+line-length = 120
+# 'select' is deprecated at top-level; move to [tool.ruff.lint] if desired by CI
 select = ["E", "F", "W", "I"] # Basic rule selection

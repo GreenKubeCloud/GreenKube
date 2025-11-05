@@ -1,10 +1,12 @@
 # src/greenkube/core/calculator.py
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
+
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
-from datetime import datetime, timezone
 
 
 def _to_datetime(ts) -> datetime:
@@ -14,8 +16,8 @@ def _to_datetime(ts) -> datetime:
     elif isinstance(ts, str):
         s = ts
         # Accept ISO strings ending with Z
-        if s.endswith('Z'):
-            s = s.replace('Z', '+00:00')
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
         try:
             dt = datetime.fromisoformat(s)
         except Exception:
@@ -31,7 +33,7 @@ def _to_datetime(ts) -> datetime:
 
 def _iso_z(dt: datetime) -> str:
     """Return an ISO-format UTC string ending with 'Z' for compatibility with tests."""
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -69,10 +71,10 @@ class CarbonCalculator:
         """
         # Normalize timestamp to hour to increase cache hit rate across similar timestamps
         dt = _to_datetime(timestamp)
-        gran = getattr(config, 'NORMALIZATION_GRANULARITY', 'hour')
-        if gran == 'hour':
+        gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+        if gran == "hour":
             normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
-        elif gran == 'day':
+        elif gran == "day":
             normalized_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
         else:  # 'none'
             normalized_dt = dt
@@ -86,7 +88,13 @@ class CarbonCalculator:
             self._intensity_cache[cache_key] = grid_intensity_value
 
         if grid_intensity_value is None:
-            print(f"WARN: Carbon intensity data not found for zone '{zone}' at {timestamp}. Using default value: {config.DEFAULT_INTENSITY} gCO2e/kWh.")
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
+                zone,
+                timestamp,
+                config.DEFAULT_INTENSITY,
+            )
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:
@@ -97,5 +105,3 @@ class CarbonCalculator:
         co2e_grams = kwh_adjusted_for_pue * grid_intensity_value
 
         return CarbonCalculationResult(co2e_grams=co2e_grams, grid_intensity=grid_intensity_value)
-
-

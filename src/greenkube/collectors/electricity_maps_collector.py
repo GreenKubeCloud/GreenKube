@@ -1,9 +1,11 @@
 # src/greenkube/collectors/electricity_maps_collector.py
 import requests
-from .base_collector import BaseCollector
+
 from ..core.config import config
+from .base_collector import BaseCollector
 
 API_BASE_URL = "https://api.electricitymaps.com/v3"
+
 
 class ElectricityMapsCollector(BaseCollector):
     """
@@ -34,4 +36,4 @@ class ElectricityMapsCollector(BaseCollector):
             return data.get("history", [])
         except requests.exceptions.RequestException as e:
             print(f"Error fetching data from Electricity Maps API: {e}")
-            return [] # Retourne une liste vide en cas d'erreur
+            return []  # Retourne une liste vide en cas d'erreur

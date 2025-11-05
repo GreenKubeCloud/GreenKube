@@ -1,15 +1,18 @@
 # src/greenkube/collectors/node_collector.py
 
-from kubernetes import client, config
-from .base_collector import BaseCollector
 import logging
+
+from kubernetes import client, config
+
 from greenkube.core.config import config as global_config
+
+from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
 
 
 class NodeCollector(BaseCollector):
-    """ Collects node zone information and instance types from the Kubernetes cluster. """
+    """Collects node zone information and instance types from the Kubernetes cluster."""
 
     def __init__(self):
         try:
@@ -45,7 +48,9 @@ class NodeCollector(BaseCollector):
                 zone = None
                 # Prefer the standard topology label, fall back to legacy if needed
                 if node.metadata.labels:
-                    zone = node.metadata.labels.get('topology.kubernetes.io/zone') or node.metadata.labels.get('failure-domain.beta.kubernetes.io/zone')
+                    zone = node.metadata.labels.get("topology.kubernetes.io/zone") or node.metadata.labels.get(
+                        "failure-domain.beta.kubernetes.io/zone"
+                    )
 
                 if zone:
                     nodes_zones_map[node_name] = zone
@@ -73,7 +78,11 @@ class NodeCollector(BaseCollector):
         Returns:
             dict: node name -> instance_type (only entries where instance type label exists)
         """
-        label_key = getattr(global_config, 'PROMETHEUS_NODE_INSTANCE_LABEL', 'label_node_kubernetes_io_instance_type')
+        label_key = getattr(
+            global_config,
+            "PROMETHEUS_NODE_INSTANCE_LABEL",
+            "label_node_kubernetes_io_instance_type",
+        )
         node_instance_map = {}
 
         try:
@@ -88,7 +97,11 @@ class NodeCollector(BaseCollector):
                 instance_type = labels.get(label_key)
                 if instance_type:
                     node_instance_map[node_name] = instance_type
-                    logger.info("Found instance type for node '%s': %s", node_name, instance_type)
+                    logger.info(
+                        "Found instance type for node '%s': %s",
+                        node_name,
+                        instance_type,
+                    )
                     continue
 
                 # If explicit instance-type label is not available, attempt to
@@ -96,15 +109,22 @@ class NodeCollector(BaseCollector):
                 # This helps produce more realistic energy estimates when
                 # cloud instance labels are absent.
                 try:
-                    capacity = getattr(node, 'status', None) and getattr(node.status, 'capacity', None)
-                    if capacity and 'cpu' in capacity:
-                        cpu_cores = int(str(capacity['cpu']))
+                    capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
+                    if capacity and "cpu" in capacity:
+                        cpu_cores = int(str(capacity["cpu"]))
                         inferred_label = f"cpu-{cpu_cores}"
                         node_instance_map[node_name] = inferred_label
-                        logger.info("Inferred instance cores for node '%s': %s cores", node_name, cpu_cores)
+                        logger.info(
+                            "Inferred instance cores for node '%s': %s cores",
+                            node_name,
+                            cpu_cores,
+                        )
                 except Exception:
                     # If anything goes wrong parsing capacity, skip silently.
-                    logger.debug("Could not infer instance type from capacity for node '%s'", node_name)
+                    logger.debug(
+                        "Could not infer instance type from capacity for node '%s'",
+                        node_name,
+                    )
 
         except client.ApiException as e:
             logger.error("Kubernetes API error while listing nodes for instance types: %s", e)

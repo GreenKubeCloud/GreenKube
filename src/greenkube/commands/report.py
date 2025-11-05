@@ -1,17 +1,11 @@
-import typer
-from typing_extensions import Annotated
-from typing import Optional
-from datetime import datetime, timezone, timedelta
 import logging
 import traceback
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from ..core.processor import DataProcessor
-from ..core.config import config
-from ..core.calculator import CarbonCalculator
-from ..collectors.prometheus_collector import PrometheusCollector
-from ..collectors.opencost_collector import OpenCostCollector
-from ..collectors.node_collector import NodeCollector
-from ..collectors.pod_collector import PodCollector
+import typer
+from typing_extensions import Annotated
+
 from ..reporters.console_reporter import ConsoleReporter
 
 logger = logging.getLogger(__name__)
@@ -21,12 +15,16 @@ app = typer.Typer(name="report", help="Generate FinOps and GreenOps reports.")
 
 @app.command("now")
 def report_now(
-    namespace: Annotated[Optional[str], typer.Option(help="Display a detailed report for a specific namespace.")] = None,
+    namespace: Annotated[
+        Optional[str],
+        typer.Option(help="Display a detailed report for a specific namespace."),
+    ] = None,
 ):
     """Get a report for the current state."""
     try:
         # reuse get_processor factory from top-level module for consistency
         from ..cli import get_processor
+
         processor = get_processor()
         console_reporter = ConsoleReporter()
 
@@ -56,8 +54,11 @@ def report_range(
     weeks: Annotated[int, typer.Option(help="Number of weeks to include (integer)")] = 0,
     monthly: Annotated[bool, typer.Option(help="Aggregate results by month (UTC)")] = False,
     yearly: Annotated[bool, typer.Option(help="Aggregate results by year (UTC)")] = False,
-    format: Annotated[str, typer.Option(help="Output format when --output is provided (csv|json)")] = 'csv',
-    output: Annotated[Optional[str], typer.Option(help="Path to output file (CSV or JSON) when provided")] = None,
+    format: Annotated[str, typer.Option(help="Output format when --output is provided (csv|json)")] = "csv",
+    output: Annotated[
+        Optional[str],
+        typer.Option(help="Path to output file (CSV or JSON) when provided"),
+    ] = None,
 ):
     """Generate a report over a time range."""
     if monthly and yearly:
@@ -79,9 +80,19 @@ def report_range(
 
     try:
         from ..cli import get_processor
+
         processor = get_processor()
         console = ConsoleReporter()
-        combined = processor.run_range(start=start, end=end, step=None, namespace=namespace, monthly=monthly, yearly=yearly, output=output, fmt=format)
+        combined = processor.run_range(
+            start=start,
+            end=end,
+            step=None,
+            namespace=namespace,
+            monthly=monthly,
+            yearly=yearly,
+            output=output,
+            fmt=format,
+        )
         if not combined:
             console.report([])
             return

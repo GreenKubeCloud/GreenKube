@@ -1,14 +1,18 @@
 # src/greenkube/core/db.py
 
 import sqlite3
+
 import psycopg2
+
 from .config import config
+
 
 class DatabaseManager:
     """
     Manages the connection to the database (SQLite or PostgreSQL).
     This class is primarily for relational database setup.
     """
+
     def __init__(self):
         self.db_type = config.DB_TYPE
         self.connection = None
@@ -56,7 +60,7 @@ class DatabaseManager:
             return
 
         cursor = self.connection.cursor()
-        
+
         # --- Table for carbon_intensity_history ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS carbon_intensity_history (
@@ -72,7 +76,7 @@ class DatabaseManager:
                 UNIQUE(zone, datetime)
             );
         """)
-        
+
         # --- Table for node_power_consumption ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS node_power_consumption (
@@ -83,7 +87,7 @@ class DatabaseManager:
                 UNIQUE(node_name, timestamp)
             );
         """)
-        
+
         # --- Table for pod_resource_usage ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pod_resource_usage (
@@ -96,18 +100,21 @@ class DatabaseManager:
                 UNIQUE(pod_name, namespace, timestamp)
             );
         """)
-        
+
         self.connection.commit()
         print("INFO: SQLite schema is up to date.")
 
+
 # Singleton instance of the DatabaseManager
 db_manager = DatabaseManager()
+
 
 def get_db_connection():
     """
     Provides global access to the database connection object.
     """
     return db_manager.get_connection()
+
 
 def close_db_connection():
     """

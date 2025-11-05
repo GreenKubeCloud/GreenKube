@@ -1,6 +1,7 @@
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict
+from typing import Any, Dict, List
 
 
 class BaseExporter(ABC):
@@ -8,6 +9,7 @@ class BaseExporter(ABC):
 
     Subclasses should provide a DEFAULT_FILENAME and implement `export`.
     """
+
     DEFAULT_FILENAME: str = "greenkube-report"
 
     @abstractmethod

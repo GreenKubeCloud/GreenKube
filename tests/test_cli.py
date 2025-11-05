@@ -2,24 +2,28 @@
 """
 Unit tests for the GreenKube Command-Line Interface (CLI).
 """
+
+from unittest.mock import ANY, MagicMock
+
 import pytest
 from typer.testing import CliRunner
-from unittest.mock import MagicMock, ANY
 
 from greenkube.cli import app
 from greenkube.models.metrics import CombinedMetric
 
 runner = CliRunner()
 
+
 @pytest.fixture
 def mock_reporter(mocker):
     """
     Fixture to patch ConsoleReporter and provide a mock instance.
     """
-    mock_reporter_class = mocker.patch('greenkube.cli.ConsoleReporter')
+    mock_reporter_class = mocker.patch("greenkube.cli.ConsoleReporter")
     mock_reporter_instance = MagicMock()
     mock_reporter_class.return_value = mock_reporter_instance
     return mock_reporter_instance
+
 
 @pytest.fixture
 def sample_combined_metrics():
@@ -33,7 +37,7 @@ def sample_combined_metrics():
             total_cost=1.0,
             co2e_grams=100.0,
             pue=1.5,
-            grid_intensity=200.0
+            grid_intensity=200.0,
         ),
         CombinedMetric(
             pod_name="pod-y",
@@ -41,47 +45,50 @@ def sample_combined_metrics():
             total_cost=2.0,
             co2e_grams=200.0,
             pue=1.6,
-            grid_intensity=210.0
+            grid_intensity=210.0,
         ),
     ]
+
 
 def test_report_success(mocker, mock_reporter, sample_combined_metrics):
     """
     Tests that the `greenkube report` command correctly calls the reporter with data.
     """
     # Patch the processor's run method to return controlled data
-    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+    mocker.patch("greenkube.cli.DataProcessor.run", return_value=sample_combined_metrics)
 
     result = runner.invoke(app, ["report"])
 
     assert result.exit_code == 0, "CLI should exit without errors"
     mock_reporter.report.assert_called_once_with(data=ANY)
-    reported_data = mock_reporter.report.call_args.kwargs['data']
+    reported_data = mock_reporter.report.call_args.kwargs["data"]
     assert isinstance(reported_data, list)
     assert all(isinstance(item, CombinedMetric) for item in reported_data)
     assert len(reported_data) == 2
+
 
 def test_report_with_namespace_filter_success(mocker, mock_reporter, sample_combined_metrics):
     """
     Tests that the CLI correctly filters data before passing it to the reporter.
     """
-    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+    mocker.patch("greenkube.cli.DataProcessor.run", return_value=sample_combined_metrics)
 
     result = runner.invoke(app, ["report", "--namespace", "monitoring"])
 
     assert result.exit_code == 0
     mock_reporter.report.assert_called_once_with(data=ANY)
-    reported_data = mock_reporter.report.call_args.kwargs['data']
+    reported_data = mock_reporter.report.call_args.kwargs["data"]
     # Only the metric with namespace "monitoring" should be present
     assert len(reported_data) == 1
     assert reported_data[0].namespace == "monitoring"
+
 
 def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metrics):
     """
     Tests that the CLI exits gracefully with a warning when a non-existent
     namespace is provided.
     """
-    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+    mocker.patch("greenkube.cli.DataProcessor.run", return_value=sample_combined_metrics)
 
     result = runner.invoke(app, ["report", "--namespace", "non-existent-ns"])
 
@@ -90,12 +97,13 @@ def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metri
     # Reporter should not be called when no data exists for the requested namespace
     mock_reporter.report.assert_not_called()
 
+
 def test_export_placeholder(mocker):
     """
     Tests the placeholder functionality of the `export` command.
     """
     # Patch the module logger and assert it is used for the placeholder message
-    mock_logger = mocker.patch('greenkube.cli.logger')
+    mock_logger = mocker.patch("greenkube.cli.logger")
     result = runner.invoke(app, ["export"])
     # Now exports actual data to disk; ensure exit_ok and that exporter logged the written path
     assert result.exit_code == 0
@@ -106,31 +114,36 @@ def test_export_placeholder(mocker):
 def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sample_combined_metrics):
     """Ensure `greenkube recommend` generates recommendations and calls reporter.report with recommendations."""
     # Patch DataProcessor.run to return data
-    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+    mocker.patch("greenkube.cli.DataProcessor.run", return_value=sample_combined_metrics)
 
     # Patch Recommender to return a sample recommendation list
-    sample_rec = mocker.patch('greenkube.cli.Recommender')
+    sample_rec = mocker.patch("greenkube.cli.Recommender")
     rec_instance = sample_rec.return_value
     rec_instance.generate_zombie_recommendations.return_value = [
-        mocker.MagicMock(pod_name='pod-y', namespace='monitoring', type=mocker.MagicMock(value='ZOMBIE_POD'), description='idle')
+        mocker.MagicMock(
+            pod_name="pod-y",
+            namespace="monitoring",
+            type=mocker.MagicMock(value="ZOMBIE_POD"),
+            description="idle",
+        )
     ]
     rec_instance.generate_rightsizing_recommendations.return_value = []
 
-    result = runner.invoke(app, ['recommend'])
+    result = runner.invoke(app, ["recommend"])
     assert result.exit_code == 0
     # ConsoleReporter.report should be called with data and recommendations
     mock_reporter.report.assert_called_once()
     # Validate that call included 'recommendations' keyword
     kwargs = mock_reporter.report.call_args.kwargs
-    assert 'recommendations' in kwargs
-    assert isinstance(kwargs['recommendations'], list)
+    assert "recommendations" in kwargs
+    assert isinstance(kwargs["recommendations"], list)
 
 
 def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_combined_metrics):
     """When namespace filter yields no data, recommend exits cleanly."""
-    mocker.patch('greenkube.cli.DataProcessor.run', return_value=sample_combined_metrics)
+    mocker.patch("greenkube.cli.DataProcessor.run", return_value=sample_combined_metrics)
 
-    result = runner.invoke(app, ['recommend', '--namespace', 'non-existent-ns'])
+    result = runner.invoke(app, ["recommend", "--namespace", "non-existent-ns"])
     assert result.exit_code == 0
     # Reporter shouldn't be called
     mock_reporter.report.assert_not_called()
@@ -140,11 +153,11 @@ def test_report_range_today_no_results(mocker, mock_reporter):
     """Tests the report-range --today path with no Prometheus results (mocked)."""
     # Mock requests.get used in report_range
     mock_resp = MagicMock()
-    mock_resp.json.return_value = {'data': {'result': []}}
+    mock_resp.json.return_value = {"data": {"result": []}}
     mock_resp.raise_for_status.return_value = None
-    mocker.patch('requests.get', return_value=mock_resp)
+    mocker.patch("requests.get", return_value=mock_resp)
 
-    result = runner.invoke(app, ['report-range', '--today'])
+    result = runner.invoke(app, ["report-range", "--today"])
     assert result.exit_code == 0
     # Reporter should have been called (with empty list)
     mock_reporter.report.assert_called_once()
@@ -152,30 +165,37 @@ def test_report_range_today_no_results(mocker, mock_reporter):
 
 def test_help_command_outputs_commands(capsys):
     """The dynamic help command should list available commands."""
-    result = runner.invoke(app, ['help'])
+    result = runner.invoke(app, ["help"])
     assert result.exit_code == 0
-    assert 'GreenKube available commands' in result.output
+    assert "GreenKube available commands" in result.output
 
 
 def test_unknown_command_shows_help():
     """When an unknown command is provided, the CLI should print help-like output."""
-    result = runner.invoke(app, ['no-such-command'])
+    result = runner.invoke(app, ["no-such-command"])
     # Our wrapper exits with non-zero for unknown commands but prints available commands
     assert result.exit_code != 0
-    assert 'GreenKube available commands' in result.output
+    assert "GreenKube available commands" in result.output
 
 
 def test_report_range_monthly_flag(mocker, mock_reporter):
     """Tests that --monthly aggregates are accepted and reporter called."""
     mock_resp = MagicMock()
     # Provide a single sample with ISO timestamps spanning two months
-    mock_resp.json.return_value = {'data': {'result': [
-        {'metric': {'namespace': 'default', 'pod': 'p1'}, 'values': [['1696118400', '0.1']]},
-    ]}}
+    mock_resp.json.return_value = {
+        "data": {
+            "result": [
+                {
+                    "metric": {"namespace": "default", "pod": "p1"},
+                    "values": [["1696118400", "0.1"]],
+                },
+            ]
+        }
+    }
     mock_resp.raise_for_status.return_value = None
-    mocker.patch('requests.get', return_value=mock_resp)
+    mocker.patch("requests.get", return_value=mock_resp)
 
-    result = runner.invoke(app, ['report-range', '--monthly'])
+    result = runner.invoke(app, ["report-range", "--monthly"])
     assert result.exit_code == 0
     mock_reporter.report.assert_called_once()
 
@@ -183,12 +203,19 @@ def test_report_range_monthly_flag(mocker, mock_reporter):
 def test_report_range_yearly_flag(mocker, mock_reporter):
     """Tests that --yearly aggregates are accepted and reporter called."""
     mock_resp = MagicMock()
-    mock_resp.json.return_value = {'data': {'result': [
-        {'metric': {'namespace': 'default', 'pod': 'p1'}, 'values': [['1696118400', '0.1']]},
-    ]}}
+    mock_resp.json.return_value = {
+        "data": {
+            "result": [
+                {
+                    "metric": {"namespace": "default", "pod": "p1"},
+                    "values": [["1696118400", "0.1"]],
+                },
+            ]
+        }
+    }
     mock_resp.raise_for_status.return_value = None
-    mocker.patch('requests.get', return_value=mock_resp)
+    mocker.patch("requests.get", return_value=mock_resp)
 
-    result = runner.invoke(app, ['report-range', '--yearly'])
+    result = runner.invoke(app, ["report-range", "--yearly"])
     assert result.exit_code == 0
     mock_reporter.report.assert_called_once()

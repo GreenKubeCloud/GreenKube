@@ -1,14 +1,17 @@
-import sqlite3
 import logging
+import sqlite3
+
 from .base_repository import CarbonIntensityRepository
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 
 class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     """
     Implementation of the repository for SQLite.
     Handles all database interactions for carbon intensity data.
     """
+
     def __init__(self, connection):
         """
         Initializes the repository with a database connection.
@@ -46,14 +49,13 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             logging.error(f"Unexpected error in get_for_zone_at_time: {e}")
             return None
 
-
     def save_history(self, history_data: list, zone: str) -> int:
         """
         Saves historical carbon intensity data to the SQLite database.
         It ignores records that would be duplicates based on zone and datetime.
         """
         if not self.conn:
-             # Use logging for errors
+            # Use logging for errors
             logging.error("SQLite connection is not available for save_history.")
             return 0
 
@@ -68,38 +70,39 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
             try:
                 # Use default value None if key is missing
-                cursor.execute("""
+                cursor.execute(
+                    """
                     INSERT INTO carbon_intensity_history
                         (zone, carbon_intensity, datetime, updated_at, created_at,
                          emission_factor_type, is_estimated, estimation_method)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(zone, datetime) DO NOTHING;
-                """, (
-                    zone,
-                    record.get('carbonIntensity'),
-                    record.get('datetime'),
-                    record.get('updatedAt'),
-                    record.get('createdAt'),
-                    record.get('emissionFactorType'),
-                    record.get('isEstimated'),
-                    record.get('estimationMethod')
-                ))
+                """,
+                    (
+                        zone,
+                        record.get("carbonIntensity"),
+                        record.get("datetime"),
+                        record.get("updatedAt"),
+                        record.get("createdAt"),
+                        record.get("emissionFactorType"),
+                        record.get("isEstimated"),
+                        record.get("estimationMethod"),
+                    ),
+                )
                 # cursor.rowcount will be 1 for a successful insert, 0 for conflict/no insert
                 saved_count += cursor.rowcount
             except sqlite3.Error as e:
-                 # Use logging for errors
+                # Use logging for errors
                 logging.error(f"Could not save record for zone {zone} at {record.get('datetime')}: {e}")
             except Exception as e:
                 # Catch potential errors from record.get() if record structure is unexpected
                 logging.error(f"Unexpected error processing record {record}: {e}")
-
 
         try:
             self.conn.commit()
         except sqlite3.Error as e:
             logging.error(f"Failed to commit transaction: {e}")
             # Depending on strategy, you might want to rollback or handle differently
-            return 0 # Indicate commit failure if necessary
+            return 0  # Indicate commit failure if necessary
 
         return saved_count
-

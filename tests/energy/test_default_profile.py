@@ -1,13 +1,15 @@
 # tests/energy/test_default_profile.py
 import pytest
-from greenkube.core.config import Config
+
 from greenkube.energy.estimator import BasicEstimator
-from greenkube.models.prometheus_metrics import PrometheusMetric, PodCPUUsage
+from greenkube.models.prometheus_metrics import PodCPUUsage, PrometheusMetric
+
 
 @pytest.fixture
 def mock_config():
     # Use the global config object and temporarily override defaults
     from greenkube.core.config import config as global_config
+
     old_vcores = global_config.DEFAULT_INSTANCE_VCORES
     old_min = global_config.DEFAULT_INSTANCE_MIN_WATTS
     old_max = global_config.DEFAULT_INSTANCE_MAX_WATTS
@@ -22,11 +24,12 @@ def mock_config():
         global_config.DEFAULT_INSTANCE_MIN_WATTS = old_min
         global_config.DEFAULT_INSTANCE_MAX_WATTS = old_max
 
+
 def test_default_profile_joules_used(mock_config):
     estimator = BasicEstimator(settings=mock_config)
 
     # Pod with 0.5 cores on node without instance label
-    pod = PodCPUUsage(namespace='test', pod='p1', container='c', node='node-x', cpu_usage_cores=0.5)
+    pod = PodCPUUsage(namespace="test", pod="p1", container="c", node="node-x", cpu_usage_cores=0.5)
     metrics = PrometheusMetric(pod_cpu_usage=[pod], node_instance_types=[])
 
     results = estimator.estimate(metrics)
@@ -40,8 +43,10 @@ def test_default_profile_joules_used(mock_config):
 
     assert results[0].joules == pytest.approx(expected_joules)
 
+
 def test_configurable_defaults_affect_estimate():
     from greenkube.core.config import config as global_config
+
     old_vcores = global_config.DEFAULT_INSTANCE_VCORES
     old_min = global_config.DEFAULT_INSTANCE_MIN_WATTS
     old_max = global_config.DEFAULT_INSTANCE_MAX_WATTS
@@ -52,7 +57,13 @@ def test_configurable_defaults_affect_estimate():
         global_config.DEFAULT_INSTANCE_MAX_WATTS = 5.0
 
         estimator = BasicEstimator(settings=global_config)
-        pod = PodCPUUsage(namespace='test', pod='p2', container='c', node='node-y', cpu_usage_cores=0.5)
+        pod = PodCPUUsage(
+            namespace="test",
+            pod="p2",
+            container="c",
+            node="node-y",
+            cpu_usage_cores=0.5,
+        )
         metrics = PrometheusMetric(pod_cpu_usage=[pod], node_instance_types=[])
 
         results = estimator.estimate(metrics)

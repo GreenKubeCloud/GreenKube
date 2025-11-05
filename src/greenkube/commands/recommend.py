@@ -1,8 +1,8 @@
-import typer
-from typing_extensions import Annotated
-from typing import Optional
 import logging
 import traceback
+
+import typer
+from typing_extensions import Annotated
 
 from ..reporters.console_reporter import ConsoleReporter
 
@@ -12,11 +12,12 @@ app = typer.Typer(name="recommend", help="Generate optimization recommendations.
 
 @app.command()
 def recommend(
-    namespace: Annotated[str, typer.Option(help="Display recommendations for a specific namespace.")] = None
+    namespace: Annotated[str, typer.Option(help="Display recommendations for a specific namespace.")] = None,
 ):
     try:
         from ..cli import get_processor
         from ..core.recommender import Recommender
+
         processor = get_processor()
         combined_data = processor.run()
         if not combined_data:
@@ -26,7 +27,9 @@ def recommend(
             if not combined_data:
                 raise typer.Exit(code=0)
         recommender = Recommender()
-        recs = recommender.generate_zombie_recommendations(combined_data) + recommender.generate_rightsizing_recommendations(combined_data)
+        recs = recommender.generate_zombie_recommendations(
+            combined_data
+        ) + recommender.generate_rightsizing_recommendations(combined_data)
         console = ConsoleReporter()
         if not recs:
             return

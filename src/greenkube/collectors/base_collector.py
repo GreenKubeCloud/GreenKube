@@ -5,13 +5,16 @@ Enforcing this interface ensures that all collectors have a consistent
 method signature, making them interchangeable and easy to manage by the
 core processing logic.
 """
+
 from abc import ABC, abstractmethod
-from typing import List, Any
+from typing import Any, List
+
 
 class BaseCollector(ABC):
     """
     Abstract Base Class for all metric collectors.
     """
+
     @abstractmethod
     def collect(self) -> List[Any]:
         """
@@ -20,4 +23,3 @@ class BaseCollector(ABC):
         Pydantic models.
         """
         pass
-

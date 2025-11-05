@@ -1,16 +1,16 @@
 # tests/integration/test_prometheus_k8s_integration.py
 
-import pytest
-from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
-from src.greenkube.collectors.prometheus_collector import PrometheusCollector
+import pytest
+
 from src.greenkube.collectors.node_collector import NodeCollector
-from src.greenkube.core.processor import DataProcessor
-from src.greenkube.core.calculator import CarbonCalculator, CarbonCalculationResult
+from src.greenkube.collectors.prometheus_collector import PrometheusCollector
+from src.greenkube.core.calculator import CarbonCalculator
 from src.greenkube.core.config import config
+from src.greenkube.core.processor import DataProcessor
 from src.greenkube.models.prometheus_metrics import PrometheusMetric
-from src.greenkube.energy.estimator import BasicEstimator
 
 
 class DummyConfig:
@@ -29,8 +29,16 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     sample_ts = datetime.now(timezone.utc).replace(minute=23, second=12, microsecond=0).isoformat()
 
     pod_series = {
-        "metric": {"namespace": "default", "pod": "p1", "container": "c1", "node": "node-1"},
-        "value": [int(sample_ts.replace('-', '').replace(':','').split('T')[0]), "0.5"]
+        "metric": {
+            "namespace": "default",
+            "pod": "p1",
+            "container": "c1",
+            "node": "node-1",
+        },
+        "value": [
+            int(sample_ts.replace("-", "").replace(":", "").split("T")[0]),
+            "0.5",
+        ],
     }
 
     prom_metric = PrometheusMetric()
@@ -39,18 +47,22 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
 
     # Patch the collector methods
     collector = PrometheusCollector(dummy_config)
-    monkeypatch.setattr(collector, '_query_prometheus', lambda q: [pod_series] if 'container_cpu_usage_seconds_total' in q else [])
+    monkeypatch.setattr(
+        collector,
+        "_query_prometheus",
+        lambda q: [pod_series] if "container_cpu_usage_seconds_total" in q else [],
+    )
 
     # Mock NodeCollector to return instance types
     node_collector = NodeCollector()
-    monkeypatch.setattr(node_collector, 'collect_instance_types', lambda: {'node-1': 'm5.large'})
-    monkeypatch.setattr(node_collector, 'collect', lambda: {'node-1': 'gcp-us-east1-a'})
+    monkeypatch.setattr(node_collector, "collect_instance_types", lambda: {"node-1": "m5.large"})
+    monkeypatch.setattr(node_collector, "collect", lambda: {"node-1": "gcp-us-east1-a"})
 
     # Mock repository to return a known intensity for the normalized hour
     class DummyRepo:
         def get_for_zone_at_time(self, zone, timestamp):
             # We expect timestamp normalized to the hour
-            assert timestamp.endswith('00:00+00:00') or timestamp.endswith('00:00+00:00')
+            assert timestamp.endswith("00:00+00:00") or timestamp.endswith("00:00+00:00")
             return 120.0
 
     repository = DummyRepo()
@@ -62,11 +74,18 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     # a single EnergyMetric with a known joules value and timestamp so we can
     # assert final CombinedMetric values.
     from src.greenkube.models.metrics import EnergyMetric
+
     est = MagicMock()
     sample_dt = datetime.now(timezone.utc).replace(minute=23, second=12, microsecond=0)
     # Use 3.6e6 Joules == 1 kWh, simplifies math
-    energy_metric = EnergyMetric(pod_name='p1', namespace='default', joules=3.6e6, timestamp=sample_dt.isoformat(), node='node-1')
-    est.estimate.return_value = [energy_metric]
+    _energy_metric = EnergyMetric(
+        pod_name="p1",
+        namespace="default",
+        joules=3.6e6,
+        timestamp=sample_dt.isoformat(),
+        node="node-1",
+    )
+    est.estimate.return_value = [_energy_metric]
 
     # OpenCost and PodCollector mocks
     opencost = MagicMock()
@@ -81,14 +100,14 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         pod_collector=pod_collector,
         repository=repository,
         calculator=calc,
-    estimator=est,
+        estimator=est,
     )
 
     # Run the processing pipeline; we expect it to run without exceptions and produce 1 or 0 combined metrics
     combined = dp.run()
     # The important assertions: repository should have been queried using the normalized hour
     normalized_hour = sample_dt.replace(minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
-    cache_key = ('FR', normalized_hour)
+    cache_key = ("FR", normalized_hour)
     assert cache_key in calc._intensity_cache
 
     # Ensure a CombinedMetric was produced and contains expected intensity and co2e
@@ -108,23 +127,34 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
 
     # Prepare a single energy metric
     from src.greenkube.models.metrics import EnergyMetric
+
     sample_dt = datetime.now(timezone.utc).replace(hour=10, minute=23, second=12, microsecond=0)
-    energy_metric = EnergyMetric(pod_name='p1', namespace='default', joules=3.6e6, timestamp=sample_dt.isoformat(), node='node-1')
+    _energy_metric = EnergyMetric(
+        pod_name="p1",
+        namespace="default",
+        joules=3.6e6,
+        timestamp=sample_dt.isoformat(),
+        node="node-1",
+    )
 
     class DummyRepoDay:
         def get_for_zone_at_time(self, zone, timestamp):
             # For 'day' we expect midnight normalization
-            assert timestamp.endswith('00:00:00+00:00') or 'T00:00:00' in timestamp
+            assert timestamp.endswith("00:00:00+00:00") or "T00:00:00" in timestamp
             return 200.0
 
     # Day granularity (use monkeypatch to avoid global state leakage)
-    monkeypatch.setattr(core_config, 'NORMALIZATION_GRANULARITY', 'day')
+    monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "day")
     # Also ensure the config object referenced inside the calculator module
     # uses the same granularity (some modules may hold a reference).
-    monkeypatch.setattr('src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY', 'day', raising=False)
+    monkeypatch.setattr(
+        "src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
+        "day",
+        raising=False,
+    )
     calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE)
     # Directly call calculate_emissions
-    res = calc_day.calculate_emissions(3.6e6, 'FR', sample_dt.isoformat())
+    res = calc_day.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res.grid_intensity == 200.0
 
     # None granularity (no normalization) should call repository with exact timestamp
@@ -134,8 +164,12 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
             assert timestamp.startswith(sample_dt.replace(tzinfo=timezone.utc).isoformat()[:13])
             return 250.0
 
-    monkeypatch.setattr(core_config, 'NORMALIZATION_GRANULARITY', 'none')
-    monkeypatch.setattr('src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY', 'none', raising=False)
+    monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "none")
+    monkeypatch.setattr(
+        "src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
+        "none",
+        raising=False,
+    )
     calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE)
-    res2 = calc_none.calculate_emissions(3.6e6, 'FR', sample_dt.isoformat())
+    res2 = calc_none.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res2.grid_intensity == 250.0

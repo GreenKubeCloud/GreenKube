@@ -2,14 +2,15 @@
 """
 A reporter that displays the final data in a formatted table in the console.
 """
-from typing import List, Optional
-import typer
+
+import logging
+from typing import List
+
 from rich.console import Console
 from rich.table import Table
-import logging
 
-from .base_reporter import BaseReporter
 from ..models.metrics import CombinedMetric, Recommendation, RecommendationType
+from .base_reporter import BaseReporter
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,17 @@ class ConsoleReporter(BaseReporter):
     """
     Renders FinGreenOps data to the console using the 'rich' library.
     """
+
     def __init__(self):
         self.console = Console()
 
-    def report(self, data: List[CombinedMetric], group_by: str = "namespace", sort_by: str = "cost", recommendations=None):
+    def report(
+        self,
+        data: List[CombinedMetric],
+        group_by: str = "namespace",
+        sort_by: str = "cost",
+        recommendations=None,
+    ):
         """
         Displays the combined metrics in a rich, detailed table.
         Shows CPU and Memory requests in the report.
@@ -33,9 +41,13 @@ class ConsoleReporter(BaseReporter):
                 self.report_recommendations(recommendations)
             return
 
-        table = Table(title="GreenKube FinGreenOps Report", header_style="bold magenta", show_lines=True)
+        table = Table(
+            title="GreenKube FinGreenOps Report",
+            header_style="bold magenta",
+            show_lines=True,
+        )
         # If any item has a period, include a Period column
-        has_period = any(getattr(item, 'period', None) for item in data)
+        has_period = any(getattr(item, "period", None) for item in data)
         table.add_column("Pod Name", style="cyan")
         table.add_column("Namespace", style="cyan")
         if has_period:
@@ -51,7 +63,7 @@ class ConsoleReporter(BaseReporter):
         # Aggregate by (namespace, pod, period) when period is present, otherwise by (namespace, pod)
         aggregated = {}
         for item in data:
-            period = getattr(item, 'period', None)
+            period = getattr(item, "period", None)
             if period:
                 key = (item.namespace, item.pod_name, period)
             else:
@@ -90,15 +102,17 @@ class ConsoleReporter(BaseReporter):
             ]
             if has_period:
                 row.append(period or "")
-            row.extend([
-                f"{item['cost']:.4f}",
-                f"{item['co2e']:.2f}",
-                f"{item['joules']:.0f}",
-                f"{item['cpu_req']}",
-                f"{mem_mib:.1f}",
-                f"{item['intensity']:.2f}",
-                f"{item['pue']:.2f}",
-            ])
+            row.extend(
+                [
+                    f"{item['cost']:.4f}",
+                    f"{item['co2e']:.2f}",
+                    f"{item['joules']:.0f}",
+                    f"{item['cpu_req']}",
+                    f"{mem_mib:.1f}",
+                    f"{item['intensity']:.2f}",
+                    f"{item['pue']:.2f}",
+                ]
+            )
 
             table.add_row(*row)
 
@@ -112,18 +126,29 @@ class ConsoleReporter(BaseReporter):
             self.console.print("No recommendations to display.", style="green")
             return
 
-        table = Table(title="GreenKube Optimization Recommendations", header_style="bold magenta", show_lines=True)
+        table = Table(
+            title="GreenKube Optimization Recommendations",
+            header_style="bold magenta",
+            show_lines=True,
+        )
         table.add_column("Type", style="bold")
         table.add_column("Namespace", style="cyan")
         table.add_column("Pod Name", style="cyan")
         table.add_column("Recommendation", style="white")
 
         # Sort by type, namespace, pod
-        sorted_recs = sorted(recommendations, key=lambda r: (r.type.value if hasattr(r.type, 'value') else str(r.type), r.namespace, r.pod_name))
+        sorted_recs = sorted(
+            recommendations,
+            key=lambda r: (
+                r.type.value if hasattr(r.type, "value") else str(r.type),
+                r.namespace,
+                r.pod_name,
+            ),
+        )
 
         for rec in sorted_recs:
             style = "white"
-            type_str = rec.type.value if hasattr(rec.type, 'value') else str(rec.type)
+            type_str = rec.type.value if hasattr(rec.type, "value") else str(rec.type)
             if rec.type == RecommendationType.ZOMBIE_POD:
                 style = "bold yellow"
                 type_str = f"🧟 {type_str}"
@@ -134,5 +159,3 @@ class ConsoleReporter(BaseReporter):
             table.add_row(f"[{style}]{type_str}[/]", rec.namespace, rec.pod_name, rec.description)
 
         self.console.print(table)
-
-

@@ -1,22 +1,28 @@
 # tests/core/test_calculator.py
 
-import pytest
 from unittest.mock import MagicMock
-from src.greenkube.core.calculator import CarbonCalculator, CarbonCalculationResult
+
+import pytest
+
+from src.greenkube.core.calculator import CarbonCalculator
+
 # --- Import the config object ---
 from src.greenkube.core.config import config
+
 # --------------------------------
 
 # Define constants for tests
-TEST_ZONE = 'FR'
+TEST_ZONE = "FR"
 TEST_TIMESTAMP = "2023-10-27T10:00:00Z"
-TEST_JOULES = config.JOULES_PER_KWH * 2 # Equivalent to 2 kWh
-TEST_INTENSITY = 150.0 # gCO2e/kWh
+TEST_JOULES = config.JOULES_PER_KWH * 2  # Equivalent to 2 kWh
+TEST_INTENSITY = 150.0  # gCO2e/kWh
+
 
 @pytest.fixture
 def mock_repository():
-    """ Creates a mock for the CarbonIntensityRepository. """
+    """Creates a mock for the CarbonIntensityRepository."""
     return MagicMock()
+
 
 def test_calculate_emissions_success(mock_repository):
     """
@@ -29,11 +35,7 @@ def test_calculate_emissions_success(mock_repository):
     # -----------------------------------------------
 
     # Act
-    result = calculator.calculate_emissions(
-        joules=TEST_JOULES,
-        zone=TEST_ZONE,
-        timestamp=TEST_TIMESTAMP
-    )
+    result = calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
 
     # Assert
     # 1. Verify repository call
@@ -44,8 +46,9 @@ def test_calculate_emissions_success(mock_repository):
     # Energy after PUE = 2 kWh * config.DEFAULT_PUE (e.g., 1.5) = 3 kWh
     # CO2e = 3 kWh * 150 gCO2e/kWh = 450 g
     expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * TEST_INTENSITY
-    assert result.co2e_grams == pytest.approx(expected_co2e) # Use approx for floats
+    assert result.co2e_grams == pytest.approx(expected_co2e)  # Use approx for floats
     assert result.grid_intensity == TEST_INTENSITY
+
 
 def test_calculate_emissions_no_intensity_data(mock_repository):
     """
@@ -53,18 +56,14 @@ def test_calculate_emissions_no_intensity_data(mock_repository):
     DEFAULT_INTENSITY when carbon intensity data is unavailable.
     """
     # Arrange
-    mock_repository.get_for_zone_at_time.return_value = None # Simulate missing data
+    mock_repository.get_for_zone_at_time.return_value = None  # Simulate missing data
     # --- Use config.DEFAULT_PUE for initialization ---
     calculator = CarbonCalculator(repository=mock_repository, pue=config.DEFAULT_PUE)
     # -----------------------------------------------
     # --- Removed the hardcoded effective_default_intensity variable ---
 
     # Act
-    result = calculator.calculate_emissions(
-        joules=TEST_JOULES,
-        zone=TEST_ZONE,
-        timestamp=TEST_TIMESTAMP
-    )
+    result = calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
 
     # Assert
     # 1. Verify repository call
@@ -77,6 +76,7 @@ def test_calculate_emissions_no_intensity_data(mock_repository):
     # --- Check against config.DEFAULT_INTENSITY ---
     assert result.grid_intensity == config.DEFAULT_INTENSITY
     # -------------------------------------------
+
 
 def test_calculate_emissions_zero_joules(mock_repository):
     """
@@ -91,9 +91,9 @@ def test_calculate_emissions_zero_joules(mock_repository):
 
     # Act
     result = calculator.calculate_emissions(
-        joules=0.1, # Zero consumption
+        joules=0.1,  # Zero consumption
         zone=TEST_ZONE,
-        timestamp=TEST_TIMESTAMP
+        timestamp=TEST_TIMESTAMP,
     )
 
     # Assert
@@ -105,4 +105,3 @@ def test_calculate_emissions_zero_joules(mock_repository):
     assert result.co2e_grams == pytest.approx(expected_co2e_zero_joules)
     # Grid intensity is still reported
     assert result.grid_intensity == TEST_INTENSITY
-
