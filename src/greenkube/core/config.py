@@ -17,18 +17,28 @@ class Config:
     """
     # --- Default variables ---
     DEFAULT_COST = 0.0
-    # CLOUD_PROVIDER selects which datacenter PUE profile to use. Expected values: 'aws', 'gcp', 'azure', 'ovh'
-    CLOUD_PROVIDER = os.getenv("CLOUD_PROVIDER", "aws").lower()
+    # CLOUD_PROVIDER and DEFAULT_PUE are provided as properties so their
+    # values are resolved at access time (reading environment variables and
+    # DATACENTER_PUE_PROFILES). This avoids binding a stale value at import
+    # time and lets callers create calculators after changing env vars.
+    @property
+    def CLOUD_PROVIDER(self) -> str:
+        return os.getenv("CLOUD_PROVIDER", "aws").lower()
 
-    # Build profile key and resolve DEFAULT_PUE from DATACENTER_PUE_PROFILES with a safe fallback
-    _profile_key = f"default_{CLOUD_PROVIDER}"
-    DEFAULT_PUE = DATACENTER_PUE_PROFILES.get(_profile_key, float(os.getenv("DEFAULT_PUE", 1.3)))
-    if _profile_key not in DATACENTER_PUE_PROFILES:
-        logging.getLogger(__name__).warning(
-            "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
-            CLOUD_PROVIDER,
-            DEFAULT_PUE,
-        )
+    @property
+    def DEFAULT_PUE(self) -> float:
+        # Resolve profile key dynamically
+        profile_key = f"default_{self.CLOUD_PROVIDER}"
+        pue = DATACENTER_PUE_PROFILES.get(profile_key)
+        if pue is None:
+            fallback = float(os.getenv("DEFAULT_PUE", 1.3))
+            logging.getLogger(__name__).warning(
+                "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
+                self.CLOUD_PROVIDER,
+                fallback,
+            )
+            return fallback
+        return pue
     DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
     DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 0.1))
     JOULES_PER_KWH = 3.6e6

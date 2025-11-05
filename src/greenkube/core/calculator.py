@@ -1,6 +1,7 @@
 # src/greenkube/core/calculator.py
 
 from dataclasses import dataclass
+from typing import Optional
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
 from datetime import datetime, timezone
@@ -42,16 +43,23 @@ class CarbonCalculationResult:
 class CarbonCalculator:
     """Calculates CO2e emissions based on energy consumption and grid carbon intensity."""
 
-    def __init__(self, repository: CarbonIntensityRepository, pue: float = config.DEFAULT_PUE):
+    def __init__(self, repository: CarbonIntensityRepository, pue: Optional[float] = None):
         """Initialize with a repository and optional PUE.
 
         A small in-memory cache is used to avoid repeated repository/API calls
         for the same (zone, timestamp) during a single run.
         """
+        # Store repository
         self.repository = repository
-        self.pue = pue
 
-        # Simple per-run cache: key = (zone, timestamp) -> intensity value (float or None)
+        # Resolve PUE at construction time so changes to config (or env-selected
+        # profiles) are picked up when the calculator is instantiated. If the
+        # caller explicitly provides a pue value, use it; otherwise fall back
+        # to the current value of config.DEFAULT_PUE.
+        self.pue = pue if pue is not None else config.DEFAULT_PUE
+
+        # Simple per-run cache: key = (zone, timestamp) -> intensity value
+        # (float or None)
         self._intensity_cache = {}
 
     def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> CarbonCalculationResult:

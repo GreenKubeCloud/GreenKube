@@ -97,8 +97,9 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         cm = combined[0]
         # grid_intensity should come from repository (120.0)
         assert cm.grid_intensity == 120.0
-        # joules -> kWh = 1, * pue (DEFAULT_PUE) = 1.5, * intensity 120 = 180 g CO2e
-        assert pytest.approx(cm.co2e_grams, rel=1e-6) == 180.0
+    # joules -> kWh = 1, * pue (DEFAULT_PUE) * intensity 120 = expected g CO2e
+    expected_co2e = (3.6e6 / config.JOULES_PER_KWH) * config.DEFAULT_PUE * 120.0
+    assert pytest.approx(cm.co2e_grams, rel=1e-6) == expected_co2e
 
 
 def test_normalization_day_and_none(monkeypatch, dummy_config):
@@ -116,11 +117,12 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
             assert timestamp.endswith('00:00:00+00:00') or 'T00:00:00' in timestamp
             return 200.0
 
-    # Day granularity
-    core_config.NORMALIZATION_GRANULARITY = 'day'
+    # Day granularity (use monkeypatch to avoid global state leakage)
+    monkeypatch.setattr(core_config, 'NORMALIZATION_GRANULARITY', 'day')
+    # Also ensure the config object referenced inside the calculator module
+    # uses the same granularity (some modules may hold a reference).
+    monkeypatch.setattr('src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY', 'day', raising=False)
     calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE)
-    # Simulate DataProcessor pre-populating cache
-    dp_day = MagicMock()
     # Directly call calculate_emissions
     res = calc_day.calculate_emissions(3.6e6, 'FR', sample_dt.isoformat())
     assert res.grid_intensity == 200.0
@@ -132,7 +134,8 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
             assert timestamp.startswith(sample_dt.replace(tzinfo=timezone.utc).isoformat()[:13])
             return 250.0
 
-    core_config.NORMALIZATION_GRANULARITY = 'none'
+    monkeypatch.setattr(core_config, 'NORMALIZATION_GRANULARITY', 'none')
+    monkeypatch.setattr('src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY', 'none', raising=False)
     calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE)
     res2 = calc_none.calculate_emissions(3.6e6, 'FR', sample_dt.isoformat())
     assert res2.grid_intensity == 250.0
