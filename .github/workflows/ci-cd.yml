@@ -30,8 +30,10 @@ jobs:
 
       - name: Lint for hardcoded secrets
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
         with:
-          fail: true
+          continue-on-error: false
 
       - name: Lint with Ruff
         run: |
