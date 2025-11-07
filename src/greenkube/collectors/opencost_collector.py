@@ -10,6 +10,8 @@ from typing import List
 
 import requests
 
+from greenkube.collectors.discovery.opencost import OpenCostDiscovery
+
 from ..core.config import config
 from ..models.metrics import CostMetric
 from .base_collector import BaseCollector
@@ -105,3 +107,35 @@ class OpenCostCollector(BaseCollector):
         # If the OpenCost API supported a range, we'd pass start/end params.
         # For now, keep behavior identical to collect(), returning latest window.
         return self.collect()
+
+    def is_available(self) -> bool:
+        """
+        Quick probe to check if the OpenCost API URL is reachable and returns a
+        2xx response. Returns True when reachable, False otherwise.
+        """
+        url = getattr(config, "OPENCOST_API_URL", None)
+
+        def _probe(u: str) -> bool:
+            try:
+                resp = requests.get(u, timeout=5, verify=False)
+                return 200 <= resp.status_code < 300
+            except Exception:
+                return False
+
+        if url and _probe(url):
+            logger.debug("OpenCost API is available at %s", url)
+            return True
+
+        # try discovery
+        try:
+            od = OpenCostDiscovery()
+            discovered = od.discover()
+            if discovered and _probe(discovered):
+                # update the config so subsequent calls use discovered URL
+                setattr(config, "OPENCOST_API_URL", discovered)
+                return True
+        except Exception:
+            logger.debug("OpenCost discovery/probe failed")
+
+        logger.debug("OpenCost API is not available")
+        return False
