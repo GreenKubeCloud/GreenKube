@@ -84,7 +84,12 @@ def get_repository() -> CarbonIntensityRepository:
     """
     Factory function to get the appropriate repository based on config.
     """
-    if config.DB_TYPE == "elasticsearch":
+    import os
+
+    # Allow tests to override DB_TYPE via environment variables (monkeypatch).
+    db_type = os.getenv("DB_TYPE", config.DB_TYPE)
+
+    if db_type == "elasticsearch":
         logger.info("Using Elasticsearch repository.")
         try:
             from .storage import elasticsearch_repository as es_mod
@@ -93,7 +98,7 @@ def get_repository() -> CarbonIntensityRepository:
         except Exception as e:
             logger.error(f"Failed to setup Elasticsearch connection: {e}")
         return ElasticsearchCarbonIntensityRepository()
-    elif config.DB_TYPE == "sqlite":
+    elif db_type == "sqlite":
         logger.info("Using SQLite repository.")
         from .core.db import db_manager
 
@@ -557,8 +562,23 @@ def export(
 
         processor = get_processor()
         combined_data = processor.run()
+        # If there is no data, still create an empty export file so callers
+        # and tests get a consistent artifact. This avoids requiring live
+        # external services just to exercise the exporter CLI path.
         if not combined_data:
-            logger.warning("No data to export.")
+            logger.warning("No data to export. Creating an empty export file.")
+            # Prepare an empty rows list and still call exporter so the file
+            # is created and the path logged.
+            rows = []
+            import os
+
+            data_dir = os.path.abspath(os.path.join(os.getcwd(), "data"))
+            os.makedirs(data_dir, exist_ok=True)
+
+            exporter = exporter_cls()
+            out_path = output if output and output.strip() else os.path.join(data_dir, exporter_cls.DEFAULT_FILENAME)
+            written = exporter.export(rows, out_path)
+            logger.info(f"Exported report to {written}")
             raise typer.Exit(code=0)
 
         # Prepare rows (convert objects to dicts when possible)

@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.greenkube.collectors.node_collector import NodeCollector
 from src.greenkube.collectors.prometheus_collector import PrometheusCollector
 from src.greenkube.core.calculator import CarbonCalculator
 from src.greenkube.core.config import config
@@ -53,10 +52,15 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         lambda q: [pod_series] if "container_cpu_usage_seconds_total" in q else [],
     )
 
-    # Mock NodeCollector to return instance types
-    node_collector = NodeCollector()
-    monkeypatch.setattr(node_collector, "collect_instance_types", lambda: {"node-1": "m5.large"})
-    monkeypatch.setattr(node_collector, "collect", lambda: {"node-1": "gcp-us-east1-a"})
+    # Provide a dummy NodeCollector-like object so tests don't require a live cluster
+    class DummyNodeCollector:
+        def collect_instance_types(self):
+            return {"node-1": "m5.large"}
+
+        def collect(self):
+            return {"node-1": "gcp-us-east1-a"}
+
+    node_collector = DummyNodeCollector()
 
     # Mock repository to return a known intensity for the normalized hour
     class DummyRepo:

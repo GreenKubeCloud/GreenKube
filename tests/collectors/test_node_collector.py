@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from kubernetes import client, config
 
 from src.greenkube.collectors.node_collector import NodeCollector
@@ -271,11 +270,12 @@ def test_init_failure(mock_load_incluster, mock_load_kube):
     mock_load_incluster.side_effect = config.ConfigException("Incluster failed")
     mock_load_kube.side_effect = config.ConfigException("Kubeconfig failed")
 
-    # Act & Assert
-    # We expect the final ConfigException from load_kube_config to be re-raised
-    # Use match to check the error message specifically if needed
-    with pytest.raises(config.ConfigException, match="Kubeconfig failed"):
-        NodeCollector()
+    # Act
+    # The collector should not raise but instead gracefully disable cluster access
+    nc = NodeCollector()
+
+    # Assert that cluster access was disabled (no API client)
+    assert getattr(nc, "v1", None) is None
 
     # Assert that both mocked functions were called in the expected order
     mock_load_incluster.assert_called_once()

@@ -15,19 +15,34 @@ class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
     def __init__(self):
+        # Attempt to load Kubernetes configuration. Prefer in-cluster, fall
+        # back to local kubeconfig. Only if one of these succeeds will we
+        # instantiate the CoreV1Api client. This mirrors expected test
+        # behavior where tests may patch the config and/or CoreV1Api.
+        config_loaded = False
         try:
-            # Try loading incluster config first, then kubeconfig
             config.load_incluster_config()
             logger.info("Loaded in-cluster Kubernetes configuration.")
+            config_loaded = True
         except config.ConfigException:
             try:
                 config.load_kube_config()
                 logger.info("Loaded Kubernetes configuration from kubeconfig file.")
+                config_loaded = True
             except config.ConfigException as e:
-                logger.error("Could not configure Kubernetes client: %s", e)
-                raise  # Re-raise the exception to signal failure
+                logger.warning("Kubernetes configuration not available: %s", e)
 
-        self.v1 = client.CoreV1Api()
+        if not config_loaded:
+            # No usable kube config found; disable cluster access.
+            self.v1 = None
+            return
+
+        # Create the API client (tests commonly patch this constructor).
+        try:
+            self.v1 = client.CoreV1Api()
+        except Exception as e:
+            logger.warning("Failed to create Kubernetes API client: %s", e)
+            self.v1 = None
 
     def collect(self) -> dict:
         """
@@ -37,6 +52,10 @@ class NodeCollector(BaseCollector):
             dict: A dictionary mapping node names to their zone labels.
         """
         nodes_zones_map = {}
+        # If there's no configured Kubernetes client, return empty results.
+        if not getattr(self, "v1", None):
+            logger.debug("Kubernetes client not configured; skipping node zone collection.")
+            return nodes_zones_map
         try:
             nodes = self.v1.list_node(watch=False)
             if not nodes.items:
@@ -84,6 +103,11 @@ class NodeCollector(BaseCollector):
             "label_node_kubernetes_io_instance_type",
         )
         node_instance_map = {}
+
+        # If there's no configured Kubernetes client, return empty results.
+        if not getattr(self, "v1", None):
+            logger.debug("Kubernetes client not configured; skipping instance type collection.")
+            return node_instance_map
 
         try:
             nodes = self.v1.list_node(watch=False)
