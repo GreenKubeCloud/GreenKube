@@ -12,6 +12,7 @@ import requests
 from pydantic import ValidationError
 
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
 from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
     NodeInstanceType,
@@ -219,7 +220,126 @@ class PrometheusCollector(BaseCollector):
             logger.error("All Prometheus query endpoints failed. Last error: %s", last_err)
         else:
             logger.error("Prometheus queries returned no results for query: %s", query)
+
+        # Attempt discovery once when configured endpoints fail. This helps when
+        # the default PROMETHEUS_URL is stale but the cluster contains a
+        # prometheus service (we prefer cluster service discovery over using
+        # an ingress URL here).
+        try:
+            pd = PrometheusDiscovery()
+            discovered = pd.discover()
+            if discovered and discovered != self.base_url:
+                logger.info("Prometheus discovery returned %s; retrying queries", discovered)
+                # update base_url and retry the candidate queries once
+                self.base_url = discovered
+                base = self.base_url.rstrip("/")
+                candidates = [
+                    f"{base}/api/v1/query",
+                    f"{base}/query",
+                    f"{base}/prometheus/api/v1/query",
+                ]
+
+                for query_url in candidates:
+                    try:
+                        logger.info("Querying Prometheus at %s", query_url)
+                        response = requests.get(
+                            query_url,
+                            params=params,
+                            headers=headers,
+                            auth=auth,
+                            timeout=self.timeout,
+                            verify=self.verify,
+                        )
+                        response.raise_for_status()
+
+                        data = response.json()
+                        if data.get("status") != "success":
+                            logger.warning(
+                                "Prometheus returned non-success status for %s: %s",
+                                query_url,
+                                data.get("error", "Unknown"),
+                            )
+                            continue
+
+                        results = data.get("data", {}).get("result", [])
+                        logger.info("Prometheus at %s returned %d result(s)", query_url, len(results))
+                        return results
+
+                    except requests.exceptions.SSLError as e:
+                        last_err = e
+                        logger.warning("TLS/SSL error querying Prometheus at %s: %s", query_url, e)
+                        continue
+                    except requests.exceptions.RequestException as e:
+                        last_err = e
+                        logger.debug("Failed to connect to Prometheus at %s: %s", query_url, e)
+                        continue
+                    except Exception as e:
+                        last_err = e
+                        logger.error("Unexpected error querying Prometheus at %s: %s", query_url, e)
+                        continue
+        except Exception:
+            logger.debug("Prometheus discovery attempt failed or returned no candidate")
+
         return []
+
+    def is_available(self) -> bool:
+        """
+        Probe Prometheus endpoints quickly to determine availability.
+
+        Returns True if at least one candidate query endpoint responds with
+        a success-like payload (HTTP 200 and JSON with status 'success').
+        If no configured base URL is reachable, attempt cluster service
+        discovery and probe the discovered DNS endpoint.
+        """
+
+        def _probe(u: str) -> bool:
+            base = u.rstrip("/")
+            candidates = [
+                f"{base}/api/v1/query",
+                f"{base}/query",
+                f"{base}/prometheus/api/v1/query",
+            ]
+
+            headers = {}
+            if self.bearer_token:
+                headers["Authorization"] = f"Bearer {self.bearer_token}"
+
+            auth = None
+            if self.username and self.password:
+                auth = (self.username, self.password)
+
+            params = {"query": "up"}
+
+            for url in candidates:
+                try:
+                    resp = requests.get(url, params=params, headers=headers, auth=auth, timeout=3, verify=self.verify)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if data.get("status") == "success":
+                        logger.debug("Prometheus is available at %s", url)
+                        return True
+                except Exception:
+                    logger.debug("Prometheus probe failed for %s", url)
+                    continue
+            return False
+
+        # If configured URL works, we're good
+        if self.base_url and _probe(self.base_url):
+            return True
+
+        # Try discovery and probe the discovered endpoint
+        try:
+            pd = PrometheusDiscovery()
+            discovered = pd.discover()
+            if discovered and _probe(discovered):
+                # persist for subsequent calls
+                self.base_url = discovered
+                return True
+        except Exception:
+            logger.debug("Prometheus discovery/probe failed")
+
+        logger.debug("Prometheus is not available on any candidate endpoints")
+        return False
 
     def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:
         """
