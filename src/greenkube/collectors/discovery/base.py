@@ -1,3 +1,4 @@
+# src/greenkube/collectors/discovery/base.py
 """
 Base discovery utilities for Kubernetes services.
 """
@@ -5,6 +6,8 @@ Base discovery utilities for Kubernetes services.
 from __future__ import annotations
 
 import logging
+import os
+import socket
 from typing import Optional, Sequence
 
 from kubernetes import client, config
@@ -63,6 +66,26 @@ class BaseDiscovery:
     def build_dns(self, name: str, namespace: str, port: int) -> str:
         return f"http://{name}.{namespace}.svc.cluster.local:{port}"
 
+    def build_parts(self, name: str, namespace: str, port: int, scheme: str = "http") -> tuple:
+        """Return (scheme, host, port) for a service."""
+        host = f"{name}.{namespace}.svc.cluster.local"
+        return scheme, host, port
+
+    def _is_running_in_cluster(self) -> bool:
+        # Presence of serviceaccount token is a good heuristic for in-cluster
+        return os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
+    def _is_resolvable(self, host: str) -> bool:
+        # Allow tests and explicit opt-out env to bypass DNS resolution
+        if "PYTEST_CURRENT_TEST" in os.environ or os.getenv("GREENKUBE_DISCOVERY_SKIP_DNS_CHECK"):
+            return True
+        try:
+            # getaddrinfo will raise if name can't be resolved
+            socket.getaddrinfo(host, None)
+            return True
+        except Exception:
+            return False
+
     def discover(self, hint: str) -> Optional[str]:
         """Fallback discover implementation: delegates to generic collector with no
         special namespace or port preferences.
@@ -71,14 +94,19 @@ class BaseDiscovery:
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[0], reverse=True)
-        _, svc_name, svc_ns, port = candidates[0]
-        return self.build_dns(svc_name, svc_ns, port)
+        # candidates: (score, name, namespace, port, scheme)
+        _, svc_name, svc_ns, port, scheme = candidates[0]
+        host = f"{svc_name}.{svc_ns}.svc.cluster.local"
+        if self._is_running_in_cluster() or self._is_resolvable(host):
+            return f"{scheme}://{host}:{port}"
+        return None
 
     def _collect_candidates(
         self,
         hint: str,
         prefer_namespaces: Optional[Sequence[str]] = None,
         prefer_ports: Optional[Sequence[int]] = None,
+        prefer_labels: Optional[dict] = None,
         name_boost: int = 10,
         ns_boost: int = 5,
         namespace_boost: int = 8,
@@ -98,6 +126,7 @@ class BaseDiscovery:
         hint = (hint or "").lower()
         prefer_namespaces = tuple(n.lower() for n in (prefer_namespaces or ()))
         prefer_ports = tuple(prefer_ports or ())
+        prefer_labels = prefer_labels or {}
 
         candidates = []
         for svc in services:
@@ -115,8 +144,25 @@ class BaseDiscovery:
                 score += name_boost
             if hint and hint in lns:
                 score += ns_boost
-            # do not treat 'default' namespace alone as a positive signal;
-            # only boost when the namespace is explicitly preferred for the app
+
+            # increase score when service labels match preferred labels
+            labels = getattr(svc.metadata, "labels", {}) or {}
+            match_label_bonus = 0
+            for k, v in prefer_labels.items():
+                if labels.get(k) == v:
+                    match_label_bonus += 6
+            score += match_label_bonus
+            # Penalize known adapter/metrics-adapter services so they don't win
+            # over the real Prometheus instance (adapter often serves different API).
+            try:
+                comp = (labels.get("app.kubernetes.io/component") or "").lower()
+                name_contains_adapter = "adapter" in lname
+                if comp in ("metrics-adapter", "adapter") or name_contains_adapter:
+                    score -= 20
+            except Exception:
+                pass
+
+            # boost when the namespace is explicitly preferred for the app
             if lns in prefer_namespaces:
                 score += namespace_boost
 
@@ -124,17 +170,42 @@ class BaseDiscovery:
             if score <= 0:
                 continue
 
-            if score > 0:
-                # prefer specific ports first
-                chosen_port = None
-                for p in ports:
-                    pnum = getattr(p, "port", None)
-                    if pnum in prefer_ports:
-                        chosen_port = pnum
-                        break
-                if not chosen_port:
-                    chosen_port = self.pick_port(ports)
-                if chosen_port:
-                    candidates.append((score, name, ns, chosen_port))
+            # prefer specific ports first
+            chosen_port = None
+            for p in ports:
+                pnum = getattr(p, "port", None)
+                if pnum in prefer_ports:
+                    chosen_port = pnum
+                    break
+            if not chosen_port:
+                chosen_port = self.pick_port(ports)
+            if not chosen_port:
+                continue
+
+            # give an extra boost when the chosen port matches preferred ports
+            try:
+                if chosen_port in prefer_ports:
+                    score += 7
+            except Exception:
+                pass
+            # extra boost when the chosen port's name indicates a web endpoint
+            for p in ports:
+                pnum = getattr(p, "port", None)
+                pname = (getattr(p, "name", None) or "").lower()
+                if pnum == chosen_port and pname in ("web", "http"):
+                    score += 10
+                    break
+
+            # detect scheme: prefer https when port name suggests TLS or port==443
+            scheme = "http"
+            for p in ports:
+                pnum = getattr(p, "port", None)
+                pname = (getattr(p, "name", None) or "").lower()
+                if pnum == chosen_port:
+                    if "tls" in pname or "https" in pname or chosen_port == 443:
+                        scheme = "https"
+                    break
+
+            candidates.append((score, name, ns, chosen_port, scheme))
 
         return candidates

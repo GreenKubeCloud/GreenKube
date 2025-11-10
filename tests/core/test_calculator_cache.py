@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from src.greenkube.core.calculator import CarbonCalculator
-from src.greenkube.core.config import config
+from greenkube.core.calculator import CarbonCalculator
+from greenkube.core.config import config
 
 
 def test_calculator_caches_intensity_per_run():

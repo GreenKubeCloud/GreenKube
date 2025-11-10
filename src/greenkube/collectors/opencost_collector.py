@@ -44,7 +44,42 @@ class OpenCostCollector(BaseCollector):
             warnings.simplefilter("ignore", InsecureRequestWarning)
 
             # Use the configured OpenCost API URL (can be overridden via env var OPENCOST_API_URL)
-            response = requests.get(config.OPENCOST_API_URL, params=params, timeout=10, verify=False)
+            url = getattr(config, "OPENCOST_API_URL", None)
+            if not url:
+                try:
+                    od = OpenCostDiscovery()
+                    discovered = od.discover()
+                    if discovered:
+                        url = discovered
+                        setattr(config, "OPENCOST_API_URL", discovered)
+                except Exception:
+                    logger.debug("OpenCost discovery failed during collect; will attempt with current config value")
+
+            if not url:
+                logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
+                return []
+
+            # If still not configured and we're running in-cluster, try well-known
+            # service DNS names used by typical OpenCost Helm charts.
+            from greenkube.collectors.discovery.base import BaseDiscovery
+
+            bd = BaseDiscovery()
+            if not url and bd._is_running_in_cluster():
+                for candidate in (
+                    "http://opencost.opencost.svc.cluster.local:9003",
+                    "http://opencost.svc.cluster.local:9003",
+                    "http://opencost.opencost.svc.cluster.local:9090",
+                ):
+                    try:
+                        r = requests.get(candidate, timeout=5)
+                        r.raise_for_status()
+                        url = candidate
+                        setattr(config, "OPENCOST_API_URL", url)
+                        break
+                    except Exception:
+                        continue
+
+            response = requests.get(url, params=params, timeout=10, verify=False)
 
             response.raise_for_status()
 
@@ -114,6 +149,16 @@ class OpenCostCollector(BaseCollector):
         2xx response. Returns True when reachable, False otherwise.
         """
         url = getattr(config, "OPENCOST_API_URL", None)
+        # If not configured, try discovery first
+        if not url:
+            try:
+                od = OpenCostDiscovery()
+                discovered = od.discover()
+                if discovered:
+                    setattr(config, "OPENCOST_API_URL", discovered)
+                    url = discovered
+            except Exception:
+                logger.debug("OpenCost discovery attempt failed or returned no candidate")
 
         def _probe(u: str) -> bool:
             try:
@@ -126,7 +171,7 @@ class OpenCostCollector(BaseCollector):
             logger.debug("OpenCost API is available at %s", url)
             return True
 
-        # try discovery
+        # try discovery as a fallback
         try:
             od = OpenCostDiscovery()
             discovered = od.discover()

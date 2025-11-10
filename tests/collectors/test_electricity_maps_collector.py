@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from src.greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
+from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 
 # A sample successful API response for mocking
 MOCK_API_RESPONSE = {
@@ -17,7 +17,7 @@ MOCK_API_RESPONSE = {
 
 
 @patch("requests.get")
-@patch("src.greenkube.collectors.electricity_maps_collector.config")
+@patch("greenkube.collectors.electricity_maps_collector.config")
 def test_collect_success(mock_config, mock_get):
     """
     Teste que le collecteur appelle correctement l'API et retourne les données.

@@ -10,7 +10,7 @@ existing in different namespaces.
 from types import SimpleNamespace
 
 
-def make_svc(name, namespace, ports):
+def make_svc(name, namespace, ports, labels=None):
     """Helper to build a fake V1Service-like object for tests."""
     svc = SimpleNamespace()
     svc.metadata = SimpleNamespace()
@@ -23,6 +23,7 @@ def make_svc(name, namespace, ports):
         port_obj.port = p.get("port")
         port_obj.name = p.get("name")
         svc.spec.ports.append(port_obj)
+    svc.metadata.labels = labels or {}
     return svc
 
 
@@ -60,33 +61,27 @@ def test_discover_prometheus_not_found(monkeypatch):
     assert url is None
 
 
-def test_discover_opencost_by_name_and_port(monkeypatch):
+def test_prometheus_prefers_namespace_and_labels(monkeypatch):
     from greenkube.collectors import discovery
 
-    svc = make_svc("opencost-api", "opencost", [{"port": 8080, "name": "http"}])
+    # service without preferred labels in default namespace
+    svc_default = make_svc("prometheus", "default", [{"port": 9090, "name": "http"}])
+    # service in monitoring namespace with preferred labels
+    svc_monitor = make_svc(
+        "prometheus-k8s",
+        "monitoring",
+        [{"port": 9090, "name": "http"}],
+        labels={"app.kubernetes.io/name": "prometheus", "app.kubernetes.io/instance": "k8s"},
+    )
 
     class MockCore:
         def list_service_for_all_namespaces(self, **kwargs):
-            return SimpleNamespace(items=[svc])
+            return SimpleNamespace(items=[svc_default, svc_monitor])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("opencost")
+    url = discovery.discover_service_dns("prometheus")
     assert url is not None
-    assert "opencost-api.opencost.svc.cluster.local" in url
-    assert ":8080" in url
-
-
-def test_discover_opencost_not_found(monkeypatch):
-    from greenkube.collectors import discovery
-
-    svc = make_svc("some", "default", [{"port": 9090, "name": "http"}])
-
-    class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
-            return SimpleNamespace(items=[svc])
-
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-
-    url = discovery.discover_service_dns("opencost")
-    assert url is None
+    # should pick the monitoring one with labels
+    assert "prometheus-k8s.monitoring.svc.cluster.local" in url
+    assert ":9090" in url

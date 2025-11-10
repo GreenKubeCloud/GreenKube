@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from src.greenkube.core.scheduler import Scheduler
+from greenkube.core.scheduler import Scheduler
 
 
 # A simple function to be used as a mock job

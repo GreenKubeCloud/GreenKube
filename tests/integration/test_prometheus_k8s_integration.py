@@ -5,11 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.greenkube.collectors.prometheus_collector import PrometheusCollector
-from src.greenkube.core.calculator import CarbonCalculator
-from src.greenkube.core.config import config
-from src.greenkube.core.processor import DataProcessor
-from src.greenkube.models.prometheus_metrics import PrometheusMetric
+from greenkube.collectors.prometheus_collector import PrometheusCollector
+from greenkube.core.calculator import CarbonCalculator
+from greenkube.core.config import config
+from greenkube.core.processor import DataProcessor
+from greenkube.models.prometheus_metrics import PrometheusMetric
 
 
 class DummyConfig:
@@ -77,7 +77,7 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     # Instead of using the full estimator pipeline, mock the estimator to return
     # a single EnergyMetric with a known joules value and timestamp so we can
     # assert final CombinedMetric values.
-    from src.greenkube.models.metrics import EnergyMetric
+    from greenkube.models.metrics import EnergyMetric
 
     est = MagicMock()
     sample_dt = datetime.now(timezone.utc).replace(minute=23, second=12, microsecond=0)
@@ -127,10 +127,10 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
 
 def test_normalization_day_and_none(monkeypatch, dummy_config):
     """Test normalization granularity 'day' and 'none' behaviors."""
-    from src.greenkube.core.config import config as core_config
+    from greenkube.core.config import config as core_config
 
     # Prepare a single energy metric
-    from src.greenkube.models.metrics import EnergyMetric
+    from greenkube.models.metrics import EnergyMetric
 
     sample_dt = datetime.now(timezone.utc).replace(hour=10, minute=23, second=12, microsecond=0)
     _energy_metric = EnergyMetric(

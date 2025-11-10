@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from kubernetes import client, config
 
-from src.greenkube.collectors.node_collector import NodeCollector
+from greenkube.collectors.node_collector import NodeCollector
 
 # --- Mock Kubernetes Objects ---
 
