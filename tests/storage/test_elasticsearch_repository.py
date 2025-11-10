@@ -12,7 +12,7 @@ from elasticsearch.exceptions import (
     TransportError,
 )
 
-from src.greenkube.core.config import config
+from greenkube.core.config import config
 
 # Sample data for testing
 SAMPLE_HISTORY_DATA = [

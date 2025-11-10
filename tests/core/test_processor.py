@@ -4,16 +4,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.greenkube.core.calculator import CarbonCalculationResult
-from src.greenkube.core.config import config
-from src.greenkube.core.processor import DataProcessor
-from src.greenkube.energy.estimator import BasicEstimator
-from src.greenkube.models.metrics import (
+from greenkube.core.calculator import CarbonCalculationResult
+from greenkube.core.config import config
+from greenkube.core.processor import DataProcessor
+from greenkube.energy.estimator import BasicEstimator
+from greenkube.models.metrics import (
     CostMetric,
     EnergyMetric,
     PodMetric,
 )
-from src.greenkube.models.prometheus_metrics import PrometheusMetric
+from greenkube.models.prometheus_metrics import PrometheusMetric
 
 # Sample data for mocking collectors
 SAMPLE_ENERGY_METRICS = [
@@ -206,7 +206,7 @@ def data_processor(
 
 
 # --- Patch the CORRECT translator function ---
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 # -------------------------------------------
 def test_processor_combines_data_correctly(mock_translator, data_processor, mock_calculator):
     """
@@ -277,7 +277,7 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
 
 
 # --- Patch the CORRECT translator function ---
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 # -------------------------------------------
 def test_processor_estimates_missing_cost_data(mock_translator, data_processor, mock_calculator):
     """
@@ -324,7 +324,7 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
 
 
 @patch("src.greenkube.core.processor.NodeCollector")  # Patch NodeCollector instantiation
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 def test_processor_uses_default_zone_when_node_zone_missing(
     mock_translator,
     mock_node_collector_class,
@@ -431,7 +431,7 @@ def test_processor_handles_opencost_failure(
 
 
 # --- Patch the CORRECT translator function ---
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 # -------------------------------------------
 def test_processor_handles_calculator_failure(mock_translator, data_processor, mock_calculator):
     """
@@ -472,7 +472,7 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
     assert mock_calculator.calculate_emissions.call_count == 4
 
 
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 def test_processor_aggregates_pod_requests(
     mock_translator,
     mock_prometheus_collector,
@@ -528,7 +528,7 @@ def test_processor_aggregates_pod_requests(
     assert metric_a.memory_request == (128 + 64) * 1024 * 1024
 
 
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 def test_processor_handles_missing_pod_requests(
     mock_translator,
     mock_prometheus_collector,
@@ -561,7 +561,7 @@ def test_processor_handles_missing_pod_requests(
         assert m.memory_request == 0 or isinstance(m.memory_request, int)
 
 
-@patch("src.greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 def test_processor_nodecollector_instance_type_fallback(
     mock_translator,
     mock_prometheus_collector,
@@ -576,7 +576,7 @@ def test_processor_nodecollector_instance_type_fallback(
     """
     from unittest.mock import MagicMock
 
-    from src.greenkube.models.prometheus_metrics import (
+    from greenkube.models.prometheus_metrics import (
         NodeInstanceType,
         PrometheusMetric,
     )

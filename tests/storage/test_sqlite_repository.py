@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 # --- Fixtures ---
 

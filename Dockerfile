@@ -1,6 +1,6 @@
 # --- STAGE 1: Builder ---
 # This stage builds the Python package and installs dependencies
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 

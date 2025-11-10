@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.greenkube.core.calculator import CarbonCalculator
+from greenkube.core.calculator import CarbonCalculator
 
 # --- Import the config object ---
-from src.greenkube.core.config import config
+from greenkube.core.config import config
 
 # --------------------------------
 

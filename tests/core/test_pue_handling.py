@@ -1,6 +1,6 @@
-from src.greenkube.core.calculator import CarbonCalculator
-from src.greenkube.core.config import config
-from src.greenkube.storage.base_repository import CarbonIntensityRepository
+from greenkube.core.calculator import CarbonCalculator
+from greenkube.core.config import config
+from greenkube.storage.base_repository import CarbonIntensityRepository
 
 
 class DummyRepo(CarbonIntensityRepository):
