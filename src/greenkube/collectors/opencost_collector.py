@@ -100,19 +100,37 @@ class OpenCostCollector(BaseCollector):
                     except Exception:
                         continue
 
-            response = requests.get(url, params=params, timeout=10, verify=False)
+            def _fetch(u: str):
+                try:
+                    resp = requests.get(u, params=params, timeout=10, verify=False)
+                    resp.raise_for_status()
+                except requests.exceptions.RequestException as exc:
+                    logger.debug("Request to %s failed: %s", u, exc)
+                    return None
 
-            response.raise_for_status()
+                try:
+                    return resp.json().get("data")
+                except requests.exceptions.JSONDecodeError:
+                    logger.error("Failed to decode JSON from %s. Server sent non-JSON response.", u)
+                    logger.debug("Raw response content from %s: %s", u, resp.text[:500])
+                    return None
 
-            try:
-                response_data = response.json().get("data")
-            except requests.exceptions.JSONDecodeError:
-                logger.error("Failed to decode JSON. Server sent non-JSON response.")
-                logger.debug("Raw response content: %s", response.text[:500])
-                return []
+            response_data = _fetch(url)
+
+            # If the base url returned no usable data, try appending the well-known
+            # allocation path used by some OpenCost deployments.
+            if not response_data:
+                alt_path = url.rstrip("/") + "/allocation/compute"
+                logger.debug("Trying alternative OpenCost path: %s", alt_path)
+                response_data = _fetch(alt_path)
+                if response_data:
+                    # Prefer the alt path for future calls
+                    setattr(config, "OPENCOST_API_URL", alt_path)
 
             if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
-                logger.warning("OpenCost API returned no data. This can happen if the cluster is new.")
+                logger.warning(
+                    "OpenCost API returned no data. This can happen if the cluster is new or the endpoint is different."
+                )
                 return []
 
             cost_data = response_data[0]
@@ -121,17 +139,14 @@ class OpenCostCollector(BaseCollector):
             logger.error("Could not connect to OpenCost API via Ingress: %s", e)
             return []
 
-        # --- TRAITEMENT DE LA RÉPONSE (CORRIGÉ) ---
         collected_metrics = []
         now = datetime.now(timezone.utc)
 
         for resource_id, item in cost_data.items():
-            # Le nom du pod et le namespace sont à l'intérieur de l'objet 'properties'.
             properties = item.get("properties", {})
             pod_name = properties.get("pod")
             namespace = properties.get("namespace")
 
-            # Si la propriété "pod" n'existe pas, on utilise la clé comme nom de pod.
             if not pod_name:
                 pod_name = resource_id
 
@@ -191,6 +206,14 @@ class OpenCostCollector(BaseCollector):
         if url and _probe(url):
             logger.debug("OpenCost API is available at %s", url)
             return True
+
+        # If configured URL didn't respond, try the well-known allocation path
+        if url:
+            alt = url.rstrip("/") + "/allocation/compute"
+            if _probe(alt):
+                logger.debug("OpenCost API is available at alternative path %s", alt)
+                setattr(config, "OPENCOST_API_URL", alt)
+                return True
 
         # try discovery as a fallback
         try:
