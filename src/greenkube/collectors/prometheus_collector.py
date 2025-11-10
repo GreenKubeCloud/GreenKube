@@ -6,12 +6,14 @@ This data is the input for the BasicEstimator.
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import ValidationError
 
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
 from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
@@ -58,6 +60,11 @@ class PrometheusCollector(BaseCollector):
         )
         # Build a query that filters nodes which have the configured instance-type label.
         self.node_labels_query = f"kube_node_labels{{{self.node_instance_label_key}!=''}}"
+        # Use a BaseDiscovery instance to access in-cluster and DNS helpers
+        # without duplicating logic. This keeps tests from needing a full
+        # PrometheusDiscovery instance and prevents AttributeError when
+        # calling _is_running_in_cluster() in probe fallbacks.
+        self._discovery = BaseDiscovery()
 
     def collect(self) -> PrometheusMetric:
         """
@@ -230,8 +237,21 @@ class PrometheusCollector(BaseCollector):
             discovered = pd.discover()
             if discovered and discovered != self.base_url:
                 logger.info("Prometheus discovery returned %s; retrying queries", discovered)
-                # update base_url and retry the candidate queries once
+                # discovered is scheme://host:port
+                # update base_url and adjust TLS verify when scheme is https
                 self.base_url = discovered
+                if discovered.startswith("https://"):
+                    # If the discovered endpoint is https, prefer to verify certs when
+                    # the user explicitly requested it via env var. Otherwise, allow
+                    # in-cluster discovery to succeed by skipping verification which is
+                    # common for cluster-local TLS with self-signed certs.
+                    env_val = os.getenv("PROMETHEUS_VERIFY_CERTS")
+                    if env_val is not None:
+                        self.verify = env_val.lower() in ("true", "1", "t", "y", "yes")
+                    else:
+                        # default to False for discovered in-cluster https endpoints
+                        # to improve 'out-of-the-box' discovery success.
+                        self.verify = False
                 base = self.base_url.rstrip("/")
                 candidates = [
                     f"{base}/api/v1/query",
@@ -279,6 +299,38 @@ class PrometheusCollector(BaseCollector):
                         continue
         except Exception:
             logger.debug("Prometheus discovery attempt failed or returned no candidate")
+        # Final fallback: when running in-cluster, try a list of well-known
+        # prometheus service DNS names used by common Helm charts / kube-prometheus.
+        if self._discovery._is_running_in_cluster():
+            hosts = [
+                "prometheus-k8s.monitoring.svc.cluster.local:9090",
+                "prometheus-k8s.monitoring.svc.cluster.local:8080",
+                "prometheus-operated.monitoring.svc.cluster.local:9090",
+                "prometheus.monitoring.svc.cluster.local:9090",
+            ]
+            for host in hosts:
+                for scheme in ("http", "https"):
+                    url = f"{scheme}://{host}"
+                    try:
+                        logger.info("Trying well-known Prometheus URL %s", url)
+                        resp = requests.get(
+                            f"{url.rstrip('/')}/api/v1/query",
+                            params=params,
+                            headers=headers,
+                            auth=auth,
+                            timeout=self.timeout,
+                            verify=False,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        if data.get("status") == "success":
+                            logger.info("Prometheus responded at well-known URL %s", url)
+                            self.base_url = url
+                            self.verify = False
+                            return data.get("data", {}).get("result", [])
+                    except Exception as e:
+                        logger.debug("Well-known Prometheus URL %s failed: %s", url, e)
+                        continue
 
         return []
 
@@ -337,6 +389,27 @@ class PrometheusCollector(BaseCollector):
                 return True
         except Exception:
             logger.debug("Prometheus discovery/probe failed")
+
+        # Direct in-cluster heuristics: try well-known prometheus service hosts.
+        if self._discovery._is_running_in_cluster():
+            well_known_hosts = [
+                "prometheus-k8s.monitoring.svc.cluster.local:9090",
+                "prometheus-k8s.monitoring.svc.cluster.local:8080",
+                "prometheus-operated.monitoring.svc.cluster.local:9090",
+                "prometheus.monitoring.svc.cluster.local:9090",
+            ]
+            for host in well_known_hosts:
+                for scheme in ("http", "https"):
+                    candidate = f"{scheme}://{host}"
+                    try:
+                        if _probe(candidate):
+                            self.base_url = candidate
+                            # when probing https in-cluster, allow skipping verification
+                            if candidate.startswith("https://"):
+                                self.verify = False
+                            return True
+                    except Exception:
+                        continue
 
         logger.debug("Prometheus is not available on any candidate endpoints")
         return False
