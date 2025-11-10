@@ -1,0 +1,23 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.5
+    hooks:
+      - id: ruff
+        name: Ruff (Linting)
+        args: [--fix]
+      - id: ruff-format
+        name: Ruff (Formatting Check)
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: pytest-run
+        name: Run Full Pytest Suite
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true

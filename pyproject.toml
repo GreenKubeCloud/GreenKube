@@ -39,8 +39,8 @@ dependencies = [
     "psycopg2-binary>=2.9.0", # PostgreSQL database adapter
     "schedule>=1.2.1", # For scheduling periodic tasks
     "kubernetes",
-    "elasticsearch>=8.10.0", # Ajout du client Elasticsearch
-    "elasticsearch-dsl>=8.10.0" # Ajout de l'ORM pour Elasticsearch
+    "elasticsearch>=8.10.0", # Elasticsearch client
+    "elasticsearch-dsl>=8.10.0"
 ]
 
 [project.optional-dependencies]
@@ -48,6 +48,10 @@ test = [
     "requests-mock",
     "pytest>=7.0",
     "pytest-mock",
+]
+dev = [
+    "pre-commit", 
+    "ruff" 
 ]
 
 [project.urls]
