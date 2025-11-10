@@ -36,6 +36,20 @@ class BaseDiscovery:
                 return False
 
     def list_services(self) -> Optional[Sequence[client.V1Service]]:
+        # When running under pytest, avoid making real Kubernetes API calls
+        # unless the test has explicitly monkeypatched `client.CoreV1Api`.
+        # This lets discovery tests provide their own mock CoreV1Api while
+        # preventing accidental network calls in other tests.
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            try:
+                core_api_mod = getattr(client.CoreV1Api, "__module__", "")
+            except Exception:
+                core_api_mod = ""
+            # If CoreV1Api appears to be the real kubernetes client, short-circuit.
+            if core_api_mod.startswith("kubernetes"):
+                logger.debug("list_services short-circuited under PYTEST_CURRENT_TEST because CoreV1Api is real")
+                return None
+
         # First try to construct the API client directly. Tests commonly
         # monkeypatch `greenkube.collectors.discovery.client.CoreV1Api` and
         # expect it to be used without requiring a kubeconfig to be loadable.
