@@ -60,7 +60,7 @@ def mock_es_connections_module():
     mock_conn.ping.return_value = True  # Assume connection is healthy by default
 
     # Mock the connections module used by elasticsearch-dsl
-    with patch("src.greenkube.storage.elasticsearch_repository.connections") as mock_connections:
+    with patch("greenkube.storage.elasticsearch_repository.connections") as mock_connections:
         # Configure get_connection to return our mock connection
         mock_connections.get_connection.return_value = mock_conn
         # Also mock create_connection used in setup_connection
@@ -72,7 +72,7 @@ def mock_es_connections_module():
 @pytest.fixture
 def mock_bulk_helper():
     """Fixture to mock the elasticsearch bulk helper."""
-    with patch("src.greenkube.storage.elasticsearch_repository.bulk") as mock_bulk:
+    with patch("greenkube.storage.elasticsearch_repository.bulk") as mock_bulk:
         # Default success: return tuple (success_count, errors_list)
         # Simulate successful processing of all items
         mock_bulk.return_value = (len(SAMPLE_HISTORY_DATA), [])
@@ -82,8 +82,8 @@ def mock_bulk_helper():
 @pytest.fixture
 def es_repository():
     """Fixture that creates an ElasticsearchCarbonIntensityRepository with setup_connection patched."""
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         return es_repo.ElasticsearchCarbonIntensityRepository()
@@ -99,8 +99,8 @@ def mock_carbon_intensity_doc():
 
     # Use patch.object for class methods like init and search
     with (
-        patch("src.greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init") as mock_init,
-        patch("src.greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.search") as mock_search,
+        patch("greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init") as mock_init,
+        patch("greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.search") as mock_search,
     ):
         mock_search.return_value = mock_search_obj
         # Yield mocks and the search object for configuration in tests
@@ -112,8 +112,8 @@ def mock_carbon_intensity_doc():
 
 def test_repository_initialization(mock_carbon_intensity_doc, mock_es_connections_module):
     """Tests that the repository initializes correctly and calls CarbonIntensityDoc.init."""
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repo.ElasticsearchCarbonIntensityRepository()
@@ -128,12 +128,12 @@ def test_repository_initialization_connection_error_ping(mock_carbon_intensity_d
     mock_conn_fail.ping.return_value = False
     # Patch get_connection specifically for this test
     with patch(
-        "src.greenkube.storage.elasticsearch_repository.connections.get_connection",
+        "greenkube.storage.elasticsearch_repository.connections.get_connection",
         return_value=mock_conn_fail,
     ):
-        with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
+        with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
             # Reload the module to trigger __init__ with the failing ping mock
-            import src.greenkube.storage.elasticsearch_repository as es_repo
+            import greenkube.storage.elasticsearch_repository as es_repo
 
             importlib.reload(es_repo)
             # Act: Instantiation should happen
@@ -146,11 +146,11 @@ def test_repository_initialization_connection_error_init(mock_es_connections_mod
     """Tests that init handles ConnectionError during Doc.init()."""
     # Arrange: Simulate Doc.init() raising ConnectionError
     with patch(
-        "src.greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init",
+        "greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init",
         side_effect=ConnectionError("Init failed"),
     ):
-        with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-            import src.greenkube.storage.elasticsearch_repository as es_repo
+        with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+            import greenkube.storage.elasticsearch_repository as es_repo
 
             importlib.reload(es_repo)  # Reload to trigger init
             # Act & Assert: Instantiation should complete without raising, error should be logged
@@ -173,11 +173,11 @@ def test_repository_initialization_request_error_init(mock_es_connections_module
         body=mock_error_info,  # Body contains the error details from ES
     )
     with patch(
-        "src.greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init",
+        "greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init",
         side_effect=request_error,
     ):
-        with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-            import src.greenkube.storage.elasticsearch_repository as es_repo
+        with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+            import greenkube.storage.elasticsearch_repository as es_repo
 
             importlib.reload(es_repo)  # Reload to trigger init
             # Act & Assert: Instantiation should complete without raising, error should be logged
@@ -189,8 +189,8 @@ def test_save_history_success(mock_bulk_helper, mock_es_connections_module):
     """Tests saving a list of valid history data."""
     # Arrange
     zone = "TEST"
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repository = es_repo.ElasticsearchCarbonIntensityRepository()
@@ -213,8 +213,8 @@ def test_save_history_success(mock_bulk_helper, mock_es_connections_module):
 
 def test_save_history_empty_list(mock_bulk_helper):
     """Tests saving an empty list."""
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repository = es_repo.ElasticsearchCarbonIntensityRepository()
@@ -235,8 +235,8 @@ def test_save_history_invalid_records(mock_bulk_helper):
     expected_valid_count = 2  # Only the first and last are fully valid
     # Adjust mock return value to reflect only valid actions processed
     mock_bulk_helper.return_value = (expected_valid_count, [])
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repository = es_repo.ElasticsearchCarbonIntensityRepository()
@@ -256,8 +256,8 @@ def test_save_history_bulk_error(mock_bulk_helper):
     """Tests handling of errors during the bulk operation."""
     # Arrange
     mock_bulk_helper.side_effect = TransportError("Bulk save failed")
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repository = es_repo.ElasticsearchCarbonIntensityRepository()
@@ -273,8 +273,8 @@ def test_save_history_connection_error(mock_bulk_helper, mock_es_connections_mod
     # Arrange
     # Use the connection mock provided by the fixture
     mock_es_connections_module["connection"].ping.return_value = False  # Simulate connection lost
-    with patch("src.greenkube.storage.elasticsearch_repository.setup_connection"):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+    with patch("greenkube.storage.elasticsearch_repository.setup_connection"):
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         importlib.reload(es_repo)
         es_repository = es_repo.ElasticsearchCarbonIntensityRepository()
@@ -360,13 +360,13 @@ def test_setup_connection_success(mock_es_connections_module):
     # Arrange
     # Use the autouse fixture which mocks connections
     # Configure config for this specific test
-    with patch("src.greenkube.storage.elasticsearch_repository.config") as mock_config:
+    with patch("greenkube.storage.elasticsearch_repository.config") as mock_config:
         mock_config.ELASTICSEARCH_HOSTS = "http://testhost:9200"
         mock_config.ELASTICSEARCH_VERIFY_CERTS = True
         mock_config.ELASTICSEARCH_USER = "user"
         mock_config.ELASTICSEARCH_PASSWORD = "password"
 
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         es_repo.setup_connection()
 
@@ -389,7 +389,7 @@ def test_setup_connection_ping_fails(mock_es_connections_module):
     mock_es_connections_module["connection"].ping.return_value = False
     # Act & Assert
     with pytest.raises(ConnectionError):
-        import src.greenkube.storage.elasticsearch_repository as es_repo
+        import greenkube.storage.elasticsearch_repository as es_repo
 
         es_repo.setup_connection()
 
@@ -399,12 +399,12 @@ def test_setup_connection_transport_error():
     # Arrange
     # Patch create_connection to raise a TransportError
     with patch(
-        "src.greenkube.storage.elasticsearch_repository.connections.create_connection",
+        "greenkube.storage.elasticsearch_repository.connections.create_connection",
         side_effect=TransportError("Host not found"),
     ):
         # Act & Assert
         with pytest.raises(ConnectionError):
-            import src.greenkube.storage.elasticsearch_repository as es_repo
+            import greenkube.storage.elasticsearch_repository as es_repo
 
             es_repo.setup_connection()
 

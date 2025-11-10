@@ -323,7 +323,7 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
     )
 
 
-@patch("src.greenkube.core.processor.NodeCollector")  # Patch NodeCollector instantiation
+@patch("greenkube.core.processor.NodeCollector")  # Patch NodeCollector instantiation
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
 def test_processor_uses_default_zone_when_node_zone_missing(
     mock_translator,

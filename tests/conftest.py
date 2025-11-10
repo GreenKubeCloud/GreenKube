@@ -35,3 +35,30 @@ def mock_settings_env_vars(monkeypatch):
     monkeypatch.setenv("DB_TYPE", "sqlite")
     monkeypatch.setenv("DB_PATH", ":memory:")  # Ensure config points to an in-memory db
     monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "test-token")
+
+
+@pytest.fixture(autouse=True)
+def mock_k8s_discovery(monkeypatch):
+    """
+    Autouse fixture to mock Kubernetes discovery helpers so tests do not
+    require a live cluster. It patches BaseDiscovery methods used by the
+    collectors and sets an env var to skip DNS checks during discovery.
+    """
+    # Patch the DNS skip env so BaseDiscovery._is_resolvable returns True in tests
+    monkeypatch.setenv("GREENKUBE_DISCOVERY_SKIP_DNS_CHECK", "1")
+
+    # Provide a conservative default: prevent attempts to load kubeconfig from disk
+    # while leaving `list_services` intact so tests can patch the Kubernetes client
+    # (they typically monkeypatch `greenkube.collectors.discovery.client.CoreV1Api`).
+    try:
+        from greenkube.collectors.discovery.base import BaseDiscovery
+
+        def _fake_load_kube_config_quietly(self) -> bool:
+            # Pretend kube config can't be loaded so BaseDiscovery will attempt to
+            # instantiate client.CoreV1Api, which tests often patch.
+            return False
+
+        monkeypatch.setattr(BaseDiscovery, "_load_kube_config_quietly", _fake_load_kube_config_quietly, raising=False)
+    except Exception:
+        # If discovery module isn't importable, ignore — tests will patch more specifically.
+        pass

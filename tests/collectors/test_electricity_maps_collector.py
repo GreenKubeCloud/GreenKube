@@ -45,7 +45,7 @@ def test_collect_success(mock_config, mock_get):
 
 
 @patch("requests.get")
-@patch("src.greenkube.collectors.electricity_maps_collector.config")
+@patch("greenkube.collectors.electricity_maps_collector.config")
 def test_collect_api_error(mock_config, mock_get):
     """
     Teste que le collecteur retourne une liste vide en cas d'erreur API.

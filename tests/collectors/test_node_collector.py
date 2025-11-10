@@ -34,8 +34,8 @@ def create_mock_node_with_instance(name, instance_label_value=None):
 # --- Test Cases ---
 
 
-@patch("src.greenkube.collectors.node_collector.config")  # Mock config loading
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")  # Mock the K8s client API class
+@patch("greenkube.collectors.node_collector.config")  # Mock config loading
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")  # Mock the K8s client API class
 def test_collect_success_with_zones(mock_core_v1_api, mock_k8s_config):
     """
     Tests successful collection when nodes have zone labels.
@@ -60,8 +60,8 @@ def test_collect_success_with_zones(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_partial_zones(mock_core_v1_api, mock_k8s_config):
     """
     Tests collection when some nodes have zone labels and others don't.
@@ -86,8 +86,8 @@ def test_collect_partial_zones(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_no_zone_labels(mock_core_v1_api, mock_k8s_config):
     """
     Tests collection when nodes exist but none have the zone label.
@@ -107,8 +107,8 @@ def test_collect_no_zone_labels(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_no_nodes(mock_core_v1_api, mock_k8s_config):
     """
     Tests collection when the cluster returns no nodes.
@@ -128,8 +128,8 @@ def test_collect_no_nodes(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_api_error(mock_core_v1_api, mock_k8s_config):
     """
     Tests that the collector handles Kubernetes API errors gracefully.
@@ -149,8 +149,8 @@ def test_collect_api_error(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_unexpected_error(mock_core_v1_api, mock_k8s_config):
     """
     Tests that the collector handles unexpected errors during processing.
@@ -170,8 +170,8 @@ def test_collect_unexpected_error(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_instance_types_success(mock_core_v1_api, mock_k8s_config):
     """Tests successful collection of instance types when nodes expose the label."""
     mock_api_instance = mock_core_v1_api.return_value
@@ -191,8 +191,8 @@ def test_collect_instance_types_success(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_instance_types_partial(mock_core_v1_api, mock_k8s_config):
     """Tests collection when some nodes have instance-type labels and others don't."""
     mock_api_instance = mock_core_v1_api.return_value
@@ -212,8 +212,8 @@ def test_collect_instance_types_partial(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_instance_types_no_instances(mock_core_v1_api, mock_k8s_config):
     """Tests collection when no nodes expose instance-type labels."""
     mock_api_instance = mock_core_v1_api.return_value
@@ -228,8 +228,8 @@ def test_collect_instance_types_no_instances(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_instance_types_api_error(mock_core_v1_api, mock_k8s_config):
     """Tests that API errors are handled gracefully when collecting instance types."""
     mock_api_instance = mock_core_v1_api.return_value
@@ -243,8 +243,8 @@ def test_collect_instance_types_api_error(mock_core_v1_api, mock_k8s_config):
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config")
-@patch("src.greenkube.collectors.node_collector.client.CoreV1Api")
+@patch("greenkube.collectors.node_collector.config")
+@patch("greenkube.collectors.node_collector.client.CoreV1Api")
 def test_collect_instance_types_unexpected_error(mock_core_v1_api, mock_k8s_config):
     """Tests that unexpected errors are handled gracefully when collecting instance types."""
     mock_api_instance = mock_core_v1_api.return_value
@@ -258,8 +258,8 @@ def test_collect_instance_types_unexpected_error(mock_core_v1_api, mock_k8s_conf
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
-@patch("src.greenkube.collectors.node_collector.config.load_kube_config")
-@patch("src.greenkube.collectors.node_collector.config.load_incluster_config")
+@patch("greenkube.collectors.node_collector.config.load_kube_config")
+@patch("greenkube.collectors.node_collector.config.load_incluster_config")
 def test_init_failure(mock_load_incluster, mock_load_kube):
     """
     Tests that NodeCollector handles exceptions during __init__ (e.g., config loading)

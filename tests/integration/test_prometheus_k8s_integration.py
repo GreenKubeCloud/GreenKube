@@ -152,7 +152,7 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
     # Also ensure the config object referenced inside the calculator module
     # uses the same granularity (some modules may hold a reference).
     monkeypatch.setattr(
-        "src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
+        "greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
         "day",
         raising=False,
     )
@@ -170,7 +170,7 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
 
     monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "none")
     monkeypatch.setattr(
-        "src.greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
+        "greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
         "none",
         raising=False,
     )

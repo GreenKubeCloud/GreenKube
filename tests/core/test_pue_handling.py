@@ -16,7 +16,7 @@ def test_calculator_uses_config_default_pue(monkeypatch):
     monkeypatch.setenv("CLOUD_PROVIDER", "ovh")
     import importlib as _importlib
 
-    _importlib.reload(__import__("src.greenkube.core.config", fromlist=["config"]))
+    _importlib.reload(__import__("greenkube.core.config", fromlist=["config"]))
     # Instantiate calculator without pue - should use config.DEFAULT_PUE
     calc = CarbonCalculator(repository=DummyRepo())
     assert calc.pue == config.DEFAULT_PUE
