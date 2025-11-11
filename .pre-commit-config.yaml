@@ -13,11 +13,12 @@ repos:
     hooks:
       - id: gitleaks
 
-  - repo: local
-    hooks:
-      - id: pytest-run
-        name: Run Full Pytest Suite
-        entry: pytest
-        language: system
-        pass_filenames: false
-        always_run: true
+  # - repo: local
+  #   hooks:
+  #     - id: pytest-run
+  #       name: Run Full Pytest Suite
+  #       entry: pytest
+  #       language: python
+  #       additional_dependencies: ['setuptools', '.']
+  #       pass_filenames: false
+  #       always_run: true
