@@ -45,7 +45,7 @@ class Config:
         return pue
 
     DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
-    DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 0.1))
+    DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
     JOULES_PER_KWH = 3.6e6
 
     # --- Logging variables ---
@@ -71,10 +71,10 @@ class Config:
     ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", "carbon_intensity")
 
     # -- Prometheus variables ---
-    PROMETHEUS_URL = os.getenv(
-        "PROMETHEUS_URL",
-        "http://prometheus-kube-prometheus-prometheus.monitoring.service.svc.cluster.local:9090",
-    )
+    # Default to empty so the application attempts discovery when no URL is
+    # provided by environment/config. This avoids binding a potentially
+    # stale in-cluster DNS name at import time.
+    PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "")
     PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
     PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
         "true",

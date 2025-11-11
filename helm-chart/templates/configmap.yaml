@@ -17,7 +17,9 @@ data:
   ELASTICSEARCH_VERIFY_CERTS: {{ .Values.elasticsearch.verifyCerts | quote }}
 
   # --- Collector Config ---
+  {{- if .Values.config.prometheus.url }}
   PROMETHEUS_URL: {{ .Values.config.prometheus.url | quote }}
+  {{- end }}
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
   OPENCOST_API_URL: {{ .Values.config.opencost.url | quote }}
   

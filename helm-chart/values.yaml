@@ -34,7 +34,11 @@ config:
 
   prometheus:
     # Default URL points to the standard kube-prometheus-stack service.
-    # If empty, GreenKube will attempt in-cluster discovery.
+    # If empty, GreenKube will attempt in-cluster discovery and use
+    # the built-in well-known service names. Leave empty to enable discovery.
+    # Use a common in-cluster DNS candidate as a sensible default. This
+    # overrides any empty .env shipped in the image and allows the
+    # collector to probe this endpoint and fall back to discovery if needed.
     url: ""
     verifyCerts: true
 

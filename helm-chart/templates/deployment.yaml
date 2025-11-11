@@ -26,13 +26,48 @@ spec:
           command: ["greenkube"]
           args: ["start"]
           
-          # Load all non-sensitive config
+          # Load all non-sensitive config (as a convenience)
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             # Load all sensitive config
             - secretRef:
                 name: {{ include "greenkube.fullname" . }}
+
+          # Explicitly map Prometheus-related variables from the ConfigMap/Secret
+          # using valueFrom. These explicit env entries take precedence over
+          # envFrom and avoid any chance of multi-line rendering issues.
+          env:
+            - name: PROMETHEUS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: PROMETHEUS_URL
+                  optional: true
+            - name: PROMETHEUS_VERIFY_CERTS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: PROMETHEUS_VERIFY_CERTS
+                  optional: true
+            - name: PROMETHEUS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: PROMETHEUS_USERNAME
+                  optional: true
+            - name: PROMETHEUS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: PROMETHEUS_PASSWORD
+                  optional: true
+            - name: PROMETHEUS_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: PROMETHEUS_BEARER_TOKEN
+                  optional: true
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
