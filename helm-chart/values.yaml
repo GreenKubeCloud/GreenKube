@@ -1,0 +1,90 @@
+# Default values for greenkube.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: greenkube/greenkube
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "0.1.0"
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+rbac:
+  # Specifies whether RBAC resources (ClusterRole, ClusterRoleBinding) should be created
+  create: true
+
+# Non-sensitive configuration passed as environment variables from config.py
+config:
+  logLevel: "INFO"
+  cloudProvider: "aws"
+  defaultZone: "FR"
+  
+  # Database type. Supported: "elasticsearch", "postgres", "sqlite"
+  # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
+  db:
+    type: "sqlite"
+
+  prometheus:
+    # Default URL points to the standard kube-prometheus-stack service.
+    # If empty, GreenKube will attempt in-cluster discovery and use
+    # the built-in well-known service names. Leave empty to enable discovery.
+    # Use a common in-cluster DNS candidate as a sensible default. This
+    # overrides any empty .env shipped in the image and allows the
+    # collector to probe this endpoint and fall back to discovery if needed.
+    url: ""
+    verifyCerts: true
+
+  opencost:
+    # If empty, GreenKube will attempt in-cluster discovery.
+    url: ""
+
+  # Default instance profile for energy estimation when an instance type is unknown
+  defaults:
+    instance:
+      vcores: 1
+      minWatts: 1.0
+      maxWatts: 10.0
+
+# Configuration for Elasticsearch (if db.type is "elasticsearch")
+elasticsearch:
+  hosts: "http://elasticsearch-master:9200" # K8s service name for Elasticsearch
+  indexName: "carbon_intensity"
+  verifyCerts: true
+  
+  # Authentication for Elasticsearch.
+  # Set these in the 'secrets' section below if you have auth enabled.
+  auth:
+    user: ""
+    password: "" # This value is ignored; set 'secrets.elasticsearch.password' instead.
+
+# Sensitive values that will be stored in a Kubernetes Secret.
+# Users MUST provide the electricityMapsToken.
+secrets:
+  # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
+  electricityMapsToken: ""
+
+  prometheus:
+    username: ""
+    password: ""
+    bearerToken: ""
+
+  elasticsearch:
+    user: ""
+    password: ""
+
+# Pod resource requests and limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
