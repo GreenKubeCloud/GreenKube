@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          
+          # This runs the 'start' command from cli.py to launch the scheduler
+          command: ["greenkube"]
+          args: ["start"]
+          
+          # Load all non-sensitive config
+          envFrom:
+            - configMapRef:
+                name: {{ include "greenkube.fullname" . }}
+            # Load all sensitive config
+            - secretRef:
+                name: {{ include "greenkube.fullname" . }}
+                
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

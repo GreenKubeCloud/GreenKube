@@ -1,0 +1,46 @@
+GreenKube has been installed.
+
+Your release is named: {{ .Release.Name }}
+The application is running as a Deployment and will continuously collect carbon intensity data.
+
+WARNING: ACTION REQUIRED
+
+This chart will not function until you provide an API token for Electricity Maps.
+
+You can provide this token by:
+
+Editing your values.yaml file to set secrets.electricityMapsToken.
+
+Upgrading the chart:
+
+helm upgrade {{ .Release.Name }} . -f values.yaml
+
+OR by creating/updating the secret manually (example):
+
+kubectl create secret generic {{ include "greenkube.fullname" . }} \
+  --from-literal=ELECTRICITY_MAPS_TOKEN='YOUR_API_TOKEN_HERE' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+
+You may also need to set credentials for Prometheus and Elasticsearch in your values.yaml or in the secret.
+
+How to use GreenKube:
+
+View Logs:
+Check the logs of the main pod to see if it's running correctly:
+
+kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -f
+
+Run an On-Demand Report:
+You can exec into the running pod to use the CLI for on-demand reports:
+
+POD_NAME=$(kubectl get pods -l app.kubernetes.io/name={{ include "greenkube.name" . }} -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it $POD_NAME -- greenkube report
+
+Run a Namespaced Report:
+
+kubectl exec -it $POD_NAME -- greenkube report --namespace my-app
+
+Get Recommendations:
+
+kubectl exec -it $POD_NAME -- greenkube recommend

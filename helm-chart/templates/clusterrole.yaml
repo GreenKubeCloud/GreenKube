@@ -1,0 +1,19 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+rules:
+  # GreenKube needs to list nodes, pods, and services for discovery and data collection
+- apiGroups: [""]
+  resources:
+  - nodes
+  - pods
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+{{- end }}
