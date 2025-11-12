@@ -28,102 +28,105 @@ class ConsoleReporter(BaseReporter):
         data: List[CombinedMetric],
         group_by: str = "namespace",
         sort_by: str = "cost",
-        recommendations=None,
+        recommendations: List[Recommendation] | None = None,
     ):
         """
         Displays the combined metrics in a rich, detailed table.
-        Shows CPU and Memory requests in the report.
+        If recommendations are provided, displays them in a second table.
         """
-        if not data:
-            self.console.print("No data to report.", style="yellow")
-            # still allow printing recommendations if provided
-            if recommendations:
-                self.report_recommendations(recommendations)
+        if not data and not recommendations:
+            self.console.print("No data or recommendations to report.", style="yellow")
             return
 
-        table = Table(
-            title="GreenKube FinGreenOps Report",
-            header_style="bold magenta",
-            show_lines=True,
-        )
-        # If any item has a period, include a Period column
-        has_period = any(getattr(item, "period", None) for item in data)
-        table.add_column("Pod Name", style="cyan")
-        table.add_column("Namespace", style="cyan")
-        if has_period:
-            table.add_column("Period", style="magenta")
-        table.add_column("Total Cost ($)", style="green", justify="right")
-        table.add_column("CO2e (g)", style="red", justify="right")
-        table.add_column("Energy (Joules)", style="yellow", justify="right")
-        table.add_column("CPU Req (m)", style="blue", justify="right")
-        table.add_column("Mem Req (Mi)", style="blue", justify="right")
-        table.add_column("Grid Intensity (g/kWh)", style="dim", justify="right")
-        table.add_column("PUE", style="dim", justify="right")
-
-        # Aggregate by (namespace, pod, period) when period is present, otherwise by (namespace, pod)
-        aggregated = {}
-        for item in data:
-            period = getattr(item, "period", None)
-            if period:
-                key = (item.namespace, item.pod_name, period)
-            else:
-                key = (item.namespace, item.pod_name)
-
-            if key not in aggregated:
-                aggregated[key] = {
-                    "cost": 0.0,
-                    "co2e": 0.0,
-                    "joules": 0.0,
-                    "cpu_req": item.cpu_request,
-                    "mem_req": item.memory_request,
-                    "intensity": item.grid_intensity,
-                    "pue": item.pue,
-                    "period": period,
-                }
-            aggregated[key]["cost"] += item.total_cost
-            aggregated[key]["co2e"] += item.co2e_grams
-            aggregated[key]["joules"] += item.joules
-
-        # Sort by CO2e descending
-        sorted_keys = sorted(aggregated.keys(), key=lambda k: aggregated[k]["co2e"], reverse=True)
-
-        for key in sorted_keys:
-            item = aggregated[key]
-            mem_mib = item["mem_req"] / (1024 * 1024) if item["mem_req"] else 0.0
-            if len(key) == 3:
-                ns, pod, period = key
-            else:
-                ns, pod = key
-                period = None
-
-            row = [
-                pod,
-                ns,
-            ]
-            if has_period:
-                row.append(period or "")
-            row.extend(
-                [
-                    f"{item['cost']:.4f}",
-                    f"{item['co2e']:.2f}",
-                    f"{item['joules']:.0f}",
-                    f"{item['cpu_req']}",
-                    f"{mem_mib:.1f}",
-                    f"{item['intensity']:.2f}",
-                    f"{item['pue']:.2f}",
-                ]
+        if not data:
+            self.console.print("No data to report.", style="yellow")
+        else:
+            table = Table(
+                title="GreenKube FinGreenOps Report",
+                header_style="bold magenta",
+                show_lines=True,
             )
+            # If any item has a period, include a Period column
+            has_period = any(getattr(item, "period", None) for item in data)
+            table.add_column("Pod Name", style="cyan")
+            table.add_column("Namespace", style="cyan")
+            if has_period:
+                table.add_column("Period", style="magenta")
+            table.add_column("Total Cost ($)", style="green", justify="right")
+            table.add_column("CO2e (g)", style="red", justify="right")
+            table.add_column("Energy (Joules)", style="yellow", justify="right")
+            table.add_column("CPU Req (m)", style="blue", justify="right")
+            table.add_column("Mem Req (Mi)", style="blue", justify="right")
+            table.add_column("Grid Intensity (g/kWh)", style="dim", justify="right")
+            table.add_column("PUE", style="dim", justify="right")
 
-            table.add_row(*row)
+            # Aggregate by (namespace, pod, period) when period is present, otherwise by (namespace, pod)
+            aggregated = {}
+            for item in data:
+                period = getattr(item, "period", None)
+                if period:
+                    key = (item.namespace, item.pod_name, period)
+                else:
+                    key = (item.namespace, item.pod_name)
 
-        self.console.print(table)
+                if key not in aggregated:
+                    aggregated[key] = {
+                        "cost": 0.0,
+                        "co2e": 0.0,
+                        "joules": 0.0,
+                        "cpu_req": item.cpu_request,
+                        "mem_req": item.memory_request,
+                        "intensity": item.grid_intensity,
+                        "pue": item.pue,
+                        "period": period,
+                    }
+                aggregated[key]["cost"] += item.total_cost
+                aggregated[key]["co2e"] += item.co2e_grams
+                aggregated[key]["joules"] += item.joules
+
+            # Sort by CO2e descending
+            sorted_keys = sorted(aggregated.keys(), key=lambda k: aggregated[k]["co2e"], reverse=True)
+
+            for key in sorted_keys:
+                item = aggregated[key]
+                mem_mib = item["mem_req"] / (1024 * 1024) if item["mem_req"] else 0.0
+                if len(key) == 3:
+                    ns, pod, period = key
+                else:
+                    ns, pod = key
+                    period = None
+
+                row = [
+                    pod,
+                    ns,
+                ]
+                if has_period:
+                    row.append(period or "")
+                row.extend(
+                    [
+                        f"{item['cost']:.4f}",
+                        f"{item['co2e']:.2f}",
+                        f"{item['joules']:.0f}",
+                        f"{item['cpu_req']}",
+                        f"{mem_mib:.1f}",
+                        f"{item['intensity']:.2f}",
+                        f"{item['pue']:.2f}",
+                    ]
+                )
+
+                table.add_row(*row)
+
+            self.console.print(table)
+
+        if recommendations is not None:
+            self.report_recommendations(recommendations)
 
     def report_recommendations(self, recommendations: List[Recommendation]):
         """
         Displays optimization recommendations in a separate table.
         """
         if not recommendations:
-            self.console.print("No recommendations to display.", style="green")
+            self.console.print("\n✅ All systems look optimized! No recommendations to display.", style="green")
             return
 
         table = Table(

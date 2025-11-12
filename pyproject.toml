@@ -61,7 +61,7 @@ dev = [
 # CLI entry point
 # This creates the `greenkube` command in the user's terminal
 [project.scripts]
-greenkube = "greenkube.cli:app"
+greenkube = "greenkube.cli.main:app"
 
 # Development tool configuration (optional but recommended)
 [tool.pytest.ini_options]
