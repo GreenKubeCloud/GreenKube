@@ -15,10 +15,8 @@ import typer
 from typing_extensions import Annotated
 
 from ..core.factory import get_processor
-from ..exporters.csv_exporter import CSVExporter
-from ..exporters.json_exporter import JSONExporter
+from ..models.cli import FilterOptions, GroupingOptions, OutputOptions
 from ..models.metrics import CombinedMetric
-from ..reporters.console_reporter import ConsoleReporter
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +27,8 @@ def parse_last_duration(last: str) -> timedelta:
     """Parses a duration string (e.g., '3h', '7d', '2w') into a timedelta."""
     match = re.match(r"^(\d+)([hdwmy])$", last.lower())
     if not match:
-        logger.error(f"Invalid format for --last: '{last}'. Use format like '7d', '3h', '2w', '1m', '1y'.")
-        raise typer.BadParameter(f"Invalid format for --last: '{last}'. Use format like '7d', '3h', '2w', '1m', '1y'.")
+        logger.error(f"Invalid format for --last: '{last}'. Use format like  '3h', '7d', '2w', '1m', '1y'.")
+        raise typer.BadParameter(f"Invalid format for --last: '{last}'. Use format like '3h', '7d', '2w', '1m', '1y'.")
 
     value, unit = int(match.group(1)), match.group(2)
     if unit == "h":
@@ -51,12 +49,23 @@ def parse_last_duration(last: str) -> timedelta:
 
 def handle_export(
     data: List[CombinedMetric],
-    output_format: str,
-    output_path: Optional[Path],
+    output_options: OutputOptions,
 ):
     """Handles writing the report data to a file."""
+    output_format = output_options.format
+    output_path = output_options.output_path
+
     if not output_path:
-        default_filename = CSVExporter.DEFAULT_FILENAME if output_format == "csv" else JSONExporter.DEFAULT_FILENAME
+        # Import the appropriate exporter to obtain its default filename.
+        if output_format == "csv":
+            from ..exporters.csv_exporter import CSVExporter
+
+            default_filename = CSVExporter.DEFAULT_FILENAME
+        else:
+            from ..exporters.json_exporter import JSONExporter
+
+            default_filename = JSONExporter.DEFAULT_FILENAME
+
         output_path = Path.cwd() / "data" / default_filename
     else:
         output_path = Path(output_path)
@@ -76,8 +85,12 @@ def handle_export(
 
     try:
         if output_format == "csv":
+            from ..exporters.csv_exporter import CSVExporter
+
             exporter = CSVExporter()
         elif output_format == "json":
+            from ..exporters.json_exporter import JSONExporter
+
             exporter = JSONExporter()
         else:
             # This should be caught by Typer's Choice, but as a safeguard:
@@ -97,6 +110,15 @@ def handle_export(
 @app.callback(invoke_without_command=True)
 def report(
     ctx: typer.Context,
+    namespace: Annotated[Optional[str], typer.Option(help="Filter by a specific namespace.")] = None,
+    last: Annotated[
+        Optional[str], typer.Option("--last", help="Time range to report (e.g., '3h', '7d', '2w', '1m', '1y').")
+    ] = None,
+    hourly: Annotated[bool, typer.Option("--hourly", help="Group data by hour.")] = False,
+    daily: Annotated[bool, typer.Option("--daily", help="Group data by day.")] = False,
+    weekly: Annotated[bool, typer.Option("--weekly", help="Group data by week.")] = False,
+    monthly: Annotated[bool, typer.Option("--monthly", help="Group data by month.")] = False,
+    yearly: Annotated[bool, typer.Option("--yearly", help="Group data by year.")] = False,
     output_format: Annotated[
         Optional[str],
         typer.Option(
@@ -115,24 +137,6 @@ def report(
             writable=True,
         ),
     ] = None,
-    # Time Period Grouping
-    hourly: Annotated[bool, typer.Option("--hourly", help="Group data by hour.")] = False,
-    daily: Annotated[bool, typer.Option("--daily", help="Group data by day.")] = False,
-    monthly: Annotated[bool, typer.Option("--monthly", help="Group data by month.")] = False,
-    yearly: Annotated[bool, typer.Option("--yearly", help="Group data by year.")] = False,
-    # Time Range Selection
-    last: Annotated[
-        Optional[str],
-        typer.Option(
-            "--last",
-            help="Time range to report (e.g., '3h', '7d', '2w', '1m', '1y').",
-        ),
-    ] = None,
-    # Filters
-    namespace: Annotated[
-        Optional[str],
-        typer.Option(help="Filter by a specific namespace."),
-    ] = None,
 ):
     """
     Generate and export FinGreenOps reports.
@@ -146,19 +150,13 @@ def report(
 
     logger.info("Initializing GreenKube FinGreenOps reporting tool...")
 
-    # Validate output format
-    if output_format and output_format.lower() not in ["csv", "json"]:
-        raise typer.BadParameter(f"Invalid output format '{output_format}'. Must be 'csv' or 'json'.")
-
-    # Validate mutually exclusive time grouping
-    time_groupings = [hourly, daily, monthly, yearly]
-    if sum(time_groupings) > 1:
-        raise typer.BadParameter(
-            "Only one time grouping flag (--hourly, --daily, --monthly, --yearly) can be used at a time."
-        )
+    # Build model objects from raw CLI params so we retain validation logic
+    filters = FilterOptions(namespace=namespace, last=last)
+    grouping = GroupingOptions(hourly=hourly, daily=daily, weekly=weekly, monthly=monthly, yearly=yearly)
+    output = OutputOptions(output_format=output_format, output_path=output_path)
 
     # Determine if this is a "now" report or a "range" report
-    is_range_report = any([last, hourly, daily, monthly, yearly])
+    is_range_report = any([filters.last, grouping.is_enabled])
 
     combined_data: List[CombinedMetric] = []
 
@@ -170,47 +168,51 @@ def report(
             end = datetime.now(timezone.utc)
             start = end - timedelta(days=1)  # Default to last 24h if a grouping is set without --last
 
-            if last:
-                start = end - parse_last_duration(last)
+            if filters.last:
+                start = end - parse_last_duration(filters.last)
 
             combined_data = processor.run_range(
                 start=start,
                 end=end,
                 step=None,  # Processor will calculate step
-                namespace=namespace,
-                monthly=monthly,
-                yearly=yearly,
-                # Pass daily/hourly to run_range if it supports it,
-                # otherwise, we'd do aggregation here.
-                # The current run_range seems to only support monthly/yearly grouping.
-                # We will pass them anyway for future proofing.
-                # daily=daily,
-                # hourly=hourly,
+                namespace=filters.namespace,
+                hourly=grouping.hourly,
+                daily=grouping.daily,
+                weekly=grouping.weekly,
+                monthly=grouping.monthly,
+                yearly=grouping.yearly,
             )
         else:
             logger.info("Running 'now' data processing pipeline...")
             combined_data = processor.run()
-            if namespace:
-                combined_data = [item for item in combined_data if item.namespace == namespace]
+            if filters.namespace:
+                combined_data = [item for item in combined_data if item.namespace == filters.namespace]
 
         if not combined_data:
             logger.warning("No combined data was generated by the processor.")
-            if not output_format:
-                ConsoleReporter().report(data=[])
+            # If a namespace filter was provided, we exit silently (no reporter)
+            if filters.namespace:
+                raise typer.Exit(code=0)
+
+            if not output.is_enabled:
+                from greenkube.cli import ConsoleReporter as _ConsoleReporter
+
+                _ConsoleReporter().report(data=[])
             else:
-                handle_export(data=[], output_format=output_format.lower(), output_path=output_path)
+                handle_export(data=[], output_options=output)
             raise typer.Exit(code=0)
 
         # Handle Output
-        if output_format:
+        if output.is_enabled:
             handle_export(
                 data=combined_data,
-                output_format=output_format.lower(),
-                output_path=output_path,
+                output_options=output,
             )
         else:
             # Default to console output
-            console_reporter = ConsoleReporter()
+            from greenkube.cli import ConsoleReporter as _ConsoleReporter
+
+            console_reporter = _ConsoleReporter()
             console_reporter.report(data=combined_data)
 
     except typer.Exit:

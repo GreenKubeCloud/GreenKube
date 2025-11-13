@@ -1,5 +1,6 @@
 # src/greenkube/core/processor.py
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -353,10 +354,11 @@ class DataProcessor:
         end,
         step=None,
         namespace=None,
-        monthly=False,
-        yearly=False,
-        output=None,
-        fmt="csv",
+        hourly: bool = False,
+        daily: bool = False,
+        weekly: bool = False,
+        monthly: bool = False,
+        yearly: bool = False,
     ):
         """Generate CombinedMetric list for a historical time range.
 
@@ -364,14 +366,8 @@ class DataProcessor:
         expects naive or aware datetimes (we treat them as UTC) and returns
         a list of CombinedMetric objects for the requested range. Optional
         parameters mirror the CLI behavior (namespace filter, monthly/yearly
-        aggregation, output file handling is left to the caller).
+        aggregation).
         """
-        import math
-        from collections import defaultdict
-        from datetime import timezone
-
-        from ..core.config import config as core_config
-        from ..models.metrics import CombinedMetric
 
         # Helper to format ISO with Z
         def iso_z(dt):
@@ -607,10 +603,19 @@ class DataProcessor:
             mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
             if carbon_result:
                 period = None
-                if monthly:
+                if hourly:
+                    period = ts.strftime("%Y-%m-%dT%H:00")
+                elif daily:
+                    period = ts.strftime("%Y-%m-%d")
+                elif weekly:
+                    # %W = Week (Monday as first day), %U = Week (Sunday as first day)
+                    # Using %Y-W%W (ISO week number) is often standard
+                    period = ts.strftime("%Y-W%V")  # ISO 8601 week number
+                elif monthly:
                     period = ts.strftime("%Y-%m")
                 elif yearly:
                     period = ts.strftime("%Y")
+
                 combined.append(
                     CombinedMetric(
                         pod_name=pod_name,

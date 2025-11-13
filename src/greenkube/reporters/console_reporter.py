@@ -35,7 +35,7 @@ class ConsoleReporter(BaseReporter):
         If recommendations are provided, displays them in a second table.
         """
         if not data and not recommendations:
-            self.console.print("No data or recommendations to report.", style="yellow")
+            self.console.print("No data to report.", style="yellow")
             return
 
         if not data:
