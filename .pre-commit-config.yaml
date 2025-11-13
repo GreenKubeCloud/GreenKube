@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.5
+    rev: v0.14.5
     hooks:
       - id: ruff
         name: Ruff (Linting)
@@ -9,7 +9,7 @@ repos:
         name: Ruff (Formatting Check)
 
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.18.2
+    rev: v8.29.0
     hooks:
       - id: gitleaks
 
