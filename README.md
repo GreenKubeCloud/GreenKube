@@ -23,6 +23,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 * **Optimization Recommendations:** Identifies "zombie" pods (idle but costly) and "oversized" pods (underutilized CPU) to help you rightsize and reduce waste.
 * **Pod & Namespace Reporting:** Generates detailed reports of CO2e emissions, energy usage, and (optional) costs per pod and namespace.
 * **Flexible Data Backends:** Supports SQLite (default) and Elasticsearch for storing and querying historical carbon intensity data.
+* **Historical Analysis:** Report on energy and carbon usage over any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, etc.).
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (can be manually overridden).
 * **Helm Chart Deployment:** Easily deploy and configure GreenKube in any Kubernetes cluster via a public Helm repository.
 * **Data Export:** Export reports to CSV or JSON for integration with other tools.
@@ -88,7 +89,7 @@ This will deploy GreenKube, which runs as a service (greenkube start) to continu
 
 ## 📈 Running Reports & Getting Recommendations
 
-The primary way to interact with GreenKube is by using kubectl exec to run commands inside the running pod.
+The primary way to interact with GreenKube is by using `kubectl exec` to run commands inside the running pod.
 
 ### 1. Find your GreenKube pod:
 

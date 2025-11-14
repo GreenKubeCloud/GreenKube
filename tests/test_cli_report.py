@@ -1,10 +1,9 @@
-import sys
 from unittest.mock import MagicMock
-
-sys.path.insert(0, "src")
 
 from typer.testing import CliRunner
 
+import greenkube.cli
+import greenkube.cli.main
 import greenkube.cli.recommend as recommend_mod
 import greenkube.cli.report as report_mod
 from greenkube.cli import app
@@ -14,6 +13,7 @@ from greenkube.models.metrics import CombinedMetric
 def make_dummy_processor(return_items=None):
     proc = MagicMock()
     proc.run = MagicMock(return_value=return_items or [])
+    proc.run_range = MagicMock(return_value=return_items or [])
     proc.estimator = MagicMock()
     proc.calculator = MagicMock()
     proc.repository = MagicMock()
@@ -53,9 +53,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
             reported.append(list(data))
 
     # Patch the package-level ConsoleReporter which report() imports dynamically
-    import greenkube.cli as cli_pkg
-
-    monkeypatch.setattr(cli_pkg, "ConsoleReporter", lambda: DummyReporter())
+    monkeypatch.setattr(greenkube.cli, "ConsoleReporter", lambda: DummyReporter())
 
     # Act via CLI runner
     runner = CliRunner()

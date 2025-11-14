@@ -60,57 +60,28 @@ class ConsoleReporter(BaseReporter):
             table.add_column("Grid Intensity (g/kWh)", style="dim", justify="right")
             table.add_column("PUE", style="dim", justify="right")
 
-            # Aggregate by (namespace, pod, period) when period is present, otherwise by (namespace, pod)
-            aggregated = {}
-            for item in data:
-                period = getattr(item, "period", None)
-                if period:
-                    key = (item.namespace, item.pod_name, period)
-                else:
-                    key = (item.namespace, item.pod_name)
-
-                if key not in aggregated:
-                    aggregated[key] = {
-                        "cost": 0.0,
-                        "co2e": 0.0,
-                        "joules": 0.0,
-                        "cpu_req": item.cpu_request,
-                        "mem_req": item.memory_request,
-                        "intensity": item.grid_intensity,
-                        "pue": item.pue,
-                        "period": period,
-                    }
-                aggregated[key]["cost"] += item.total_cost
-                aggregated[key]["co2e"] += item.co2e_grams
-                aggregated[key]["joules"] += item.joules
-
             # Sort by CO2e descending
-            sorted_keys = sorted(aggregated.keys(), key=lambda k: aggregated[k]["co2e"], reverse=True)
+            sorted_data = sorted(data, key=lambda item: item.co2e_grams, reverse=True)
 
-            for key in sorted_keys:
-                item = aggregated[key]
-                mem_mib = item["mem_req"] / (1024 * 1024) if item["mem_req"] else 0.0
-                if len(key) == 3:
-                    ns, pod, period = key
-                else:
-                    ns, pod = key
-                    period = None
+            for item in sorted_data:
+                mem_mib = item.memory_request / (1024 * 1024) if item.memory_request else 0.0
+                period = getattr(item, "period", None)
 
                 row = [
-                    pod,
-                    ns,
+                    item.pod_name,
+                    item.namespace,
                 ]
                 if has_period:
                     row.append(period or "")
                 row.extend(
                     [
-                        f"{item['cost']:.4f}",
-                        f"{item['co2e']:.2f}",
-                        f"{item['joules']:.0f}",
-                        f"{item['cpu_req']}",
+                        f"{item.total_cost:.4f}",
+                        f"{item.co2e_grams:.2f}",
+                        f"{item.joules:.0f}",
+                        f"{item.cpu_request}",
                         f"{mem_mib:.1f}",
-                        f"{item['intensity']:.2f}",
-                        f"{item['pue']:.2f}",
+                        f"{item.grid_intensity:.2f}",
+                        f"{item.pue:.2f}",
                     ]
                 )
 

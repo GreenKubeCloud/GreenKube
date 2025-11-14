@@ -75,11 +75,16 @@ def collect_carbon_intensity_for_all_zones() -> None:
     logger.info("--- Finished carbon intensity collection task ---")
 
 
-@app.command()
-def start() -> None:
+@app.callback(invoke_without_command=True)
+def start(
+    ctx: typer.Context,
+) -> None:
     """
     Initialize the database (if needed) and start the scheduler loop.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     logging.basicConfig(
         level=config.LOG_LEVEL.upper(),
         format="%(asctime)s - %(levelname)s - %(message)s",

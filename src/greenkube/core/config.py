@@ -76,6 +76,9 @@ class Config:
     # stale in-cluster DNS name at import time.
     PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "")
     PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
+    PROMETHEUS_QUERY_RANGE_MAX_SAMPLES = int(
+        os.getenv("PROMETHEUS_QUERY_RANGE_MAX_SAMPLES", "10000")
+    )  # Max data points in a range query
     PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
         "true",
         "1",

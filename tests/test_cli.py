@@ -194,14 +194,14 @@ def test_report_range_today_no_results(mocker, mock_reporter):
 
 def test_help_command_outputs_commands(capsys):
     """The dynamic help command should list available commands."""
-    result = runner.invoke(app, ["--help"])
+    result = runner.invoke(app, ["--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     assert "Usage: greenkube" in result.output
 
 
 def test_unknown_command_shows_help():
     """When an unknown command is provided, the CLI should print help-like output."""
-    result = runner.invoke(app, ["no-such-command"])
+    result = runner.invoke(app, ["no-such-command"], env={"TERM": "dumb"})
     # Our wrapper exits with non-zero for unknown commands but prints available commands
     assert result.exit_code != 0
     assert "Usage: greenkube" in result.output

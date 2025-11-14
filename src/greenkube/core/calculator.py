@@ -40,6 +40,7 @@ def _iso_z(dt: datetime) -> str:
 class CarbonCalculationResult:
     co2e_grams: float
     grid_intensity: float
+    grid_intensity_timestamp: Optional[datetime] = None
 
 
 class CarbonCalculator:
@@ -64,7 +65,7 @@ class CarbonCalculator:
         # (float or None)
         self._intensity_cache = {}
 
-    def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> CarbonCalculationResult:
+    def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 
         If intensity is missing in the repository, the configured default is used.
@@ -80,12 +81,15 @@ class CarbonCalculator:
             normalized_dt = dt
         normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
+        grid_intensity_data = None
         if cache_key in self._intensity_cache:
-            grid_intensity_value = self._intensity_cache[cache_key]
+            grid_intensity_data = self._intensity_cache[cache_key]
         else:
-            grid_intensity_value = self.repository.get_for_zone_at_time(zone, normalized)
+            grid_intensity_data = self.repository.get_for_zone_at_time(zone, normalized)
             # Store even None values to avoid repeated DB/API lookups for missing data
-            self._intensity_cache[cache_key] = grid_intensity_value
+            self._intensity_cache[cache_key] = grid_intensity_data
+
+        grid_intensity_value = grid_intensity_data
 
         if grid_intensity_value is None:
             logger = logging.getLogger(__name__)
@@ -98,10 +102,18 @@ class CarbonCalculator:
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:
-            return CarbonCalculationResult(co2e_grams=0.0, grid_intensity=grid_intensity_value)
+            return CarbonCalculationResult(
+                co2e_grams=0.0,
+                grid_intensity=grid_intensity_value,
+                grid_intensity_timestamp=normalized_dt,
+            )
 
         kwh = joules / config.JOULES_PER_KWH
         kwh_adjusted_for_pue = kwh * self.pue
         co2e_grams = kwh_adjusted_for_pue * grid_intensity_value
 
-        return CarbonCalculationResult(co2e_grams=co2e_grams, grid_intensity=grid_intensity_value)
+        return CarbonCalculationResult(
+            co2e_grams=co2e_grams,
+            grid_intensity=grid_intensity_value,
+            grid_intensity_timestamp=normalized_dt,
+        )

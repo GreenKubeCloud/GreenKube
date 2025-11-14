@@ -11,6 +11,22 @@ import typer
 from typing_extensions import Annotated
 
 
+class ReportOptions:
+    """Dependency-injectable model for report options."""
+
+    def __init__(
+        self,
+        aggregate: Annotated[
+            bool,
+            typer.Option(
+                "--aggregate",
+                help="Aggregate data by namespace, pod, and period.",
+            ),
+        ] = False,
+    ):
+        self.aggregate = aggregate
+
+
 class FilterOptions:
     """Dependency-injectable model for filter options."""
 
