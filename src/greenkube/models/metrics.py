@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EnergyMetric(BaseModel):
@@ -118,6 +118,14 @@ class CombinedMetric(BaseModel):
     memory_request: int = 0  # in bytes
     # Optional aggregation period (e.g., '2025-11' or '2025')
     period: Optional[str] = None
+    # Timestamp for the metric window start (e.g., from Prometheus)
+    timestamp: Optional[datetime] = None
+    # Duration of the metric window in seconds
+    duration_seconds: Optional[int] = None
+    # Timestamp of the grid intensity data used for calculation
+    grid_intensity_timestamp: Optional[datetime] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class EnvironmentalMetric(BaseModel):

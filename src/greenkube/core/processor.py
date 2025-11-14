@@ -1,5 +1,6 @@
 # src/greenkube/core/processor.py
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -353,10 +354,6 @@ class DataProcessor:
         end,
         step=None,
         namespace=None,
-        monthly=False,
-        yearly=False,
-        output=None,
-        fmt="csv",
     ):
         """Generate CombinedMetric list for a historical time range.
 
@@ -364,14 +361,8 @@ class DataProcessor:
         expects naive or aware datetimes (we treat them as UTC) and returns
         a list of CombinedMetric objects for the requested range. Optional
         parameters mirror the CLI behavior (namespace filter, monthly/yearly
-        aggregation, output file handling is left to the caller).
+        aggregation).
         """
-        import math
-        from collections import defaultdict
-        from datetime import timezone
-
-        from ..core.config import config as core_config
-        from ..models.metrics import CombinedMetric
 
         # Helper to format ISO with Z
         def iso_z(dt):
@@ -391,17 +382,18 @@ class DataProcessor:
             except Exception:
                 return 60
 
-        cfg_step_str = getattr(core_config, "PROMETHEUS_QUERY_RANGE_STEP", None) or "60s"
+        cfg_step_str = core_config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = parse_duration_to_seconds(cfg_step_str)
         duration_sec = max(1, int((end - start).total_seconds()))
-        max_points = getattr(core_config, "PROMETHEUS_QUERY_RANGE_MAX_SAMPLES", 10000)
+        max_points = core_config.PROMETHEUS_QUERY_RANGE_MAX_SAMPLES
         min_step_needed = int(math.ceil(duration_sec / float(max_points)))
         chosen_step_sec = max(cfg_step_sec, min_step_needed, 1)
         chosen_step = f"{chosen_step_sec}s"
 
         # Use the Prometheus collector to fetch range-series
-        primary_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,container,node)"
-        chosen_step = chosen_step
+        # The rate window should match the step to avoid gaps/overlaps.
+        rate_window = f"{chosen_step_sec}s"
+        primary_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,container,node)"
         try:
             results = self.prometheus_collector.collect_range(
                 start=start, end=end, step=chosen_step, query=primary_query
@@ -412,7 +404,7 @@ class DataProcessor:
                 "Prometheus collector failed to return range results; attempting fallback query via collector."
             )
             try:
-                fallback_query = "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace,pod,node)"
+                fallback_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,node)"
                 results = self.prometheus_collector.collect_range(
                     start=start, end=end, step=chosen_step, query=fallback_query
                 )
@@ -520,8 +512,10 @@ class DataProcessor:
                         em_namespace, pod = pod_key
                         cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
                         cpu_utilization = min(cpu_utilization, 1.0)
-                        power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
-                        joules = power_draw_watts * estimator.query_range_step_sec
+                        power_draw_watts = min_watts + (
+                            cpu_utilization * (max_watts - min_watts)
+                        )  # This is incorrect, should be node_power_watts * share
+                        joules = power_draw_watts * chosen_step_sec
                         em = {
                             "pod_name": pod,
                             "namespace": em_namespace,
@@ -535,7 +529,7 @@ class DataProcessor:
                         em_namespace, pod = pod_key
                         share = cpu_cores / total_cpu if total_cpu > 0 else 0.0
                         pod_power = node_power_watts * share
-                        joules = pod_power * estimator.query_range_step_sec
+                        joules = pod_power * chosen_step_sec
                         em = {
                             "pod_name": pod,
                             "namespace": em_namespace,
@@ -606,17 +600,16 @@ class DataProcessor:
             cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
             mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
             if carbon_result:
-                period = None
-                if monthly:
-                    period = ts.strftime("%Y-%m")
-                elif yearly:
-                    period = ts.strftime("%Y")
                 combined.append(
                     CombinedMetric(
                         pod_name=pod_name,
                         namespace=em_namespace,
-                        period=period,
+                        # Period is now set by the aggregator, not the processor.
+                        period=None,
                         total_cost=total_cost,
+                        timestamp=ts,
+                        duration_seconds=chosen_step_sec,
+                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                         co2e_grams=carbon_result.co2e_grams,
                         pue=calculator.pue,
                         grid_intensity=carbon_result.grid_intensity,

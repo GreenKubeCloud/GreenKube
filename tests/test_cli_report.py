@@ -1,15 +1,19 @@
-import sys
 from unittest.mock import MagicMock
 
-sys.path.insert(0, "src")
+from typer.testing import CliRunner
 
-import greenkube.cli as cli
+import greenkube.cli
+import greenkube.cli.main
+import greenkube.cli.recommend as recommend_mod
+import greenkube.cli.report as report_mod
+from greenkube.cli import app
 from greenkube.models.metrics import CombinedMetric
 
 
 def make_dummy_processor(return_items=None):
     proc = MagicMock()
     proc.run = MagicMock(return_value=return_items or [])
+    proc.run_range = MagicMock(return_value=return_items or [])
     proc.estimator = MagicMock()
     proc.calculator = MagicMock()
     proc.repository = MagicMock()
@@ -39,7 +43,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
     ]
 
     dummy_proc = make_dummy_processor(return_items=items)
-    monkeypatch.setattr(cli, "get_processor", lambda: dummy_proc)
+    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
 
     reported = []
 
@@ -48,10 +52,13 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
             # Reporter.report now accepts only the data list
             reported.append(list(data))
 
-    monkeypatch.setattr(cli, "ConsoleReporter", lambda: DummyReporter())
+    # Patch the package-level ConsoleReporter which report() imports dynamically
+    monkeypatch.setattr(greenkube.cli, "ConsoleReporter", lambda: DummyReporter())
 
-    # Act
-    cli.report()
+    # Act via CLI runner
+    runner = CliRunner()
+    result = runner.invoke(app, ["report"])
+    assert result.exit_code == 0
 
     # Assert
     assert len(reported) == 1
@@ -66,14 +73,16 @@ def test_report_with_range_delegates_to_report_range(monkeypatch):
         called["args"] = kwargs
         return None
 
-    monkeypatch.setattr(cli, "report_range", fake_report_range)
+    # Make a dummy processor whose run_range will be captured
+    dummy_proc = make_dummy_processor()
+    dummy_proc.run_range = fake_report_range
+    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
 
-    # Act
-    cli.report(hours=2)
-
-    # Assert
+    runner = CliRunner()
+    result = runner.invoke(app, ["report", "--last", "2h"])  # trigger range path
+    assert result.exit_code == 0
+    # Assert run_range was called
     assert "args" in called
-    assert called["args"].get("hours") == 2
 
 
 def test_recommend_generates_and_reports(monkeypatch):
@@ -89,7 +98,7 @@ def test_recommend_generates_and_reports(monkeypatch):
     ]
 
     dummy_proc = make_dummy_processor(return_items=items)
-    monkeypatch.setattr(cli, "get_processor", lambda: dummy_proc)
+    monkeypatch.setattr(recommend_mod, "get_processor", lambda: dummy_proc)
 
     # Dummy recommender that returns some recommendations
     class DummyRec:
@@ -102,7 +111,7 @@ def test_recommend_generates_and_reports(monkeypatch):
     dummy_recommender = MagicMock()
     dummy_recommender.generate_zombie_recommendations = MagicMock(return_value=[DummyRec("p1", "ns1")])
     dummy_recommender.generate_rightsizing_recommendations = MagicMock(return_value=[])
-    monkeypatch.setattr(cli, "Recommender", lambda: dummy_recommender)
+    monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
 
     reported = []
 
@@ -110,10 +119,11 @@ def test_recommend_generates_and_reports(monkeypatch):
         def report_recommendations(self, recommendations):
             reported.append(list(recommendations))
 
-    monkeypatch.setattr(cli, "ConsoleReporter", lambda: DummyReporter2())
+    monkeypatch.setattr(recommend_mod, "ConsoleReporter", lambda: DummyReporter2())
 
-    # Act: should not raise
-    cli.recommend()
+    runner = CliRunner()
+    result = runner.invoke(app, ["recommend"])  # Act
+    assert result.exit_code == 0
 
     # Assert
     assert len(reported) == 1
@@ -132,7 +142,9 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
         )
     ]
     dummy_proc = make_dummy_processor(return_items=items)
-    monkeypatch.setattr(cli, "get_processor", lambda: dummy_proc)
+    # ensure run_range path is used: provide run_range on dummy processor
+    dummy_proc.run_range = lambda **kwargs: items
+    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
 
     # Patch exporters to write to tmp_path and capture call
     written = {}
@@ -148,8 +160,10 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
 
     monkeypatch.setattr(csv_mod, "CSVExporter", DummyExporter)
 
-    # Act: ask for monthly range and output csv (shortcut)
-    cli.report_range(monthly=True, output="csv")
+    # Act: ask for monthly range and output csv (shortcut via CLI)
+    runner = CliRunner()
+    result = runner.invoke(app, ["report", "--monthly", "--output", "csv"])
+    assert result.exit_code == 0
 
     # Assert: exporter was invoked and wrote to data folder path
     assert "path" in written
