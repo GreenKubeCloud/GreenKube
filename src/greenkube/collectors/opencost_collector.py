@@ -5,11 +5,14 @@ allocation data from the OpenCost API.
 """
 
 import logging
+import warnings
 from datetime import datetime, timezone
 from typing import List
 
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
+from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 from ..core.config import config
@@ -37,10 +40,6 @@ class OpenCostCollector(BaseCollector):
         params = {"window": "1d", "aggregate": "pod"}
 
         try:
-            import warnings
-
-            from requests.packages.urllib3.exceptions import InsecureRequestWarning
-
             warnings.simplefilter("ignore", InsecureRequestWarning)
 
             # Use the configured OpenCost API URL (can be overridden via env var OPENCOST_API_URL)
@@ -82,8 +81,6 @@ class OpenCostCollector(BaseCollector):
 
             # If still not configured and we're running in-cluster, try well-known
             # service DNS names used by typical OpenCost Helm charts.
-            from greenkube.collectors.discovery.base import BaseDiscovery
-
             bd = BaseDiscovery()
             if not url and bd._is_running_in_cluster():
                 for candidate in (

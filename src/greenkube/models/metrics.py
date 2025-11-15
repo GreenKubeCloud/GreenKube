@@ -91,6 +91,15 @@ class Recommendation(BaseModel):
     description: str = Field(..., description="A human-readable description of the recommendation.")
 
 
+class EnvironmentalMetric(BaseModel):
+    """
+    Holds environmental factors for a specific location (e.g., a cloud region).
+    """
+
+    pue: float = Field(..., description="Power Usage Effectiveness of the data center.")
+    grid_intensity: float = Field(..., description="Carbon intensity of the grid in gCO2e/kWh.")
+
+
 class CombinedMetric(BaseModel):
     """
     A combined data model for reporting AND analysis.
@@ -126,12 +135,3 @@ class CombinedMetric(BaseModel):
     grid_intensity_timestamp: Optional[datetime] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-class EnvironmentalMetric(BaseModel):
-    """
-    Holds environmental factors for a specific location (e.g., a cloud region).
-    """
-
-    pue: float = Field(..., description="Power Usage Effectiveness of the data center.")
-    grid_intensity: float = Field(..., description="Carbon intensity of the grid in gCO2e/kWh.")

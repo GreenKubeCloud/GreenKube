@@ -10,9 +10,10 @@ that lived in `cli.main` but is isolated for clarity and easier testing.
 import logging
 import time
 import traceback
-from typing import Set
+from typing import Optional, Set
 
 import typer
+from typing_extensions import Annotated
 
 from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
@@ -20,6 +21,7 @@ from ..core.config import config
 from ..core.factory import get_repository
 from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
+from .utils import write_combined_metrics_to_database
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,10 @@ def collect_carbon_intensity_for_all_zones() -> None:
 @app.callback(invoke_without_command=True)
 def start(
     ctx: typer.Context,
+    last: Annotated[
+        Optional[str],
+        typer.Option("--last", help="Time range to collect (e.g., '10min', '2h', '7d', '3w', '1m' for month)."),
+    ] = None,
 ) -> None:
     """
     Initialize the database (if needed) and start the scheduler loop.
@@ -100,12 +106,16 @@ def start(
 
         scheduler = Scheduler()
         scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
+        scheduler.add_job_from_string(
+            lambda: write_combined_metrics_to_database(last=None), config.PROMETHEUS_QUERY_RANGE_STEP
+        )
 
         logger.info("📈 Starting scheduler...")
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")
 
         logger.info("Running initial data collection for all zones...")
         collect_carbon_intensity_for_all_zones()
+        write_combined_metrics_to_database(last=last)
         logger.info("Initial collection complete.")
 
         while True:

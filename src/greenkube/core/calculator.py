@@ -82,23 +82,29 @@ class CarbonCalculator:
         normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
         grid_intensity_data = None
+
         if cache_key in self._intensity_cache:
             grid_intensity_data = self._intensity_cache[cache_key]
         else:
             grid_intensity_data = self.repository.get_for_zone_at_time(zone, normalized)
-            # Store even None values to avoid repeated DB/API lookups for missing data
-            self._intensity_cache[cache_key] = grid_intensity_data
+            self._intensity_cache[cache_key] = grid_intensity_data  # Cache the result (even if None)
 
         grid_intensity_value = grid_intensity_data
 
+        # A value of -1 in the cache indicates we've already warned for this key.
+        has_warned = self._intensity_cache.get(cache_key) == -1
+
         if grid_intensity_value is None:
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
-                zone,
-                timestamp,
-                config.DEFAULT_INTENSITY,
-            )
+            if not has_warned:
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
+                    zone,
+                    normalized_dt.isoformat(),
+                    config.DEFAULT_INTENSITY,
+                )
+                # Mark this cache key as warned to prevent re-logging.
+                self._intensity_cache[cache_key] = -1
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:

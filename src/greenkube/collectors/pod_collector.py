@@ -12,7 +12,7 @@ from kubernetes import client, config
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.models.metrics import PodMetric
 
-LOG = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class PodCollector(BaseCollector):
@@ -33,16 +33,16 @@ class PodCollector(BaseCollector):
             try:
                 config.load_kube_config()
             except config.ConfigException:
-                LOG.warning("Could not configure Kubernetes client. Neither in-cluster nor local config found.")
+                logger.warning("Could not configure Kubernetes client. Neither in-cluster nor local config found.")
 
         # Attempt to create the API client regardless of config loader outcome.
         try:
             self.v1 = client.CoreV1Api()
-            LOG.info("PodCollector initialized with Kubernetes client.")
+            logger.info("PodCollector initialized with Kubernetes client.")
         except Exception as e:
-            LOG.warning("Failed to create Kubernetes API client: %s", e)
+            logger.warning("Failed to create Kubernetes API client: %s", e)
             self.v1 = None
-            LOG.debug("PodCollector initialized without Kubernetes client.")
+            logger.debug("PodCollector initialized without Kubernetes client.")
 
     def _parse_cpu_request(self, cpu: Optional[str]) -> int:
         """Converts K8s CPU string to millicores (int)."""
@@ -57,7 +57,7 @@ class PodCollector(BaseCollector):
             # Convert full cores (e.g., "1", "0.5") to millicores
             return int(float(cpu) * 1000)
         except ValueError:
-            LOG.warning(f"Could not parse CPU request value: {cpu}")
+            logger.warning(f"Could not parse CPU request value: {cpu}")
             return 0
 
     def _parse_memory_request(self, memory: Optional[str]) -> int:
@@ -89,7 +89,7 @@ class PodCollector(BaseCollector):
             # Assume plain number is in bytes
             return int(memory)
         except ValueError:
-            LOG.warning(f"Could not parse memory request value: {memory}")
+            logger.warning(f"Could not parse memory request value: {memory}")
             return 0
 
     def collect(self) -> List[PodMetric]:
@@ -99,7 +99,7 @@ class PodCollector(BaseCollector):
         pod_metrics: List[PodMetric] = []
         # If there's no configured Kubernetes client, return empty list.
         if not getattr(self, "v1", None):
-            LOG.debug("Kubernetes client not configured; skipping pod collection.")
+            logger.debug("Kubernetes client not configured; skipping pod collection.")
             return pod_metrics
 
         try:
@@ -132,8 +132,8 @@ class PodCollector(BaseCollector):
                         )
                     )
         except Exception as e:
-            LOG.error(f"Error collecting pod metrics from Kubernetes API: {e}", exc_info=True)
+            logger.error(f"Error collecting pod metrics from Kubernetes API: {e}", exc_info=True)
             return []  # Return empty list on failure
 
-        LOG.debug(f"Collected {len(pod_metrics)} pod/container request metrics.")
+        logger.debug(f"Collected {len(pod_metrics)} pod/container request metrics.")
         return pod_metrics

@@ -1,5 +1,9 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import List
+
+from ..models.metrics import CombinedMetric
 
 
 class CarbonIntensityRepository(ABC):
@@ -33,5 +37,19 @@ class CarbonIntensityRepository(ABC):
 
         Returns:
             The number of new records saved.
+        """
+        pass
+
+    @abstractmethod
+    def write_combined_metrics(self, metrics: List[CombinedMetric]):
+        """
+        Writes a list of CombinedMetric objects to the repository.
+        """
+        pass
+
+    @abstractmethod
+    def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
+        """
+        Reads CombinedMetric objects from the repository within a given time range.
         """
         pass

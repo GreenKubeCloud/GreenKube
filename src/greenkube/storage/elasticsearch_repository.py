@@ -28,8 +28,7 @@ from elasticsearch.exceptions import (
 from ..core.config import config  # Import config object
 from .base_repository import CarbonIntensityRepository
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def setup_connection():
@@ -106,6 +105,30 @@ class CarbonIntensityDoc(Document):
         settings = {"number_of_shards": 1, "number_of_replicas": 0}
 
 
+class CombinedMetricDoc(Document):
+    """
+    Elasticsearch Document representing a combined metric record.
+    """
+
+    pod_name = Keyword(required=True)
+    namespace = Keyword(required=True)
+    total_cost = Float()
+    co2e_grams = Float()
+    pue = Float()
+    grid_intensity = Float()
+    joules = Float()
+    cpu_request = Float()
+    memory_request = Float()
+    period = Text()
+    timestamp = Date()
+    duration_seconds = Float()
+    grid_intensity_timestamp = Date()
+
+    class Index:
+        name = "greenkube_combined_metrics"
+        settings = {"number_of_shards": 1, "number_of_replicas": 0}
+
+
 class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
     """
     Repository for handling carbon intensity data with Elasticsearch.
@@ -125,9 +148,11 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             # Call without `using` to avoid delegating to the connection internals
             # which tests may mock.
             CarbonIntensityDoc.init()
+            CombinedMetricDoc.init()
             # Use configured index name for logging to avoid depending on
             # elasticsearch-dsl's internal _index attribute during tests.
             logging.info(f"Elasticsearch index '{config.ELASTICSEARCH_INDEX_NAME}' is ready.")
+            logging.info(f"Elasticsearch index '{CombinedMetricDoc.Index.name}' is ready.")
         except ConnectionError as ce:
             logging.error(f"Elasticsearch connection error during index initialization: {ce}")
         except RequestError as re:
@@ -255,3 +280,74 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
         except Exception as e:
             logging.error(f"Unexpected error during bulk save to Elasticsearch for zone {zone}: {e}")
             return 0
+
+    def write_combined_metrics(self, metrics: list) -> int:
+        if not metrics:
+            return 0
+
+        actions = []
+        for metric in metrics:
+            doc_id = metric.get("id")  # Use the pre-generated hash ID
+            actions.append(
+                {
+                    "_op_type": "index",
+                    "_index": CombinedMetricDoc.Index.name,
+                    "_id": doc_id,  # This ensures documents are idempotent
+                    "_source": metric,
+                }
+            )
+
+        if not actions:
+            return 0
+
+        try:
+            conn = connections.get_connection("default")
+            if not conn.ping():
+                raise ConnectionError("Elasticsearch connection lost before bulk save.")
+
+            success_count, errors = bulk(
+                client=conn,
+                actions=actions,
+                raise_on_error=True,
+                stats_only=False,
+                request_timeout=60,
+            )
+            logging.info(f"Successfully saved {success_count} combined metrics to Elasticsearch.")
+            return success_count
+        except ConnectionError as ce:
+            logging.error(f"Elasticsearch connection error during bulk save of combined metrics: {ce}")
+            return 0
+        except TransportError as te:
+            logging.error(f"Failed to bulk save combined metrics to Elasticsearch: {te}")
+            return 0
+        except Exception as e:
+            logging.error(f"Unexpected error during bulk save of combined metrics to Elasticsearch: {e}")
+            return 0
+
+    def read_combined_metrics(self, start_time, end_time) -> list:
+        try:
+            conn = connections.get_connection("default")
+            if not conn.ping():
+                raise ConnectionError("Elasticsearch connection lost before search.")
+
+            s = CombinedMetricDoc.search().filter("range", timestamp={"gte": start_time, "lte": end_time})
+
+            # Use .scan() to retrieve all documents matching the query, not just the first page.
+            # This returns a generator, which we convert to a list.
+            all_hits = s.scan()
+            return [hit.to_dict() for hit in all_hits]
+        except ConnectionError as ce:
+            logging.error(f"Elasticsearch connection error during read_combined_metrics: {ce}")
+            return []
+        except NotFoundError:
+            logging.error(f"Elasticsearch index '{CombinedMetricDoc.Index.name}' not found during search.")
+            return []
+        except RequestError as re:
+            logging.error(f"Elasticsearch query error for combined metrics: {re.info}")
+            return []
+        except TransportError as te:
+            logging.error(f"Elasticsearch transport error during search for combined metrics: {te}")
+            return []
+        except Exception as e:
+            logging.error(f"Unexpected error retrieving combined metrics from Elasticsearch: {e}")
+            return []

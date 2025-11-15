@@ -2,8 +2,6 @@ from unittest.mock import MagicMock
 
 from typer.testing import CliRunner
 
-import greenkube.cli
-import greenkube.cli.main
 import greenkube.cli.recommend as recommend_mod
 import greenkube.cli.report as report_mod
 from greenkube.cli import app
@@ -42,8 +40,9 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
         ),
     ]
 
-    dummy_proc = make_dummy_processor(return_items=items)
-    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
+    dummy_repo = MagicMock()
+    dummy_repo.read_combined_metrics.return_value = items
+    monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
 
     reported = []
 
@@ -52,8 +51,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
             # Reporter.report now accepts only the data list
             reported.append(list(data))
 
-    # Patch the package-level ConsoleReporter which report() imports dynamically
-    monkeypatch.setattr(greenkube.cli, "ConsoleReporter", lambda: DummyReporter())
+    monkeypatch.setattr(report_mod, "ConsoleReporter", lambda: DummyReporter())
 
     # Act via CLI runner
     runner = CliRunner()
@@ -66,23 +64,16 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
 
 
 def test_report_with_range_delegates_to_report_range(monkeypatch):
-    # Arrange: patch report_range to capture calls
-    called = {}
-
-    def fake_report_range(**kwargs):
-        called["args"] = kwargs
-        return None
-
-    # Make a dummy processor whose run_range will be captured
-    dummy_proc = make_dummy_processor()
-    dummy_proc.run_range = fake_report_range
-    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
+    # Arrange: patch the repository to capture calls
+    mock_repo = MagicMock()
+    mock_repo.read_combined_metrics.return_value = []
+    monkeypatch.setattr(report_mod, "get_repository", lambda: mock_repo)
 
     runner = CliRunner()
     result = runner.invoke(app, ["report", "--last", "2h"])  # trigger range path
     assert result.exit_code == 0
-    # Assert run_range was called
-    assert "args" in called
+    # Assert read_combined_metrics was called
+    mock_repo.read_combined_metrics.assert_called()
 
 
 def test_recommend_generates_and_reports(monkeypatch):
@@ -141,10 +132,9 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
             joules=100.0,
         )
     ]
-    dummy_proc = make_dummy_processor(return_items=items)
-    # ensure run_range path is used: provide run_range on dummy processor
-    dummy_proc.run_range = lambda **kwargs: items
-    monkeypatch.setattr(report_mod, "get_processor", lambda: dummy_proc)
+    dummy_repo = MagicMock()
+    dummy_repo.read_combined_metrics.return_value = items
+    monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
 
     # Patch exporters to write to tmp_path and capture call
     written = {}
@@ -156,9 +146,7 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
             written["path"] = path
             return path
 
-    import greenkube.exporters.csv_exporter as csv_mod
-
-    monkeypatch.setattr(csv_mod, "CSVExporter", DummyExporter)
+    monkeypatch.setattr(report_mod, "CSVExporter", DummyExporter)
 
     # Act: ask for monthly range and output csv (shortcut via CLI)
     runner = CliRunner()

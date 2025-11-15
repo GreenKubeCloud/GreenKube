@@ -1,10 +1,13 @@
 # src/greenkube/core/db.py
 
+import logging
 import sqlite3
 
 import psycopg2
 
 from .config import config
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
@@ -25,22 +28,20 @@ class DatabaseManager:
         try:
             if self.db_type == "sqlite":
                 self.connection = sqlite3.connect(config.DB_PATH)
-                print("INFO: Successfully connected to SQLite database.")
-                self.setup_sqlite()
+                logger.info("Successfully connected to SQLite database.")
             elif self.db_type == "postgres":
                 self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
-                print("INFO: Successfully connected to PostgreSQL database.")
+                logger.info("Successfully connected to PostgreSQL database.")
                 # You might need a setup_postgres() method here
-            # --- AJOUT DE LA CONDITION POUR ELASTICSEARCH ---
             elif self.db_type == "elasticsearch":
                 # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
                 # This prevents the application from crashing on startup.
-                print("INFO: DB_TYPE is 'elasticsearch'. Connection will be managed by the specific repository.")
+                logger.info("DB_TYPE is 'elasticsearch'. Connection will be managed by the specific repository.")
                 self.connection = None
             else:
                 raise ValueError("Unsupported database type specified in config.")
         except Exception as e:
-            print(f"ERROR: Could not connect to the database: {e}")
+            logger.error(f"Could not connect to the database: {e}")
             raise
 
     def get_connection(self):
@@ -49,14 +50,17 @@ class DatabaseManager:
     def close(self):
         if self.connection:
             self.connection.close()
-            print("INFO: Database connection closed.")
+            logger.info("Database connection closed.")
 
-    def setup_sqlite(self):
+    def setup_sqlite(self, db_path: str = None):
         """
         Creates the necessary tables for SQLite if they don't exist.
         """
+        if db_path:
+            self.connection = sqlite3.connect(db_path)
+
         if not self.connection:
-            print("ERROR: Cannot setup SQLite, no connection available.")
+            logger.error("Cannot setup SQLite, no connection available.")
             return
 
         cursor = self.connection.cursor()
@@ -101,8 +105,29 @@ class DatabaseManager:
             );
         """)
 
+        # --- Table for combined_metrics ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS combined_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pod_name TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                total_cost REAL,
+                co2e_grams REAL,
+                pue REAL,
+                grid_intensity REAL,
+                joules REAL,
+                cpu_request INTEGER,
+                memory_request INTEGER,
+                period TEXT,
+                "timestamp" TEXT,
+                duration_seconds INTEGER,
+                grid_intensity_timestamp TEXT,
+                UNIQUE(pod_name, namespace, "timestamp")
+            );
+        """)
+
         self.connection.commit()
-        print("INFO: SQLite schema is up to date.")
+        logger.info("SQLite schema is up to date.")
 
 
 # Singleton instance of the DatabaseManager
