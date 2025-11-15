@@ -146,5 +146,5 @@ jobs:
             echo "No changes to publish"
           else
             git commit -m "chore: publish helm chart from CI"
-            git push origin gh-pages
+            git push --force origin gh-pages
           fi
