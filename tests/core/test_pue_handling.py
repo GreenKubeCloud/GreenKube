@@ -10,6 +10,12 @@ class DummyRepo(CarbonIntensityRepository):
     def save_history(self, records, zone=None):
         return 0
 
+    def write_combined_metrics(self, metrics):
+        return 0
+
+    def read_combined_metrics(self, start_time, end_time):
+        return []
+
 
 def test_calculator_uses_config_default_pue(monkeypatch):
     # Ensure CLOUD_PROVIDER affects config.DEFAULT_PUE and calculator picks it

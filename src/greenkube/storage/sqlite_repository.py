@@ -1,9 +1,12 @@
 import logging
 import sqlite3
+from datetime import datetime
+
+from greenkube.models.metrics import CombinedMetric
 
 from .base_repository import CarbonIntensityRepository
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
@@ -106,3 +109,94 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             return 0  # Indicate commit failure if necessary
 
         return saved_count
+
+    def write_combined_metrics(self, metrics: list) -> int:
+        if not self.conn:
+            logging.error("SQLite connection is not available for write_combined_metrics.")
+            return 0
+
+        cursor = self.conn.cursor()
+        saved_count = 0
+
+        for metric in metrics:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO combined_metrics
+                        (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
+                         cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
+                """,
+                    (
+                        metric.pod_name,
+                        metric.namespace,
+                        metric.total_cost,
+                        metric.co2e_grams,
+                        metric.pue,
+                        metric.grid_intensity,
+                        metric.joules,
+                        metric.cpu_request,
+                        metric.memory_request,
+                        metric.period,
+                        metric.timestamp.isoformat() if metric.timestamp else None,
+                        metric.duration_seconds,
+                        metric.grid_intensity_timestamp.isoformat() if metric.grid_intensity_timestamp else None,
+                    ),
+                )
+                saved_count += cursor.rowcount
+            except sqlite3.Error as e:
+                logging.error(f"Could not save combined metric for pod {metric.pod_name}: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error processing combined metric {metric.pod_name}: {e}")
+
+        try:
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to commit transaction for combined_metrics: {e}")
+            return 0
+
+        return saved_count
+
+    def read_combined_metrics(self, start_time, end_time) -> list[CombinedMetric]:
+        if not self.conn:
+            logging.error("SQLite connection is not available for read_combined_metrics.")
+            return []
+
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
+                       cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp
+                FROM combined_metrics
+                WHERE "timestamp" BETWEEN ? AND ?
+            """,
+                (start_time.isoformat(), end_time.isoformat()),
+            )
+            rows = cursor.fetchall()
+            metrics = [
+                CombinedMetric(
+                    pod_name=row[0],
+                    namespace=row[1],
+                    total_cost=row[2],
+                    co2e_grams=row[3],
+                    pue=row[4],
+                    grid_intensity=row[5],
+                    joules=row[6],
+                    cpu_request=row[7],
+                    memory_request=row[8],
+                    period=row[9],
+                    timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
+                    duration_seconds=row[11],
+                    grid_intensity_timestamp=datetime.fromisoformat(row[12]) if row[12] else None,
+                )
+                for row in rows
+            ]
+            return metrics
+        except sqlite3.Error as e:
+            logging.error(f"Could not read combined metrics: {e}")
+            return []
+        except Exception as e:
+            logging.error(f"Unexpected error reading combined metrics: {e}")
+            return []

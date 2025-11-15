@@ -9,25 +9,34 @@ data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}
+  DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
+  DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
+  NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}
+  DB_PATH: {{ .Values.config.db.path | quote }}
   ELASTICSEARCH_HOSTS: {{ .Values.elasticsearch.hosts | quote }}
   ELASTICSEARCH_INDEX_NAME: {{ .Values.elasticsearch.indexName | quote }}
   ELASTICSEARCH_VERIFY_CERTS: {{ .Values.elasticsearch.verifyCerts | quote }}
 
-  # --- Collector Config ---
+  # --- Prometheus Collector Config ---
   {{- if .Values.config.prometheus.url }}
   PROMETHEUS_URL: {{ .Values.config.prometheus.url | quote }}
   {{- end }}
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
+  PROMETHEUS_QUERY_RANGE_STEP: {{ .Values.config.prometheus.queryRangeStep | quote }}
+  PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: {{ .Values.config.prometheus.queryRangeMaxSamples | quote }}
+  PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
+
+  # --- OpenCost Collector Config ---
+  {{- if .Values.config.opencost.url }}
   OPENCOST_API_URL: {{ .Values.config.opencost.url | quote }}
+  {{- end }}
   
   # --- Estimator Defaults ---
-  {{- with .Values.defaults }}
-  {{- with .instance }}
+  {{- with .Values.config.defaults.instance }}
   DEFAULT_INSTANCE_VCORES: {{ .vcores | quote }}
   DEFAULT_INSTANCE_MIN_WATTS: {{ .minWatts | quote }}
   DEFAULT_INSTANCE_MAX_WATTS: {{ .maxWatts | quote }}
-  {{- end }}
   {{- end }}

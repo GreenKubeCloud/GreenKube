@@ -2,6 +2,8 @@
 
 import logging
 import os
+import re
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -114,6 +116,18 @@ class Config:
             raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
         if cls.DB_TYPE == "postgres" and not cls.DB_CONNECTION_STRING:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
+        if cls.PROMETHEUS_QUERY_RANGE_STEP:
+            match = re.match(r"^(\d+)([smh])$", cls.PROMETHEUS_QUERY_RANGE_STEP.lower())
+            if not match:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
+
+            value, unit = int(match.group(1)), match.group(2)
+            unit_map = {"s": "seconds", "m": "minutes", "h": "hours"}
+            delta = timedelta(**{unit_map[unit]: value})
+            step_seconds = delta.total_seconds()
+
+            if (24 * 3600) % step_seconds != 0:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         if not cls.ELECTRICITY_MAPS_TOKEN:
             logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
         if cls.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):

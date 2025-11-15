@@ -1,6 +1,5 @@
 # src/greenkube/core/processor.py
 import logging
-import math
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -10,7 +9,6 @@ from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
 from ..core.config import config
-from ..core.config import config as core_config
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..storage.base_repository import CarbonIntensityRepository
@@ -203,7 +201,7 @@ class DataProcessor:
             # the latest timestamp among metrics to be conservative.
             representative_ts = max(m.timestamp for m in metrics)
             # Normalize representative timestamp based on configured granularity
-            gran = getattr(core_config, "NORMALIZATION_GRANULARITY", "hour")
+            gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
             if isinstance(representative_ts, str):
                 try:
                     rep_dt = datetime.fromisoformat(representative_ts.replace("Z", "+00:00"))
@@ -382,12 +380,10 @@ class DataProcessor:
             except Exception:
                 return 60
 
-        cfg_step_str = core_config.PROMETHEUS_QUERY_RANGE_STEP
+        cfg_step_str = config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = parse_duration_to_seconds(cfg_step_str)
-        duration_sec = max(1, int((end - start).total_seconds()))
-        max_points = core_config.PROMETHEUS_QUERY_RANGE_MAX_SAMPLES
-        min_step_needed = int(math.ceil(duration_sec / float(max_points)))
-        chosen_step_sec = max(cfg_step_sec, min_step_needed, 1)
+        # Use the configured step directly. The logic to increase it was causing fewer data points for long ranges.
+        chosen_step_sec = cfg_step_sec
         chosen_step = f"{chosen_step_sec}s"
 
         # Use the Prometheus collector to fetch range-series
@@ -484,11 +480,17 @@ class DataProcessor:
             pod_mem_map = {}
 
         all_energy_metrics = []
-        from datetime import datetime
-        from datetime import timezone as _tz
 
-        for ts_f, pod_map in sorted(samples.items()):
-            sample_dt = datetime.fromtimestamp(ts_f, tz=_tz.utc)
+        # Normalize samples by the chosen step to avoid floating point timestamp issues
+        normalized_samples = defaultdict(lambda: defaultdict(float))
+        for ts_f, pod_map in samples.items():
+            normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
+            for pod_key, cpu_usage in pod_map.items():
+                normalized_samples[normalized_ts_f][pod_key] += cpu_usage
+
+        for ts_f, pod_map in sorted(normalized_samples.items()):
+            sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
+
             pod_cpu_usage = pod_map
             node_total_cpu = defaultdict(float)
             node_pod_map = defaultdict(list)
@@ -510,11 +512,8 @@ class DataProcessor:
                 if total_cpu <= 0:
                     for pod_key, cpu_cores in pods_on_node:
                         em_namespace, pod = pod_key
-                        cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
-                        cpu_utilization = min(cpu_utilization, 1.0)
-                        power_draw_watts = min_watts + (
-                            cpu_utilization * (max_watts - min_watts)
-                        )  # This is incorrect, should be node_power_watts * share
+                        num_pods_on_node = len(pods_on_node)
+                        power_draw_watts = (min_watts / num_pods_on_node) if num_pods_on_node > 0 else 0
                         joules = power_draw_watts * chosen_step_sec
                         em = {
                             "pod_name": pod,
@@ -561,7 +560,7 @@ class DataProcessor:
             for m in metrics:
                 ts = m["timestamp"]
                 key_dt = ts.replace(minute=0, second=0, microsecond=0)
-                key_dt_utc = key_dt.astimezone(_tz.utc).replace(microsecond=0)
+                key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
                 key_plus = key_dt_utc.isoformat()
                 key_z = key_plus.replace("+00:00", "Z")
                 cache_key_plus = (zone, key_plus)
@@ -601,22 +600,21 @@ class DataProcessor:
             mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
             if carbon_result:
                 combined.append(
-                    CombinedMetric(
-                        pod_name=pod_name,
-                        namespace=em_namespace,
-                        # Period is now set by the aggregator, not the processor.
-                        period=None,
-                        total_cost=total_cost,
-                        timestamp=ts,
-                        duration_seconds=chosen_step_sec,
-                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
-                        co2e_grams=carbon_result.co2e_grams,
-                        pue=calculator.pue,
-                        grid_intensity=carbon_result.grid_intensity,
-                        joules=joules,
-                        cpu_request=cpu_req,
-                        memory_request=mem_req,
-                    )
+                    {
+                        "pod_name": pod_name,
+                        "namespace": em_namespace,
+                        "period": None,
+                        "total_cost": total_cost,
+                        "timestamp": ts,
+                        "duration_seconds": chosen_step_sec,
+                        "grid_intensity_timestamp": carbon_result.grid_intensity_timestamp,
+                        "co2e_grams": carbon_result.co2e_grams,
+                        "pue": calculator.pue,
+                        "grid_intensity": carbon_result.grid_intensity,
+                        "joules": joules,
+                        "cpu_request": cpu_req,
+                        "memory_request": mem_req,
+                    }
                 )
 
         # optional namespace filter

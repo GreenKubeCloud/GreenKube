@@ -40,7 +40,7 @@ class FilterOptions:
             Optional[str],
             typer.Option(
                 "--last",
-                help="Time range to report (e.g., '3h', '7d', '2w', '1m', '1y').",
+                help="Time range to report (e.g., '10min', '2h', '7d', '3w', '1m' for month, '1y').",
             ),
         ] = None,
     ):

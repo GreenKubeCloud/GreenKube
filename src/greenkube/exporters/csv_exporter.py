@@ -1,4 +1,5 @@
 import csv
+import os
 from typing import Any, Dict, List
 
 from .base_exporter import BaseExporter
@@ -29,8 +30,6 @@ class CSVExporter(BaseExporter):
                     headers.append(k)
 
         # Ensure parent directory exists
-        import os
-
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
         with open(out_path, "w", encoding="utf-8", newline="") as fh:

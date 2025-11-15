@@ -7,6 +7,7 @@ This data is the input for the BasicEstimator.
 
 import logging
 import os
+from datetime import timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -521,18 +522,8 @@ class PrometheusCollector(BaseCollector):
 
         # Accept aware or naive datetimes; normalize to Z-suffixed ISO
         try:
-            params["start"] = (
-                start.replace(microsecond=0)
-                .astimezone(__import__("datetime").timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
-            params["end"] = (
-                end.replace(microsecond=0)
-                .astimezone(__import__("datetime").timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
+            params["start"] = start.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            params["end"] = end.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         except Exception:
             # Fallback to string conversion
             params["start"] = str(start)

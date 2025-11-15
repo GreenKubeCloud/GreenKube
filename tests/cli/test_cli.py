@@ -19,7 +19,7 @@ def mock_reporter(mocker):
     """
     Fixture to patch ConsoleReporter and provide a mock instance.
     """
-    mock_reporter_class = mocker.patch("greenkube.cli.ConsoleReporter")
+    mock_reporter_class = mocker.patch("greenkube.cli.report.ConsoleReporter")
     mock_reporter_instance = MagicMock()
     mock_reporter_class.return_value = mock_reporter_instance
     return mock_reporter_instance
@@ -54,11 +54,10 @@ def test_report_success(mocker, mock_reporter, sample_combined_metrics):
     """
     Tests that the `greenkube report` command correctly calls the reporter with data.
     """
-    # Patch the processor used by the report submodule
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run.return_value = sample_combined_metrics
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = sample_combined_metrics
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report"])
 
@@ -71,13 +70,10 @@ def test_report_success(mocker, mock_reporter, sample_combined_metrics):
 
 
 def test_report_with_namespace_filter_success(mocker, mock_reporter, sample_combined_metrics):
-    """
-    Tests that the CLI correctly filters data before passing it to the reporter.
-    """
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run.return_value = sample_combined_metrics
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = sample_combined_metrics
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--namespace", "monitoring"])
 
@@ -94,17 +90,16 @@ def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metri
     Tests that the CLI exits gracefully with a warning when a non-existent
     namespace is provided.
     """
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run.return_value = sample_combined_metrics
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = sample_combined_metrics
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--namespace", "non-existent-ns"])
 
     # The CLI now exits cleanly with code 0 when a namespace has no data
     assert result.exit_code == 0
-    # Reporter should not be called when no data exists for the requested namespace
-    mock_reporter.report.assert_not_called()
+    mock_reporter.report.assert_called_once_with(data=[])
 
 
 def test_export_placeholder(mocker):
@@ -113,13 +108,12 @@ def test_export_placeholder(mocker):
     """
     # Patch the report module logger used when exporting
     mock_logger = mocker.patch("greenkube.cli.report.logger")
-    # Ensure processor returns something so export runs
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run.return_value = [
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = [
         CombinedMetric(pod_name="p1", namespace="ns", total_cost=1.0, co2e_grams=1.0, pue=1.0, grid_intensity=1.0)
     ]
-    mock_proc.return_value = proc_inst
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--output", "csv"])
     # Now exports actual data to disk; ensure exit_ok and that exporter logged the written path
@@ -180,11 +174,10 @@ def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_c
 
 def test_report_range_today_no_results(mocker, mock_reporter):
     """Tests the ranged report path with no results (mocked)."""
-    # Patch the processor.run_range to return empty results
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run_range.return_value = []
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = []
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--last", "1d"])
     assert result.exit_code == 0
@@ -224,11 +217,10 @@ def test_report_range_monthly_flag(mocker, mock_reporter):
     mock_resp.raise_for_status.return_value = None
     mocker.patch("requests.get", return_value=mock_resp)
 
-    # Patch processor.run_range to return empty so reporter is called with []
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run_range.return_value = []
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = []
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--monthly"])
     assert result.exit_code == 0
@@ -251,10 +243,10 @@ def test_report_range_yearly_flag(mocker, mock_reporter):
     mock_resp.raise_for_status.return_value = None
     mocker.patch("requests.get", return_value=mock_resp)
 
-    mock_proc = mocker.patch("greenkube.cli.report.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run_range.return_value = []
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics.return_value = []
+    mock_repo.return_value = repo_inst
 
     result = runner.invoke(app, ["report", "--yearly"])
     assert result.exit_code == 0
