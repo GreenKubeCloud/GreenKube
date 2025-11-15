@@ -17,6 +17,10 @@ spec:
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
       {{- end }}
+      {{- if eq .Values.config.db.type "sqlite" }}
+      securityContext:
+        fsGroup: 1000
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -71,3 +75,13 @@ spec:
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if eq .Values.config.db.type "sqlite" }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- end }}
+      {{- if eq .Values.config.db.type "sqlite" }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
