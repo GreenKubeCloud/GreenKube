@@ -3,8 +3,7 @@
 import logging
 import sqlite3
 
-import psycopg2
-
+# import psycopg2
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -30,8 +29,9 @@ class DatabaseManager:
                 self.connection = sqlite3.connect(config.DB_PATH)
                 logger.info("Successfully connected to SQLite database.")
             elif self.db_type == "postgres":
-                self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
-                logger.info("Successfully connected to PostgreSQL database.")
+                # self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
+                # logger.info("Successfully connected to PostgreSQL database.")
+                raise NotImplementedError("PostgreSQL support is not yet implemented.")
                 # You might need a setup_postgres() method here
             elif self.db_type == "elasticsearch":
                 # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository

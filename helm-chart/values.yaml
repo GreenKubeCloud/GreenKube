@@ -22,32 +22,46 @@ rbac:
   create: true
 
 # Non-sensitive configuration passed as environment variables from config.py
+# These values will be stored in a ConfigMap.
 config:
   logLevel: "INFO"
   cloudProvider: "aws"
   defaultZone: "FR"
+  defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
   
-  # Database type. Supported: "elasticsearch", "postgres", "sqlite"
-  # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
-  db:
-    type: "sqlite"
+  # Normalization granularity for carbon intensity lookups.
+  # Supported: "hour", "day", "none"
+  normalizationGranularity: "hour"
 
+  # Database configuration
+  db:
+    # Supported: "elasticsearch", "postgres", "sqlite"
+    # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
+    type: "sqlite"
+    # Path for the sqlite database file (only used if db.type is "sqlite")
+    path: "/data/greenkube_data.db"
+
+  # Prometheus collector configuration
   prometheus:
-    # Default URL points to the standard kube-prometheus-stack service.
-    # If empty, GreenKube will attempt in-cluster discovery and use
-    # the built-in well-known service names. Leave empty to enable discovery.
-    # Use a common in-cluster DNS candidate as a sensible default. This
-    # overrides any empty .env shipped in the image and allows the
-    # collector to probe this endpoint and fall back to discovery if needed.
+    # If empty, GreenKube will attempt in-cluster discovery.
     url: ""
     verifyCerts: true
+    # Prometheus query step (e.g., "5m", "1h"). Must be a divisor of 24 hours.
+    queryRangeStep: "5m"
+    # Maximum number of data points to fetch in a single range query.
+    queryRangeMaxSamples: 10000
+    # The node label to use for discovering the instance type.
+    nodeInstanceLabel: "label_node_kubernetes_io_instance_type"
 
+  # OpenCost collector configuration
   opencost:
     # If empty, GreenKube will attempt in-cluster discovery.
     url: ""
 
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
+    # Default Power Usage Effectiveness (PUE). Overridden by cloudProvider-specific values if available.
+    pue: 1.3
     instance:
       vcores: 1
       minWatts: 1.0
@@ -58,12 +72,6 @@ elasticsearch:
   hosts: "http://elasticsearch-master:9200" # K8s service name for Elasticsearch
   indexName: "carbon_intensity"
   verifyCerts: true
-  
-  # Authentication for Elasticsearch.
-  # Set these in the 'secrets' section below if you have auth enabled.
-  auth:
-    user: ""
-    password: "" # This value is ignored; set 'secrets.elasticsearch.password' instead.
 
 # Sensitive values that will be stored in a Kubernetes Secret.
 # Users MUST provide the electricityMapsToken.
@@ -71,11 +79,17 @@ secrets:
   # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
   electricityMapsToken: ""
 
+  # Connection string for PostgreSQL (only used if db.type is "postgres")
+  # Example: "postgresql://user:password@host:port/dbname"
+  dbConnectionString: ""
+
+  # Prometheus authentication
   prometheus:
     username: ""
     password: ""
     bearerToken: ""
 
+  # Elasticsearch authentication
   elasticsearch:
     user: ""
     password: ""
