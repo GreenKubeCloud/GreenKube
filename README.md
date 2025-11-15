@@ -17,7 +17,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Community Edition v0.1)
+## ✨ Features (Community Edition v0.1.0)
 
 * **Prometheus-Based Energy Estimation:** Calculates pod-level energy consumption (Joules) using CPU usage data from Prometheus and a built-in library of instance power profiles.
 * **Optimization Recommendations:** Identifies "zombie" pods (idle but costly) and "oversized" pods (underutilized CPU) to help you rightsize and reduce waste.
@@ -52,20 +52,23 @@ Add your API token to the file. You can also configure your database type (e.g.,
 `my-values.yaml`:
 
 ```yaml
-# Get your API token from [https://www.electricitymaps.com/](https://www.electricitymaps.com/)
-secrets:
-  electricityMapsToken: "YOUR_API_TOKEN_HERE"
-
 # Uncomment to use Elasticsearch instead of the default SQLite (recommended)
 # config:
 #   db:
 #     type: "elasticsearch"
 
+# Configure the Elasticsearch hosts
 # elasticsearch:
 #   hosts: "http://your-elasticsearch-host:9200"
-#   secrets:
-#     user: "elastic"
-#     password: "your-password"
+
+secrets:
+  # Get your API token from [https://www.electricitymaps.com/](https://www.electricitymaps.com/)
+  # If not provided, a default value will be used for every zone
+  electricityMapsToken: "YOUR_API_TOKEN_HERE"
+  # Provide credentials in the secrets section
+  # elasticsearch:
+  #   user: "elastic"
+  #   password: "your-password"
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)
