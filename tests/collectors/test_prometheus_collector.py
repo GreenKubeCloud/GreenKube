@@ -6,11 +6,14 @@ We will mock all HTTP requests to the Prometheus API.
 """
 
 import urllib.parse
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 import requests
 from requests_mock import ANY
 
+from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
 from greenkube.collectors.prometheus_collector import PrometheusCollector
 from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
@@ -109,6 +112,20 @@ MOCK_EMPTY_RESPONSE = {
     "data": {"resultType": "vector", "result": []},
 }
 
+MOCK_CPU_RANGE_RESPONSE = {
+    "status": "success",
+    "data": {
+        "resultType": "matrix",
+        "result": [
+            {
+                "metric": {"namespace": "prod", "pod": "api-1", "node": "node-1"},
+                "values": [[1678886400, "0.5"], [1678886700, "0.6"]],
+            }
+        ],
+    },
+}
+
+
 # --- Pytest Fixtures ---
 
 
@@ -169,20 +186,36 @@ def test_collect_success(collector, requests_mock):
     assert result.node_instance_types[1].instance_type == "t3.medium"
 
 
-def test_collect_no_url_configured():
+@patch.object(PrometheusDiscovery, "discover")
+def test_collect_with_no_url_triggers_discovery(mock_discover, collector, requests_mock):
     """
-    Test behavior when PROMETHEUS_URL is not set.
+    Test that collect() triggers discovery when PROMETHEUS_URL is not set.
     """
-    config = Config()
-    config.PROMETHEUS_URL = None
-    collector = PrometheusCollector(settings=config)
+    # We need a collector with no URL
+    collector.base_url = None
 
+    # 1. Discovery is mocked to return a new URL
+    discovered_url = "http://discovered-prometheus:9090"
+    mock_discover.return_value = discovered_url
+
+    # 2. Mock the API calls to the *discovered* URL. The initial query with a
+    #    blank URL will fail, triggering discovery.
+    requests_mock.get(
+        f"{discovered_url}/api/v1/query",
+        [
+            {"json": MOCK_CPU_USAGE_RESPONSE},
+            {"json": MOCK_NODE_LABELS_RESPONSE},
+        ],
+    )
+
+    # 3. Call collect - this should now succeed via discovery
     result = collector.collect()
 
-    # Should return an empty data object and not try to connect
-    assert isinstance(result, PrometheusMetric)
-    assert len(result.pod_cpu_usage) == 0
-    assert len(result.node_instance_types) == 0
+    # 4. Assertions
+    mock_discover.assert_called_once()
+    assert collector.base_url == discovered_url
+    assert len(result.pod_cpu_usage) == 2
+    assert len(result.node_instance_types) == 2
 
 
 def test_collect_connection_error(collector, requests_mock):
@@ -342,3 +375,31 @@ def test_parse_pod_series_variants(collector):
     p2 = collector._parse_cpu_data_no_container(pod_without_container)
     assert isinstance(p2, PodCPUUsage)
     assert p2.container == ""
+
+
+@patch.object(PrometheusCollector, "is_available")
+def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collector, requests_mock):
+    """
+    Test that collect_range() triggers discovery when PROMETHEUS_URL is not set.
+    """
+    # We need a collector with no URL
+    collector.base_url = None
+    discovered_url = "http://discovered-prometheus:9090"
+
+    def side_effect():
+        collector.base_url = discovered_url
+        return True
+
+    mock_is_available.side_effect = side_effect
+
+    # Mock the API call to the discovered URL
+    requests_mock.get(f"{discovered_url}/api/v1/query_range", json=MOCK_CPU_RANGE_RESPONSE)
+
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=1)
+    result = collector.collect_range(start_time, end_time)
+
+    mock_is_available.assert_called_once()
+    assert collector.base_url == discovered_url
+    assert len(result) == 1
+    assert result[0]["metric"]["pod"] == "api-1"

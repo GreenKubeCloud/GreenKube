@@ -161,12 +161,9 @@ class PrometheusCollector(BaseCollector):
 
         Returns the 'result' list from the JSON response, or [] on failure.
         """
-        if not self.base_url:
-            logger.warning("PROMETHEUS_URL is not set. Skipping Prometheus collection.")
-            return []
-
+        # If base_url is not set, this part will fail and fall through to discovery.
         # Normalize base URL and try a couple of common endpoint forms.
-        base = self.base_url.rstrip("/")
+        base = self.base_url.rstrip("/") if self.base_url else ""
         candidates = [
             f"{base}/api/v1/query",
             f"{base}/query",
@@ -505,7 +502,11 @@ class PrometheusCollector(BaseCollector):
         without the 'container' label when needed.
         """
         if not self.base_url:
-            logger.warning("PROMETHEUS_URL is not set. Skipping Prometheus range collection.")
+            logger.info("PROMETHEUS_URL is not set; attempting discovery.")
+            self.is_available()
+
+        if not self.base_url:
+            logger.warning("PROMETHEUS_URL is not set and discovery failed. Skipping Prometheus range collection.")
             return []
 
         step = step or self.query_range_step
