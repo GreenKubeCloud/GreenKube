@@ -619,6 +619,6 @@ class DataProcessor:
 
         # optional namespace filter
         if namespace:
-            combined = [c for c in combined if c.namespace == namespace]
+            combined = [c for c in combined if c.get("namespace") == namespace]
 
         return combined

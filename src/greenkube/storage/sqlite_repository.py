@@ -120,6 +120,14 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
         for metric in metrics:
             try:
+                # Handle datetime objects that might be None before formatting
+                timestamp_iso = metric.get("timestamp").isoformat() if metric.get("timestamp") else None
+                grid_intensity_timestamp_iso = (
+                    metric.get("grid_intensity_timestamp").isoformat()
+                    if metric.get("grid_intensity_timestamp")
+                    else None
+                )
+
                 cursor.execute(
                     """
                     INSERT INTO combined_metrics
@@ -129,19 +137,19 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                 """,
                     (
-                        metric.pod_name,
-                        metric.namespace,
-                        metric.total_cost,
-                        metric.co2e_grams,
-                        metric.pue,
-                        metric.grid_intensity,
-                        metric.joules,
-                        metric.cpu_request,
-                        metric.memory_request,
-                        metric.period,
-                        metric.timestamp.isoformat() if metric.timestamp else None,
-                        metric.duration_seconds,
-                        metric.grid_intensity_timestamp.isoformat() if metric.grid_intensity_timestamp else None,
+                        metric.get("pod_name"),
+                        metric.get("namespace"),
+                        metric.get("total_cost"),
+                        metric.get("co2e_grams"),
+                        metric.get("pue"),
+                        metric.get("grid_intensity"),
+                        metric.get("joules"),
+                        metric.get("cpu_request"),
+                        metric.get("memory_request"),
+                        metric.get("period"),
+                        timestamp_iso,
+                        metric.get("duration_seconds"),
+                        grid_intensity_timestamp_iso,
                     ),
                 )
                 saved_count += cursor.rowcount
