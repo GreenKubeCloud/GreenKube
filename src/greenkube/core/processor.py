@@ -2,6 +2,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import List
 
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
@@ -335,6 +336,8 @@ class DataProcessor:
                     joules=energy_metric.joules,
                     cpu_request=pod_requests["cpu"],
                     memory_request=pod_requests["memory"],
+                    timestamp=energy_metric.timestamp,
+                    grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                 )
                 combined_metrics.append(combined)
             else:
@@ -352,7 +355,7 @@ class DataProcessor:
         end,
         step=None,
         namespace=None,
-    ):
+    ) -> List[CombinedMetric]:
         """Generate CombinedMetric list for a historical time range.
 
         This method centralizes the logic previously located in the CLI. It
@@ -473,8 +476,15 @@ class DataProcessor:
         # pod request maps
         try:
             pod_metrics_list = pod_collector.collect()
-            pod_request_map = {(p.namespace, p.pod_name): p.cpu_request for p in pod_metrics_list}
-            pod_mem_map = {(p.namespace, p.pod_name): p.memory_request for p in pod_metrics_list}
+            # Aggregate by (namespace, pod_name)
+            pod_request_map_agg = defaultdict(int)
+            pod_mem_map_agg = defaultdict(int)
+            for p in pod_metrics_list:
+                key = (p.namespace, p.pod_name)
+                pod_request_map_agg[key] += p.cpu_request
+                pod_mem_map_agg[key] += p.memory_request
+            pod_request_map = pod_request_map_agg
+            pod_mem_map = pod_mem_map_agg
         except Exception:
             pod_request_map = {}
             pod_mem_map = {}
@@ -574,7 +584,7 @@ class DataProcessor:
                     calculator._intensity_cache[cache_key_z] = intensity
 
         # now build CombinedMetric list using calculator
-        combined = []
+        combined: List[CombinedMetric] = []
         try:
             cost_metrics = self.opencost_collector.collect()
             cost_map = {c.pod_name: c for c in cost_metrics}
@@ -600,25 +610,25 @@ class DataProcessor:
             mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
             if carbon_result:
                 combined.append(
-                    {
-                        "pod_name": pod_name,
-                        "namespace": em_namespace,
-                        "period": None,
-                        "total_cost": total_cost,
-                        "timestamp": ts,
-                        "duration_seconds": chosen_step_sec,
-                        "grid_intensity_timestamp": carbon_result.grid_intensity_timestamp,
-                        "co2e_grams": carbon_result.co2e_grams,
-                        "pue": calculator.pue,
-                        "grid_intensity": carbon_result.grid_intensity,
-                        "joules": joules,
-                        "cpu_request": cpu_req,
-                        "memory_request": mem_req,
-                    }
+                    CombinedMetric(
+                        pod_name=pod_name,
+                        namespace=em_namespace,
+                        period=None,
+                        total_cost=total_cost,
+                        timestamp=ts,
+                        duration_seconds=chosen_step_sec,
+                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
+                        co2e_grams=carbon_result.co2e_grams,
+                        pue=calculator.pue,
+                        grid_intensity=carbon_result.grid_intensity,
+                        joules=joules,
+                        cpu_request=cpu_req,
+                        memory_request=mem_req,
+                    )
                 )
 
         # optional namespace filter
         if namespace:
-            combined = [c for c in combined if c.get("namespace") == namespace]
+            combined = [c for c in combined if c.namespace == namespace]
 
         return combined

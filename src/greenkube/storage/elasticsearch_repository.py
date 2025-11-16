@@ -1,4 +1,6 @@
+import hashlib
 import logging
+from typing import List
 
 from elasticsearch_dsl import Date, Document, Float, Keyword, Text
 
@@ -25,7 +27,8 @@ from elasticsearch.exceptions import (
     TransportError,
 )
 
-from ..core.config import config  # Import config object
+from ..core.config import config
+from ..models.metrics import CombinedMetric
 from .base_repository import CarbonIntensityRepository
 
 logger = logging.getLogger(__name__)
@@ -281,19 +284,26 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             logging.error(f"Unexpected error during bulk save to Elasticsearch for zone {zone}: {e}")
             return 0
 
-    def write_combined_metrics(self, metrics: list) -> int:
+    def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         if not metrics:
             return 0
 
         actions = []
         for metric in metrics:
-            doc_id = metric.get("id")  # Use the pre-generated hash ID
+            namespace = metric.namespace or "default"
+            pod_name = metric.pod_name or "unknown"
+            timestamp = metric.timestamp or ""
+            duration = metric.duration_seconds or 0
+
+            id_string = f"{namespace}-{pod_name}-{timestamp.isoformat() if timestamp else ''}-{duration}"
+            doc_id = hashlib.sha256(id_string.encode("utf-8")).hexdigest()
+
             actions.append(
                 {
                     "_op_type": "index",
                     "_index": CombinedMetricDoc.Index.name,
                     "_id": doc_id,  # This ensures documents are idempotent
-                    "_source": metric,
+                    "_source": metric.model_dump(),
                 }
             )
 
@@ -324,7 +334,7 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             logging.error(f"Unexpected error during bulk save of combined metrics to Elasticsearch: {e}")
             return 0
 
-    def read_combined_metrics(self, start_time, end_time) -> list:
+    def read_combined_metrics(self, start_time, end_time) -> List[CombinedMetric]:
         try:
             conn = connections.get_connection("default")
             if not conn.ping():
@@ -333,9 +343,9 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             s = CombinedMetricDoc.search().filter("range", timestamp={"gte": start_time, "lte": end_time})
 
             # Use .scan() to retrieve all documents matching the query, not just the first page.
-            # This returns a generator, which we convert to a list.
             all_hits = s.scan()
-            return [hit.to_dict() for hit in all_hits]
+
+            return [CombinedMetric.model_validate(hit.to_dict()) for hit in all_hits]
         except ConnectionError as ce:
             logging.error(f"Elasticsearch connection error during read_combined_metrics: {ce}")
             return []
