@@ -36,6 +36,7 @@ class PrometheusCollector(BaseCollector):
         """
         Initializes the collector with settings and PromQL queries.
         """
+        self.settings = settings
         self.base_url = settings.PROMETHEUS_URL
         self.query_range_step = settings.PROMETHEUS_QUERY_RANGE_STEP
         self.timeout = 10
@@ -238,6 +239,7 @@ class PrometheusCollector(BaseCollector):
                 # discovered is scheme://host:port
                 # update base_url and adjust TLS verify when scheme is https
                 self.base_url = discovered
+                self.settings.PROMETHEUS_URL = discovered
                 if discovered.startswith("https://"):
                     # If the discovered endpoint is https, prefer to verify certs when
                     # the user explicitly requested it via env var. Otherwise, allow
@@ -384,6 +386,7 @@ class PrometheusCollector(BaseCollector):
             if discovered and _probe(discovered):
                 # persist for subsequent calls
                 self.base_url = discovered
+                self.settings.PROMETHEUS_URL = discovered
                 return True
         except Exception:
             logger.debug("Prometheus discovery/probe failed")
@@ -402,6 +405,7 @@ class PrometheusCollector(BaseCollector):
                     try:
                         if _probe(candidate):
                             self.base_url = candidate
+                            self.settings.PROMETHEUS_URL = candidate
                             # when probing https in-cluster, allow skipping verification
                             if candidate.startswith("https://"):
                                 self.verify = False
@@ -562,7 +566,7 @@ class PrometheusCollector(BaseCollector):
 
                 results = data.get("data", {}).get("result", [])
                 # If no results and we used the container query, try fallback
-                if not results and q == self.cpu_usage_query:
+                if not results and "container" in q:
                     fallback_query = (
                         f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
                         " by (namespace, pod, node)"

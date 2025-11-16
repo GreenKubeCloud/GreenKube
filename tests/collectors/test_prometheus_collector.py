@@ -393,6 +393,8 @@ def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collect
     mock_is_available.side_effect = side_effect
 
     # Mock the API call to the discovered URL
+    # The query_range endpoint has a different structure for its query params
+    # We will use a matcher to catch the request regardless of the exact query params
     requests_mock.get(f"{discovered_url}/api/v1/query_range", json=MOCK_CPU_RANGE_RESPONSE)
 
     end_time = datetime.now()
