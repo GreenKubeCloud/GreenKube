@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 from datetime import datetime
+from typing import List
 
 from greenkube.models.metrics import CombinedMetric
 
@@ -110,7 +111,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
         return saved_count
 
-    def write_combined_metrics(self, metrics: list) -> int:
+    def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         if not self.conn:
             logging.error("SQLite connection is not available for write_combined_metrics.")
             return 0
@@ -120,12 +121,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
         for metric in metrics:
             try:
-                # Handle datetime objects that might be None before formatting
-                timestamp_iso = metric.get("timestamp").isoformat() if metric.get("timestamp") else None
+                timestamp_iso = metric.timestamp.isoformat() if metric.timestamp else None
                 grid_intensity_timestamp_iso = (
-                    metric.get("grid_intensity_timestamp").isoformat()
-                    if metric.get("grid_intensity_timestamp")
-                    else None
+                    metric.grid_intensity_timestamp.isoformat() if metric.grid_intensity_timestamp else None
                 )
 
                 cursor.execute(
@@ -137,18 +135,18 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                 """,
                     (
-                        metric.get("pod_name"),
-                        metric.get("namespace"),
-                        metric.get("total_cost"),
-                        metric.get("co2e_grams"),
-                        metric.get("pue"),
-                        metric.get("grid_intensity"),
-                        metric.get("joules"),
-                        metric.get("cpu_request"),
-                        metric.get("memory_request"),
-                        metric.get("period"),
+                        metric.pod_name,
+                        metric.namespace,
+                        metric.total_cost,
+                        metric.co2e_grams,
+                        metric.pue,
+                        metric.grid_intensity,
+                        metric.joules,
+                        metric.cpu_request,
+                        metric.memory_request,
+                        metric.period,
                         timestamp_iso,
-                        metric.get("duration_seconds"),
+                        metric.duration_seconds,
                         grid_intensity_timestamp_iso,
                     ),
                 )
@@ -166,7 +164,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
         return saved_count
 
-    def read_combined_metrics(self, start_time, end_time) -> list[CombinedMetric]:
+    def read_combined_metrics(self, start_time, end_time) -> List[CombinedMetric]:
         if not self.conn:
             logging.error("SQLite connection is not available for read_combined_metrics.")
             return []

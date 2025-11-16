@@ -58,10 +58,12 @@ def handle_export(
         raise typer.Exit(code=1)
 
     try:
-        # Convert Pydantic models to dicts for export
-        rows = [item.model_dump() for item in data]
-    except AttributeError:  # Fallback for older Pydantic or other objects
-        rows = [item.__dict__ if hasattr(item, "__dict__") else dict(item) for item in data]
+        rows = [item.model_dump(mode="json") for item in data]
+    except Exception as e:
+        logger.error(f"Failed to serialize report data for export: {e}")
+        logger.error(traceback.format_exc())
+        # Re-raise as a TyperExit to stop execution gracefully
+        raise typer.Exit(code=1)
 
     try:
         written_path = exporter.export(rows, str(output_path))
@@ -153,9 +155,7 @@ def report(
         else:
             start = end - timedelta(days=1)
 
-        # read_combined_metrics returns a list of dicts; convert them to CombinedMetric objects.
-        raw_data = repository.read_combined_metrics(start_time=start, end_time=end)
-        combined_data = [CombinedMetric.model_validate(item) for item in raw_data]
+        combined_data = repository.read_combined_metrics(start_time=start, end_time=end)
 
         if filters.namespace:
             combined_data = [item for item in combined_data if item.namespace == filters.namespace]
