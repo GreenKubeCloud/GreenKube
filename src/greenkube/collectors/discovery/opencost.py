@@ -1,15 +1,15 @@
 # src/greenkube/collectors/discovery/opencost.py
 import logging
 import os
+import warnings
 from typing import Optional
 
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-from .base import BaseDiscovery
+from greenkube.core.config import config
 
-# Suppress only the InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from .base import BaseDiscovery
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -52,8 +52,13 @@ class OpenCostDiscovery(BaseDiscovery):
             # Probe the /healthz endpoint instead of the base URL
             probe_url = f"{base_url.rstrip('/')}/healthz"
 
+            verify_certs = config.OPENCOST_VERIFY_CERTS
+            # Only suppress SSL warnings if verification is explicitly disabled
+            if not verify_certs:
+                warnings.simplefilter("ignore", InsecureRequestWarning)
+
             try:
-                resp = requests.get(probe_url, timeout=3, verify=False)
+                resp = requests.get(probe_url, timeout=3, verify=verify_certs)
                 status = resp.status_code
 
                 logger.info(

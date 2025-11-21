@@ -38,9 +38,12 @@ class OpenCostCollector(BaseCollector):
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
         params = {"window": "1d", "aggregate": "pod"}
+        verify_certs = config.OPENCOST_VERIFY_CERTS
 
         try:
-            warnings.simplefilter("ignore", InsecureRequestWarning)
+            # Only suppress SSL warnings if verification is explicitly disabled
+            if not verify_certs:
+                warnings.simplefilter("ignore", InsecureRequestWarning)
 
             # Resolve URL (Config -> Discovery -> Local -> In-Cluster)
             url = self._resolve_url()
@@ -51,7 +54,7 @@ class OpenCostCollector(BaseCollector):
 
             def _fetch(u: str):
                 try:
-                    resp = requests.get(u, params=params, timeout=10, verify=False)
+                    resp = requests.get(u, params=params, timeout=10, verify=verify_certs)
                     resp.raise_for_status()
                 except requests.exceptions.RequestException as exc:
                     logger.debug("Request to %s failed: %s", u, exc)
@@ -220,9 +223,10 @@ class OpenCostCollector(BaseCollector):
         """
         Probes a URL to see if it's a valid OpenCost endpoint.
         """
+        verify_certs = config.OPENCOST_VERIFY_CERTS
         try:
             params = {"window": "1d", "aggregate": "pod"}
-            r = requests.get(url, params=params, timeout=5, verify=False)
+            r = requests.get(url, params=params, timeout=5, verify=verify_certs)
             r.raise_for_status()
             return True
         except Exception:

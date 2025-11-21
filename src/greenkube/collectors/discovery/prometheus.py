@@ -1,6 +1,7 @@
 # src/greenkube/collectors/discovery/prometheus.py
 import logging
 import os
+import warnings
 from typing import Optional
 
 import requests
@@ -8,10 +9,9 @@ import requests
 # Suppress InsecureRequestWarning for self-signed certs in-cluster
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-from .base import BaseDiscovery
+from greenkube.core.config import config
 
-# Suppress only the InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from .base import BaseDiscovery
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -82,9 +82,14 @@ class PrometheusDiscovery(BaseDiscovery):
         """
         for path in self.PROBE_PATHS:
             url = f"{base_url.rstrip('/')}{path}"
+            verify_certs = config.PROMETHEUS_VERIFY_CERTS
+            # Only suppress SSL warnings if verification is explicitly disabled
+            if not verify_certs:
+                warnings.simplefilter("ignore", InsecureRequestWarning)
+
             try:
                 # Use a simple 'up' query which is lightweight and universal
-                resp = requests.get(url, params={"query": "up"}, timeout=3, verify=False)
+                resp = requests.get(url, params={"query": "up"}, timeout=3, verify=verify_certs)
                 status = resp.status_code
 
                 try:
