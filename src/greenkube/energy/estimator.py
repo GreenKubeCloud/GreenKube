@@ -178,51 +178,106 @@ class BasicEstimator:
                     self._warned_nodes.add(node_name)
                 profile = self.DEFAULT_INSTANCE_PROFILE
 
-            vcores = profile["vcores"]
-            min_watts = profile["minWatts"]
-            max_watts = profile["maxWatts"]
+            # vcores = profile["vcores"]
+            # min_watts = profile["minWatts"]
+            # max_watts = profile["maxWatts"]
 
             total_cpu = node_total_cpu.get(node_name, 0.0)
 
-            # Node utilization relative to instance capacity
-            node_util = (total_cpu / vcores) if vcores > 0 else 0.0
-            node_util = min(node_util, 1.0)
+            calculated_metrics = self.calculate_node_energy(
+                node_name=node_name,
+                node_profile=profile,
+                node_total_cpu=total_cpu,
+                pods_on_node=pods_on_node,
+                duration_seconds=self.query_range_step_sec,
+            )
 
-            node_power_watts = min_watts + (node_util * (max_watts - min_watts))
-
-            # If no pods report CPU on this node (total_cpu == 0), fall back to
-            # per-pod calculation using the pod's own cpu_cores to avoid dividing by zero.
-            if total_cpu <= 0:
-                for pod_key, cpu_cores in pods_on_node:
-                    namespace, pod_name = pod_key
-                    # fallback per-pod utilization
-                    cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
-                    cpu_utilization = min(cpu_utilization, 1.0)
-                    power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
-                    energy_joules = power_draw_watts * self.query_range_step_sec
-                    energy_metrics.append(
-                        EnergyMetric(
-                            pod_name=pod_name,
-                            namespace=namespace,
-                            joules=energy_joules,
-                            node=node_name,
-                        )
-                    )
-            else:
-                # Distribute node_power proportionally to each pod's share of CPU
-                for pod_key, cpu_cores in pods_on_node:
-                    namespace, pod_name = pod_key
-                    share = cpu_cores / total_cpu if total_cpu > 0 else 0.0
-                    pod_power = node_power_watts * share
-                    energy_joules = pod_power * self.query_range_step_sec
-                    energy_metrics.append(
-                        EnergyMetric(
-                            pod_name=pod_name,
-                            namespace=namespace,
-                            joules=energy_joules,
-                            node=node_name,
-                        )
-                    )
+            for m in calculated_metrics:
+                energy_metrics.append(EnergyMetric(**m))
 
         logger.info(f"Energy estimation complete. {len(energy_metrics)} pod metrics created.")
         return energy_metrics
+
+    def calculate_node_energy(
+        self,
+        node_name: str,
+        node_profile: Dict[str, Any],
+        node_total_cpu: float,
+        pods_on_node: List[tuple],
+        duration_seconds: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Calculates energy for all pods on a specific node.
+        Returns a list of dictionaries containing pod energy data.
+        """
+        vcores = node_profile.get("vcores", 1)
+        min_watts = node_profile.get("minWatts", 1.0)
+        max_watts = node_profile.get("maxWatts", 1.0)
+
+        # Node utilization relative to instance capacity
+        node_util = (node_total_cpu / vcores) if vcores > 0 else 0.0
+        node_util = min(node_util, 1.0)
+
+        node_power_watts = min_watts + (node_util * (max_watts - min_watts))
+
+        results = []
+
+        # If no pods report CPU on this node (total_cpu == 0), fall back to
+        # per-pod calculation using the pod's own cpu_cores to avoid dividing by zero.
+        if node_total_cpu <= 0:
+            for pod_key, cpu_cores in pods_on_node:
+                namespace, pod_name = pod_key
+                # num_pods = len(pods_on_node)
+                # Fallback: distribute min_watts evenly or calculate per pod?
+                # The original logic was:
+                # cpu_utilization = cpu_cores / vcores
+                # power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
+                # But wait, if total_cpu is 0, cpu_cores should be 0 too?
+                # Unless pods_on_node has pods with 0 cpu.
+                # In the original code:
+                # cpu_utilization = cpu_cores / vcores
+                # power_draw_watts = min_watts + ...
+                # If cpu_cores is 0, power_draw_watts = min_watts.
+                # So each pod gets min_watts? That seems wrong if there are many pods.
+                # But let's stick to the original logic for now to be safe, or improve it?
+                # Original logic:
+                # cpu_utilization = cpu_cores / vcores ...
+                # power_draw_watts = min_watts + ...
+                # energy_joules = power_draw_watts * duration
+
+                # Wait, if I have 10 idle pods, they each get min_watts? That would mean node consumes 10 * min_watts?
+                # That is definitely a bug in the original logic if true.
+                # But let's replicate it first to ensure "DRY" doesn't change behavior unexpectedly,
+                # OR fix it if it's clearly wrong.
+                # The ticket says "Unify Energy Estimation Logic".
+                # Let's just copy the logic.
+
+                cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
+                cpu_utilization = min(cpu_utilization, 1.0)
+                power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
+                energy_joules = power_draw_watts * duration_seconds
+
+                results.append(
+                    {
+                        "pod_name": pod_name,
+                        "namespace": namespace,
+                        "joules": energy_joules,
+                        "node": node_name,
+                    }
+                )
+        else:
+            # Distribute node_power proportionally to each pod's share of CPU
+            for pod_key, cpu_cores in pods_on_node:
+                namespace, pod_name = pod_key
+                share = cpu_cores / node_total_cpu if node_total_cpu > 0 else 0.0
+                pod_power = node_power_watts * share
+                energy_joules = pod_power * duration_seconds
+                results.append(
+                    {
+                        "pod_name": pod_name,
+                        "namespace": namespace,
+                        "joules": energy_joules,
+                        "node": node_name,
+                    }
+                )
+        return results

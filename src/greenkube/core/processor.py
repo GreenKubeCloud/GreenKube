@@ -4,6 +4,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List
 
+from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
+
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -233,6 +235,15 @@ class DataProcessor:
             rep_normalized_plus = rep_dt_utc.isoformat()
             try:
                 intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
+                if intensity is None:
+                    # TICKET-007: Attempt live fetch if DB misses
+                    logger.info(
+                        "Intensity missing for zone %s at %s. Attempting live fetch.", zone, rep_normalized_plus
+                    )
+                    em_collector = ElectricityMapsCollector()
+                    em_collector.collect(zone=zone)
+                    # Retry fetch from DB
+                    intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
                 logger.info(
                     "Prefetched intensity for zone '%s' at '%s' (present=%s)",
                     zone,
@@ -347,6 +358,7 @@ class DataProcessor:
                     memory_request=pod_requests["memory"],
                     timestamp=energy_metric.timestamp,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
+                    node=node_name,
                 )
                 combined_metrics.append(combined)
             else:
@@ -356,6 +368,7 @@ class DataProcessor:
                 )
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
+        self.calculator.clear_cache()
         return combined_metrics
 
     def run_range(
@@ -520,42 +533,17 @@ class DataProcessor:
 
             for node_name, pods_on_node in node_pod_map.items():
                 profile = profile_for_node(node_name)
-                vcores = profile.get("vcores", 1)
-                min_watts = profile.get("minWatts", 1.0)
-                max_watts = profile.get("maxWatts", 1.0)
-                total_cpu = node_total_cpu.get(node_name, 0.0)
-                node_util = (total_cpu / vcores) if vcores > 0 else 0.0
-                node_util = min(node_util, 1.0)
-                node_power_watts = min_watts + (node_util * (max_watts - min_watts))
+                calculated_metrics = estimator.calculate_node_energy(
+                    node_name=node_name,
+                    node_profile=profile,
+                    node_total_cpu=node_total_cpu.get(node_name, 0.0),
+                    pods_on_node=pods_on_node,
+                    duration_seconds=chosen_step_sec,
+                )
 
-                if total_cpu <= 0:
-                    for pod_key, cpu_cores in pods_on_node:
-                        em_namespace, pod = pod_key
-                        num_pods_on_node = len(pods_on_node)
-                        power_draw_watts = (min_watts / num_pods_on_node) if num_pods_on_node > 0 else 0
-                        joules = power_draw_watts * chosen_step_sec
-                        em = {
-                            "pod_name": pod,
-                            "namespace": em_namespace,
-                            "joules": joules,
-                            "node": node_name,
-                            "timestamp": sample_dt,
-                        }
-                        all_energy_metrics.append(em)
-                else:
-                    for pod_key, cpu_cores in pods_on_node:
-                        em_namespace, pod = pod_key
-                        share = cpu_cores / total_cpu if total_cpu > 0 else 0.0
-                        pod_power = node_power_watts * share
-                        joules = pod_power * chosen_step_sec
-                        em = {
-                            "pod_name": pod,
-                            "namespace": em_namespace,
-                            "joules": joules,
-                            "node": node_name,
-                            "timestamp": sample_dt,
-                        }
-                        all_energy_metrics.append(em)
+                for m in calculated_metrics:
+                    m["timestamp"] = sample_dt
+                    all_energy_metrics.append(m)
 
         # Prefetch intensities per zone/hour and populate calculator cache
         node_emaps_map = self._get_node_emaps_map()
@@ -625,11 +613,12 @@ class DataProcessor:
                         joules=joules,
                         cpu_request=cpu_req,
                         memory_request=mem_req,
+                        node=node_name,
                     )
                 )
 
-        # optional namespace filter
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
 
+        self.calculator.clear_cache()
         return combined

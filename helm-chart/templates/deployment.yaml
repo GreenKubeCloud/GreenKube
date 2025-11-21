@@ -34,9 +34,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
-            # Load all sensitive config
-            - secretRef:
-                name: {{ include "greenkube.fullname" . }}
+
 
           # Explicitly map Prometheus-related variables from the ConfigMap/Secret
           # using valueFrom. These explicit env entries take precedence over
@@ -54,34 +52,23 @@ spec:
                   name: {{ include "greenkube.fullname" . }}
                   key: PROMETHEUS_VERIFY_CERTS
                   optional: true
-            - name: PROMETHEUS_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
-                  key: PROMETHEUS_USERNAME
-                  optional: true
-            - name: PROMETHEUS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
-                  key: PROMETHEUS_PASSWORD
-                  optional: true
-            - name: PROMETHEUS_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
-                  key: PROMETHEUS_BEARER_TOKEN
-                  optional: true
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if eq .Values.config.db.type "sqlite" }}
+
           volumeMounts:
+            - name: secrets
+              mountPath: /etc/greenkube/secrets
+              readOnly: true
+            {{- if eq .Values.config.db.type "sqlite" }}
             - name: data
               mountPath: /data
-          {{- end }}
-      {{- if eq .Values.config.db.type "sqlite" }}
+            {{- end }}
       volumes:
+        - name: secrets
+          secret:
+            secretName: {{ include "greenkube.fullname" . }}
+        {{- if eq .Values.config.db.type "sqlite" }}
         - name: data
           emptyDir: {}
-      {{- end }}
+        {{- end }}

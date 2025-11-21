@@ -20,6 +20,22 @@ class Config:
     Handles the application's configuration by loading values from environment variables.
     """
 
+    @staticmethod
+    def _get_secret(key: str, default: str = None) -> str:
+        """
+        Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
+        """
+        # Check for secret file first (mounted volume)
+        secret_file = f"/etc/greenkube/secrets/{key}"
+        if os.path.exists(secret_file):
+            try:
+                with open(secret_file, "r") as f:
+                    return f.read().strip()
+            except Exception:
+                pass
+        # Fallback to environment variable
+        return os.getenv(key, default)
+
     # --- Default variables ---
     DEFAULT_COST = 0.0
 
@@ -57,12 +73,12 @@ class Config:
     DB_TYPE = os.getenv("DB_TYPE", "sqlite")
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
     DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
-    ELECTRICITY_MAPS_TOKEN = os.getenv("ELECTRICITY_MAPS_TOKEN")
+    ELECTRICITY_MAPS_TOKEN = _get_secret.__func__("ELECTRICITY_MAPS_TOKEN")
 
     # --- ELASTICSEARCH VARIABLES ---
     ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
-    ELASTICSEARCH_USER = os.getenv("ELASTICSEARCH_USER")
-    ELASTICSEARCH_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
+    ELASTICSEARCH_USER = _get_secret.__func__("ELASTICSEARCH_USER")
+    ELASTICSEARCH_PASSWORD = _get_secret.__func__("ELASTICSEARCH_PASSWORD")
     ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
         "true",
         "1",
@@ -88,9 +104,9 @@ class Config:
         "y",
         "yes",
     )
-    PROMETHEUS_BEARER_TOKEN = os.getenv("PROMETHEUS_BEARER_TOKEN")
-    PROMETHEUS_USERNAME = os.getenv("PROMETHEUS_USERNAME")
-    PROMETHEUS_PASSWORD = os.getenv("PROMETHEUS_PASSWORD")
+    PROMETHEUS_BEARER_TOKEN = _get_secret.__func__("PROMETHEUS_BEARER_TOKEN")
+    PROMETHEUS_USERNAME = _get_secret.__func__("PROMETHEUS_USERNAME")
+    PROMETHEUS_PASSWORD = _get_secret.__func__("PROMETHEUS_PASSWORD")
     PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
         "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
     )

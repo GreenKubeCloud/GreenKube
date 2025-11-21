@@ -350,15 +350,20 @@ class PrometheusCollector(BaseCollector):
 
         # Validate required labels are present; if any are missing, return None and let
         # the caller aggregate malformed items for a single warning.
-        if not all(k in metric for k in ("namespace", "pod", "container", "node")):
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        container = metric.get("container") or metric.get("container_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, container, node)):
             return None
 
         try:
             data_to_validate = {
-                "namespace": metric["namespace"],
-                "pod": metric["pod"],
-                "container": metric["container"],
-                "node": metric["node"],
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "node": node,
                 "cpu_usage_cores": float(value_str),
             }
             return PodCPUUsage(**data_to_validate)
@@ -379,15 +384,20 @@ class PrometheusCollector(BaseCollector):
 
         # namespace, pod and node are required; container may be absent and will be
         # set to empty string.
-        if not all(k in metric for k in ("namespace", "pod", "node")):
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+        container = metric.get("container") or metric.get("container_name") or ""
+
+        if not all((namespace, pod, node)):
             return None
 
         try:
             data_to_validate = {
-                "namespace": metric["namespace"],
-                "pod": metric["pod"],
-                "container": metric.get("container", ""),
-                "node": metric["node"],
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "node": node,
                 "cpu_usage_cores": float(value_str),
             }
             return PodCPUUsage(**data_to_validate)
