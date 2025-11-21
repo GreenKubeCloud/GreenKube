@@ -145,21 +145,14 @@ class OpenCostCollector(BaseCollector):
             except Exception:
                 logger.debug("OpenCost discovery attempt failed or returned no candidate")
 
-        def _probe(u: str) -> bool:
-            try:
-                resp = requests.get(u, timeout=5, verify=False)
-                return 200 <= resp.status_code < 300
-            except Exception:
-                return False
-
-        if url and _probe(url):
+        if url and self._probe(url):
             logger.debug("OpenCost API is available at %s", url)
             return True
 
         # If configured URL didn't respond, try the well-known allocation path
         if url:
             alt = url.rstrip("/") + "/allocation/compute"
-            if _probe(alt):
+            if self._probe(alt):
                 logger.debug("OpenCost API is available at alternative path %s", alt)
                 setattr(config, "OPENCOST_API_URL", alt)
                 return True
@@ -168,7 +161,7 @@ class OpenCostCollector(BaseCollector):
         try:
             od = OpenCostDiscovery()
             discovered = od.discover()
-            if discovered and _probe(discovered):
+            if discovered and self._probe(discovered):
                 # update the config so subsequent calls use discovered URL
                 setattr(config, "OPENCOST_API_URL", discovered)
                 return True

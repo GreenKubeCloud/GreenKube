@@ -66,7 +66,7 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     class DummyRepo:
         def get_for_zone_at_time(self, zone, timestamp):
             # We expect timestamp normalized to the hour
-            assert timestamp.endswith("00:00+00:00") or timestamp.endswith("00:00+00:00")
+            assert timestamp.endswith("00:00+00:00")
             return 120.0
 
     repository = DummyRepo()

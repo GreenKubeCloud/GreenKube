@@ -94,15 +94,7 @@ class DataProcessor:
         logger.info("Starting data processing cycle...")
         combined_metrics = []
 
-        # 1. Get Node Zones (or use default if unavailable)
-        # We used to do this here, but now we do it later or via helper.
-        # However, 'run' logic had it split. Let's just use the helper later.
-        # But wait, 'run' doesn't use cloud_zones_map until step 2 (fallback) or step 3 (mapping).
-        # Actually, step 1 was just collecting it.
-        # Let's remove this block and call the helper when needed.
-        pass
-
-        # 2. Collect Prometheus metrics
+        # Collect Prometheus metrics
         try:
             prom_metrics = self.prometheus_collector.collect()
             # If Prometheus did not return any node instance types, attempt a
