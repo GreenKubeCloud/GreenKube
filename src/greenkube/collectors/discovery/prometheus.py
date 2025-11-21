@@ -1,6 +1,5 @@
 # src/greenkube/collectors/discovery/prometheus.py
 import logging
-import os
 import warnings
 from typing import Optional
 
@@ -48,28 +47,11 @@ class PrometheusDiscovery(BaseDiscovery):
             logger.info("Prometheus discovery: no candidates found after scoring.")
             return None
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        result = self.probe_candidates(candidates, self._probe_prometheus_endpoint)
 
-        # For unit testing, bypass HTTP probes and return the top-scored candidate.
-        if os.getenv("PYTEST_CURRENT_TEST"):
-            score, svc_name, svc_ns, port, scheme = candidates[0]
-            host = f"{svc_name}.{svc_ns}.svc.cluster.local"
-            return f"{scheme}://{host}:{port}"
-
-        # Probe the top 5 candidates in score order.
-        logger.info(f"Prometheus discovery: Probing top {len(candidates[:5])} candidates.")
-        for score, svc_name, svc_ns, port, scheme in candidates[:5]:
-            host = f"{svc_name}.{svc_ns}.svc.cluster.local"
-
-            # Skip candidates that aren't resolvable or running in-cluster
-            if not (self._is_running_in_cluster() or self._is_resolvable(host)):
-                logger.debug(f"Prometheus discovery: Skipping candidate '{host}' (score={score}) - unresolvable.")
-                continue
-
-            base_url = f"{scheme}://{host}:{port}"
-            if self._probe_prometheus_endpoint(base_url, score):
-                logger.info(f"Prometheus discovery: Successfully verified endpoint {base_url}")
-                return base_url
+        if result:
+            logger.info(f"Prometheus discovery: Successfully verified endpoint {result}")
+            return result
 
         logger.warning("Prometheus discovery: Probed top candidates, but none responded with a valid Prometheus API.")
         return None
