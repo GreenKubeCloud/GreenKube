@@ -1,0 +1,78 @@
+# Power consumption profiles for cloud instances
+# Based on Cloud Carbon Footprint data
+# Sources:
+#   - https://github.com/cloud-carbon-footprint/cloud-carbon-footprint/blob/trunk/packages/gcp/src/lib/GCPFootprintEstimationConstants.ts
+#   - https://github.com/cloud-carbon-footprint/cloud-carbon-footprint/blob/trunk/packages/aws/src/lib/AWSFootprintEstimationConstants.ts
+#
+# Users can override this by providing a custom ConfigMap in Kubernetes mounted at:
+# /etc/greenkube/instance_profiles.yaml
+
+profiles:
+  # AWS Instances
+  m5.large:
+    vcores: 2
+    minWatts: 3.23
+    maxWatts: 36.30
+    provider: AWS
+
+  m5.xlarge:
+    vcores: 4
+    minWatts: 5.82
+    maxWatts: 66.27
+    provider: AWS
+
+  t3.medium:
+    vcores: 2
+    minWatts: 2.03
+    maxWatts: 23.41
+    provider: AWS
+
+  t3.large:
+    vcores: 2
+    minWatts: 2.03
+    maxWatts: 23.41
+    provider: AWS
+
+  t3.xlarge:
+    vcores: 4
+    minWatts: 3.42
+    maxWatts: 40.48
+    provider: AWS
+
+  # GCP Instances
+  n1-standard-1:
+    vcores: 1
+    minWatts: 1.42
+    maxWatts: 13.56
+    provider: GCP
+
+  n1-standard-2:
+    vcores: 2
+    minWatts: 2.22
+    maxWatts: 22.31
+    provider: GCP
+
+  e2-standard-2:
+    vcores: 2
+    minWatts: 1.34
+    maxWatts: 11.23
+    provider: GCP
+
+  e2-standard-4:
+    vcores: 4
+    minWatts: 2.36
+    maxWatts: 19.94
+    provider: GCP
+
+  # Azure Instances
+  Standard_D2s_v3:
+    vcores: 2
+    minWatts: 2.22
+    maxWatts: 22.31
+    provider: Azure
+
+  Standard_D4s_v3:
+    vcores: 4
+    minWatts: 3.82
+    maxWatts: 39.81
+    provider: Azure
