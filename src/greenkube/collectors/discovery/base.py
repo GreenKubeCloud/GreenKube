@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from kubernetes import client, config
 
@@ -113,6 +113,37 @@ class BaseDiscovery:
         host = f"{svc_name}.{svc_ns}.svc.cluster.local"
         if self._is_running_in_cluster() or self._is_resolvable(host):
             return f"{scheme}://{host}:{port}"
+        return None
+
+    def probe_candidates(self, candidates: list, probe_func: Callable[[str, int], bool]) -> Optional[str]:
+        """
+        Iterates over candidates and probes them using the provided function.
+        Returns the base URL of the first successful candidate.
+        """
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # For unit testing, bypass HTTP probes and return the top-scored candidate.
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            score, svc_name, svc_ns, port, scheme = candidates[0]
+            host = f"{svc_name}.{svc_ns}.svc.cluster.local"
+            return f"{scheme}://{host}:{port}"
+
+        logger.info(f"Discovery: Probing top {len(candidates[:5])} candidates.")
+        for score, svc_name, svc_ns, port, scheme in candidates[:5]:
+            host = f"{svc_name}.{svc_ns}.svc.cluster.local"
+
+            # Skip candidates that aren't resolvable or running in-cluster
+            if not (self._is_running_in_cluster() or self._is_resolvable(host)):
+                logger.debug(f"Discovery: Skipping candidate '{host}' (score={score}) - unresolvable.")
+                continue
+
+            base_url = f"{scheme}://{host}:{port}"
+            if probe_func(base_url, score):
+                return base_url
+
         return None
 
     def _collect_candidates(

@@ -8,39 +8,60 @@ It is based on open-source data from the Cloud Carbon Footprint project,
 which provides estimates for minimum (idle) and maximum (100% CPU) power
 draw for various instance types.
 
+Instance profiles are now loaded from a YAML configuration file to allow
+users to add custom hardware without modifying source code.
+
 Source: https://github.com/cloud-carbon-footprint/cloud-carbon-footprint/blob/trunk/packages/gcp/src/lib/GCPFootprintEstimationConstants.ts
 Source: https://github.com/cloud-carbon-footprint/cloud-carbon-footprint/blob/trunk/packages/aws/src/lib/AWSFootprintEstimationConstants.ts
 """
 
-# Each key is the 'instance_type' (e.g., 'm5.large')
-# - vcores: Number of vCPUs for this instance type.
-# - minWatts: Power consumption at idle.
-# - maxWatts: Power consumption at 100% CPU utilization.
-INSTANCE_PROFILES = {
-    # --- AWS ---
-    "m5.large": {"vcores": 2, "minWatts": 3.23, "maxWatts": 36.30},
-    "m5.xlarge": {"vcores": 4, "minWatts": 5.82, "maxWatts": 66.27},
-    "t3.medium": {"vcores": 2, "minWatts": 2.03, "maxWatts": 23.41},
-    "t3.large": {
-        "vcores": 2,
-        "minWatts": 2.03,
-        "maxWatts": 23.41,  # Often shared for burstable types
-    },
-    "t3.xlarge": {"vcores": 4, "minWatts": 3.42, "maxWatts": 40.48},
-    # --- GCP ---
-    "n1-standard-1": {"vcores": 1, "minWatts": 1.42, "maxWatts": 13.56},
-    "n1-standard-2": {"vcores": 2, "minWatts": 2.22, "maxWatts": 22.31},
-    "e2-standard-2": {"vcores": 2, "minWatts": 1.34, "maxWatts": 11.23},
-    "e2-standard-4": {"vcores": 4, "minWatts": 2.36, "maxWatts": 19.94},
-    # --- Azure (Examples) ---
-    "Standard_D2s_v3": {
-        "vcores": 2,
-        "minWatts": 2.22,
-        "maxWatts": 22.31,  # Based on similar n1-standard-2 GCP profile
-    },
-    "Standard_D4s_v3": {
-        "vcores": 4,
-        "minWatts": 3.82,
-        "maxWatts": 39.81,  # Based on similar n1-standard-4 GCP profile
-    },
-}
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+
+def load_instance_profiles() -> Dict[str, Any]:
+    """
+    Load instance profiles from YAML configuration file.
+
+    Checks for custom profiles file via INSTANCE_PROFILES_PATH environment
+    variable, or uses the default shipped with GreenKube. This allows users
+    to provide custom ConfigMaps in Kubernetes deployments.
+
+    Returns:
+        Dictionary mapping instance type names to profile data (vcores, minWatts, maxWatts)
+    """
+    # Check for custom profiles file (e.g., from Kubernetes ConfigMap)
+    custom_path = os.environ.get("INSTANCE_PROFILES_PATH")
+    if custom_path and Path(custom_path).exists():
+        profiles_file = Path(custom_path)
+        logger.info(f"Loading instance profiles from custom path: {profiles_file}")
+    else:
+        # Use default file shipped with GreenKube
+        profiles_file = Path(__file__).parent / "instance_profiles.yaml"
+        logger.debug(f"Loading instance profiles from default path: {profiles_file}")
+
+    try:
+        with open(profiles_file, "r") as f:
+            data = yaml.safe_load(f)
+            profiles = data.get("profiles", {})
+            logger.info(f"Loaded {len(profiles)} instance profiles")
+            return profiles
+    except FileNotFoundError:
+        logger.error(f"Instance profiles file not found: {profiles_file}")
+        return {}
+    except yaml.YAMLError as e:
+        logger.error(f"Failed to parse instance profiles YAML: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error loading instance profiles: {e}")
+        return {}
+
+
+# Load profiles at module import time
+INSTANCE_PROFILES = load_instance_profiles()

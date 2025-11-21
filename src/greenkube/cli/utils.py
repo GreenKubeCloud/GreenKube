@@ -40,6 +40,20 @@ def parse_last_duration(last: str) -> timedelta:
     return timedelta()
 
 
+def get_report_time_range(last: Optional[str] = None) -> tuple[datetime, datetime]:
+    """
+    Calculates the start and end time for a report.
+    If 'last' is provided, start = end - duration.
+    Otherwise, defaults to last 24 hours.
+    """
+    end = datetime.now(timezone.utc)
+    if last:
+        start = end - parse_last_duration(last)
+    else:
+        start = end - timedelta(days=1)
+    return start, end
+
+
 def get_normalized_window() -> (datetime, datetime):
     """
     Calculates a consistent, non-overlapping query window based on the configured step.

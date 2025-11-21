@@ -6,7 +6,6 @@ Implements the consolidated `report` command for the GreenKube CLI.
 import logging
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,8 +19,7 @@ from ..exporters.json_exporter import JSONExporter
 from ..models.cli import FilterOptions, GroupingOptions, OutputOptions, ReportOptions
 from ..models.metrics import CombinedMetric
 from ..reporters.console_reporter import ConsoleReporter
-from .start import write_combined_metrics_to_database
-from .utils import parse_last_duration
+from .utils import get_report_time_range, write_combined_metrics_to_database
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +147,7 @@ def report(
 
         repository = get_repository()
 
-        end = datetime.now(timezone.utc)
-        if filters.last:
-            start = end - parse_last_duration(filters.last)
-        else:
-            start = end - timedelta(days=1)
+        start, end = get_report_time_range(filters.last)
 
         combined_data = repository.read_combined_metrics(start_time=start, end_time=end)
 

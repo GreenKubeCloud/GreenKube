@@ -135,7 +135,12 @@ class NodeCollector(BaseCollector):
                 try:
                     capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
                     if capacity and "cpu" in capacity:
-                        cpu_cores = int(str(capacity["cpu"]))
+                        from kubernetes.utils.quantity import parse_quantity
+
+                        # Use parse_quantity to handle "4" or "4000m" correctly
+                        cpu_qty = parse_quantity(capacity["cpu"])
+                        cpu_cores = int(cpu_qty)
+
                         inferred_label = f"cpu-{cpu_cores}"
                         node_instance_map[node_name] = inferred_label
                         logger.info(
@@ -143,11 +148,10 @@ class NodeCollector(BaseCollector):
                             node_name,
                             cpu_cores,
                         )
-                except Exception:
-                    # If anything goes wrong parsing capacity, skip silently.
-                    logger.debug(
-                        "Could not infer instance type from capacity for node '%s'",
-                        node_name,
+                except Exception as e:
+                    # Log warning with exception info instead of silent failure
+                    logger.warning(
+                        "Could not infer instance type from capacity for node '%s': %s", node_name, e, exc_info=True
                     )
 
         except client.ApiException as e:

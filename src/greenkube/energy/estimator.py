@@ -222,49 +222,27 @@ class BasicEstimator:
 
         results = []
 
-        # If no pods report CPU on this node (total_cpu == 0), fall back to
-        # per-pod calculation using the pod's own cpu_cores to avoid dividing by zero.
+        # If no pods report CPU on this node (total_cpu == 0), the node is idle.
+        # Distribute the node's idle power (minWatts) evenly among all pods on the node.
+        # This ensures the sum of pod energy does not exceed the node's actual consumption.
         if node_total_cpu <= 0:
-            for pod_key, cpu_cores in pods_on_node:
-                namespace, pod_name = pod_key
-                # num_pods = len(pods_on_node)
-                # Fallback: distribute min_watts evenly or calculate per pod?
-                # The original logic was:
-                # cpu_utilization = cpu_cores / vcores
-                # power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
-                # But wait, if total_cpu is 0, cpu_cores should be 0 too?
-                # Unless pods_on_node has pods with 0 cpu.
-                # In the original code:
-                # cpu_utilization = cpu_cores / vcores
-                # power_draw_watts = min_watts + ...
-                # If cpu_cores is 0, power_draw_watts = min_watts.
-                # So each pod gets min_watts? That seems wrong if there are many pods.
-                # But let's stick to the original logic for now to be safe, or improve it?
-                # Original logic:
-                # cpu_utilization = cpu_cores / vcores ...
-                # power_draw_watts = min_watts + ...
-                # energy_joules = power_draw_watts * duration
+            num_pods = len(pods_on_node)
+            if num_pods > 0:
+                # Node operates at minimum power when idle
+                # Distribute this power evenly among all pods
+                power_per_pod = min_watts / num_pods
+                energy_per_pod = power_per_pod * duration_seconds
 
-                # Wait, if I have 10 idle pods, they each get min_watts? That would mean node consumes 10 * min_watts?
-                # That is definitely a bug in the original logic if true.
-                # But let's replicate it first to ensure "DRY" doesn't change behavior unexpectedly,
-                # OR fix it if it's clearly wrong.
-                # The ticket says "Unify Energy Estimation Logic".
-                # Let's just copy the logic.
-
-                cpu_utilization = cpu_cores / vcores if vcores > 0 else 0.0
-                cpu_utilization = min(cpu_utilization, 1.0)
-                power_draw_watts = min_watts + (cpu_utilization * (max_watts - min_watts))
-                energy_joules = power_draw_watts * duration_seconds
-
-                results.append(
-                    {
-                        "pod_name": pod_name,
-                        "namespace": namespace,
-                        "joules": energy_joules,
-                        "node": node_name,
-                    }
-                )
+                for pod_key, cpu_cores in pods_on_node:
+                    namespace, pod_name = pod_key
+                    results.append(
+                        {
+                            "pod_name": pod_name,
+                            "namespace": namespace,
+                            "joules": energy_per_pod,
+                            "node": node_name,
+                        }
+                    )
         else:
             # Distribute node_power proportionally to each pod's share of CPU
             for pod_key, cpu_cores in pods_on_node:

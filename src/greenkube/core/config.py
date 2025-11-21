@@ -113,6 +113,13 @@ class Config:
 
     # --- OpenCost API URL (used by OpenCostCollector) ---
     OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
+    OPENCOST_VERIFY_CERTS = os.getenv("OPENCOST_VERIFY_CERTS", "True").lower() in (
+        "true",
+        "1",
+        "t",
+        "y",
+        "yes",
+    )
 
     # --- Default instance profile (used when instance type unknown) ---
     DEFAULT_INSTANCE_VCORES = int(os.getenv("DEFAULT_INSTANCE_VCORES", "1"))

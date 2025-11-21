@@ -45,51 +45,39 @@ class PodCollector(BaseCollector):
             logger.debug("PodCollector initialized without Kubernetes client.")
 
     def _parse_cpu_request(self, cpu: Optional[str]) -> int:
-        """Converts K8s CPU string to millicores (int)."""
+        """Converts K8s CPU string to millicores (int) using parse_quantity.
+
+        Supports formats like "250m", "0.5", "1" and returns millicores.
+        """
         if not cpu:
             return 0
-        if cpu.endswith("m"):
-            return int(cpu[:-1])
-        if cpu.endswith("n"):
-            # Nano-cores are too small to be relevant for this calculation
-            return 0
         try:
-            # Convert full cores (e.g., "1", "0.5") to millicores
-            return int(float(cpu) * 1000)
-        except ValueError:
-            logger.warning(f"Could not parse CPU request value: {cpu}")
+            from kubernetes.utils.quantity import parse_quantity
+
+            # parse_quantity returns a Decimal representing cores
+            cores = parse_quantity(cpu)
+            # Convert to millicores (multiply by 1000)
+            millicores = int(cores * 1000)
+            return millicores
+        except Exception as e:
+            logger.warning(f"Could not parse CPU request value '{cpu}': {e}")
             return 0
 
     def _parse_memory_request(self, memory: Optional[str]) -> int:
-        """Converts K8s memory string to bytes (int)."""
+        """Converts K8s memory string to bytes (int) using parse_quantity.
+
+        Supports binary (Ki, Mi, Gi, Ti) and decimal (K, M, G, T) units.
+        """
         if not memory:
             return 0
-
-        # Handle binary units (Ki, Mi, Gi, Ti)
-        if memory.endswith("Ki"):
-            return int(memory[:-2]) * 1024
-        if memory.endswith("Mi"):
-            return int(memory[:-2]) * 1024**2
-        if memory.endswith("Gi"):
-            return int(memory[:-2]) * 1024**3
-        if memory.endswith("Ti"):
-            return int(memory[:-2]) * 1024**4
-
-        # Handle decimal units (K, M, G, T)
-        if memory.endswith("K"):
-            return int(memory[:-1]) * 1000
-        if memory.endswith("M"):
-            return int(memory[:-1]) * 1000**2
-        if memory.endswith("G"):
-            return int(memory[:-1]) * 1000**3
-        if memory.endswith("T"):
-            return int(memory[:-1]) * 1000**4
-
         try:
-            # Assume plain number is in bytes
-            return int(memory)
-        except ValueError:
-            logger.warning(f"Could not parse memory request value: {memory}")
+            from kubernetes.utils.quantity import parse_quantity
+
+            # parse_quantity returns a Decimal representing bytes
+            bytes_val = int(parse_quantity(memory))
+            return bytes_val
+        except Exception as e:
+            logger.warning(f"Could not parse memory request value '{memory}': {e}")
             return 0
 
     def collect(self) -> List[PodMetric]:
