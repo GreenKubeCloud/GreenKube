@@ -39,12 +39,8 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
 
-    def run(self):
-        """Executes the data processing pipeline."""
-        logger.info("Starting data processing cycle...")
-        combined_metrics = []
-
-        # 1. Get Node Zones (or use default if unavailable)
+    def _get_node_emaps_map(self) -> dict:
+        """Collects node zones and maps them to Electricity Maps zones."""
         try:
             cloud_zones_map = self.node_collector.collect()
             if not cloud_zones_map:
@@ -58,7 +54,51 @@ class DataProcessor:
                 e,
                 config.DEFAULT_ZONE,
             )
-            cloud_zones_map = {}  # Ensure it's iterable
+            cloud_zones_map = {}
+
+        node_emaps_map = {}
+        if cloud_zones_map:
+            for node, cloud_zone in cloud_zones_map.items():
+                try:
+                    mapped = get_emaps_zone_from_cloud_zone(cloud_zone)
+                    if mapped:
+                        node_emaps_map[node] = mapped
+                        logger.info(
+                            "Node '%s' cloud zone '%s' -> Electricity Maps zone '%s'",
+                            node,
+                            cloud_zone,
+                            mapped,
+                        )
+                    else:
+                        node_emaps_map[node] = config.DEFAULT_ZONE
+                        logger.warning(
+                            "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
+                            cloud_zone,
+                            node,
+                            config.DEFAULT_ZONE,
+                        )
+                except Exception:
+                    node_emaps_map[node] = config.DEFAULT_ZONE
+                    logger.warning(
+                        "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
+                        cloud_zone,
+                        node,
+                        config.DEFAULT_ZONE,
+                    )
+        return node_emaps_map
+
+    def run(self):
+        """Executes the data processing pipeline."""
+        logger.info("Starting data processing cycle...")
+        combined_metrics = []
+
+        # 1. Get Node Zones (or use default if unavailable)
+        # We used to do this here, but now we do it later or via helper.
+        # However, 'run' logic had it split. Let's just use the helper later.
+        # But wait, 'run' doesn't use cloud_zones_map until step 2 (fallback) or step 3 (mapping).
+        # Actually, step 1 was just collecting it.
+        # Let's remove this block and call the helper when needed.
+        pass
 
         # 2. Collect Prometheus metrics
         try:
@@ -112,7 +152,7 @@ class DataProcessor:
                     node_totals[item.node] += item.cpu_usage_cores
 
                 # Threshold in cores below which Prometheus totals are considered too small
-                LOW_NODE_CPU_THRESHOLD = 0.05  # 50 millicores
+                LOW_NODE_CPU_THRESHOLD = config.LOW_NODE_CPU_THRESHOLD
                 if node_totals:
                     # Build mapping pod->node (from prom_metrics) and node->list(items)
                     pod_to_items = {}
@@ -152,39 +192,8 @@ class DataProcessor:
             energy_metrics = []  # Continue with empty list if Prometheus/estimator fails
 
         # Precompute node -> Electricity Maps zone mapping once to avoid repeated
-        # translations/prints during per-pod processing. This also yields a set
-        # of unique (zone, timestamp) keys which we will prefetch from the
-        # repository and place in the calculator's per-run cache to avoid
-        # repeated external DB/API calls.
-        node_emaps_map = {}
-        if cloud_zones_map:
-            for node, cloud_zone in cloud_zones_map.items():
-                try:
-                    mapped = get_emaps_zone_from_cloud_zone(cloud_zone)
-                    if mapped:
-                        node_emaps_map[node] = mapped
-                        logger.info(
-                            "Node '%s' cloud zone '%s' -> Electricity Maps zone '%s'",
-                            node,
-                            cloud_zone,
-                            mapped,
-                        )
-                    else:
-                        node_emaps_map[node] = config.DEFAULT_ZONE
-                        logger.warning(
-                            "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
-                            cloud_zone,
-                            node,
-                            config.DEFAULT_ZONE,
-                        )
-                except Exception:
-                    node_emaps_map[node] = config.DEFAULT_ZONE
-                    logger.warning(
-                        "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
-                        cloud_zone,
-                        node,
-                        config.DEFAULT_ZONE,
-                    )
+        # translations/prints during per-pod processing.
+        node_emaps_map = self._get_node_emaps_map()
 
         # Group energy metrics by emaps_zone so we can prefetch intensity once
         # per zone and populate the calculator cache for all timestamps of
@@ -549,15 +558,7 @@ class DataProcessor:
                         all_energy_metrics.append(em)
 
         # Prefetch intensities per zone/hour and populate calculator cache
-        try:
-            cloud_zones_map = node_collector.collect() or {}
-        except Exception:
-            cloud_zones_map = {}
-
-        node_emaps_map = {}
-        for node, cz in cloud_zones_map.items():
-            emz = get_emaps_zone_from_cloud_zone(cz) or config.DEFAULT_ZONE
-            node_emaps_map[node] = emz
+        node_emaps_map = self._get_node_emaps_map()
 
         zone_to_metrics = defaultdict(list)
         skipped_carbon = 0
