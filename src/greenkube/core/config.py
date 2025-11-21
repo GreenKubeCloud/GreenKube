@@ -103,6 +103,9 @@ class Config:
     DEFAULT_INSTANCE_MIN_WATTS = float(os.getenv("DEFAULT_INSTANCE_MIN_WATTS", "1.0"))
     DEFAULT_INSTANCE_MAX_WATTS = float(os.getenv("DEFAULT_INSTANCE_MAX_WATTS", "10.0"))
 
+    # Threshold in cores below which Prometheus totals are considered too small
+    LOW_NODE_CPU_THRESHOLD = float(os.getenv("LOW_NODE_CPU_THRESHOLD", "0.05"))
+
     # Normalization granularity for carbon intensity lookups and cache keys.
     # Allowed values: 'hour', 'day', 'none'
     NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
