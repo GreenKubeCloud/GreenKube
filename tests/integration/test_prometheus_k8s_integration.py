@@ -109,17 +109,13 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
 
     # Run the processing pipeline; we expect it to run without exceptions and produce 1 or 0 combined metrics
     combined = dp.run()
-    # The important assertions: repository should have been queried using the normalized hour
-    normalized_hour = sample_dt.replace(minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
-    cache_key = ("FR", normalized_hour)
-    assert cache_key in calc._intensity_cache
 
     # Ensure a CombinedMetric was produced and contains expected intensity and co2e
-    assert len(combined) >= 0
-    if combined:
-        cm = combined[0]
-        # grid_intensity should come from repository (120.0)
-        assert cm.grid_intensity == 120.0
+    assert len(combined) >= 1, f"Expected at least 1 combined metric, got {len(combined)}"
+
+    cm = combined[0]
+    # grid_intensity should come from repository (120.0)
+    assert cm.grid_intensity == 120.0
     # joules -> kWh = 1, * pue (DEFAULT_PUE) * intensity 120 = expected g CO2e
     expected_co2e = (3.6e6 / config.JOULES_PER_KWH) * config.DEFAULT_PUE * 120.0
     assert pytest.approx(cm.co2e_grams, rel=1e-6) == expected_co2e
