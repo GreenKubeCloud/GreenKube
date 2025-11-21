@@ -456,6 +456,18 @@ class DataProcessor:
         node_collector = self.node_collector
         pod_collector = self.pod_collector
 
+        # NOTE: For historical reports, we use CURRENT cluster metadata (node instance types,
+        # pod requests, zone assignments). This means:
+        # - Deleted pods/nodes will have missing or default metadata
+        # - "Rightsizing" recommendations rely on current pod resource requests
+        # - "Region" assignments use current node zones
+        # If the cluster state has changed significantly since the historical data was collected,
+        # metadata-dependent fields may not reflect the actual state at that time.
+        logger.warning(
+            "Historical report: Using CURRENT cluster metadata for node instance types, "
+            "pod requests, and zone assignments. Deleted resources will use default values."
+        )
+
         # node instance types
         try:
             node_instance_map = node_collector.collect_instance_types() or {}
