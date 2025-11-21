@@ -1,0 +1,16 @@
+apiVersion: v1
+entries:
+  greenkube:
+  - apiVersion: v2
+    appVersion: 0.1.4
+    created: "2025-11-21T22:38:09.909639966Z"
+    description: A Helm chart for GreenKube to measure, understand, and reduce the
+      carbon footprint of your Kubernetes infrastructure.
+    digest: b1787c383077f15082ce280cee877d664fc7c03227c94779000aca84acb4846b
+    icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
+    name: greenkube
+    type: application
+    urls:
+    - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.1.4.tgz
+    version: 0.1.4
+generated: "2025-11-21T22:38:09.909105583Z"
