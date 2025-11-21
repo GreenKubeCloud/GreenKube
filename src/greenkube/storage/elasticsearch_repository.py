@@ -126,6 +126,9 @@ class CombinedMetricDoc(Document):
     timestamp = Date()
     duration_seconds = Float()
     grid_intensity_timestamp = Date()
+    node_instance_type = Keyword()
+    node_zone = Keyword()
+    emaps_zone = Keyword()
 
     class Index:
         name = "greenkube_combined_metrics"

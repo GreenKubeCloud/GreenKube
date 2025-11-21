@@ -154,8 +154,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     """
                     INSERT INTO combined_metrics
                         (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                         cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
+                         node_instance_type, node_zone, emaps_zone)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                 """,
                     (
@@ -172,6 +173,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         timestamp_iso,
                         metric.duration_seconds,
                         grid_intensity_timestamp_iso,
+                        metric.node_instance_type,
+                        metric.node_zone,
+                        metric.emaps_zone,
                     ),
                 )
                 saved_count += cursor.rowcount
@@ -198,7 +202,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             cursor.execute(
                 """
                 SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                       cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp
+                       cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
+                       node_instance_type, node_zone, emaps_zone
                 FROM combined_metrics
                 WHERE "timestamp" BETWEEN ? AND ?
             """,
@@ -220,6 +225,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
                     duration_seconds=row[11],
                     grid_intensity_timestamp=datetime.fromisoformat(row[12]) if row[12] else None,
+                    node_instance_type=row[13],
+                    node_zone=row[14],
+                    emaps_zone=row[15],
                 )
                 for row in rows
             ]

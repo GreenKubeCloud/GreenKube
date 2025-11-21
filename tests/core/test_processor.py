@@ -117,6 +117,7 @@ def mock_node_collector():
     """Provides a mock NodeCollector."""
     mock = MagicMock()
     mock.collect.return_value = SAMPLE_NODE_ZONES
+    mock.collect_instance_types.return_value = {"node-1": "m5.large", "node-2": "m5.large"}
     return mock
 
 
@@ -128,7 +129,6 @@ def mock_pod_collector():
     return mock
 
 
-# --- ADDED: Fixtures for repository and calculator ---
 @pytest.fixture
 def mock_repository():
     """Provides a mock CarbonIntensityRepository."""
@@ -171,9 +171,6 @@ def mock_calculator():
     return mock
 
 
-# ------------------------------------------------------
-
-
 @pytest.fixture
 def data_processor(
     mock_prometheus_collector,
@@ -205,9 +202,7 @@ def data_processor(
 # --- Test Cases ---
 
 
-# --- Patch the CORRECT translator function ---
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-# -------------------------------------------
 def test_processor_combines_data_correctly(mock_translator, data_processor, mock_calculator):
     """
     Tests the main success path: combines data from all sources correctly.
@@ -276,9 +271,7 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
     )
 
 
-# --- Patch the CORRECT translator function ---
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-# -------------------------------------------
 def test_processor_estimates_missing_cost_data(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor uses the default cost when OpenCost data is missing for a pod,
@@ -341,6 +334,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(
     # Configure the NodeCollector mock *instance* to return an empty dict
     mock_node_collector_instance = mock_node_collector_class.return_value
     mock_node_collector_instance.collect.return_value = {}  # Simulate no zones found
+    mock_node_collector_instance.collect_instance_types.return_value = {}  # Simulate no instance types
 
     # Need to instantiate processor manually here because the fixture uses the class mock incorrectly
     data_processor = DataProcessor(
@@ -430,9 +424,7 @@ def test_processor_handles_opencost_failure(
     mock_node_collector.collect.assert_called_once()
 
 
-# --- Patch the CORRECT translator function ---
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-# -------------------------------------------
 def test_processor_handles_calculator_failure(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor skips a metric if the calculator fails for it,

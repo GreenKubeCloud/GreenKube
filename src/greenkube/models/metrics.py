@@ -135,5 +135,9 @@ class CombinedMetric(BaseModel):
     grid_intensity_timestamp: Optional[datetime] = None
     # Node where the pod is running
     node: Optional[str] = None
+    # Metadata for historical accuracy
+    node_instance_type: Optional[str] = None
+    node_zone: Optional[str] = None  # Cloud provider zone
+    emaps_zone: Optional[str] = None  # Electricity Maps zone
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

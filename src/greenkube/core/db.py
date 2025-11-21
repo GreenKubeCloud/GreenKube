@@ -122,9 +122,26 @@ class DatabaseManager:
                 "timestamp" TEXT,
                 duration_seconds INTEGER,
                 grid_intensity_timestamp TEXT,
+                node_instance_type TEXT,
+                node_zone TEXT,
+                emaps_zone TEXT,
                 UNIQUE(pod_name, namespace, "timestamp")
             );
         """)
+
+        # Migrations for existing tables
+        try:
+            cursor.execute("ALTER TABLE combined_metrics ADD COLUMN node_instance_type TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE combined_metrics ADD COLUMN node_zone TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE combined_metrics ADD COLUMN emaps_zone TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         self.connection.commit()
         logger.info("SQLite schema is up to date.")

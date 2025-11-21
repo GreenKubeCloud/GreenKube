@@ -42,22 +42,23 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
 
-    def _get_node_emaps_map(self) -> dict:
+    def _get_node_emaps_map(self, cloud_zones_map: dict = None) -> dict:
         """Collects node zones and maps them to Electricity Maps zones."""
-        try:
-            cloud_zones_map = self.node_collector.collect()
-            if not cloud_zones_map:
-                logger.warning(
-                    "NodeCollector returned no zones. Using default zone '%s' for Electricity Maps lookup.",
+        if cloud_zones_map is None:
+            try:
+                cloud_zones_map = self.node_collector.collect()
+                if not cloud_zones_map:
+                    logger.warning(
+                        "NodeCollector returned no zones. Using default zone '%s' for Electricity Maps lookup.",
+                        config.DEFAULT_ZONE,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to collect node zones: %s. Using default zone '%s' for Electricity Maps lookup.",
+                    e,
                     config.DEFAULT_ZONE,
                 )
-        except Exception as e:
-            logger.error(
-                "Failed to collect node zones: %s. Using default zone '%s' for Electricity Maps lookup.",
-                e,
-                config.DEFAULT_ZONE,
-            )
-            cloud_zones_map = {}
+                cloud_zones_map = {}
 
         node_emaps_map = {}
         if cloud_zones_map:
@@ -96,6 +97,7 @@ class DataProcessor:
         combined_metrics = []
 
         # Collect Prometheus metrics
+        node_instance_map = {}
         try:
             prom_metrics = self.prometheus_collector.collect()
             # If Prometheus did not return any node instance types, attempt a
@@ -119,12 +121,17 @@ class DataProcessor:
                     for node, itype in node_instances.items():
                         prom_metrics.node_instance_types.append(NodeInstanceType(node=node, instance_type=itype))
                     if node_instances:
+                        node_instance_map = node_instances
                         logger.info(
                             "Used NodeCollector to populate %d instance-type(s) as fallback.",
                             len(node_instances),
                         )
                 except Exception as e:
                     logger.debug("NodeCollector instance-type fallback failed: %s", e)
+            else:
+                # Populate map from prom_metrics
+                for item in node_types:
+                    node_instance_map[item.node] = item.instance_type
 
             # Collect pod requests early so we can use them as a fallback when
             # Prometheus reports extremely low node CPU usage (which can make
@@ -188,7 +195,12 @@ class DataProcessor:
 
         # Precompute node -> Electricity Maps zone mapping once to avoid repeated
         # translations/prints during per-pod processing.
-        node_emaps_map = self._get_node_emaps_map()
+        try:
+            node_cloud_zone_map = self.node_collector.collect() or {}
+        except Exception:
+            node_cloud_zone_map = {}
+
+        node_emaps_map = self._get_node_emaps_map(node_cloud_zone_map)
 
         # Group energy metrics by emaps_zone so we can prefetch intensity once
         # per zone and populate the calculator cache for all timestamps of
@@ -307,6 +319,14 @@ class DataProcessor:
             logger.error("Failed to collect data from PodCollector: %s", e)
             pod_request_map = {}
 
+        # Collect node metadata for CombinedMetric
+        # node_instance_map and node_cloud_zone_map are already collected above.
+        if not node_instance_map:
+            try:
+                node_instance_map = self.node_collector.collect_instance_types() or {}
+            except Exception:
+                node_instance_map = {}
+
         # 5. Combine and Calculate
         for energy_metric in energy_metrics:
             pod_name = energy_metric.pod_name
@@ -350,6 +370,9 @@ class DataProcessor:
                     timestamp=energy_metric.timestamp,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                     node=node_name,
+                    node_instance_type=node_instance_map.get(node_name),
+                    node_zone=node_cloud_zone_map.get(node_name),
+                    emaps_zone=emaps_zone,
                 )
                 combined_metrics.append(combined)
             else:
@@ -583,6 +606,12 @@ class DataProcessor:
         except Exception:
             cost_map = {}
 
+        # Get cloud zones for metadata
+        try:
+            node_cloud_zone_map = self.node_collector.collect() or {}
+        except Exception:
+            node_cloud_zone_map = {}
+
         for em in all_energy_metrics:
             pod_name = em["pod_name"]
             em_namespace = em["namespace"]
@@ -617,6 +646,9 @@ class DataProcessor:
                         cpu_request=cpu_req,
                         memory_request=mem_req,
                         node=node_name,
+                        node_instance_type=node_instance_map.get(node_name),
+                        node_zone=node_cloud_zone_map.get(node_name),
+                        emaps_zone=zone,
                     )
                 )
 
