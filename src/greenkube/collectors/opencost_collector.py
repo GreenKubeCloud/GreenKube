@@ -7,7 +7,7 @@ allocation data from the OpenCost API.
 import logging
 import warnings
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -42,60 +42,12 @@ class OpenCostCollector(BaseCollector):
         try:
             warnings.simplefilter("ignore", InsecureRequestWarning)
 
-            # Use the configured OpenCost API URL (can be overridden via env var OPENCOST_API_URL)
-            url = getattr(config, "OPENCOST_API_URL", None)
-            if not url:
-                try:
-                    od = OpenCostDiscovery()
-                    discovered = od.discover()
-                    if discovered:
-                        url = discovered
-                        setattr(config, "OPENCOST_API_URL", discovered)
-                except Exception:
-                    logger.debug("OpenCost discovery failed during collect; will attempt with current config value")
+            # Resolve URL (Config -> Discovery -> Local -> In-Cluster)
+            url = self._resolve_url()
 
             if not url:
-                # Try a small set of common local candidates before giving up.
-                # This helps unit tests that mock requests.get but don't set
-                # config.OPENCOST_API_URL, and avoids hard failure when discovery
-                # can't reach the cluster API during CI/deploy.
-                for candidate in (
-                    "http://localhost:9003",
-                    "http://opencost:9003",
-                    "http://localhost:9090",
-                ):
-                    try:
-                        r = requests.get(candidate, params=params, timeout=5, verify=False)
-                        r.raise_for_status()
-                        url = candidate
-                        setattr(config, "OPENCOST_API_URL", url)
-                        break
-                    except Exception:
-                        continue
-
-                if not url:
-                    logger.error(
-                        "OpenCost API URL is not configured and discovery failed; skipping OpenCost collection"
-                    )
-                    return []
-
-            # If still not configured and we're running in-cluster, try well-known
-            # service DNS names used by typical OpenCost Helm charts.
-            bd = BaseDiscovery()
-            if not url and bd._is_running_in_cluster():
-                for candidate in (
-                    "http://opencost.opencost.svc.cluster.local:9003",
-                    "http://opencost.svc.cluster.local:9003",
-                    "http://opencost.opencost.svc.cluster.local:9090",
-                ):
-                    try:
-                        r = requests.get(candidate, timeout=5)
-                        r.raise_for_status()
-                        url = candidate
-                        setattr(config, "OPENCOST_API_URL", url)
-                        break
-                    except Exception:
-                        continue
+                logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
+                return []
 
             def _fetch(u: str):
                 try:
@@ -193,21 +145,14 @@ class OpenCostCollector(BaseCollector):
             except Exception:
                 logger.debug("OpenCost discovery attempt failed or returned no candidate")
 
-        def _probe(u: str) -> bool:
-            try:
-                resp = requests.get(u, timeout=5, verify=False)
-                return 200 <= resp.status_code < 300
-            except Exception:
-                return False
-
-        if url and _probe(url):
+        if url and self._probe(url):
             logger.debug("OpenCost API is available at %s", url)
             return True
 
         # If configured URL didn't respond, try the well-known allocation path
         if url:
             alt = url.rstrip("/") + "/allocation/compute"
-            if _probe(alt):
+            if self._probe(alt):
                 logger.debug("OpenCost API is available at alternative path %s", alt)
                 setattr(config, "OPENCOST_API_URL", alt)
                 return True
@@ -216,7 +161,7 @@ class OpenCostCollector(BaseCollector):
         try:
             od = OpenCostDiscovery()
             discovered = od.discover()
-            if discovered and _probe(discovered):
+            if discovered and self._probe(discovered):
                 # update the config so subsequent calls use discovered URL
                 setattr(config, "OPENCOST_API_URL", discovered)
                 return True
@@ -225,3 +170,60 @@ class OpenCostCollector(BaseCollector):
 
         logger.debug("OpenCost API is not available")
         return False
+
+    def _resolve_url(self) -> Optional[str]:
+        """
+        Resolves the OpenCost API URL by checking config, discovery, and fallback candidates.
+        """
+        # 1. Configured URL
+        url = getattr(config, "OPENCOST_API_URL", None)
+        if url:
+            return url
+
+        # 2. Discovery
+        try:
+            od = OpenCostDiscovery()
+            discovered = od.discover()
+            if discovered:
+                setattr(config, "OPENCOST_API_URL", discovered)
+                return discovered
+        except Exception:
+            logger.debug("OpenCost discovery failed")
+
+        # 3. Localhost candidates
+        candidates = [
+            "http://localhost:9003",
+            "http://opencost:9003",
+            "http://localhost:9090",
+        ]
+        for candidate in candidates:
+            if self._probe(candidate):
+                setattr(config, "OPENCOST_API_URL", candidate)
+                return candidate
+
+        # 4. In-cluster candidates
+        bd = BaseDiscovery()
+        if bd._is_running_in_cluster():
+            cluster_candidates = [
+                "http://opencost.opencost.svc.cluster.local:9003",
+                "http://opencost.svc.cluster.local:9003",
+                "http://opencost.opencost.svc.cluster.local:9090",
+            ]
+            for candidate in cluster_candidates:
+                if self._probe(candidate):
+                    setattr(config, "OPENCOST_API_URL", candidate)
+                    return candidate
+
+        return None
+
+    def _probe(self, url: str) -> bool:
+        """
+        Probes a URL to see if it's a valid OpenCost endpoint.
+        """
+        try:
+            params = {"window": "1d", "aggregate": "pod"}
+            r = requests.get(url, params=params, timeout=5, verify=False)
+            r.raise_for_status()
+            return True
+        except Exception:
+            return False

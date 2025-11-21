@@ -133,5 +133,7 @@ class CombinedMetric(BaseModel):
     duration_seconds: Optional[int] = None
     # Timestamp of the grid intensity data used for calculation
     grid_intensity_timestamp: Optional[datetime] = None
+    # Node where the pod is running
+    node: Optional[str] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -65,6 +65,10 @@ class CarbonCalculator:
         # (float or None)
         self._intensity_cache = {}
 
+    def clear_cache(self):
+        """Clears the internal intensity cache."""
+        self._intensity_cache.clear()
+
     def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 

@@ -227,110 +227,10 @@ class PrometheusCollector(BaseCollector):
         else:
             logger.error("Prometheus queries returned no results for query: %s", query)
 
-        # Attempt discovery once when configured endpoints fail. This helps when
-        # the default PROMETHEUS_URL is stale but the cluster contains a
-        # prometheus service (we prefer cluster service discovery over using
-        # an ingress URL here).
-        try:
-            pd = PrometheusDiscovery()
-            discovered = pd.discover()
-            if discovered and discovered != self.base_url:
-                logger.info("Prometheus discovery returned %s; retrying queries", discovered)
-                # discovered is scheme://host:port
-                # update base_url and adjust TLS verify when scheme is https
-                self.base_url = discovered
-                self.settings.PROMETHEUS_URL = discovered
-                if discovered.startswith("https://"):
-                    # If the discovered endpoint is https, prefer to verify certs when
-                    # the user explicitly requested it via env var. Otherwise, allow
-                    # in-cluster discovery to succeed by skipping verification which is
-                    # common for cluster-local TLS with self-signed certs.
-                    env_val = os.getenv("PROMETHEUS_VERIFY_CERTS")
-                    if env_val is not None:
-                        self.verify = env_val.lower() in ("true", "1", "t", "y", "yes")
-                    else:
-                        # default to False for discovered in-cluster https endpoints
-                        # to improve 'out-of-the-box' discovery success.
-                        self.verify = False
-                base = self.base_url.rstrip("/")
-                candidates = [
-                    f"{base}/api/v1/query",
-                    f"{base}/query",
-                    f"{base}/prometheus/api/v1/query",
-                ]
-
-                for query_url in candidates:
-                    try:
-                        logger.info("Querying Prometheus at %s", query_url)
-                        response = requests.get(
-                            query_url,
-                            params=params,
-                            headers=headers,
-                            auth=auth,
-                            timeout=self.timeout,
-                            verify=self.verify,
-                        )
-                        response.raise_for_status()
-
-                        data = response.json()
-                        if data.get("status") != "success":
-                            logger.warning(
-                                "Prometheus returned non-success status for %s: %s",
-                                query_url,
-                                data.get("error", "Unknown"),
-                            )
-                            continue
-
-                        results = data.get("data", {}).get("result", [])
-                        logger.info("Prometheus at %s returned %d result(s)", query_url, len(results))
-                        return results
-
-                    except requests.exceptions.SSLError as e:
-                        last_err = e
-                        logger.warning("TLS/SSL error querying Prometheus at %s: %s", query_url, e)
-                        continue
-                    except requests.exceptions.RequestException as e:
-                        last_err = e
-                        logger.debug("Failed to connect to Prometheus at %s: %s", query_url, e)
-                        continue
-                    except Exception as e:
-                        last_err = e
-                        logger.error("Unexpected error querying Prometheus at %s: %s", query_url, e)
-                        continue
-        except Exception:
-            logger.debug("Prometheus discovery attempt failed or returned no candidate")
-        # Final fallback: when running in-cluster, try a list of well-known
-        # prometheus service DNS names used by common Helm charts / kube-prometheus.
-        if self._discovery._is_running_in_cluster():
-            hosts = [
-                "prometheus-k8s.monitoring.svc.cluster.local:9090",
-                "prometheus-k8s.monitoring.svc.cluster.local:8080",
-                "prometheus-operated.monitoring.svc.cluster.local:9090",
-                "prometheus.monitoring.svc.cluster.local:9090",
-            ]
-            for host in hosts:
-                for scheme in ("http", "https"):
-                    url = f"{scheme}://{host}"
-                    try:
-                        logger.info("Trying well-known Prometheus URL %s", url)
-                        resp = requests.get(
-                            f"{url.rstrip('/')}/api/v1/query",
-                            params=params,
-                            headers=headers,
-                            auth=auth,
-                            timeout=self.timeout,
-                            verify=False,
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        if data.get("status") == "success":
-                            logger.info("Prometheus responded at well-known URL %s", url)
-                            self.base_url = url
-                            self.verify = False
-                            return data.get("data", {}).get("result", [])
-                    except Exception as e:
-                        logger.debug("Well-known Prometheus URL %s failed: %s", url, e)
-                        continue
+        # Attempt discovery once when configured endpoints fail.
+        if self._discover_and_update_url():
+            # Retry with new URL
+            return self._query_prometheus(query)
 
         return []
 
@@ -344,76 +244,95 @@ class PrometheusCollector(BaseCollector):
         discovery and probe the discovered DNS endpoint.
         """
 
-        def _probe(u: str) -> bool:
-            base = u.rstrip("/")
-            candidates = [
-                f"{base}/api/v1/query",
-                f"{base}/query",
-                f"{base}/prometheus/api/v1/query",
-            ]
-
-            headers = {}
-            if self.bearer_token:
-                headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-            auth = None
-            if self.username and self.password:
-                auth = (self.username, self.password)
-
-            params = {"query": "up"}
-
-            for url in candidates:
-                try:
-                    resp = requests.get(url, params=params, headers=headers, auth=auth, timeout=3, verify=self.verify)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if data.get("status") == "success":
-                        logger.debug("Prometheus is available at %s", url)
-                        return True
-                except Exception:
-                    logger.debug("Prometheus probe failed for %s", url)
-                    continue
-            return False
-
         # If configured URL works, we're good
-        if self.base_url and _probe(self.base_url):
+        if self.base_url and self._probe_url(self.base_url):
             return True
 
         # Try discovery and probe the discovered endpoint
+        if self._discover_and_update_url():
+            return True
+
+        logger.debug("Prometheus is not available on any candidate endpoints")
+        return False
+
+    def _probe_url(self, u: str) -> bool:
+        base = u.rstrip("/")
+        candidates = [
+            f"{base}/api/v1/query",
+            f"{base}/query",
+            f"{base}/prometheus/api/v1/query",
+        ]
+
+        headers = {}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+
+        auth = None
+        if self.username and self.password:
+            auth = (self.username, self.password)
+
+        params = {"query": "up"}
+
+        for url in candidates:
+            try:
+                # When probing, we might want to be lenient with verify if it's a new URL
+                # but for now use self.verify which might have been updated by _update_url
+                resp = requests.get(url, params=params, headers=headers, auth=auth, timeout=3, verify=self.verify)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("status") == "success":
+                    logger.debug("Prometheus is available at %s", url)
+                    return True
+            except Exception:
+                logger.debug("Prometheus probe failed for %s", url)
+                continue
+        return False
+
+    def _update_url(self, url: str):
+        self.base_url = url
+        self.settings.PROMETHEUS_URL = url
+        if url.startswith("https://"):
+            env_val = os.getenv("PROMETHEUS_VERIFY_CERTS")
+            if env_val is not None:
+                self.verify = env_val.lower() in ("true", "1", "t", "y", "yes")
+            else:
+                self.verify = False
+        else:
+            # Reset verify to default or keep as is?
+            # If switching from https to http, verify doesn't matter much.
+            pass
+
+    def _discover_and_update_url(self) -> bool:
         try:
             pd = PrometheusDiscovery()
             discovered = pd.discover()
-            if discovered and _probe(discovered):
-                # persist for subsequent calls
-                self.base_url = discovered
-                self.settings.PROMETHEUS_URL = discovered
+            if discovered and discovered != self.base_url:
+                logger.info("Prometheus discovery returned %s", discovered)
+                self._update_url(discovered)
                 return True
         except Exception:
-            logger.debug("Prometheus discovery/probe failed")
+            logger.debug("Prometheus discovery attempt failed")
 
-        # Direct in-cluster heuristics: try well-known prometheus service hosts.
         if self._discovery._is_running_in_cluster():
-            well_known_hosts = [
+            hosts = [
                 "prometheus-k8s.monitoring.svc.cluster.local:9090",
                 "prometheus-k8s.monitoring.svc.cluster.local:8080",
                 "prometheus-operated.monitoring.svc.cluster.local:9090",
                 "prometheus.monitoring.svc.cluster.local:9090",
             ]
-            for host in well_known_hosts:
+            for host in hosts:
                 for scheme in ("http", "https"):
-                    candidate = f"{scheme}://{host}"
-                    try:
-                        if _probe(candidate):
-                            self.base_url = candidate
-                            self.settings.PROMETHEUS_URL = candidate
-                            # when probing https in-cluster, allow skipping verification
-                            if candidate.startswith("https://"):
-                                self.verify = False
-                            return True
-                    except Exception:
-                        continue
-
-        logger.debug("Prometheus is not available on any candidate endpoints")
+                    url = f"{scheme}://{host}"
+                    # Temporarily update URL to probe it with correct verify settings
+                    old_url = self.base_url
+                    old_verify = self.verify
+                    self._update_url(url)
+                    if self._probe_url(url):
+                        logger.info("Prometheus responded at well-known URL %s", url)
+                        return True
+                    # Revert if failed
+                    self.base_url = old_url
+                    self.verify = old_verify
         return False
 
     def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:
@@ -431,15 +350,20 @@ class PrometheusCollector(BaseCollector):
 
         # Validate required labels are present; if any are missing, return None and let
         # the caller aggregate malformed items for a single warning.
-        if not all(k in metric for k in ("namespace", "pod", "container", "node")):
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        container = metric.get("container") or metric.get("container_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, container, node)):
             return None
 
         try:
             data_to_validate = {
-                "namespace": metric["namespace"],
-                "pod": metric["pod"],
-                "container": metric["container"],
-                "node": metric["node"],
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "node": node,
                 "cpu_usage_cores": float(value_str),
             }
             return PodCPUUsage(**data_to_validate)
@@ -460,15 +384,20 @@ class PrometheusCollector(BaseCollector):
 
         # namespace, pod and node are required; container may be absent and will be
         # set to empty string.
-        if not all(k in metric for k in ("namespace", "pod", "node")):
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+        container = metric.get("container") or metric.get("container_name") or ""
+
+        if not all((namespace, pod, node)):
             return None
 
         try:
             data_to_validate = {
-                "namespace": metric["namespace"],
-                "pod": metric["pod"],
-                "container": metric.get("container", ""),
-                "node": metric["node"],
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "node": node,
                 "cpu_usage_cores": float(value_str),
             }
             return PodCPUUsage(**data_to_validate)
