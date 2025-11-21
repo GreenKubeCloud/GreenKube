@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
+from greenkube.utils.date_utils import parse_iso_date
 
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
@@ -207,9 +208,8 @@ class DataProcessor:
             # Normalize representative timestamp based on configured granularity
             gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
             if isinstance(representative_ts, str):
-                try:
-                    rep_dt = datetime.fromisoformat(representative_ts.replace("Z", "+00:00"))
-                except Exception:
+                rep_dt = parse_iso_date(representative_ts)
+                if not rep_dt:
                     rep_dt = datetime.now(timezone.utc)
             else:
                 rep_dt = representative_ts
@@ -257,9 +257,8 @@ class DataProcessor:
                 # Normalize metric timestamp to match calculator cache keys
                 ts = m.timestamp
                 if isinstance(ts, str):
-                    try:
-                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    except Exception:
+                    dt = parse_iso_date(ts)
+                    if not dt:
                         dt = rep_dt
                 else:
                     dt = ts

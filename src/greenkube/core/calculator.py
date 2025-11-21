@@ -5,35 +5,24 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from greenkube.utils.date_utils import ensure_utc, to_iso_z
+
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
 
 
 def _to_datetime(ts) -> datetime:
     """Convert a timestamp (str or datetime) to a timezone-aware datetime in UTC."""
-    if isinstance(ts, datetime):
-        dt = ts
-    elif isinstance(ts, str):
-        s = ts
-        # Accept ISO strings ending with Z
-        if s.endswith("Z"):
-            s = s.replace("Z", "+00:00")
-        try:
-            dt = datetime.fromisoformat(s)
-        except Exception:
-            # Fallback: use now to avoid crashing; caller will likely use default intensity.
-            dt = datetime.now(timezone.utc)
-    else:
-        dt = datetime.now(timezone.utc)
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    try:
+        return ensure_utc(ts)
+    except ValueError:
+        # Fallback: use now to avoid crashing; caller will likely use default intensity.
+        return datetime.now(timezone.utc)
 
 
 def _iso_z(dt: datetime) -> str:
     """Return an ISO-format UTC string ending with 'Z' for compatibility with tests."""
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return to_iso_z(dt)
 
 
 @dataclass
