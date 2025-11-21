@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 
 from greenkube.models.metrics import CombinedMetric
@@ -30,20 +30,44 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
+        Only considers data from the last 48 hours to avoid using stale values.
         """
         if not self.conn:
             logging.error("SQLite connection is not available for get_for_zone_at_time.")
             return None
         try:
             cursor = self.conn.cursor()
-            query = """
-                SELECT carbon_intensity
-                FROM carbon_intensity_history
-                WHERE zone = ? AND datetime <= ?
-                ORDER BY datetime DESC
-                LIMIT 1
-            """
-            cursor.execute(query, (zone, timestamp))
+            # Parse the timestamp to calculate the lookback window
+            try:
+                # Handle both 'Z' and '+00:00' formats
+                query_ts = timestamp.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(query_ts)
+            except Exception:
+                # If parsing fails, fallback to using the timestamp as-is
+                dt = None
+
+            # Define lookback window (48 hours)
+            if dt:
+                lookback_limit = (dt - timedelta(hours=48)).isoformat()
+                query = """
+                    SELECT carbon_intensity
+                    FROM carbon_intensity_history
+                    WHERE zone = ? AND datetime <= ? AND datetime >= ?
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                """
+                cursor.execute(query, (zone, timestamp, lookback_limit))
+            else:
+                # Fallback: use original query without time bound if timestamp parsing fails
+                query = """
+                    SELECT carbon_intensity
+                    FROM carbon_intensity_history
+                    WHERE zone = ? AND datetime <= ?
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                """
+                cursor.execute(query, (zone, timestamp))
+
             result = cursor.fetchone()
             return result[0] if result else None
         except sqlite3.Error as e:
