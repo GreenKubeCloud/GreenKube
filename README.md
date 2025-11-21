@@ -28,6 +28,16 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 * **Helm Chart Deployment:** Easily deploy and configure GreenKube in any Kubernetes cluster via a public Helm repository.
 * **Data Export:** Export reports to CSV or JSON for integration with other tools.
 
+
+## 📦 Dependencies
+
+The chart requires the following services to be available in the cluster:
+
+- **OpenCost** – for cost data.
+- **Prometheus** – for metrics collection.
+
+GreenKube uses service auto‑discovery to locate these services automatically. If they are deployed in non‑standard namespaces or with custom names, auto‑discovery may fail. In that case, set the service URLs manually in `values.yaml` (see the `prometheus.url` and `opencost.url` fields).
+
 ## 🚀 Installation & Usage
 
 The recommended way to install GreenKube is via the official Helm chart.
