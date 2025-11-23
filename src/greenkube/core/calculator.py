@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
@@ -13,11 +13,7 @@ from .config import config
 
 def _to_datetime(ts) -> datetime:
     """Convert a timestamp (str or datetime) to a timezone-aware datetime in UTC."""
-    try:
-        return ensure_utc(ts)
-    except ValueError:
-        # Fallback: use now to avoid crashing; caller will likely use default intensity.
-        return datetime.now(timezone.utc)
+    return ensure_utc(ts)
 
 
 def _iso_z(dt: datetime) -> str:
