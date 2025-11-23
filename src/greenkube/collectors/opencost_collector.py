@@ -28,7 +28,7 @@ class OpenCostCollector(BaseCollector):
     The endpoint URL is read from application configuration (`config.OPENCOST_API_URL`).
     """
 
-    def collect(self) -> List[CostMetric]:
+    def collect(self, window: str = "1d", timestamp: Optional[datetime] = None) -> List[CostMetric]:
         """
         Fetches cost data from OpenCost by making an HTTP request to its API.
 
@@ -37,7 +37,7 @@ class OpenCostCollector(BaseCollector):
         """
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
-        params = {"window": "1d", "aggregate": "pod"}
+        params = {"window": window, "aggregate": "pod"}
         verify_certs = config.OPENCOST_VERIFY_CERTS
 
         try:
@@ -92,7 +92,7 @@ class OpenCostCollector(BaseCollector):
             return []
 
         collected_metrics = []
-        now = datetime.now(timezone.utc)
+        now = timestamp if timestamp else datetime.now(timezone.utc)
 
         for resource_id, item in cost_data.items():
             properties = item.get("properties", {})
@@ -127,9 +127,10 @@ class OpenCostCollector(BaseCollector):
         caller to provide start/end in case the backend supports it later.
         Currently it proxies to `collect()` for compatibility.
         """
-        # If the OpenCost API supported a range, we'd pass start/end params.
-        # For now, keep behavior identical to collect(), returning latest window.
-        return self.collect()
+        start_ts = int(start.timestamp())
+        end_ts = int(end.timestamp())
+        window = f"{start_ts},{end_ts}"
+        return self.collect(window=window, timestamp=end)
 
     def is_available(self) -> bool:
         """
