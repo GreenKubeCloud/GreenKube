@@ -78,28 +78,6 @@ class Recommender:
         cpu_util_fraction = (current_watts - min_watts) / (max_watts - min_watts)
         cpu_util_fraction = max(0.0, min(cpu_util_fraction, 1.0))
 
-        # This is node-level utilization (or core-level if normalized).
-        # Wait, the formula gives "Node Utilization".
-        # But we want "Pod CPU Usage".
-        # The estimator calculates pod energy based on share of CPU.
-        # So reversing it is tricky.
-        # If Pod Energy = Node Power * Share
-        # And Node Power = Min + Util * (Max - Min)
-        # And Share = Pod CPU / Node Total CPU
-        # Then Pod CPU = Share * Node Total CPU
-
-        # The ticket says: "Formula: Approximate CPU Usage = (Current Watts - Min Watts) / (Max Watts - Min Watts)."
-        # This formula seems to assume the pod is the only thing running or we are calculating "equivalent CPU usage".
-        # "Use this absolute CPU usage to compare against the cpu_request."
-
-        # If I use the formula:
-        # implied_util = (current_watts - min_watts) / (max_watts - min_watts)
-        # This gives me a fraction (0-1).
-        # If I multiply this by vcores, I get "implied cores used".
-        # implied_cores = implied_util * vcores.
-
-        # Then usage_percent = implied_cores / (cpu_request / 1000).
-
         implied_cores = cpu_util_fraction * vcores
 
         # Compare against request (in millicores, so divide by 1000 for cores)

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from greenkube.models.metrics import CombinedMetric
+from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from .base_repository import CarbonIntensityRepository
 
@@ -37,18 +38,19 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             return None
         try:
             cursor = self.conn.cursor()
-            # Parse the timestamp to calculate the lookback window
+
+            # Normalize the query timestamp to ensure it matches the stored format (Z suffix)
             try:
-                # Handle both 'Z' and '+00:00' formats
-                query_ts = timestamp.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(query_ts)
-            except Exception:
-                # If parsing fails, fallback to using the timestamp as-is
+                dt = ensure_utc(timestamp)
+                normalized_ts = to_iso_z(dt)
+            except ValueError:
+                # If parsing fails, fallback to using the timestamp as-is (though it likely won't match)
                 dt = None
+                normalized_ts = timestamp
 
             # Define lookback window (48 hours)
             if dt:
-                lookback_limit = (dt - timedelta(hours=48)).isoformat()
+                lookback_limit = to_iso_z(dt - timedelta(hours=48))
                 query = """
                     SELECT carbon_intensity
                     FROM carbon_intensity_history
@@ -56,7 +58,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
-                cursor.execute(query, (zone, timestamp, lookback_limit))
+                cursor.execute(query, (zone, normalized_ts, lookback_limit))
             else:
                 # Fallback: use original query without time bound if timestamp parsing fails
                 query = """
@@ -66,7 +68,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
-                cursor.execute(query, (zone, timestamp))
+                cursor.execute(query, (zone, normalized_ts))
 
             result = cursor.fetchone()
             return result[0] if result else None
@@ -97,6 +99,13 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 continue
 
             try:
+                # Normalize datetime
+                raw_dt = record.get("datetime")
+                if raw_dt:
+                    normalized_dt = to_iso_z(ensure_utc(raw_dt))
+                else:
+                    normalized_dt = None
+
                 # Use default value None if key is missing
                 cursor.execute(
                     """
@@ -109,7 +118,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     (
                         zone,
                         record.get("carbonIntensity"),
-                        record.get("datetime"),
+                        normalized_dt,
                         record.get("updatedAt"),
                         record.get("createdAt"),
                         record.get("emissionFactorType"),
