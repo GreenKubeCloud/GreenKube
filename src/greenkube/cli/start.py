@@ -8,6 +8,7 @@ that lived in `cli.main` but is isolated for clarity and easier testing.
 """
 
 import logging
+import signal
 import time
 import traceback
 from typing import Optional, Set
@@ -96,6 +97,20 @@ def start(
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logger.info("🚀 Initializing GreenKube...")
+
+    # Flag to signal graceful shutdown
+    shutdown_requested = {"flag": False}
+
+    def signal_handler(signum, frame):
+        """Handle SIGTERM and SIGINT for graceful shutdown."""
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.info(f"\n🛑 Received {sig_name}, initiating graceful shutdown...")
+        shutdown_requested["flag"] = True
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
         # For SQLite, initialize the DB schema if needed
         if config.DB_TYPE == "sqlite":
@@ -118,11 +133,14 @@ def start(
         write_combined_metrics_to_database(last=last)
         logger.info("Initial collection complete.")
 
-        while True:
+        while not shutdown_requested["flag"]:
             scheduler.run_pending()
             time.sleep(60)
 
+        logger.info("🛑 Shutting down GreenKube service gracefully.")
+
     except KeyboardInterrupt:
+        # This might still be triggered in some edge cases
         logger.info("\n🛑 Shutting down GreenKube service.")
         raise typer.Exit()
     except Exception as e:
