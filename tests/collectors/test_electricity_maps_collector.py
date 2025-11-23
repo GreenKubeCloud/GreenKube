@@ -20,10 +20,10 @@ MOCK_API_RESPONSE = {
 @patch("greenkube.collectors.electricity_maps_collector.config")
 def test_collect_success(mock_config, mock_get):
     """
-    Teste que le collecteur appelle correctement l'API et retourne les données.
+    Tests that the collector correctly calls the API and returns the data.
     """
     # Arrange
-    # On simule la présence du token API
+    # Simulate the presence of the API token
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
 
     mock_response = MagicMock()
@@ -46,9 +46,9 @@ def test_collect_success(mock_config, mock_get):
 
 @patch("requests.get")
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_api_error(mock_config, mock_get):
+def test_collect_api_error_fallback(mock_config, mock_get):
     """
-    Teste que le collecteur retourne une liste vide en cas d'erreur API.
+    Tests that the collector returns the default value in case of an API error.
     """
     # Arrange
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
@@ -58,6 +58,46 @@ def test_collect_api_error(mock_config, mock_get):
 
     # Act
     result = collector.collect(zone="FR")
+
+    # Assert
+    assert len(result) == 1
+    assert result[0]["zone"] == "FR"
+    assert result[0]["carbonIntensity"] == 26  # Default for FR
+    assert result[0]["isEstimated"] is True
+
+
+@patch("greenkube.collectors.electricity_maps_collector.config")
+def test_collect_no_token_fallback(mock_config):
+    """
+    Tests that the collector returns the default value if no token is configured.
+    """
+    # Arrange
+    mock_config.ELECTRICITY_MAPS_TOKEN = None
+
+    collector = ElectricityMapsCollector()
+
+    # Act
+    result = collector.collect(zone="FR")
+
+    # Assert
+    assert len(result) == 1
+    assert result[0]["zone"] == "FR"
+    assert result[0]["carbonIntensity"] == 26  # Default for FR
+    assert result[0]["isEstimated"] is True
+
+
+@patch("greenkube.collectors.electricity_maps_collector.config")
+def test_collect_unknown_zone(mock_config):
+    """
+    Tests that the collector returns an empty list for an unknown zone without a token.
+    """
+    # Arrange
+    mock_config.ELECTRICITY_MAPS_TOKEN = None
+
+    collector = ElectricityMapsCollector()
+
+    # Act
+    result = collector.collect(zone="UNKNOWN_ZONE")
 
     # Assert
     assert result == []

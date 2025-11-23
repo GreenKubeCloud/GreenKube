@@ -254,7 +254,10 @@ class DataProcessor:
                     logger.info(
                         "Intensity missing for zone %s at %s. Attempting live fetch.", zone, rep_normalized_plus
                     )
-                    self.electricity_maps_collector.collect(zone=zone)
+                    history = self.electricity_maps_collector.collect(zone=zone, target_datetime=rep_normalized_dt)
+                    if history:
+                        self.repository.save_history(history, zone)
+
                     # Retry fetch from DB
                     intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
                 logger.info(

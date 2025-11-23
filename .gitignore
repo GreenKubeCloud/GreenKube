@@ -212,3 +212,6 @@ __marimo__/
 
 # Database files
 *.db
+
+# Default data files to keep
+!electricity_maps_default.csv
