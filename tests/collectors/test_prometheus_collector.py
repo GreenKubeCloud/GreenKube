@@ -405,3 +405,35 @@ def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collect
     assert collector.base_url == discovered_url
     assert len(result) == 1
     assert result[0]["metric"]["pod"] == "api-1"
+
+
+def test_update_url_respects_config_verify_certs(mock_config):
+    """
+    Test that _update_url respects the Config default for PROMETHEUS_VERIFY_CERTS.
+
+    This is a security test to ensure that when auto-discovery updates the URL
+    to HTTPS, the verify setting respects the Config default (True) instead of
+    defaulting to False, which would expose connections to MITM attacks.
+    """
+    # Create a collector with the default config (PROMETHEUS_VERIFY_CERTS = True)
+    mock_config.PROMETHEUS_VERIFY_CERTS = True
+    collector = PrometheusCollector(settings=mock_config)
+
+    # Initially verify should be True (from config)
+    assert collector.verify is True
+
+    # Update URL to HTTPS - verify should remain True (from config)
+    collector._update_url("https://discovered-prometheus:9090")
+    assert collector.verify is True
+    assert collector.base_url == "https://discovered-prometheus:9090"
+
+    # Update URL to HTTP - verify should be False (not applicable for HTTP)
+    collector._update_url("http://discovered-prometheus:9090")
+    assert collector.verify is False
+    assert collector.base_url == "http://discovered-prometheus:9090"
+
+    # Test with config explicitly set to False
+    mock_config.PROMETHEUS_VERIFY_CERTS = False
+    collector2 = PrometheusCollector(settings=mock_config)
+    collector2._update_url("https://another-prometheus:9090")
+    assert collector2.verify is False

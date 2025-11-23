@@ -6,7 +6,6 @@ This data is the input for the BasicEstimator.
 """
 
 import logging
-import os
 from datetime import timezone
 from typing import Any, Dict, List, Optional
 
@@ -292,15 +291,12 @@ class PrometheusCollector(BaseCollector):
         self.base_url = url
         self.settings.PROMETHEUS_URL = url
         if url.startswith("https://"):
-            env_val = os.getenv("PROMETHEUS_VERIFY_CERTS")
-            if env_val is not None:
-                self.verify = env_val.lower() in ("true", "1", "t", "y", "yes")
-            else:
-                self.verify = False
+            # Use the settings object's PROMETHEUS_VERIFY_CERTS value to respect
+            # the secure default (True) from config.py when env var is not set
+            self.verify = self.settings.PROMETHEUS_VERIFY_CERTS
         else:
-            # Reset verify to default or keep as is?
-            # If switching from https to http, verify doesn't matter much.
-            pass
+            # For HTTP URLs, SSL verification is not applicable
+            self.verify = False
 
     def _discover_and_update_url(self) -> bool:
         try:
