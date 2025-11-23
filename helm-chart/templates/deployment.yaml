@@ -70,5 +70,10 @@ spec:
             secretName: {{ include "greenkube.fullname" . }}
         {{- if eq .Values.config.db.type "sqlite" }}
         - name: data
+          {{- if .Values.config.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "greenkube.fullname" . }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- end }}

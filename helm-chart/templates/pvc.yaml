@@ -1,0 +1,17 @@
+{{- if and (eq .Values.config.db.type "sqlite") .Values.config.persistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.config.persistence.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.config.persistence.size | quote }}
+  {{- if .Values.config.persistence.storageClassName }}
+  storageClassName: {{ .Values.config.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

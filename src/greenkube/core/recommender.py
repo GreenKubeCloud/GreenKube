@@ -4,6 +4,7 @@ import logging
 from typing import List
 
 from greenkube.core.config import config
+from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 
 LOG = logging.getLogger(__name__)
@@ -54,53 +55,18 @@ class Recommender:
         duration = metric.duration_seconds or 1  # Avoid division by zero
         current_watts = metric.joules / duration
 
-        # Get Instance Profile
-        # profile = None
-        if metric.node:
-            # In a real scenario, we'd need the instance type of the node.
-            # However, CombinedMetric only has the node name.
-            # We might need to look up the instance type from somewhere or
-            # assume we can get the profile from the node name if we had a map.
-            # But we don't have the node->instance_type map here.
-            # Wait, the ticket says "The Recommender needs access to the INSTANCE_PROFILES."
-            # But we also need to know which profile applies to the node.
-            # Since we don't have that easily, we might have to rely on the fact that
-            # we can't easily look it up without passing more data.
-            # BUT, for the sake of the fix, let's assume we use the DEFAULT if we can't find it,
-            # OR we need to pass the node_instance_map to the recommender.
-            # The recommender is initialized once.
-            # Maybe we can try to infer it or just use default if unknown.
-            # Actually, `CombinedMetric` doesn't store instance type.
-            # Let's use the DEFAULT_INSTANCE_PROFILE as a fallback, which is better than the relative logic.
-            # Or better, we can try to match if we had the info.
-            # Given the constraints, I will use the default profile if I can't find a specific one.
-            # However, without instance type, I can't look up the profile.
-            # I'll use config defaults.
-            pass
-
         # Fallback to default profile values
         min_watts = config.DEFAULT_INSTANCE_MIN_WATTS
         max_watts = config.DEFAULT_INSTANCE_MAX_WATTS
         vcores = config.DEFAULT_INSTANCE_VCORES
 
-        # If we had the profile, we would use it.
-        # Since we don't have instance type in CombinedMetric, we are limited.
-        # But the ticket says "The Recommender needs access to the INSTANCE_PROFILES."
-        # This implies I should probably have added instance_type to CombinedMetric too.
-        # Let's do that. It's safer.
-        pass
-
-        # Re-evaluating: I should add instance_type to CombinedMetric.
-        # But for now, let's implement the formula with what we have (Defaults)
-        # and maybe I'll add instance_type in a follow-up or right now if I can.
-        # I'll stick to the plan of using the formula.
-
-        # Wait, if I use default profile for everything, it might be wrong for large instances.
-        # But it's still better than the relative "max ratio" logic which was completely flawed for idle clusters.
-
-        # Let's check if I can add instance_type to CombinedMetric.
-        # Yes, I can.
-        pass
+        # Lookup specific profile if available
+        if metric.node_instance_type:
+            profile = INSTANCE_PROFILES.get(metric.node_instance_type)
+            if profile:
+                min_watts = profile.get("minWatts", min_watts)
+                max_watts = profile.get("maxWatts", max_watts)
+                vcores = profile.get("vcores", vcores)
 
         # Calculating utilization
         # Power = Min + Util * (Max - Min)
@@ -111,28 +77,6 @@ class Recommender:
 
         cpu_util_fraction = (current_watts - min_watts) / (max_watts - min_watts)
         cpu_util_fraction = max(0.0, min(cpu_util_fraction, 1.0))
-
-        # This is node-level utilization (or core-level if normalized).
-        # Wait, the formula gives "Node Utilization".
-        # But we want "Pod CPU Usage".
-        # The estimator calculates pod energy based on share of CPU.
-        # So reversing it is tricky.
-        # If Pod Energy = Node Power * Share
-        # And Node Power = Min + Util * (Max - Min)
-        # And Share = Pod CPU / Node Total CPU
-        # Then Pod CPU = Share * Node Total CPU
-
-        # The ticket says: "Formula: Approximate CPU Usage = (Current Watts - Min Watts) / (Max Watts - Min Watts)."
-        # This formula seems to assume the pod is the only thing running or we are calculating "equivalent CPU usage".
-        # "Use this absolute CPU usage to compare against the cpu_request."
-
-        # If I use the formula:
-        # implied_util = (current_watts - min_watts) / (max_watts - min_watts)
-        # This gives me a fraction (0-1).
-        # If I multiply this by vcores, I get "implied cores used".
-        # implied_cores = implied_util * vcores.
-
-        # Then usage_percent = implied_cores / (cpu_request / 1000).
 
         implied_cores = cpu_util_fraction * vcores
 

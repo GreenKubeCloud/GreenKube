@@ -12,6 +12,7 @@ from functools import lru_cache
 import typer
 
 # --- GreenKube Collector Imports ---
+from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -76,6 +77,7 @@ def get_processor() -> DataProcessor:
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
+        electricity_maps_collector = ElectricityMapsCollector()
 
         # 3. Instantiate the calculator and estimator
         carbon_calculator = CarbonCalculator(repository=repository)
@@ -87,6 +89,7 @@ def get_processor() -> DataProcessor:
             opencost_collector=opencost_collector,
             node_collector=node_collector,
             pod_collector=pod_collector,
+            electricity_maps_collector=electricity_maps_collector,
             repository=repository,
             calculator=carbon_calculator,
             estimator=estimator,

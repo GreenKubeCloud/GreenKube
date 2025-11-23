@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 # --- Fixtures ---
 
@@ -93,7 +94,7 @@ def test_save_history_new_records(sqlite_repo, db_connection):
     assert cursor.fetchone()[0] == 3
     cursor.execute(
         "SELECT carbon_intensity FROM carbon_intensity_history WHERE datetime=?",
-        (SAMPLE_HISTORY_DATA[1]["datetime"],),
+        (to_iso_z(ensure_utc(SAMPLE_HISTORY_DATA[1]["datetime"])),),
     )
     assert cursor.fetchone()[0] == 55.5
 

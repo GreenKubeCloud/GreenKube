@@ -13,6 +13,7 @@ from greenkube.models.metrics import (
     EnergyMetric,
     PodMetric,
 )
+from greenkube.models.node import NodeInfo
 from greenkube.models.prometheus_metrics import PrometheusMetric
 
 # Sample data for mocking collectors
@@ -71,9 +72,26 @@ SAMPLE_COST_METRICS = [
     # No cost metric for pod-C intentionally
 ]
 
-SAMPLE_NODE_ZONES = {
-    "node-1": "gcp-us-east1-a",  # Maps to US-CISO-NE
-    "node-2": "aws-eu-west-1b",  # Maps to IE
+# Create NodeInfo objects for test data
+SAMPLE_NODE_INFO = {
+    "node-1": NodeInfo(
+        name="node-1",
+        zone="gcp-us-east1-a",
+        region="us-east1",
+        cloud_provider="gcp",
+        instance_type="m5.large",
+        architecture="amd64",
+        node_pool=None,
+    ),
+    "node-2": NodeInfo(
+        name="node-2",
+        zone="aws-eu-west-1b",
+        region="eu-west-1",
+        cloud_provider="aws",
+        instance_type="m5.large",
+        architecture="amd64",
+        node_pool=None,
+    ),
     # No mapping for node-unknown intentionally
 }
 
@@ -114,9 +132,9 @@ def mock_opencost_collector():
 
 @pytest.fixture
 def mock_node_collector():
-    """Provides a mock NodeCollector."""
+    """Provides a mock NodeCollector that returns NodeInfo objects."""
     mock = MagicMock()
-    mock.collect.return_value = SAMPLE_NODE_ZONES
+    mock.collect.return_value = SAMPLE_NODE_INFO
     mock.collect_instance_types.return_value = {"node-1": "m5.large", "node-2": "m5.large"}
     return mock
 
@@ -172,11 +190,19 @@ def mock_calculator():
 
 
 @pytest.fixture
+def mock_electricity_maps_collector():
+    """Provides a mock ElectricityMapsCollector."""
+    mock = MagicMock()
+    return mock
+
+
+@pytest.fixture
 def data_processor(
     mock_prometheus_collector,
     mock_opencost_collector,
     mock_node_collector,
     mock_pod_collector,
+    mock_electricity_maps_collector,
     mock_repository,
     mock_calculator,
 ):
@@ -193,6 +219,7 @@ def data_processor(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=mock_electricity_maps_collector,
         repository=mock_repository,  # Pass the mock repository
         calculator=mock_calculator,  # Pass the mock calculator
         estimator=estimator_mock,
@@ -342,6 +369,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector_instance,  # Use the configured instance
         pod_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -502,6 +530,7 @@ def test_processor_aggregates_pod_requests(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -540,6 +569,7 @@ def test_processor_handles_missing_pod_requests(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -595,6 +625,7 @@ def test_processor_nodecollector_instance_type_fallback(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=estimator_spy,

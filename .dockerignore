@@ -17,3 +17,8 @@ data
 .git
 *.csv
 *.json
+helm-chart
+k8s
+.github
+.vscode
+.idea

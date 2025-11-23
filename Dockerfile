@@ -5,7 +5,7 @@ FROM python:3.11-slim AS builder
 WORKDIR /app
 
 # Install build tools
-RUN pip install --upgrade pip build
+RUN pip install --no-cache-dir --upgrade pip build
 
 # Copy all project files required for the build
 COPY pyproject.toml .
@@ -16,7 +16,7 @@ COPY src /app/src
 # Build and install the package (and its dependencies) into a temporary prefix
 # Using 'pip install .' reads pyproject.toml and runs the hatchling build backend
 # We install into /install to easily copy it to the final stage
-RUN pip install . --prefix=/install
+RUN pip install --no-cache-dir . --prefix=/install
 
 # --- STAGE 2: Final Image ---
 # This stage creates the final, lean image
