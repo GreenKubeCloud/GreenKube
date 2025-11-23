@@ -400,6 +400,33 @@ class DataProcessor:
         parameters mirror the CLI behavior (namespace filter, monthly/yearly
         aggregation).
         """
+        # Try to read from repository first to use historical metadata if available
+        try:
+            # Ensure start/end are datetime objects
+            if isinstance(start, str):
+                start_dt = parse_iso_date(start)
+            else:
+                start_dt = start
+
+            if isinstance(end, str):
+                end_dt = parse_iso_date(end)
+            else:
+                end_dt = end
+
+            if start_dt and end_dt:
+                stored_metrics = self.repository.read_combined_metrics(start_dt, end_dt)
+                if stored_metrics:
+                    logger.info(
+                        "Found %d stored metrics in repository for range %s - %s",
+                        len(stored_metrics),
+                        start,
+                        end,
+                    )
+                    if namespace:
+                        stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
+                    return stored_metrics
+        except Exception as e:
+            logger.warning("Failed to read stored metrics: %s", e)
 
         # Helper to format ISO with Z
         def iso_z(dt):
