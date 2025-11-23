@@ -24,15 +24,31 @@ class Config:
     def _get_secret(key: str, default: str = None) -> str:
         """
         Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
+
+        Raises:
+            PermissionError: If the secret file exists but cannot be read due to permissions.
+            IOError: If the secret file exists but cannot be read due to I/O errors.
         """
         # Check for secret file first (mounted volume)
         secret_file = f"/etc/greenkube/secrets/{key}"
         if os.path.exists(secret_file):
             try:
                 with open(secret_file, "r") as f:
-                    return f.read().strip()
-            except Exception:
-                pass
+                    value = f.read().strip()
+                    logging.getLogger(__name__).debug(f"Loaded secret '{key}' from {secret_file}")
+                    return value
+            except PermissionError as e:
+                # Fail fast with clear error message for permission issues
+                raise PermissionError(
+                    f"Secret file '{secret_file}' exists but cannot be read due to permission denied. "
+                    f"Please check file permissions or run with appropriate privileges."
+                ) from e
+            except (IOError, OSError) as e:
+                # Fail fast for other I/O errors (disk issues, etc.)
+                raise IOError(
+                    f"Secret file '{secret_file}' exists but cannot be read: {e}. "
+                    f"Please check the file integrity and system resources."
+                ) from e
         # Fallback to environment variable
         return os.getenv(key, default)
 
