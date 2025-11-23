@@ -291,11 +291,8 @@ class PrometheusCollector(BaseCollector):
         self.base_url = url
         self.settings.PROMETHEUS_URL = url
         if url.startswith("https://"):
-            # Use the settings object's PROMETHEUS_VERIFY_CERTS value to respect
-            # the secure default (True) from config.py when env var is not set
             self.verify = self.settings.PROMETHEUS_VERIFY_CERTS
         else:
-            # For HTTP URLs, SSL verification is not applicable
             self.verify = False
 
     def _discover_and_update_url(self) -> bool:

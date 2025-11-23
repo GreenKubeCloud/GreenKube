@@ -8,6 +8,9 @@ from greenkube.core.config import config as global_config
 
 from .base_collector import BaseCollector
 
+if False:  # TYPE_CHECKING
+    from greenkube.models.node import NodeInfo
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,50 +47,70 @@ class NodeCollector(BaseCollector):
             logger.warning("Failed to create Kubernetes API client: %s", e)
             self.v1 = None
 
-    def collect(self) -> dict:
+    def collect(self) -> dict[str, "NodeInfo"]:
         """
-        Collects node names and their corresponding zones from Kubernetes labels.
+        Collects comprehensive node information from Kubernetes.
 
         Returns:
-            dict: A dictionary mapping node names to their zone labels.
+            dict: A dictionary mapping node names to NodeInfo objects containing
+                  zone, region, cloud provider, instance type, architecture, and node pool.
         """
-        nodes_zones_map = {}
-        # If there's no configured Kubernetes client, return empty results.
+        from greenkube.models.node import NodeInfo
+
+        nodes_info = {}
         if not getattr(self, "v1", None):
-            logger.debug("Kubernetes client not configured; skipping node zone collection.")
-            return nodes_zones_map
+            logger.debug("Kubernetes client not configured; skipping node collection.")
+            return nodes_info
+
         try:
             nodes = self.v1.list_node(watch=False)
             if not nodes.items:
                 logger.warning("No nodes found in the cluster.")
-                return nodes_zones_map
+                return nodes_info
 
             for node in nodes.items:
                 node_name = node.metadata.name
-                zone = None
-                # Prefer the standard topology label, fall back to legacy if needed
-                if node.metadata.labels:
-                    zone = node.metadata.labels.get("topology.kubernetes.io/zone") or node.metadata.labels.get(
-                        "failure-domain.beta.kubernetes.io/zone"
-                    )
+                labels = node.metadata.labels or {}
 
-                if zone:
-                    nodes_zones_map[node_name] = zone
-                    logger.info(" -> Found node '%s' in zone '%s'", node_name, zone)
-                else:
-                    logger.warning(" -> Zone label not found for node '%s'", node_name)
+                cloud_provider = self._detect_cloud_provider(labels)
+                instance_type = self._extract_instance_type(labels, node, cloud_provider)
 
-            if not nodes_zones_map:
-                logger.warning("No nodes with a zone label were found.")
+                zone = labels.get("topology.kubernetes.io/zone") or labels.get("failure-domain.beta.kubernetes.io/zone")
+                region = labels.get("topology.kubernetes.io/region") or labels.get(
+                    "failure-domain.beta.kubernetes.io/region"
+                )
+                architecture = labels.get("kubernetes.io/arch") or labels.get("beta.kubernetes.io/arch")
+                node_pool = self._extract_node_pool(labels, cloud_provider)
+
+                nodes_info[node_name] = NodeInfo(
+                    name=node_name,
+                    instance_type=instance_type,
+                    zone=zone,
+                    region=region,
+                    cloud_provider=cloud_provider,
+                    architecture=architecture,
+                    node_pool=node_pool,
+                )
+
+                logger.info(
+                    " -> Node '%s': provider=%s, instance=%s, zone=%s",
+                    node_name,
+                    cloud_provider,
+                    instance_type,
+                    zone,
+                )
+
+            if not nodes_info:
+                logger.warning("No nodes found in the cluster.")
 
         except client.ApiException as e:
             logger.error("Kubernetes API error while listing nodes: %s", e)
             return {}
         except Exception as e:
-            logger.error("An unexpected error occurred while collecting node zones: %s", e)
+            logger.error("An unexpected error occurred while collecting nodes: %s", e)
             return {}
 
-        return nodes_zones_map
+        return nodes_info
 
     def collect_detailed_info(self) -> dict:
         """

@@ -43,15 +43,15 @@ def collect_carbon_intensity_for_all_zones() -> None:
         return
 
     try:
-        nodes_zones_map = node_collector.collect()
-        if not nodes_zones_map:
+        nodes_info = node_collector.collect()
+        if not nodes_info:
             logger.warning("No node zones discovered.")
             return
     except Exception as e:
         logger.error(f"Failed to collect node zones: {e}")
         return
 
-    unique_cloud_zones: Set[str] = set(nodes_zones_map.values())
+    unique_cloud_zones: Set[str] = {node_info.zone for node_info in nodes_info.values() if node_info.zone}
     emaps_zones: Set[str] = set()
     for cz in unique_cloud_zones:
         emz = get_emaps_zone_from_cloud_zone(cz)

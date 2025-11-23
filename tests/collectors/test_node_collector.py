@@ -56,7 +56,13 @@ def test_collect_success_with_zones(mock_core_v1_api, mock_k8s_config):
     result = collector.collect()
 
     # Assert
-    assert result == {"node-1": "us-east-1a", "node-2": "us-west-2b"}
+    assert len(result) == 2
+    assert "node-1" in result
+    assert "node-2" in result
+    assert result["node-1"].zone == "us-east-1a"
+    assert result["node-2"].zone == "us-west-2b"
+    assert result["node-1"].name == "node-1"
+    assert result["node-2"].name == "node-2"
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
@@ -82,7 +88,11 @@ def test_collect_partial_zones(mock_core_v1_api, mock_k8s_config):
     result = collector.collect()
 
     # Assert
-    assert result == {"node-1": "us-east-1a"}  # Only node-1 should be included
+    assert len(result) == 2  # Now includes both nodes
+    assert "node-1" in result
+    assert "node-missing-label" in result
+    assert result["node-1"].zone == "us-east-1a"
+    assert result["node-missing-label"].zone is None  # No zone label
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 
@@ -102,8 +112,12 @@ def test_collect_no_zone_labels(mock_core_v1_api, mock_k8s_config):
     # Act
     result = collector.collect()
 
-    # Assert
-    assert result == {}  # Expect an empty dictionary
+    # Assert - now returns ALL nodes, even without zones
+    assert len(result) == 2
+    assert "node-no-label-1" in result
+    assert "node-no-label-2" in result
+    assert result["node-no-label-1"].zone is None
+    assert result["node-no-label-2"].zone is None
     mock_api_instance.list_node.assert_called_once_with(watch=False)
 
 

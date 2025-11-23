@@ -53,12 +53,24 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     )
 
     # Provide a dummy NodeCollector-like object so tests don't require a live cluster
+    from greenkube.models.node import NodeInfo
+
     class DummyNodeCollector:
         def collect_instance_types(self):
             return {"node-1": "m5.large"}
 
         def collect(self):
-            return {"node-1": "gcp-us-east1-a"}
+            return {
+                "node-1": NodeInfo(
+                    name="node-1",
+                    zone="gcp-us-east1-a",
+                    region="us-east1",
+                    cloud_provider="gcp",
+                    instance_type="m5.large",
+                    architecture="amd64",
+                    node_pool=None,
+                )
+            }
 
     node_collector = DummyNodeCollector()
 

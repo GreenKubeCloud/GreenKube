@@ -44,12 +44,16 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
 
-    def _get_node_emaps_map(self, cloud_zones_map: dict = None) -> dict:
-        """Collects node zones and maps them to Electricity Maps zones."""
-        if cloud_zones_map is None:
+    def _get_node_emaps_map(self, nodes_info: dict = None) -> dict:
+        """Collects node zones and maps them to Electricity Maps zones.
+
+        Args:
+            nodes_info: Optional dict[str, NodeInfo] from node collector
+        """
+        if nodes_info is None:
             try:
-                cloud_zones_map = self.node_collector.collect()
-                if not cloud_zones_map:
+                nodes_info = self.node_collector.collect()
+                if not nodes_info:
                     logger.warning(
                         "NodeCollector returned no zones. Using default zone '%s' for Electricity Maps lookup.",
                         config.DEFAULT_ZONE,
@@ -60,37 +64,41 @@ class DataProcessor:
                     e,
                     config.DEFAULT_ZONE,
                 )
-                cloud_zones_map = {}
+                nodes_info = {}
 
         node_emaps_map = {}
-        if cloud_zones_map:
-            for node, cloud_zone in cloud_zones_map.items():
-                try:
-                    mapped = get_emaps_zone_from_cloud_zone(cloud_zone)
-                    if mapped:
-                        node_emaps_map[node] = mapped
-                        logger.info(
-                            "Node '%s' cloud zone '%s' -> Electricity Maps zone '%s'",
-                            node,
-                            cloud_zone,
-                            mapped,
-                        )
-                    else:
-                        node_emaps_map[node] = config.DEFAULT_ZONE
+        if nodes_info:
+            for node_name, node_info in nodes_info.items():
+                cloud_zone = node_info.zone
+                if cloud_zone:
+                    try:
+                        mapped = get_emaps_zone_from_cloud_zone(cloud_zone)
+                        if mapped:
+                            node_emaps_map[node_name] = mapped
+                            logger.info(
+                                "Node '%s' cloud zone '%s' -> Electricity Maps zone '%s'",
+                                node_name,
+                                cloud_zone,
+                                mapped,
+                            )
+                        else:
+                            node_emaps_map[node_name] = config.DEFAULT_ZONE
+                            logger.warning(
+                                "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
+                                cloud_zone,
+                                node_name,
+                                config.DEFAULT_ZONE,
+                            )
+                    except Exception:
+                        node_emaps_map[node_name] = config.DEFAULT_ZONE
                         logger.warning(
-                            "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
+                            "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
                             cloud_zone,
-                            node,
+                            node_name,
                             config.DEFAULT_ZONE,
                         )
-                except Exception:
-                    node_emaps_map[node] = config.DEFAULT_ZONE
-                    logger.warning(
-                        "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
-                        cloud_zone,
-                        node,
-                        config.DEFAULT_ZONE,
-                    )
+                else:
+                    node_emaps_map[node_name] = config.DEFAULT_ZONE
         return node_emaps_map
 
     def run(self):
@@ -198,11 +206,11 @@ class DataProcessor:
         # Precompute node -> Electricity Maps zone mapping once to avoid repeated
         # translations/prints during per-pod processing.
         try:
-            node_cloud_zone_map = self.node_collector.collect() or {}
+            nodes_info = self.node_collector.collect() or {}
         except Exception:
-            node_cloud_zone_map = {}
+            nodes_info = {}
 
-        node_emaps_map = self._get_node_emaps_map(node_cloud_zone_map)
+        node_emaps_map = self._get_node_emaps_map(nodes_info)
 
         # Group energy metrics by emaps_zone so we can prefetch intensity once
         # per zone and populate the calculator cache for all timestamps of
@@ -371,8 +379,12 @@ class DataProcessor:
                     timestamp=energy_metric.timestamp,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                     node=node_name,
-                    node_instance_type=node_instance_map.get(node_name),
-                    node_zone=node_cloud_zone_map.get(node_name),
+                    node_instance_type=(
+                        nodes_info.get(node_name).instance_type
+                        if nodes_info.get(node_name)
+                        else node_instance_map.get(node_name)
+                    ),
+                    node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
                     emaps_zone=emaps_zone,
                 )
                 combined_metrics.append(combined)
@@ -634,11 +646,11 @@ class DataProcessor:
         except Exception:
             cost_map = {}
 
-        # Get cloud zones for metadata
+        # Get cloud zones and instance types for metadata
         try:
-            node_cloud_zone_map = self.node_collector.collect() or {}
+            nodes_info = self.node_collector.collect() or {}
         except Exception:
-            node_cloud_zone_map = {}
+            nodes_info = {}
 
         for em in all_energy_metrics:
             pod_name = em["pod_name"]
@@ -674,8 +686,12 @@ class DataProcessor:
                         cpu_request=cpu_req,
                         memory_request=mem_req,
                         node=node_name,
-                        node_instance_type=node_instance_map.get(node_name),
-                        node_zone=node_cloud_zone_map.get(node_name),
+                        node_instance_type=(
+                            nodes_info.get(node_name).instance_type
+                            if nodes_info.get(node_name)
+                            else node_instance_map.get(node_name)
+                        ),
+                        node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
                         emaps_zone=zone,
                     )
                 )

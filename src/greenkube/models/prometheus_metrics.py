@@ -5,13 +5,15 @@ Pydantic models for structured data returned from the PrometheusCollector.
 
 from typing import List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PodCPUUsage(BaseModel):
     """
     Represents the average CPU usage for a single container.
     """
+
+    model_config = ConfigDict()
 
     namespace: str
     pod: str
@@ -25,6 +27,8 @@ class NodeInstanceType(BaseModel):
     Maps a Kubernetes node name to its cloud instance type.
     """
 
+    model_config = ConfigDict()
+
     node: str
     instance_type: str = Field(..., description="Cloud provider instance type (e.g., 'm5.large')")
 
@@ -34,6 +38,8 @@ class PrometheusMetric(BaseModel):
     A container for all metrics fetched from Prometheus by the collector.
     This structured data is the input for the BasicEstimator.
     """
+
+    model_config = ConfigDict()
 
     pod_cpu_usage: List[PodCPUUsage] = Field(default_factory=list)
     node_instance_types: List[NodeInstanceType] = Field(default_factory=list)
