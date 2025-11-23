@@ -102,6 +102,7 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         opencost_collector=opencost,
         node_collector=node_collector,
         pod_collector=pod_collector,
+        electricity_maps_collector=MagicMock(),
         repository=repository,
         calculator=calc,
         estimator=est,

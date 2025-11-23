@@ -30,6 +30,7 @@ class TestProcessorRunRange(unittest.TestCase):
             opencost_collector=MagicMock(),
             node_collector=MagicMock(),
             pod_collector=MagicMock(),
+            electricity_maps_collector=MagicMock(),
             repository=mock_repo,
             calculator=MagicMock(),
             estimator=MagicMock(),

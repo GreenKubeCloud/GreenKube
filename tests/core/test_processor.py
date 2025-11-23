@@ -172,11 +172,19 @@ def mock_calculator():
 
 
 @pytest.fixture
+def mock_electricity_maps_collector():
+    """Provides a mock ElectricityMapsCollector."""
+    mock = MagicMock()
+    return mock
+
+
+@pytest.fixture
 def data_processor(
     mock_prometheus_collector,
     mock_opencost_collector,
     mock_node_collector,
     mock_pod_collector,
+    mock_electricity_maps_collector,
     mock_repository,
     mock_calculator,
 ):
@@ -193,6 +201,7 @@ def data_processor(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=mock_electricity_maps_collector,
         repository=mock_repository,  # Pass the mock repository
         calculator=mock_calculator,  # Pass the mock calculator
         estimator=estimator_mock,
@@ -342,6 +351,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector_instance,  # Use the configured instance
         pod_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -502,6 +512,7 @@ def test_processor_aggregates_pod_requests(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -540,6 +551,7 @@ def test_processor_handles_missing_pod_requests(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
@@ -595,6 +607,7 @@ def test_processor_nodecollector_instance_type_fallback(
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(),
         repository=mock_repository,
         calculator=mock_calculator,
         estimator=estimator_spy,

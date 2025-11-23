@@ -30,6 +30,7 @@ class DataProcessor:
         opencost_collector: OpenCostCollector,
         node_collector: NodeCollector,
         pod_collector: PodCollector,
+        electricity_maps_collector: ElectricityMapsCollector,
         repository: CarbonIntensityRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
@@ -38,6 +39,7 @@ class DataProcessor:
         self.opencost_collector = opencost_collector
         self.node_collector = node_collector
         self.pod_collector = pod_collector
+        self.electricity_maps_collector = electricity_maps_collector
         self.repository = repository
         self.calculator = calculator
         self.estimator = estimator
@@ -244,8 +246,7 @@ class DataProcessor:
                     logger.info(
                         "Intensity missing for zone %s at %s. Attempting live fetch.", zone, rep_normalized_plus
                     )
-                    em_collector = ElectricityMapsCollector()
-                    em_collector.collect(zone=zone)
+                    self.electricity_maps_collector.collect(zone=zone)
                     # Retry fetch from DB
                     intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
                 logger.info(
