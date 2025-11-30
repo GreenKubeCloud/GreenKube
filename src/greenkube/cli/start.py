@@ -51,14 +51,16 @@ def collect_carbon_intensity_for_all_zones() -> None:
         logger.error(f"Failed to collect node zones: {e}")
         return
 
-    unique_cloud_zones: Set[str] = {node_info.zone for node_info in nodes_info.values() if node_info.zone}
+    unique_zone_providers = {
+        (node_info.zone, node_info.cloud_provider) for node_info in nodes_info.values() if node_info.zone
+    }
     emaps_zones: Set[str] = set()
-    for cz in unique_cloud_zones:
-        emz = get_emaps_zone_from_cloud_zone(cz)
+    for cz, provider in unique_zone_providers:
+        emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
         if emz and emz != "unknown":
             emaps_zones.add(emz)
         else:
-            logger.warning(f"Could not map cloud zone '{cz}' to an Electricity Maps zone.")
+            logger.warning(f"Could not map cloud zone '{cz}' (provider: {provider}) to an Electricity Maps zone.")
 
     if not emaps_zones:
         logger.warning("No mappable Electricity Maps zones found based on node discovery.")

@@ -70,15 +70,17 @@ class DataProcessor:
         if nodes_info:
             for node_name, node_info in nodes_info.items():
                 cloud_zone = node_info.zone
+                provider = node_info.cloud_provider
                 if cloud_zone:
                     try:
-                        mapped = get_emaps_zone_from_cloud_zone(cloud_zone)
+                        mapped = get_emaps_zone_from_cloud_zone(cloud_zone, provider=provider)
                         if mapped:
                             node_emaps_map[node_name] = mapped
                             logger.info(
-                                "Node '%s' cloud zone '%s' -> Electricity Maps zone '%s'",
+                                "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
                                 node_name,
                                 cloud_zone,
+                                provider,
                                 mapped,
                             )
                         else:
