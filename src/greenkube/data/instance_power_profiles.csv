@@ -142,3 +142,59 @@ Standard_E20s_v3,20,Azure,Memory Optimized
 Standard_E32s_v3,32,Azure,Memory Optimized
 Standard_E48s_v3,48,Azure,Memory Optimized
 Standard_E64s_v3,64,Azure,Memory Optimized
+b3-8,2,OVH,General Purpose
+b3-16,4,OVH,General Purpose
+b3-32,8,OVH,General Purpose
+b3-64,16,OVH,General Purpose
+b3-128,32,OVH,General Purpose
+b3-256,64,OVH,General Purpose
+b3-512,128,OVH,General Purpose
+b3-640,160,OVH,General Purpose
+b2-7,2,OVH,General Purpose
+b2-15,4,OVH,General Purpose
+b2-30,8,OVH,General Purpose
+b2-60,16,OVH,General Purpose
+b2-120,32,OVH,General Purpose
+c3-4,2,OVH,Compute Optimized
+c3-8,4,OVH,Compute Optimized
+c3-16,8,OVH,Compute Optimized
+c3-32,16,OVH,Compute Optimized
+c3-64,32,OVH,Compute Optimized
+c3-128,64,OVH,Compute Optimized
+c3-256,128,OVH,Compute Optimized
+c3-320,160,OVH,Compute Optimized
+c2-7,2,OVH,Compute Optimized
+c2-15,4,OVH,Compute Optimized
+c2-30,8,OVH,Compute Optimized
+c2-60,16,OVH,Compute Optimized
+c2-120,32,OVH,Compute Optimized
+r3-16,2,OVH,Memory Optimized
+r3-32,4,OVH,Memory Optimized
+r3-64,8,OVH,Memory Optimized
+r3-128,16,OVH,Memory Optimized
+r3-256,32,OVH,Memory Optimized
+r3-512,64,OVH,Memory Optimized
+r3-1024,128,OVH,Memory Optimized
+r2-15,2,OVH,Memory Optimized
+r2-30,2,OVH,Memory Optimized
+r2-60,4,OVH,Memory Optimized
+r2-120,8,OVH,Memory Optimized
+r2-240,16,OVH,Memory Optimized
+i1-45,8,OVH,Storage Optimized
+i1-90,16,OVH,Storage Optimized
+i1-180,32,OVH,Storage Optimized
+d2-2,1,OVH,Discovery
+d2-4,2,OVH,Discovery
+d2-8,4,OVH,Discovery
+VPS-START-XS,1,Scaleway,Development
+VPS-START-S,1,Scaleway,Development
+VPS-START-M,2,Scaleway,Development
+VPS-START-L,4,Scaleway,Development
+VPS-START-XL,8,Scaleway,Development
+VPS-START-XXL,16,Scaleway,Development
+VPS-PRO-XS,1,Scaleway,General Purpose
+VPS-PRO-S,1,Scaleway,General Purpose
+VPS-PRO-M,2,Scaleway,General Purpose
+VPS-PRO-L,4,Scaleway,General Purpose
+VPS-PRO-XL,8,Scaleway,General Purpose
+VPS-PRO-XXL,16,Scaleway,General Purpose
