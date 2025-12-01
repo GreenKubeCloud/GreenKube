@@ -32,6 +32,9 @@ config:
   # Supported: "hour", "day", "none"
   normalizationGranularity: hour
 
+  # Interval for analyzing nodes (e.g., "5m", "1h")
+  nodeAnalysisInterval: 5m
+
   # Database configuration
   db:
     # Supported: "elasticsearch", "postgres", "sqlite"

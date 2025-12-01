@@ -29,6 +29,7 @@ from ..storage.base_repository import CarbonIntensityRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
+from ..storage.node_repository import NodeRepository
 from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,30 @@ def get_repository() -> CarbonIntensityRepository:
         return SQLiteCarbonIntensityRepository(db_manager.get_connection())
     else:
         raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
+
+
+@lru_cache(maxsize=1)
+def get_node_repository() -> NodeRepository:
+    """
+    Factory function to get the node repository.
+    """
+    if config.DB_TYPE == "sqlite":
+        from ..core.db import db_manager
+
+        return NodeRepository(db_manager.get_connection())
+    elif config.DB_TYPE == "elasticsearch":
+        from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
+
+        return ElasticsearchNodeRepository()
+    else:
+        # For now, only SQLite and Elasticsearch are supported for nodes
+        logger.warning(
+            f"NodeRepository not implemented for DB_TYPE '{config.DB_TYPE}'. "
+            "Using SQLite fallback if possible or failing."
+        )
+        from ..core.db import db_manager
+
+        return NodeRepository(db_manager.get_connection())
 
 
 @lru_cache(maxsize=1)

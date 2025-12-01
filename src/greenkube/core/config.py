@@ -149,6 +149,9 @@ class Config:
     # Allowed values: 'hour', 'day', 'none'
     NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
 
+    # --- Node Analysis variables ---
+    NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
+
     @classmethod
     def validate(cls):
         """

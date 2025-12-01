@@ -19,7 +19,7 @@ from typing_extensions import Annotated
 from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..core.config import config
-from ..core.factory import get_repository
+from ..core.factory import get_node_repository, get_repository
 from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from .utils import write_combined_metrics_to_database
@@ -80,6 +80,33 @@ def collect_carbon_intensity_for_all_zones() -> None:
     logger.info("--- Finished carbon intensity collection task ---")
 
 
+def analyze_nodes() -> None:
+    """
+    Collects node information and updates the database.
+    """
+    logger.info("--- Starting node analysis task ---")
+    try:
+        node_collector = NodeCollector()
+        node_repo = get_node_repository()
+    except Exception as e:
+        logger.error(f"Failed to initialize components for node analysis: {e}")
+        return
+
+    try:
+        nodes_info = node_collector.collect()
+        if not nodes_info:
+            logger.warning("No nodes discovered during analysis.")
+            return
+
+        saved_count = node_repo.save_nodes(list(nodes_info.values()))
+        logger.info(f"Successfully updated {saved_count} nodes in the database.")
+
+    except Exception as e:
+        logger.error(f"Failed to analyze nodes: {e}")
+
+    logger.info("--- Finished node analysis task ---")
+
+
 @app.callback(invoke_without_command=True)
 def start(
     ctx: typer.Context,
@@ -126,12 +153,14 @@ def start(
         scheduler.add_job_from_string(
             lambda: write_combined_metrics_to_database(last=None), config.PROMETHEUS_QUERY_RANGE_STEP
         )
+        scheduler.add_job_from_string(analyze_nodes, config.NODE_ANALYSIS_INTERVAL)
 
         logger.info("📈 Starting scheduler...")
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")
 
         logger.info("Running initial data collection for all zones...")
         collect_carbon_intensity_for_all_zones()
+        analyze_nodes()
         write_combined_metrics_to_database(last=last)
         logger.info("Initial collection complete.")
 

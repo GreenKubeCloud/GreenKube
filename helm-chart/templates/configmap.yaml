@@ -12,6 +12,7 @@ data:
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
   DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
+  NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}

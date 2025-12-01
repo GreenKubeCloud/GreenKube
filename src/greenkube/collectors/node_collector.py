@@ -82,6 +82,9 @@ class NodeCollector(BaseCollector):
                 architecture = labels.get("kubernetes.io/arch") or labels.get("beta.kubernetes.io/arch")
                 node_pool = self._extract_node_pool(labels, cloud_provider)
 
+                cpu_capacity = self._extract_cpu_capacity(node)
+                memory_capacity = self._extract_memory_capacity(node)
+
                 nodes_info[node_name] = NodeInfo(
                     name=node_name,
                     instance_type=instance_type,
@@ -90,14 +93,18 @@ class NodeCollector(BaseCollector):
                     cloud_provider=cloud_provider,
                     architecture=architecture,
                     node_pool=node_pool,
+                    cpu_capacity_cores=cpu_capacity,
+                    memory_capacity_bytes=memory_capacity,
                 )
 
                 logger.info(
-                    " -> Node '%s': provider=%s, instance=%s, zone=%s",
+                    " -> Node '%s': provider=%s, instance=%s, zone=%s, cpu=%s, mem=%s",
                     node_name,
                     cloud_provider,
                     instance_type,
                     zone,
+                    cpu_capacity,
+                    memory_capacity,
                 )
 
             if not nodes_info:
@@ -376,3 +383,29 @@ class NodeCollector(BaseCollector):
             return {}
 
         return node_instance_map
+
+    def _extract_cpu_capacity(self, node) -> float | None:
+        """Extract CPU capacity from node status."""
+        try:
+            capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
+            if capacity and "cpu" in capacity:
+                from kubernetes.utils.quantity import parse_quantity
+
+                cpu_qty = parse_quantity(capacity["cpu"])
+                return float(cpu_qty)
+        except Exception as e:
+            logger.debug("Could not extract CPU capacity: %s", e)
+        return None
+
+    def _extract_memory_capacity(self, node) -> int | None:
+        """Extract memory capacity from node status."""
+        try:
+            capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
+            if capacity and "memory" in capacity:
+                from kubernetes.utils.quantity import parse_quantity
+
+                mem_qty = parse_quantity(capacity["memory"])
+                return int(mem_qty)
+        except Exception as e:
+            logger.debug("Could not extract memory capacity: %s", e)
+        return None
