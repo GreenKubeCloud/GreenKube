@@ -1,0 +1,6 @@
+provider,min_watts,max_watts
+AWS,0.74,3.5
+GCP,0.71,4.26
+Azure,0.78,3.76
+OVH,0.80,3.52
+Scaleway,0.60,2.78

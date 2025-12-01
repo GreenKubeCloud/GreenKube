@@ -6,6 +6,7 @@ GCP : https://datacenters.google/efficiency/
 AWS : https://sustainability.aboutamazon.com/products-services/aws-cloud#carbon-free-energy
 Azure : https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/msc/documents/presentations/CSR/2025-Microsoft-Environmental-Sustainability-Report.pdf#page=01
 OVHcloud : https://corporate.ovhcloud.com/en/sustainability/environment/
+Scaleway : https://www.scaleway.com/fr/leadership-environnemental/
 """
 
 # We currently use default PUE values per cloud provider.
@@ -19,4 +20,6 @@ DATACENTER_PUE_PROFILES = {
     "default_azure": 1.18,
     # --- OVHcloud ---
     "default_ovh": 1.26,
+    # --- Scaleway ---
+    "default_scaleway": 1.37,
 }

@@ -212,3 +212,9 @@ __marimo__/
 
 # Database files
 *.db
+
+# Default data files to keep
+!electricity_maps_default.csv
+!instance_power_profiles.csv
+!provider_power_estimates.csv
+!cloud_region_electricity_maps_mapping.csv

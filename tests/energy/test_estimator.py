@@ -109,17 +109,22 @@ def test_estimator_calculates_energy_correctly(estimator, sample_prometheus_metr
     pod1_result = next(m for m in energy_results if m.pod_name == "api-pod")
     assert pod1_result.namespace == "prod"
 
-    profile = INSTANCE_PROFILES["m5.large"]  # vcores=2, min=3.23, max=36.30
+    profile = INSTANCE_PROFILES["m5.large"]
+    # New values based on AWS averages:
+    # Min: 0.74 * 2 = 1.48
+    # Max: 3.5 * 2 = 7.0
+
     cpu_cores = 0.5
     vcores = profile["vcores"]
 
     # Utilization = 0.5 / 2 = 0.25
     cpu_util = cpu_cores / vcores
-    # Power = 3.23 + 0.25 * (36.30 - 3.23) = 3.23 + 8.2675 = 11.4975 Watts
-    expected_power_watts = profile["minWatts"] + (cpu_util * (profile["maxWatts"] - profile["minWatts"]))
-    assert expected_power_watts == pytest.approx(11.4975)
 
-    # Energy = 11.4975 Watts * 300 Seconds = 3449.25 Joules
+    # Power = 1.48 + 0.25 * (7.0 - 1.48) = 1.48 + 1.38 = 2.86 Watts
+    expected_power_watts = profile["minWatts"] + (cpu_util * (profile["maxWatts"] - profile["minWatts"]))
+    assert expected_power_watts == pytest.approx(2.86)
+
+    # Energy = 2.86 Watts * 300 Seconds = 858 Joules
     expected_joules = expected_power_watts * 300  # 300s = 5m
     assert pod1_result.joules == pytest.approx(expected_joules)
     assert pod1_result.node == "node-1"
@@ -128,18 +133,23 @@ def test_estimator_calculates_energy_correctly(estimator, sample_prometheus_metr
     pod2_result = next(m for m in energy_results if m.pod_name == "db-pod")
     assert pod2_result.namespace == "dev"
 
-    profile2 = INSTANCE_PROFILES["t3.medium"]  # vcores=2, min=2.03, max=23.41
+    profile2 = INSTANCE_PROFILES["t3.medium"]
+    # New values based on AWS averages:
+    # Min: 0.74 * 2 = 1.48
+    # Max: 3.5 * 2 = 7.0
+
     # Aggregated CPU usage = 1.0 + 0.2 = 1.2 cores
     cpu_cores_2 = 1.2
     vcores_2 = profile2["vcores"]
 
     # Utilization = 1.2 / 2 = 0.6
     cpu_util_2 = cpu_cores_2 / vcores_2
-    # Power = 2.03 + 0.6 * (23.41 - 2.03) = 2.03 + 12.828 = 14.858 Watts
-    expected_power_watts_2 = profile2["minWatts"] + (cpu_util_2 * (profile2["maxWatts"] - profile2["minWatts"]))
-    assert expected_power_watts_2 == pytest.approx(14.858)
 
-    # Energy = 14.858 Watts * 300 Seconds = 4457.4 Joules
+    # Power = 1.48 + 0.6 * (7.0 - 1.48) = 1.48 + 3.312 = 4.792 Watts
+    expected_power_watts_2 = profile2["minWatts"] + (cpu_util_2 * (profile2["maxWatts"] - profile2["minWatts"]))
+    assert expected_power_watts_2 == pytest.approx(4.792)
+
+    # Energy = 4.792 Watts * 300 Seconds = 1437.6 Joules
     expected_joules_2 = expected_power_watts_2 * 300
     assert pod2_result.joules == pytest.approx(expected_joules_2)
     assert pod2_result.node == "node-2"
@@ -216,9 +226,10 @@ def test_estimator_handles_cpu_utilization_over_100(estimator):
     # so the energy should equal maxWatts * time.
     profile = INSTANCE_PROFILES["m5.large"]
 
-    # Power = 3.23 + 1.0 * (36.30 - 3.23) = 36.30 Watts (maxWatts)
+    # Power = Max Watts = 7.0 Watts (AWS Average Max 3.5 * 2 vCPUs)
     expected_power_watts = profile["maxWatts"]
+    assert expected_power_watts == pytest.approx(7.0)
 
-    # Energy = 36.30 Watts * 300 Seconds = 10890 Joules
+    # Energy = 7.0 Watts * 300 Seconds = 2100 Joules
     expected_joules = expected_power_watts * 300
     assert energy_results[0].joules == pytest.approx(expected_joules)

@@ -237,7 +237,7 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
 
     # Arrange
     # Configure the translator mock
-    def translator_side_effect(region):
+    def translator_side_effect(region, provider=None):
         if region == "gcp-us-east1-a":
             return "US-CISO-NE"
         if region == "aws-eu-west-1b":
@@ -306,7 +306,7 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
     """
 
     # Arrange
-    def translator_side_effect(region):
+    def translator_side_effect(region, provider=None):
         if region == "gcp-us-east1-a":
             return "US-CISO-NE"
         if region == "aws-eu-west-1b":
@@ -461,7 +461,7 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
 
     # Arrange
     # Configure the translator mock
-    def translator_side_effect(region):
+    def translator_side_effect(region, provider=None):
         if region == "gcp-us-east1-a":
             return "US-CISO-NE"
         if region == "aws-eu-west-1b":
