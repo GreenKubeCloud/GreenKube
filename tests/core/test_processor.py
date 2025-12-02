@@ -197,6 +197,15 @@ def mock_electricity_maps_collector():
 
 
 @pytest.fixture
+def mock_node_repository():
+    """Provides a mock NodeRepository."""
+    mock = MagicMock()
+    mock.get_latest_snapshots_before.return_value = []
+    mock.get_snapshots.return_value = []
+    return mock
+
+
+@pytest.fixture
 def data_processor(
     mock_prometheus_collector,
     mock_opencost_collector,
@@ -204,6 +213,7 @@ def data_processor(
     mock_pod_collector,
     mock_electricity_maps_collector,
     mock_repository,
+    mock_node_repository,
     mock_calculator,
 ):
     """
@@ -213,6 +223,10 @@ def data_processor(
     # Build a basic estimator mock that will convert Prometheus metrics to SAMPLE_ENERGY_METRICS
     estimator_mock = MagicMock(spec=BasicEstimator)
     estimator_mock.estimate.return_value = SAMPLE_ENERGY_METRICS
+    # Also mock instance_profiles for run_range tests
+    estimator_mock.instance_profiles = {}
+    estimator_mock.DEFAULT_INSTANCE_PROFILE = {"vcores": 2, "minWatts": 10, "maxWatts": 50}
+    estimator_mock.calculate_node_energy.return_value = []  # Default return
 
     return DataProcessor(
         prometheus_collector=mock_prometheus_collector,
@@ -221,6 +235,7 @@ def data_processor(
         pod_collector=mock_pod_collector,
         electricity_maps_collector=mock_electricity_maps_collector,
         repository=mock_repository,  # Pass the mock repository
+        node_repository=mock_node_repository,
         calculator=mock_calculator,  # Pass the mock calculator
         estimator=estimator_mock,
     )
@@ -371,6 +386,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(
         pod_collector=MagicMock(),
         electricity_maps_collector=MagicMock(),
         repository=mock_repository,
+        node_repository=MagicMock(),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -532,6 +548,7 @@ def test_processor_aggregates_pod_requests(
         pod_collector=mock_pod_collector,
         electricity_maps_collector=MagicMock(),
         repository=mock_repository,
+        node_repository=MagicMock(),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -571,6 +588,7 @@ def test_processor_handles_missing_pod_requests(
         pod_collector=mock_pod_collector,
         electricity_maps_collector=MagicMock(),
         repository=mock_repository,
+        node_repository=MagicMock(),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -627,6 +645,7 @@ def test_processor_nodecollector_instance_type_fallback(
         pod_collector=MagicMock(),
         electricity_maps_collector=MagicMock(),
         repository=mock_repository,
+        node_repository=MagicMock(),
         calculator=mock_calculator,
         estimator=estimator_spy,
     )
@@ -643,3 +662,106 @@ def test_processor_nodecollector_instance_type_fallback(
     assert any(isinstance(nt, NodeInstanceType) for nt in called_metric.node_instance_types)
     assert called_metric.node_instance_types[0].node == "node-1"
     assert called_metric.node_instance_types[0].instance_type == "m5.large"
+
+
+@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+def test_run_range_uses_historical_node_data(
+    mock_translator,
+    data_processor,
+    mock_prometheus_collector,
+    mock_node_repository,
+    mock_calculator,
+):
+    """
+    Tests that run_range uses historical node data from NodeRepository.
+    """
+    from datetime import datetime, timezone
+
+    # Arrange
+    start = datetime(2023, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2023, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+
+    # Ensure repository doesn't return stored metrics (simulating fresh calculation)
+    mock_repository = data_processor.repository
+    mock_repository.read_combined_metrics.return_value = []
+
+    # Mock translator to return a valid zone string
+    mock_translator.return_value = "US-EAST-1"
+
+    # Mock Prometheus range data
+    mock_prometheus_collector.collect_range.return_value = [
+        {
+            "metric": {"namespace": "ns-1", "pod": "pod-A", "node": "node-1"},
+            "values": [[1672567200, "1.0"]],  # 10:00:00
+        }
+    ]
+
+    # Mock NodeRepository snapshots
+    # Initial state: node-1 is t3.medium (2 cores)
+    mock_node_repository.get_latest_snapshots_before.return_value = [
+        NodeInfo(
+            name="node-1",
+            instance_type="t3.medium",
+            cpu_capacity_cores=2.0,
+            zone="us-east-1a",
+            region="us-east-1",
+            cloud_provider="aws",
+            architecture="amd64",
+            node_pool="default",
+        )
+    ]
+    # Change at 10:30: node-1 becomes t3.large (4 cores)
+    mock_node_repository.get_snapshots.return_value = [
+        (
+            "2023-01-01T10:30:00+00:00",
+            NodeInfo(
+                name="node-1",
+                instance_type="t3.large",
+                cpu_capacity_cores=4.0,
+                zone="us-east-1a",
+                region="us-east-1",
+                cloud_provider="aws",
+                architecture="amd64",
+                node_pool="default",
+            ),
+        )
+    ]
+
+    # Mock Estimator behavior
+    # We need to verify that calculate_node_energy is called with different profiles
+    # But since we mocked estimator in fixture, we need to inspect calls or side effects
+
+    # Let's mock calculate_node_energy to return dummy metrics so run_range completes
+    data_processor.estimator.calculate_node_energy.return_value = [
+        {"pod_name": "pod-A", "namespace": "ns-1", "joules": 100, "node": "node-1"}
+    ]
+
+    # We also need to mock instance_profiles in estimator if we want profile lookup to work,
+    # OR we can rely on the fact that processor calls profile_for_node which uses estimator.instance_profiles
+    data_processor.estimator.instance_profiles = {
+        "t3.medium": {"vcores": 2, "minWatts": 10, "maxWatts": 20},
+        "t3.large": {"vcores": 4, "minWatts": 20, "maxWatts": 40},
+    }
+
+    # Act
+    # Act
+    data_processor.run_range(start, end)
+
+    # Assert
+    # Verify that get_latest_snapshots_before and get_snapshots were called
+    mock_node_repository.get_latest_snapshots_before.assert_called_once()
+    mock_node_repository.get_snapshots.assert_called_once()
+
+    # Verify that calculate_node_energy was called.
+    # We can check the 'node_profile' argument passed to it.
+    # Since we have one data point at 10:00, it should use the initial snapshot (t3.medium)
+
+    calls = data_processor.estimator.calculate_node_energy.call_args_list
+    assert len(calls) > 0
+
+    # Check the profile used in the call corresponding to the timestamp
+    # The timestamp in collect_range is 1672567200 (10:00:00)
+    # So it should use t3.medium profile
+    args, kwargs = calls[0]
+    assert kwargs["node_name"] == "node-1"
+    assert kwargs["node_profile"]["vcores"] == 2

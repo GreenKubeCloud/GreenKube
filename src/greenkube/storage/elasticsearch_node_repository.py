@@ -123,3 +123,87 @@ class ElasticsearchNodeRepository:
         except Exception as e:
             logging.error(f"Failed to save node snapshots to Elasticsearch: {e}")
             return 0
+
+    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
+        """
+        Retrieves node snapshots within a time range.
+        """
+        try:
+            s = NodeSnapshotDoc.search().filter("range", timestamp={"gte": start, "lte": end}).sort("timestamp")
+            # Use scan to get all results
+            hits = s.scan()
+
+            results = []
+            for hit in hits:
+                node_info = NodeInfo(
+                    name=hit.node_name,
+                    instance_type=hit.instance_type,
+                    zone=hit.zone,
+                    region=hit.region,
+                    cloud_provider=hit.cloud_provider,
+                    architecture=hit.architecture,
+                    node_pool=hit.node_pool,
+                    cpu_capacity_cores=hit.cpu_capacity_cores,
+                    memory_capacity_bytes=hit.memory_capacity_bytes,
+                )
+                # hit.timestamp is usually a datetime object or string depending on deserialization
+                # elasticsearch-dsl usually returns datetime if mapped as Date
+                ts = hit.timestamp
+                if isinstance(ts, datetime):
+                    ts_str = ts.isoformat()
+                else:
+                    ts_str = str(ts)
+
+                results.append((ts_str, node_info))
+            return results
+
+        except Exception as e:
+            logging.error(f"Failed to retrieve snapshots from Elasticsearch: {e}")
+            return []
+
+    def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+        """
+        Retrieves the latest snapshot for each node before the given timestamp.
+        """
+        try:
+            # This is tricky in ES. We want the latest document per node_name where timestamp < timestamp.
+            # A terms aggregation on node_name with a top_hits sub-aggregation sorted by timestamp desc, size 1.
+
+            s = NodeSnapshotDoc.search()
+            s = s.filter("range", timestamp={"lt": timestamp})
+
+            # We need to aggregate by node_name
+            # Since we don't know how many nodes there are, we might need a large size for terms agg
+            # or use composite agg. For simplicity, let's assume a reasonable max nodes (e.g. 10000).
+
+            s.aggs.bucket("nodes", "terms", field="node_name", size=10000).metric(
+                "latest_snapshot", "top_hits", size=1, sort=[{"timestamp": {"order": "desc"}}]
+            )
+
+            # We don't need hits, just aggs
+            response = s.execute()
+
+            results = []
+            for bucket in response.aggregations.nodes.buckets:
+                hits = bucket.latest_snapshot.hits.hits
+                if hits:
+                    hit = hits[0]["_source"]
+                    # Map dict to NodeInfo
+                    node_info = NodeInfo(
+                        name=hit.get("node_name"),
+                        instance_type=hit.get("instance_type"),
+                        zone=hit.get("zone"),
+                        region=hit.get("region"),
+                        cloud_provider=hit.get("cloud_provider"),
+                        architecture=hit.get("architecture"),
+                        node_pool=hit.get("node_pool"),
+                        cpu_capacity_cores=hit.get("cpu_capacity_cores"),
+                        memory_capacity_bytes=hit.get("memory_capacity_bytes"),
+                    )
+                    results.append(node_info)
+
+            return results
+
+        except Exception as e:
+            logging.error(f"Failed to retrieve latest snapshots from Elasticsearch: {e}")
+            return []

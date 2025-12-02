@@ -116,6 +116,7 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         pod_collector=pod_collector,
         electricity_maps_collector=MagicMock(),
         repository=repository,
+        node_repository=MagicMock(),
         calculator=calc,
         estimator=est,
     )

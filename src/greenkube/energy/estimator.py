@@ -77,6 +77,22 @@ class BasicEstimator:
         )
         return 300  # 5 minutes by default
 
+    def _create_cpu_profile(self, cores: float) -> Dict[str, Any]:
+        """Creates a power profile based on core count and default per-core values."""
+        default_vcores = self.DEFAULT_INSTANCE_PROFILE["vcores"]
+        if default_vcores <= 0:
+            per_core_min = self.DEFAULT_INSTANCE_PROFILE["minWatts"]
+            per_core_max = self.DEFAULT_INSTANCE_PROFILE["maxWatts"]
+        else:
+            per_core_min = self.DEFAULT_INSTANCE_PROFILE["minWatts"] / default_vcores
+            per_core_max = self.DEFAULT_INSTANCE_PROFILE["maxWatts"] / default_vcores
+
+        return {
+            "vcores": cores,
+            "minWatts": per_core_min * cores,
+            "maxWatts": per_core_max * cores,
+        }
+
     def estimate(self, metrics: PrometheusMetric) -> List[EnergyMetric]:
         """
         Orchestrates the energy estimation for all pods.
@@ -108,21 +124,7 @@ class BasicEstimator:
             if isinstance(instance_type, str) and instance_type.startswith("cpu-"):
                 try:
                     cores = int(instance_type.split("-", 1)[1])
-                    # Derive per-core wattage from DEFAULT_INSTANCE_PROFILE
-                    default_vcores = self.DEFAULT_INSTANCE_PROFILE["vcores"]
-                    # Protect division by zero
-                    if default_vcores <= 0:
-                        per_core_min = self.DEFAULT_INSTANCE_PROFILE["minWatts"]
-                        per_core_max = self.DEFAULT_INSTANCE_PROFILE["maxWatts"]
-                    else:
-                        per_core_min = self.DEFAULT_INSTANCE_PROFILE["minWatts"] / default_vcores
-                        per_core_max = self.DEFAULT_INSTANCE_PROFILE["maxWatts"] / default_vcores
-
-                    inferred_profile = {
-                        "vcores": cores,
-                        "minWatts": per_core_min * cores,
-                        "maxWatts": per_core_max * cores,
-                    }
+                    inferred_profile = self._create_cpu_profile(cores)
                     node_to_profile[node] = inferred_profile
                     logger.info(
                         "Built inferred power profile for node '%s' from %d cores",

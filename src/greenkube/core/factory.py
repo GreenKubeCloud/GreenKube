@@ -96,30 +96,31 @@ def get_processor() -> DataProcessor:
     try:
         # 1. Get the repository
         repository = get_repository()
+        node_repository = get_node_repository()
 
         # 2. Instantiate all collectors
-        prometheus_collector = PrometheusCollector(settings=config)
+        prometheus_collector = PrometheusCollector()
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
         electricity_maps_collector = ElectricityMapsCollector()
 
-        # 3. Instantiate the calculator and estimator
-        carbon_calculator = CarbonCalculator(repository=repository)
-        estimator = BasicEstimator(settings=config)
+        # 3. Instantiate Calculator and Estimator
+        calculator = CarbonCalculator()
+        estimator = BasicEstimator(config)
 
-        # 4. Instantiate and return the processor
-        processor = DataProcessor(
+        # 4. Instantiate and return DataProcessor
+        return DataProcessor(
             prometheus_collector=prometheus_collector,
             opencost_collector=opencost_collector,
             node_collector=node_collector,
             pod_collector=pod_collector,
             electricity_maps_collector=electricity_maps_collector,
             repository=repository,
-            calculator=carbon_calculator,
+            node_repository=node_repository,
+            calculator=calculator,
             estimator=estimator,
         )
-        return processor
     except Exception as e:
         logger.error(f"An error occurred during processor initialization: {e}")
         logger.error("Processor initialization failed: %s", traceback.format_exc())

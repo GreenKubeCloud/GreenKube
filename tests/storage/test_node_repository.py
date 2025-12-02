@@ -1,7 +1,7 @@
 # tests/storage/test_node_repository.py
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -92,6 +92,89 @@ def test_save_nodes_new_snapshots(node_repo, db_connection):
     row = cursor.fetchone()
     assert row[0] == "m5.large"
     assert row[1] == 2.0
+
+
+def test_get_snapshots(node_repo):
+    """Test retrieving snapshots within a time range."""
+    # Insert some data
+    node1 = NodeInfo(
+        name="node-1",
+        instance_type="t3.medium",
+        zone="us-east-1a",
+        region="us-east-1",
+        cloud_provider="aws",
+        architecture="amd64",
+        node_pool="default",
+        cpu_capacity_cores=2.0,
+        memory_capacity_bytes=4000000000,
+    )
+    node_repo.save_nodes([node1])
+
+    # Wait a bit or mock time? save_nodes uses datetime.now(timezone.utc).
+    # Since we can't easily mock datetime inside the method without patching,
+    # let's just use a wide range.
+
+    start = datetime.now(timezone.utc) - timedelta(minutes=1)
+    end = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    snapshots = node_repo.get_snapshots(start, end)
+    assert len(snapshots) == 1
+    ts, info = snapshots[0]
+    assert info.name == "node-1"
+    assert info.cpu_capacity_cores == 2.0
+
+
+def test_get_latest_snapshots_before(node_repo):
+    """Test retrieving latest snapshots before a timestamp."""
+    # We need to simulate history.
+    # Since save_nodes uses current time, we might need to manually insert for testing history
+    # or patch datetime.
+
+    cursor = node_repo.conn.cursor()
+
+    # Insert snapshot at T-10m
+    t1 = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    cursor.execute(
+        """
+        INSERT INTO node_snapshots (
+            timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
+            cloud_provider, region, zone, node_pool, memory_capacity_bytes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (t1, "node-1", "t3.medium", 2.0, "amd64", "aws", "us-east-1", "us-east-1a", "default", 4000000000),
+    )
+
+    # Insert snapshot at T-5m (updated capacity)
+    t2 = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    cursor.execute(
+        """
+        INSERT INTO node_snapshots (
+            timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
+            cloud_provider, region, zone, node_pool, memory_capacity_bytes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (t2, "node-1", "t3.large", 4.0, "amd64", "aws", "us-east-1", "us-east-1a", "default", 8000000000),
+    )
+
+    node_repo.conn.commit()
+
+    # Query at T-2m (should get T-5m snapshot)
+    query_time = datetime.now(timezone.utc) - timedelta(minutes=2)
+    snapshots = node_repo.get_latest_snapshots_before(query_time)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].name == "node-1"
+    assert snapshots[0].cpu_capacity_cores == 4.0
+
+    # Query at T-7m (should get T-10m snapshot)
+    query_time_old = datetime.now(timezone.utc) - timedelta(minutes=7)
+    snapshots_old = node_repo.get_latest_snapshots_before(query_time_old)
+
+    assert len(snapshots_old) == 1
+    assert snapshots_old[0].name == "node-1"
+    assert snapshots_old[0].cpu_capacity_cores == 2.0
 
 
 def test_save_nodes_multiple_snapshots(node_repo, db_connection):
