@@ -8,7 +8,7 @@ consistency across all modules (collectors, calculators, reporters).
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +28,8 @@ class EnergyMetric(BaseModel):
     )
     node: Optional[str] = Field(None, description="The node where the pod is running.")
     region: Optional[str] = Field(None, description="The cloud region of the node.")
+    is_estimated: bool = Field(False, description="Whether the metric relies on estimated values.")
+    estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
 
 
 class CostMetric(BaseModel):
@@ -137,7 +139,9 @@ class CombinedMetric(BaseModel):
     node: Optional[str] = None
     # Metadata for historical accuracy
     node_instance_type: Optional[str] = None
-    node_zone: Optional[str] = None  # Cloud provider zone
-    emaps_zone: Optional[str] = None  # Electricity Maps zone
+    node_zone: Optional[str] = Field(None, description="Cloud provider zone")
+    emaps_zone: Optional[str] = Field(None, description="Electricity Maps zone")
+    is_estimated: bool = Field(False, description="Whether the metric relies on estimated values.")
+    estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

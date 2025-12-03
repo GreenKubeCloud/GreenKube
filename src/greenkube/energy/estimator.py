@@ -111,7 +111,10 @@ class BasicEstimator:
 
         # 2. Create a Node -> Power Profile map
         # (e.g., 'node-1' -> {'vcores': 2, 'minWatts': 3.23, 'maxWatts': 36.30})
+        # Also track estimation reasons per node
         node_to_profile: Dict[str, Dict[str, Any]] = {}
+        node_estimations: Dict[str, List[str]] = defaultdict(list)
+
         for node, instance_type in node_to_instance_type.items():
             profile = self.instance_profiles.get(instance_type)
             if profile:
@@ -126,6 +129,7 @@ class BasicEstimator:
                     cores = int(instance_type.split("-", 1)[1])
                     inferred_profile = self._create_cpu_profile(cores)
                     node_to_profile[node] = inferred_profile
+                    node_estimations[node].append(f"Inferred profile from CPU count: {instance_type}")
                     logger.info(
                         "Built inferred power profile for node '%s' from %d cores",
                         node,
@@ -143,6 +147,7 @@ class BasicEstimator:
                 )
                 self._warned_nodes.add(node)
             node_to_profile[node] = self.DEFAULT_INSTANCE_PROFILE
+            node_estimations[node].append(f"Unknown instance type '{instance_type}'; used default profile")
 
         # 3. Aggregate CPU usage by Pod
         # Prometheus metrics are per *container*. We aggregate them
@@ -179,6 +184,7 @@ class BasicEstimator:
                     logger.warning(f"No power profile for node {node_name}. Using DEFAULT_INSTANCE_PROFILE.")
                     self._warned_nodes.add(node_name)
                 profile = self.DEFAULT_INSTANCE_PROFILE
+                node_estimations[node_name].append(f"No profile found for node '{node_name}'; used default profile")
 
             # vcores = profile["vcores"]
             # min_watts = profile["minWatts"]
@@ -192,6 +198,7 @@ class BasicEstimator:
                 node_total_cpu=total_cpu,
                 pods_on_node=pods_on_node,
                 duration_seconds=self.query_range_step_sec,
+                estimation_reasons=node_estimations.get(node_name, []),
             )
 
             for m in calculated_metrics:
@@ -207,6 +214,7 @@ class BasicEstimator:
         node_total_cpu: float,
         pods_on_node: List[tuple],
         duration_seconds: float,
+        estimation_reasons: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Calculates energy for all pods on a specific node.
@@ -223,6 +231,8 @@ class BasicEstimator:
         node_power_watts = min_watts + (node_util * (max_watts - min_watts))
 
         results = []
+        reasons = estimation_reasons or []
+        is_estimated = len(reasons) > 0
 
         # If no pods report CPU on this node (total_cpu == 0), the node is idle.
         # Distribute the node's idle power (minWatts) evenly among all pods on the node.
@@ -243,6 +253,8 @@ class BasicEstimator:
                             "namespace": namespace,
                             "joules": energy_per_pod,
                             "node": node_name,
+                            "is_estimated": is_estimated,
+                            "estimation_reasons": list(reasons),
                         }
                     )
         else:
@@ -258,6 +270,8 @@ class BasicEstimator:
                         "namespace": namespace,
                         "joules": energy_joules,
                         "node": node_name,
+                        "is_estimated": is_estimated,
+                        "estimation_reasons": list(reasons),
                     }
                 )
         return results

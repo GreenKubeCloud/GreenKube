@@ -1,7 +1,7 @@
 # src/greenkube/models/node.py
 
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,3 +35,14 @@ class NodeInfo(BaseModel):
     cpu_capacity_cores: Optional[float] = Field(None, description="CPU capacity in cores")
     memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
+
+
+class NodeZoneContext(BaseModel):
+    """
+    Context about a node's zone mapping and any estimations involved.
+    """
+
+    node: str = Field(..., description="Node name")
+    emaps_zone: str = Field(..., description="Electricity Maps zone")
+    is_estimated: bool = Field(False, description="Whether the zone mapping is estimated/fallback")
+    estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation")

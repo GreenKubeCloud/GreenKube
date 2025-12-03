@@ -639,6 +639,9 @@ def test_processor_nodecollector_instance_type_fallback(
     estimator_spy = MagicMock()
     estimator_spy.estimate.return_value = []
 
+    # Ensure translator returns a string to satisfy Pydantic model
+    mock_translator.return_value = "US-TEST"
+
     dp = DataProcessor(
         prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
