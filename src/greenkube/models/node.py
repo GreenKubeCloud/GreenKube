@@ -1,5 +1,6 @@
 # src/greenkube/models/node.py
 
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,9 @@ class NodeInfo(BaseModel):
         cloud_provider: Cloud provider (ovh, azure, aws, gcp, or unknown)
         architecture: CPU architecture (amd64, arm64, etc.)
         node_pool: Node pool/agent pool name (cloud-specific)
+        cpu_capacity_cores: CPU capacity in cores
+        memory_capacity_bytes: Memory capacity in bytes
+        timestamp: Snapshot timestamp
     """
 
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -28,3 +32,6 @@ class NodeInfo(BaseModel):
     cloud_provider: str = Field(default="unknown", description="Cloud provider")
     architecture: Optional[str] = Field(None, description="CPU architecture")
     node_pool: Optional[str] = Field(None, description="Node pool name")
+    cpu_capacity_cores: Optional[float] = Field(None, description="CPU capacity in cores")
+    memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
+    timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")

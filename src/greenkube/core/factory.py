@@ -29,6 +29,7 @@ from ..storage.base_repository import CarbonIntensityRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
+from ..storage.node_repository import NodeRepository
 from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,30 @@ def get_repository() -> CarbonIntensityRepository:
 
 
 @lru_cache(maxsize=1)
+def get_node_repository() -> NodeRepository:
+    """
+    Factory function to get the node repository.
+    """
+    if config.DB_TYPE == "sqlite":
+        from ..core.db import db_manager
+
+        return NodeRepository(db_manager.get_connection())
+    elif config.DB_TYPE == "elasticsearch":
+        from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
+
+        return ElasticsearchNodeRepository()
+    else:
+        # For now, only SQLite and Elasticsearch are supported for nodes
+        logger.warning(
+            f"NodeRepository not implemented for DB_TYPE '{config.DB_TYPE}'. "
+            "Using SQLite fallback if possible or failing."
+        )
+        from ..core.db import db_manager
+
+        return NodeRepository(db_manager.get_connection())
+
+
+@lru_cache(maxsize=1)
 def get_processor() -> DataProcessor:
     """
     Factory function to instantiate and return a fully configured DataProcessor.
@@ -71,30 +96,31 @@ def get_processor() -> DataProcessor:
     try:
         # 1. Get the repository
         repository = get_repository()
+        node_repository = get_node_repository()
 
         # 2. Instantiate all collectors
-        prometheus_collector = PrometheusCollector(settings=config)
+        prometheus_collector = PrometheusCollector()
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
         electricity_maps_collector = ElectricityMapsCollector()
 
-        # 3. Instantiate the calculator and estimator
-        carbon_calculator = CarbonCalculator(repository=repository)
-        estimator = BasicEstimator(settings=config)
+        # 3. Instantiate Calculator and Estimator
+        calculator = CarbonCalculator()
+        estimator = BasicEstimator(config)
 
-        # 4. Instantiate and return the processor
-        processor = DataProcessor(
+        # 4. Instantiate and return DataProcessor
+        return DataProcessor(
             prometheus_collector=prometheus_collector,
             opencost_collector=opencost_collector,
             node_collector=node_collector,
             pod_collector=pod_collector,
             electricity_maps_collector=electricity_maps_collector,
             repository=repository,
-            calculator=carbon_calculator,
+            node_repository=node_repository,
+            calculator=calculator,
             estimator=estimator,
         )
-        return processor
     except Exception as e:
         logger.error(f"An error occurred during processor initialization: {e}")
         logger.error("Processor initialization failed: %s", traceback.format_exc())

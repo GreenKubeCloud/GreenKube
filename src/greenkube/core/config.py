@@ -78,6 +78,19 @@ class Config:
             return fallback
         return pue
 
+    def get_pue_for_provider(self, provider: str) -> float:
+        """
+        Retrieves the PUE for a specific cloud provider.
+        """
+        if not provider:
+            return self.DEFAULT_PUE
+
+        profile_key = f"default_{provider.lower()}"
+        pue = DATACENTER_PUE_PROFILES.get(profile_key)
+        if pue is None:
+            return self.DEFAULT_PUE
+        return pue
+
     DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
     DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
     JOULES_PER_KWH = 3.6e6
@@ -148,6 +161,10 @@ class Config:
     # Normalization granularity for carbon intensity lookups and cache keys.
     # Allowed values: 'hour', 'day', 'none'
     NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
+
+    # --- Node Analysis variables ---
+    NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
+    NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
     @classmethod
     def validate(cls):

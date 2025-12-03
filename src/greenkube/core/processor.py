@@ -1,7 +1,7 @@
 # src/greenkube/core/processor.py
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
@@ -16,6 +16,7 @@ from ..core.config import config
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..storage.base_repository import CarbonIntensityRepository
+from ..storage.node_repository import NodeRepository
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class DataProcessor:
         pod_collector: PodCollector,
         electricity_maps_collector: ElectricityMapsCollector,
         repository: CarbonIntensityRepository,
+        node_repository: NodeRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
     ):
@@ -41,6 +43,7 @@ class DataProcessor:
         self.pod_collector = pod_collector
         self.electricity_maps_collector = electricity_maps_collector
         self.repository = repository
+        self.node_repository = node_repository
         self.calculator = calculator
         self.estimator = estimator
 
@@ -71,36 +74,56 @@ class DataProcessor:
             for node_name, node_info in nodes_info.items():
                 cloud_zone = node_info.zone
                 provider = node_info.cloud_provider
+                mapped = None
                 if cloud_zone:
                     try:
                         mapped = get_emaps_zone_from_cloud_zone(cloud_zone, provider=provider)
-                        if mapped:
-                            node_emaps_map[node_name] = mapped
-                            logger.info(
-                                "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
-                                node_name,
-                                cloud_zone,
-                                provider,
-                                mapped,
-                            )
-                        else:
-                            node_emaps_map[node_name] = config.DEFAULT_ZONE
-                            logger.warning(
-                                "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
-                                cloud_zone,
-                                node_name,
-                                config.DEFAULT_ZONE,
-                            )
                     except Exception:
+                        logger.warning(
+                            "Exception while mapping cloud zone '%s' for node '%s'.",
+                            cloud_zone,
+                            node_name,
+                            exc_info=True,
+                        )
+
+                if mapped:
+                    node_emaps_map[node_name] = mapped
+                    logger.info(
+                        "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
+                        node_name,
+                        cloud_zone,
+                        provider,
+                        mapped,
+                    )
+                else:
+                    # Fallback: try to map region if zone mapping failed
+                    region = node_info.region
+                    if region:
+                        try:
+                            mapped = get_emaps_zone_from_cloud_zone(region, provider=provider)
+                        except Exception:
+                            pass
+
+                    if mapped:
+                        node_emaps_map[node_name] = mapped
+                        logger.info(
+                            "Node '%s' region '%s' (provider: %s) -> Electricity Maps zone '%s' "
+                            "(fallback from zone '%s')",
+                            node_name,
+                            region,
+                            provider,
+                            mapped,
+                            cloud_zone,
+                        )
+                    else:
                         node_emaps_map[node_name] = config.DEFAULT_ZONE
                         logger.warning(
-                            "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
+                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
                             cloud_zone,
+                            region,
                             node_name,
                             config.DEFAULT_ZONE,
                         )
-                else:
-                    node_emaps_map[node_name] = config.DEFAULT_ZONE
         return node_emaps_map
 
     def run(self):
@@ -376,7 +399,9 @@ class DataProcessor:
                     namespace=namespace,
                     total_cost=total_cost,
                     co2e_grams=carbon_result.co2e_grams,
-                    pue=self.calculator.pue,
+                    pue=config.get_pue_for_provider(
+                        nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                    ),
                     grid_intensity=carbon_result.grid_intensity,
                     joules=energy_metric.joules,
                     cpu_request=pod_requests["cpu"],
@@ -520,50 +545,103 @@ class DataProcessor:
         estimator = self.estimator
         calculator = self.calculator
         repository = self.repository
+        node_repository = self.node_repository
         node_collector = self.node_collector
         pod_collector = self.pod_collector
 
-        # NOTE: For historical reports, we use CURRENT cluster metadata (node instance types,
-        # pod requests, zone assignments). This means:
-        # - Deleted pods/nodes will have missing or default metadata
-        # - "Rightsizing" recommendations rely on current pod resource requests
-        # - "Region" assignments use current node zones
-        # If the cluster state has changed significantly since the historical data was collected,
-        # metadata-dependent fields may not reflect the actual state at that time.
-        logger.warning(
-            "Historical report: Using CURRENT cluster metadata for node instance types, "
-            "pod requests, and zone assignments. Deleted resources will use default values."
-        )
+        # --- Historical Node Data Logic ---
+        # 1. Fetch initial state (latest snapshot before start)
+        initial_snapshots = node_repository.get_latest_snapshots_before(start_dt)
+        # 2. Fetch changes during the interval
+        snapshot_changes = node_repository.get_snapshots(start_dt, end_dt)
 
-        # node instance types
+        # Build a timeline of node configurations
+        # node_timeline[node_name] = [(timestamp, NodeInfo), ...]
+        node_timeline = defaultdict(list)
+
+        # Populate initial state
+        for node_info in initial_snapshots:
+            # Use node_info.timestamp if available, otherwise fallback to start_dt
+            # This ensures we track the actual age of the snapshot
+            ts = node_info.timestamp if node_info.timestamp else start_dt
+            node_timeline[node_info.name].append((ts, node_info))
+
+        # Add changes
+        for ts_str, node_info in snapshot_changes:
+            # Ensure timestamp is datetime
+            if isinstance(ts_str, str):
+                change_dt = parse_iso_date(ts_str)
+            else:
+                change_dt = ts_str
+
+            if change_dt:
+                node_timeline[node_info.name].append((change_dt, node_info))
+
+        # Sort timelines
+        for node_name in node_timeline:
+            node_timeline[node_name].sort(key=lambda x: x[0])
+
+        def get_node_info_at(node_name: str, timestamp: datetime):
+            """Finds the active NodeInfo for a node at a specific time."""
+            timeline = node_timeline.get(node_name)
+            if not timeline:
+                return None
+
+            # Find the latest snapshot <= timestamp
+            # Since timeline is sorted, we can iterate backwards or use bisect
+            # Given the small number of changes per node usually, linear scan backwards is fine
+            for ts, info in reversed(timeline):
+                if ts <= timestamp:
+                    # Check for staleness
+                    age = timestamp - ts
+                    if age > timedelta(days=config.NODE_DATA_MAX_AGE_DAYS):
+                        logger.warning(
+                            "Node snapshot for '%s' at %s is too old (age: %s). Ignoring.",
+                            node_name,
+                            ts,
+                            age,
+                        )
+                        return None
+                    return info
+            return None
+
+        # Fallback to current state if no history
         try:
-            node_instance_map = node_collector.collect_instance_types() or {}
+            current_node_map = node_collector.collect_instance_types() or {}
         except Exception:
-            node_instance_map = {}
+            current_node_map = {}
 
-        def profile_for_node(node_name: str):
-            inst = node_instance_map.get(node_name)
+        def profile_for_node(node_name: str, timestamp: datetime):
+            # Try historical data first
+            node_info = get_node_info_at(node_name, timestamp)
+            inst = None
+            cpu_capacity = None
+
+            if node_info:
+                inst = node_info.instance_type
+                cpu_capacity = node_info.cpu_capacity_cores
+            else:
+                # Fallback to current state
+                inst = current_node_map.get(node_name)
+
             if inst:
                 profile = estimator.instance_profiles.get(inst)
                 if profile:
                     return profile
+
+                # Fallback logic for unknown instance types or "cpu-X" types
                 if isinstance(inst, str) and inst.startswith("cpu-"):
                     try:
                         cores = int(inst.split("-", 1)[1])
-                        default_vcores = estimator.DEFAULT_INSTANCE_PROFILE["vcores"]
-                        if default_vcores <= 0:
-                            per_core_min = estimator.DEFAULT_INSTANCE_PROFILE["minWatts"]
-                            per_core_max = estimator.DEFAULT_INSTANCE_PROFILE["maxWatts"]
-                        else:
-                            per_core_min = estimator.DEFAULT_INSTANCE_PROFILE["minWatts"] / default_vcores
-                            per_core_max = estimator.DEFAULT_INSTANCE_PROFILE["maxWatts"] / default_vcores
-                        return {
-                            "vcores": cores,
-                            "minWatts": per_core_min * cores,
-                            "maxWatts": per_core_max * cores,
-                        }
+                        return estimator._create_cpu_profile(cores)
                     except Exception:
                         pass
+
+            # If we have cpu_capacity from snapshot but no known instance type profile,
+            # we can try to estimate based on capacity
+            if cpu_capacity:
+                return estimator._create_cpu_profile(cpu_capacity)
+
             return estimator.DEFAULT_INSTANCE_PROFILE
 
         # pod request maps
@@ -603,7 +681,7 @@ class DataProcessor:
                 node_pod_map[node].append((pod_key, cpu))
 
             for node_name, pods_on_node in node_pod_map.items():
-                profile = profile_for_node(node_name)
+                profile = profile_for_node(node_name, sample_dt)
                 calculated_metrics = estimator.calculate_node_energy(
                     node_name=node_name,
                     node_profile=profile,
@@ -685,7 +763,9 @@ class DataProcessor:
                         duration_seconds=chosen_step_sec,
                         grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                         co2e_grams=carbon_result.co2e_grams,
-                        pue=calculator.pue,
+                        pue=config.get_pue_for_provider(
+                            nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                        ),
                         grid_intensity=carbon_result.grid_intensity,
                         joules=joules,
                         cpu_request=cpu_req,
@@ -694,7 +774,7 @@ class DataProcessor:
                         node_instance_type=(
                             nodes_info.get(node_name).instance_type
                             if nodes_info.get(node_name)
-                            else node_instance_map.get(node_name)
+                            else current_node_map.get(node_name)
                         ),
                         node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
                         emaps_zone=zone,

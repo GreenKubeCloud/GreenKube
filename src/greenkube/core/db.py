@@ -129,6 +129,24 @@ class DatabaseManager:
             );
         """)
 
+        # --- Table for node_snapshots ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS node_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                node_name TEXT NOT NULL,
+                instance_type TEXT,
+                cpu_capacity_cores REAL,
+                architecture TEXT,
+                cloud_provider TEXT,
+                region TEXT,
+                zone TEXT,
+                node_pool TEXT,
+                memory_capacity_bytes INTEGER,
+                UNIQUE(node_name, timestamp)
+            );
+        """)
+
         # Migrations for existing tables
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN node_instance_type TEXT")

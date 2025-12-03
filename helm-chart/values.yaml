@@ -32,6 +32,12 @@ config:
   # Supported: "hour", "day", "none"
   normalizationGranularity: hour
 
+  # Interval for analyzing nodes (e.g., "5m", "1h")
+  nodeAnalysisInterval: 5m
+
+  # Max age for historical node data in days
+  nodeDataMaxAgeDays: 30
+
   # Database configuration
   db:
     # Supported: "elasticsearch", "postgres", "sqlite"
@@ -64,6 +70,10 @@ config:
   opencost:
     # If empty, GreenKube will attempt in-cluster discovery.
     url: ""
+    verifyCerts: true
+
+  # Threshold in cores below which Prometheus totals are considered too small
+  lowNodeCpuThreshold: 0.05
 
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
