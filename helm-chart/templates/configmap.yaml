@@ -13,6 +13,7 @@ data:
   DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
   NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
+  NODE_DATA_MAX_AGE_DAYS: {{ .Values.config.nodeDataMaxAgeDays | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}
@@ -34,6 +35,9 @@ data:
   {{- if .Values.config.opencost.url }}
   OPENCOST_API_URL: {{ .Values.config.opencost.url | quote }}
   {{- end }}
+  OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
+  
+  LOW_NODE_CPU_THRESHOLD: {{ .Values.config.lowNodeCpuThreshold | quote }}
   
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}

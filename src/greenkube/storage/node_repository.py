@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from greenkube.models.node import NodeInfo
+from greenkube.utils.date_utils import parse_iso_date
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ class NodeRepository:
 
         for node in nodes:
             try:
+                # Use node.timestamp if available, otherwise use current time
+                ts = node.timestamp.isoformat() if node.timestamp else now
                 cursor.execute(
                     """
                     INSERT INTO node_snapshots
@@ -47,7 +50,7 @@ class NodeRepository:
                     ON CONFLICT(node_name, timestamp) DO NOTHING;
                 """,
                     (
-                        now,
+                        ts,
                         node.name,
                         node.instance_type,
                         node.cpu_capacity_cores,
@@ -109,6 +112,7 @@ class NodeRepository:
                         node_pool=row[6],
                         cpu_capacity_cores=row[7],
                         memory_capacity_bytes=row[8],
+                        timestamp=parse_iso_date(row[9]),  # Parse timestamp string to datetime
                     ),
                 )
                 for row in rows
@@ -155,6 +159,7 @@ class NodeRepository:
                     node_pool=row[6],
                     cpu_capacity_cores=row[7],
                     memory_capacity_bytes=row[8],
+                    timestamp=parse_iso_date(row[9]),  # Parse timestamp string to datetime
                 )
                 for row in rows
             ]

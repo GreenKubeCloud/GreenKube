@@ -91,7 +91,7 @@ class ElasticsearchNodeRepository:
                     "_index": NodeSnapshotDoc.Index.name,
                     "_id": doc_id,
                     "_source": {
-                        "timestamp": now,
+                        "timestamp": node.timestamp if node.timestamp else now,
                         "node_name": node.name,
                         "instance_type": node.instance_type,
                         "cpu_capacity_cores": node.cpu_capacity_cores,
@@ -145,6 +145,7 @@ class ElasticsearchNodeRepository:
                     node_pool=hit.node_pool,
                     cpu_capacity_cores=hit.cpu_capacity_cores,
                     memory_capacity_bytes=hit.memory_capacity_bytes,
+                    timestamp=hit.timestamp,
                 )
                 # hit.timestamp is usually a datetime object or string depending on deserialization
                 # elasticsearch-dsl usually returns datetime if mapped as Date
@@ -199,6 +200,7 @@ class ElasticsearchNodeRepository:
                         node_pool=hit.get("node_pool"),
                         cpu_capacity_cores=hit.get("cpu_capacity_cores"),
                         memory_capacity_bytes=hit.get("memory_capacity_bytes"),
+                        timestamp=hit.get("timestamp"),
                     )
                     results.append(node_info)
 

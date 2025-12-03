@@ -1,7 +1,7 @@
 # src/greenkube/core/processor.py
 import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
@@ -539,8 +539,10 @@ class DataProcessor:
 
         # Populate initial state
         for node_info in initial_snapshots:
-            # Use start_dt as the effective start time for initial state
-            node_timeline[node_info.name].append((start_dt, node_info))
+            # Use node_info.timestamp if available, otherwise fallback to start_dt
+            # This ensures we track the actual age of the snapshot
+            ts = node_info.timestamp if node_info.timestamp else start_dt
+            node_timeline[node_info.name].append((ts, node_info))
 
         # Add changes
         for ts_str, node_info in snapshot_changes:
@@ -568,6 +570,16 @@ class DataProcessor:
             # Given the small number of changes per node usually, linear scan backwards is fine
             for ts, info in reversed(timeline):
                 if ts <= timestamp:
+                    # Check for staleness
+                    age = timestamp - ts
+                    if age > timedelta(days=config.NODE_DATA_MAX_AGE_DAYS):
+                        logger.warning(
+                            "Node snapshot for '%s' at %s is too old (age: %s). Ignoring.",
+                            node_name,
+                            ts,
+                            age,
+                        )
+                        return None
                     return info
             return None
 

@@ -1,6 +1,7 @@
 # src/greenkube/collectors/node_collector.py
 
 import logging
+from datetime import datetime, timezone
 
 from kubernetes import client, config
 
@@ -95,6 +96,7 @@ class NodeCollector(BaseCollector):
                     node_pool=node_pool,
                     cpu_capacity_cores=cpu_capacity,
                     memory_capacity_bytes=memory_capacity,
+                    timestamp=datetime.now(timezone.utc),
                 )
 
                 logger.info(

@@ -151,6 +151,7 @@ class Config:
 
     # --- Node Analysis variables ---
     NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
+    NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
     @classmethod
     def validate(cls):
