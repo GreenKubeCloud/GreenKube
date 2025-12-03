@@ -2,7 +2,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import Dict, List
 
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 from greenkube.utils.date_utils import parse_iso_date
@@ -15,6 +15,7 @@ from ..core.calculator import CarbonCalculator
 from ..core.config import config
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
+from ..models.node import NodeZoneContext
 from ..storage.base_repository import CarbonIntensityRepository
 from ..storage.node_repository import NodeRepository
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
@@ -47,11 +48,14 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
 
-    def _get_node_emaps_map(self, nodes_info: dict = None) -> dict:
+    def _get_node_emaps_map(self, nodes_info: dict = None) -> Dict[str, NodeZoneContext]:
         """Collects node zones and maps them to Electricity Maps zones.
 
         Args:
             nodes_info: Optional dict[str, NodeInfo] from node collector
+
+        Returns:
+            A dict mapping node names to NodeZoneContext objects.
         """
         if nodes_info is None:
             try:
@@ -69,12 +73,14 @@ class DataProcessor:
                 )
                 nodes_info = {}
 
-        node_emaps_map = {}
+        node_contexts = {}
         if nodes_info:
             for node_name, node_info in nodes_info.items():
                 cloud_zone = node_info.zone
                 provider = node_info.cloud_provider
                 mapped = None
+                reasons = []
+                is_estimated = False
                 if cloud_zone:
                     try:
                         mapped = get_emaps_zone_from_cloud_zone(cloud_zone, provider=provider)
@@ -87,7 +93,8 @@ class DataProcessor:
                         )
 
                 if mapped:
-                    node_emaps_map[node_name] = mapped
+                    # Direct mapping success
+                    pass
                     logger.info(
                         "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
                         node_name,
@@ -105,7 +112,11 @@ class DataProcessor:
                             pass
 
                     if mapped:
-                        node_emaps_map[node_name] = mapped
+                        reasons.append(
+                            f"Node '{node_name}' region '{region}' (provider: {provider}) -> "
+                            f"Electricity Maps zone '{mapped}' (fallback from zone '{cloud_zone}')"
+                        )
+                        is_estimated = True
                         logger.info(
                             "Node '%s' region '%s' (provider: %s) -> Electricity Maps zone '%s' "
                             "(fallback from zone '%s')",
@@ -116,7 +127,12 @@ class DataProcessor:
                             cloud_zone,
                         )
                     else:
-                        node_emaps_map[node_name] = config.DEFAULT_ZONE
+                        mapped = config.DEFAULT_ZONE
+                        reasons.append(
+                            f"Could not map cloud zone '{cloud_zone}' or region '{region}'. "
+                            f"Used default zone '{config.DEFAULT_ZONE}'"
+                        )
+                        is_estimated = True
                         logger.warning(
                             "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
                             cloud_zone,
@@ -124,7 +140,12 @@ class DataProcessor:
                             node_name,
                             config.DEFAULT_ZONE,
                         )
-        return node_emaps_map
+
+                node_contexts[node_name] = NodeZoneContext(
+                    node=node_name, emaps_zone=mapped, is_estimated=is_estimated, estimation_reasons=reasons
+                )
+
+        return node_contexts
 
     def run(self):
         """Executes the data processing pipeline."""
@@ -235,7 +256,7 @@ class DataProcessor:
         except Exception:
             nodes_info = {}
 
-        node_emaps_map = self._get_node_emaps_map(nodes_info)
+        node_contexts = self._get_node_emaps_map(nodes_info)
 
         # Group energy metrics by emaps_zone so we can prefetch intensity once
         # per zone and populate the calculator cache for all timestamps of
@@ -245,7 +266,8 @@ class DataProcessor:
         zone_to_metrics = {}
         for em in energy_metrics:
             node_name = em.node
-            emaps_zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            context = node_contexts.get(node_name)
+            emaps_zone = context.emaps_zone if context else config.DEFAULT_ZONE
             zone_to_metrics.setdefault(emaps_zone, []).append(em)
 
         for zone, metrics in zone_to_metrics.items():
@@ -371,8 +393,12 @@ class DataProcessor:
             pod_key = (namespace, pod_name)
 
             # Find corresponding cost metric
+            # Find corresponding cost metric
             cost_metric = cost_map.get(pod_name)
-            total_cost = cost_metric.total_cost if cost_metric else config.DEFAULT_COST
+            if cost_metric:
+                total_cost = cost_metric.total_cost
+            else:
+                total_cost = config.DEFAULT_COST
 
             # Find corresponding pod requests
             pod_requests = pod_request_map.get(pod_key, {"cpu": 0, "memory": 0})
@@ -380,7 +406,48 @@ class DataProcessor:
             # Determine Electricity Maps Zone using the precomputed mapping to
             # avoid calling the translator repeatedly during the per-pod loop.
             node_name = energy_metric.node
-            emaps_zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            node_context = node_contexts.get(node_name)
+            emaps_zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
+
+            # Collect estimation reasons
+            estimation_reasons = []
+            is_estimated = False
+
+            # 1. From Energy Estimation (Instance Profile)
+            if energy_metric.is_estimated:
+                is_estimated = True
+                estimation_reasons.extend(energy_metric.estimation_reasons)
+
+            # 2. From Zone Mapping
+            if node_context:
+                if node_context.is_estimated:
+                    is_estimated = True
+                    estimation_reasons.extend(node_context.estimation_reasons)
+            else:
+                # Fallback if node not in map at all (should be rare given _get_node_emaps_map logic)
+                is_estimated = True
+                estimation_reasons.append(
+                    f"Node '{node_name}' not found in zone map. Used default zone '{config.DEFAULT_ZONE}'"
+                )
+
+            # 3. From Cost
+            if not cost_metric:
+                is_estimated = True
+                estimation_reasons.append(f"No cost data for pod '{pod_name}'. Used default cost {config.DEFAULT_COST}")
+
+            # 4. From PUE
+            provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+            pue = config.get_pue_for_provider(provider)
+            # Check if we used a default PUE because provider was unknown or missing
+            # config.get_pue_for_provider returns DEFAULT_PUE if provider is None or unknown
+            # We can check if provider is None or if it's not in the profiles
+            if not provider:
+                is_estimated = True
+                estimation_reasons.append(f"Unknown provider for node '{node_name}'. Used default PUE {pue}")
+            elif f"default_{provider.lower()}" not in config.DATACENTER_PUE_PROFILES:
+                # This check mimics get_pue_for_provider logic to detect fallback
+                is_estimated = True
+                estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
 
             # Calculate Carbon Emissions
             try:
@@ -416,6 +483,8 @@ class DataProcessor:
                     ),
                     node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
                     emaps_zone=emaps_zone,
+                    is_estimated=is_estimated,
+                    estimation_reasons=estimation_reasons,
                 )
                 combined_metrics.append(combined)
             else:
@@ -695,13 +764,14 @@ class DataProcessor:
                     all_energy_metrics.append(m)
 
         # Prefetch intensities per zone/hour and populate calculator cache
-        node_emaps_map = self._get_node_emaps_map()
+        node_contexts = self._get_node_emaps_map()
 
         zone_to_metrics = defaultdict(list)
         skipped_carbon = 0
         for em in all_energy_metrics:
             node_name = em["node"]
-            zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            context = node_contexts.get(node_name)
+            zone = context.emaps_zone if context else config.DEFAULT_ZONE
             zone_to_metrics[zone].append(em)
 
         for zone, metrics in zone_to_metrics.items():
@@ -741,7 +811,8 @@ class DataProcessor:
             node_name = em["node"]
             joules = em["joules"]
             ts = em["timestamp"]
-            zone = node_emaps_map.get(node_name, config.DEFAULT_ZONE)
+            node_context = node_contexts.get(node_name)
+            zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
             try:
                 carbon_result = calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
             except Exception:
@@ -749,7 +820,53 @@ class DataProcessor:
             if carbon_result is None:
                 skipped_carbon += 1
 
-            total_cost = cost_map.get(pod_name).total_cost if cost_map.get(pod_name) else config.DEFAULT_COST
+            if carbon_result is None:
+                skipped_carbon += 1
+
+            cost_metric = cost_map.get(pod_name)
+            if cost_metric:
+                total_cost = cost_metric.total_cost
+            else:
+                total_cost = config.DEFAULT_COST
+
+            # Collect estimation reasons
+            estimation_reasons = []
+            is_estimated = False
+
+            # 1. From Energy Estimation (Instance Profile)
+            # EnergyMetric from estimator is a dict here because of calculate_node_energy return type in run_range
+            # Wait, calculate_node_energy returns dicts, but run_range appends them to all_energy_metrics
+            # So em is a dict.
+            if em.get("is_estimated"):
+                is_estimated = True
+                estimation_reasons.extend(em.get("estimation_reasons", []))
+
+            # 2. From Zone Mapping
+            if node_context:
+                if node_context.is_estimated:
+                    is_estimated = True
+                    estimation_reasons.extend(node_context.estimation_reasons)
+            else:
+                is_estimated = True
+                estimation_reasons.append(
+                    f"Node '{node_name}' not found in zone map. Used default zone '{config.DEFAULT_ZONE}'"
+                )
+
+            # 3. From Cost
+            if not cost_metric:
+                is_estimated = True
+                estimation_reasons.append(f"No cost data for pod '{pod_name}'. Used default cost {config.DEFAULT_COST}")
+
+            # 4. From PUE
+            provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+            pue = config.get_pue_for_provider(provider)
+            if not provider:
+                is_estimated = True
+                estimation_reasons.append(f"Unknown provider for node '{node_name}'. Used default PUE {pue}")
+            elif f"default_{provider.lower()}" not in config.DATACENTER_PUE_PROFILES:
+                is_estimated = True
+                estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
+
             cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
             mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
             if carbon_result:
@@ -778,6 +895,8 @@ class DataProcessor:
                         ),
                         node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
                         emaps_zone=zone,
+                        is_estimated=is_estimated,
+                        estimation_reasons=estimation_reasons,
                     )
                 )
 

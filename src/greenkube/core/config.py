@@ -166,6 +166,10 @@ class Config:
     NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
     NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
+    @property
+    def DATACENTER_PUE_PROFILES(self):
+        return DATACENTER_PUE_PROFILES
+
     @classmethod
     def validate(cls):
         """

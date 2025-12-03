@@ -50,13 +50,13 @@ def test_pue_and_zone_fallback():
     )
 
     # Act - Test Zone Mapping Logic directly via private method
-    node_emaps_map = processor._get_node_emaps_map({"node-1": node_info})
+    node_contexts = processor._get_node_emaps_map({"node-1": node_info})
 
     # Assert - Zone Mapping
     # us-east-1 should map to US-MISO-RTO or similar depending on mapping file,
     # but definitely NOT DEFAULT_ZONE if mapping works.
     # Let's check if it's NOT the default zone (assuming default is FR)
-    assert node_emaps_map["node-1"] != config.DEFAULT_ZONE
+    assert node_contexts["node-1"].emaps_zone != config.DEFAULT_ZONE
 
     # Act - Test PUE Logic
     # We can check config.get_pue_for_provider directly
