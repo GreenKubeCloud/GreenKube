@@ -74,36 +74,56 @@ class DataProcessor:
             for node_name, node_info in nodes_info.items():
                 cloud_zone = node_info.zone
                 provider = node_info.cloud_provider
+                mapped = None
                 if cloud_zone:
                     try:
                         mapped = get_emaps_zone_from_cloud_zone(cloud_zone, provider=provider)
-                        if mapped:
-                            node_emaps_map[node_name] = mapped
-                            logger.info(
-                                "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
-                                node_name,
-                                cloud_zone,
-                                provider,
-                                mapped,
-                            )
-                        else:
-                            node_emaps_map[node_name] = config.DEFAULT_ZONE
-                            logger.warning(
-                                "Could not map cloud zone '%s' for node '%s'. Using default: '%s'",
-                                cloud_zone,
-                                node_name,
-                                config.DEFAULT_ZONE,
-                            )
                     except Exception:
+                        logger.warning(
+                            "Exception while mapping cloud zone '%s' for node '%s'.",
+                            cloud_zone,
+                            node_name,
+                            exc_info=True,
+                        )
+
+                if mapped:
+                    node_emaps_map[node_name] = mapped
+                    logger.info(
+                        "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
+                        node_name,
+                        cloud_zone,
+                        provider,
+                        mapped,
+                    )
+                else:
+                    # Fallback: try to map region if zone mapping failed
+                    region = node_info.region
+                    if region:
+                        try:
+                            mapped = get_emaps_zone_from_cloud_zone(region, provider=provider)
+                        except Exception:
+                            pass
+
+                    if mapped:
+                        node_emaps_map[node_name] = mapped
+                        logger.info(
+                            "Node '%s' region '%s' (provider: %s) -> Electricity Maps zone '%s' "
+                            "(fallback from zone '%s')",
+                            node_name,
+                            region,
+                            provider,
+                            mapped,
+                            cloud_zone,
+                        )
+                    else:
                         node_emaps_map[node_name] = config.DEFAULT_ZONE
                         logger.warning(
-                            "Exception while mapping cloud zone '%s' for node '%s'. Using default: '%s'",
+                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
                             cloud_zone,
+                            region,
                             node_name,
                             config.DEFAULT_ZONE,
                         )
-                else:
-                    node_emaps_map[node_name] = config.DEFAULT_ZONE
         return node_emaps_map
 
     def run(self):
@@ -379,7 +399,9 @@ class DataProcessor:
                     namespace=namespace,
                     total_cost=total_cost,
                     co2e_grams=carbon_result.co2e_grams,
-                    pue=self.calculator.pue,
+                    pue=config.get_pue_for_provider(
+                        nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                    ),
                     grid_intensity=carbon_result.grid_intensity,
                     joules=energy_metric.joules,
                     cpu_request=pod_requests["cpu"],
@@ -741,7 +763,9 @@ class DataProcessor:
                         duration_seconds=chosen_step_sec,
                         grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                         co2e_grams=carbon_result.co2e_grams,
-                        pue=calculator.pue,
+                        pue=config.get_pue_for_provider(
+                            nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                        ),
                         grid_intensity=carbon_result.grid_intensity,
                         joules=joules,
                         cpu_request=cpu_req,

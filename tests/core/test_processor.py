@@ -275,7 +275,8 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
     assert metric_a.total_cost == SAMPLE_COST_METRICS[0].total_cost
     assert metric_a.co2e_grams == SAMPLE_CALCULATION_RESULT_A.co2e_grams
     assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
-    assert metric_a.pue == config.DEFAULT_PUE
+    assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
+    assert metric_a.pue == 1.09  # GCP PUE
 
     # Detailed checks for pod-B (has all data)
     metric_b = next(m for m in combined_results if m.pod_name == "pod-B")
@@ -283,7 +284,7 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
     assert metric_b.total_cost == SAMPLE_COST_METRICS[1].total_cost
     assert metric_b.co2e_grams == SAMPLE_CALCULATION_RESULT_B.co2e_grams
     assert metric_b.grid_intensity == SAMPLE_CALCULATION_RESULT_B.grid_intensity
-    assert metric_b.pue == config.DEFAULT_PUE
+    assert metric_b.pue == 1.15  # AWS PUE
 
     # Check calculator calls precisely
     assert mock_calculator.calculate_emissions.call_count == 4
@@ -348,7 +349,7 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
     assert metric_c.namespace == "ns-1"  # Check other fields are populated
     assert metric_c.co2e_grams == SAMPLE_CALCULATION_RESULT_C.co2e_grams  # Ensure calculation was done
     assert metric_c.grid_intensity == SAMPLE_CALCULATION_RESULT_C.grid_intensity
-    assert metric_c.pue == config.DEFAULT_PUE
+    assert metric_c.pue == 1.09  # GCP PUE
 
     # Verify calculator was called for pod-C
     mock_calculator.calculate_emissions.assert_any_call(
