@@ -52,6 +52,10 @@ spec:
                   name: {{ include "greenkube.fullname" . }}
                   key: PROMETHEUS_VERIFY_CERTS
                   optional: true
+            {{- if eq .Values.config.db.type "postgres" }}
+            - name: DB_CONNECTION_STRING
+              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
+            {{- end }}
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

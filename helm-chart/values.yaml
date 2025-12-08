@@ -42,7 +42,7 @@ config:
   db:
     # Supported: "elasticsearch", "postgres", "sqlite"
     # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
-    type: sqlite
+    type: postgres
     # Path for the sqlite database file (only used if db.type is "sqlite")
     path: /data/greenkube_data.db
 
@@ -119,3 +119,19 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+
+# PostgreSQL configuration (custom statefulset)
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17-alpine"
+    pullPolicy: IfNotPresent
+  auth:
+    username: greenkube
+    password: greenkube_password
+    database: greenkube
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""

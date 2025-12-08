@@ -3,7 +3,8 @@
 import logging
 import sqlite3
 
-# import psycopg2
+import psycopg2
+
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -29,10 +30,9 @@ class DatabaseManager:
                 self.connection = sqlite3.connect(config.DB_PATH)
                 logger.info("Successfully connected to SQLite database.")
             elif self.db_type == "postgres":
-                # self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
-                # logger.info("Successfully connected to PostgreSQL database.")
-                raise NotImplementedError("PostgreSQL support is not yet implemented.")
-                # You might need a setup_postgres() method here
+                self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
+                logger.info("Successfully connected to PostgreSQL database.")
+                self.setup_postgres()
             elif self.db_type == "elasticsearch":
                 # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
                 # This prevents the application from crashing on startup.
@@ -163,6 +163,101 @@ class DatabaseManager:
 
         self.connection.commit()
         logger.info("SQLite schema is up to date.")
+
+    def setup_postgres(self):
+        """
+        Creates the necessary tables for PostgreSQL if they don't exist.
+        """
+        if not self.connection:
+            logger.error("Cannot setup Postgres, no connection available.")
+            return
+
+        cursor = self.connection.cursor()
+
+        # --- Table for carbon_intensity_history ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS carbon_intensity_history (
+                id SERIAL PRIMARY KEY,
+                zone TEXT NOT NULL,
+                carbon_intensity INTEGER NOT NULL,
+                datetime TIMESTAMP WITH TIME ZONE NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE,
+                emission_factor_type TEXT,
+                is_estimated BOOLEAN,
+                estimation_method TEXT,
+                UNIQUE(zone, datetime)
+            );
+        """)
+
+        # --- Table for node_power_consumption ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS node_power_consumption (
+                id SERIAL PRIMARY KEY,
+                node_name TEXT NOT NULL,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                power_consumption_mw INTEGER NOT NULL,
+                UNIQUE(node_name, timestamp)
+            );
+        """)
+
+        # --- Table for pod_resource_usage ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pod_resource_usage (
+                id SERIAL PRIMARY KEY,
+                pod_name TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                cpu_usage_milli_cores REAL,
+                memory_usage_bytes BIGINT,
+                UNIQUE(pod_name, namespace, timestamp)
+            );
+        """)
+
+        # --- Table for combined_metrics ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS combined_metrics (
+                id SERIAL PRIMARY KEY,
+                pod_name TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                total_cost REAL,
+                co2e_grams REAL,
+                pue REAL,
+                grid_intensity REAL,
+                joules REAL,
+                cpu_request INTEGER,
+                memory_request BIGINT,
+                period TEXT,
+                timestamp TIMESTAMP WITH TIME ZONE,
+                duration_seconds INTEGER,
+                grid_intensity_timestamp TIMESTAMP WITH TIME ZONE,
+                node_instance_type TEXT,
+                node_zone TEXT,
+                emaps_zone TEXT,
+                UNIQUE(pod_name, namespace, timestamp)
+            );
+        """)
+
+        # --- Table for node_snapshots ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS node_snapshots (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                node_name TEXT NOT NULL,
+                instance_type TEXT,
+                cpu_capacity_cores REAL,
+                architecture TEXT,
+                cloud_provider TEXT,
+                region TEXT,
+                zone TEXT,
+                node_pool TEXT,
+                memory_capacity_bytes BIGINT,
+                UNIQUE(node_name, timestamp)
+            );
+        """)
+
+        self.connection.commit()
+        logger.info("PostgreSQL schema is up to date.")
 
 
 # Singleton instance of the DatabaseManager

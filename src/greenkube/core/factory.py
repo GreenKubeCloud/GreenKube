@@ -29,6 +29,8 @@ from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
+from ..storage.postgres_node_repository import PostgresNodeRepository
+from ..storage.postgres_repository import PostgresCarbonIntensityRepository
 from ..storage.sqlite_node_repository import SQLiteNodeRepository
 from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
@@ -58,6 +60,11 @@ def get_repository() -> CarbonIntensityRepository:
         from ..core.db import db_manager
 
         return SQLiteCarbonIntensityRepository(db_manager.get_connection())
+    elif db_type == "postgres":
+        logger.info("Using PostgreSQL repository.")
+        from ..core.db import db_manager
+
+        return PostgresCarbonIntensityRepository(db_manager.get_connection())
     else:
         raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
 
@@ -75,6 +82,10 @@ def get_node_repository() -> NodeRepository:
         from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
 
         return ElasticsearchNodeRepository()
+    elif config.DB_TYPE == "postgres":
+        from ..core.db import db_manager
+
+        return PostgresNodeRepository(db_manager.get_connection())
     else:
         # For now, only SQLite and Elasticsearch are supported for nodes
         logger.warning(

@@ -16,6 +16,9 @@ optional cost annotation (from OpenCost or other sources). The carbon
 calculation sits at the intersection of those flows and external intensity
 data sources (e.g., Electricity Maps).
 
+Recent updates have added **estimation transparency** (flagging when defaults are used)
+and **historical node tracking** (reconstructing past node states for accurate backfilling).
+
 ## Core Components
 
 ### Collectors
@@ -28,8 +31,10 @@ data sources (e.g., Electricity Maps).
 
 - NodeCollector
     - Reads node metadata (zones, labels, instance-type labels) using the
-        Kubernetes API and is used as a fallback to populate instance-type
-        information when Prometheus doesn't provide it.
+        Kubernetes API.
+    - Collects comprehensive node information (CPU capacity, architecture, provider)
+        to build accurate instance profiles.
+    - Used as a fallback when Prometheus metrics lack instance-type labels.
 
 - PodCollector
     - Gathers pod resource request metrics from the K8s API and aggregates
@@ -48,6 +53,10 @@ data sources (e.g., Electricity Maps).
 - DataProcessor
     - Orchestrates collection, estimation, prefetching of intensities, and the
         final combination of metrics.
+    - Reconstructs historical node states using `NodeRepository` to ensure
+        backfilled data uses the correct instance type and zone for that time.
+    - Aggregates `is_estimated` flags and `estimation_reasons` from all sources
+        (estimator, zone mapping, cost, PUE) into the final `CombinedMetric`.
     - Groups energy metrics by Electricity Maps zone and prefetches a single
         intensity per zone per run to reduce external calls.
     - Populates the calculator's per-run intensity cache to make repeated
@@ -60,22 +69,29 @@ data sources (e.g., Electricity Maps).
         avoid repeated repository queries.
 
 ### Repositories
-- Implementations (e.g., SQLiteRepository, ElasticsearchRepository) provide
-    get_for_zone_at_time(zone, timestamp) to retrieve grid intensity (gCO2e/kWh)
-    for a normalized timestamp.
+- **CarbonIntensityRepository**: Abstract base class for storing carbon intensity data and combined metrics.
+    - **PostgresCarbonIntensityRepository** (Default): Uses PostgreSQL for persistent storage.
+    - **SQLiteCarbonIntensityRepository**: Uses SQLite for local development/testing.
+    - **ElasticsearchCarbonIntensityRepository**: Uses Elasticsearch for scalable storage.
+- **NodeRepository**: Abstract base class for storing node snapshots.
+    - **PostgresNodeRepository** (Default): Stores historical node snapshots (`NodeInfo`) in PostgreSQL.
+    - **SQLiteNodeRepository**: SQLite implementation.
+    - **ElasticsearchNodeRepository**: Elasticsearch implementation.
 
 ## Data Flow
 1. PrometheusCollector scrapes CPU series and returns PrometheusMetric.
-2. BasicEstimator estimates EnergyMetric(s) from Prometheus data.
-3. DataProcessor groups energy metrics by zone and selects a representative
+2. NodeCollector (periodically) saves node snapshots to NodeRepository (PostgreSQL by default).
+3. DataProcessor retrieves historical node state from NodeRepository (or current state from NodeCollector) to determine instance types and zones.
+4. BasicEstimator estimates EnergyMetric(s) from Prometheus data, flagging estimates if defaults are used.
+5. DataProcessor groups energy metrics by zone and selects a representative
      timestamp for the zone (latest among metrics) to prefetch intensity.
-4. DataProcessor normalizes timestamps according to NORMALIZATION_GRANULARITY
+6. DataProcessor normalizes timestamps according to NORMALIZATION_GRANULARITY
      and prefetches one intensity per zone per run, populating the
      CarbonCalculator._intensity_cache for all metric timestamps in that zone.
-5. CarbonCalculator.calculate_emissions uses cached intensities when
+7. CarbonCalculator.calculate_emissions uses cached intensities when
      available, otherwise calls the repository.
-6. DataProcessor combines CO2e, cost, and request data into a CombinedMetric
-     per pod and returns the list of combined metrics.
+8. DataProcessor combines CO2e, cost, and request data into a CombinedMetric
+     per pod, aggregating all `is_estimated` flags and reasons.
 
 ## Normalization and caching
 - NORMALIZATION_GRANULARITY (env-configurable) controls timestamp bucketing:
@@ -85,7 +101,12 @@ data sources (e.g., Electricity Maps).
 - The processor stores both 'Z' and '+00:00' ISO timestamp string variants in
     the calculator cache to be tolerant of callers/tests that use either form.
     Repository calls use the '+00:00' form for compatibility with existing
-    backends/tests.
+    backend/tests.
+
+## Data Models
+- **EnergyMetric** and **CombinedMetric** now include:
+    - `is_estimated` (bool): True if any part of the calculation (instance type, zone, PUE, cost) used a default value.
+    - `estimation_reasons` (List[str]): Human-readable explanations for why estimation was used.
 
 ## Goals and design choices
 - Replace Kepler dependency with Prometheus-based estimation.
@@ -95,6 +116,7 @@ data sources (e.g., Electricity Maps).
     prefetching once per zone per run.
 - Use conservative defaults (DEFAULT instance profile) when instance-type is
     unknown so the pipeline remains operational.
+- **Database Agnosticism**: The core logic is independent of the storage backend. PostgreSQL is the default for production, but SQLite and Elasticsearch are fully supported.
 
 ## Notes for contributors
 - Tests are TDD-first: add tests before implementing behavior.
