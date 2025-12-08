@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -11,8 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
-    def __init__(self, connection):
-        self.connection = connection
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    @property
+    def connection(self):
+        return self.db_manager.get_connection()
 
     def get_for_zone_at_time(self, zone: str, time: datetime) -> Optional[dict]:
         """
@@ -81,17 +86,25 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                 INSERT INTO combined_metrics (
                     pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity,
                     joules, cpu_request, memory_request, period, timestamp, duration_seconds,
-                    grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone
+                    grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
+                    is_estimated, estimation_reasons
                 ) VALUES (
                     %(pod_name)s, %(namespace)s, %(total_cost)s, %(co2e_grams)s, %(pue)s, %(grid_intensity)s,
                     %(joules)s, %(cpu_request)s, %(memory_request)s, %(period)s, %(timestamp)s, %(duration_seconds)s,
-                    %(grid_intensity_timestamp)s, %(node_instance_type)s, %(node_zone)s, %(emaps_zone)s
+                    %(grid_intensity_timestamp)s, %(node_instance_type)s, %(node_zone)s, %(emaps_zone)s,
+                    %(is_estimated)s, %(estimation_reasons)s
                 )
                 ON CONFLICT (pod_name, namespace, timestamp) DO NOTHING
             """
 
             # Convert Pydantic models to dicts for insertion
-            metrics_data = [metric.model_dump() for metric in metrics]
+            metrics_data = []
+            for metric in metrics:
+                data = metric.model_dump()
+                # Serialize estimation_reasons to JSON string
+                if "estimation_reasons" in data and isinstance(data["estimation_reasons"], list):
+                    data["estimation_reasons"] = json.dumps(data["estimation_reasons"])
+                metrics_data.append(data)
 
             cursor.executemany(query, metrics_data)
             self.connection.commit()
@@ -119,7 +132,15 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
             results = cursor.fetchall()
 
             metrics = []
+
             for row in results:
+                # Deserialize estimation_reasons from JSON string
+                if "estimation_reasons" in row and isinstance(row["estimation_reasons"], str):
+                    try:
+                        row["estimation_reasons"] = json.loads(row["estimation_reasons"])
+                    except json.JSONDecodeError:
+                        row["estimation_reasons"] = []
+
                 # Ensure timestamp fields are correctly handled if needed,
                 # though psycopg2 usually handles datetime objects well.
                 metrics.append(CombinedMetric(**row))

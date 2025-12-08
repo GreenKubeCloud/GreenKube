@@ -12,8 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class PostgresNodeRepository(NodeRepository):
-    def __init__(self, connection):
-        self.connection = connection
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    @property
+    def connection(self):
+        return self.db_manager.get_connection()
 
     def save_nodes(self, nodes: List[NodeInfo]) -> int:
         """

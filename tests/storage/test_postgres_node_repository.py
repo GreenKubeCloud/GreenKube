@@ -21,8 +21,15 @@ def mock_connection(mock_cursor):
 
 
 @pytest.fixture
-def repository(mock_connection):
-    return PostgresNodeRepository(mock_connection)
+def mock_db_manager(mock_connection):
+    db_manager = MagicMock()
+    db_manager.get_connection.return_value = mock_connection
+    return db_manager
+
+
+@pytest.fixture
+def repository(mock_db_manager):
+    return PostgresNodeRepository(mock_db_manager)
 
 
 def test_save_nodes(repository, mock_cursor, mock_connection):

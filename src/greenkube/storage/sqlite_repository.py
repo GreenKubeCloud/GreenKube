@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -164,8 +165,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     INSERT INTO combined_metrics
                         (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                          cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
-                         node_instance_type, node_zone, emaps_zone)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         node_instance_type, node_zone, emaps_zone, is_estimated, estimation_reasons)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                 """,
                     (
@@ -185,6 +186,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         metric.node_instance_type,
                         metric.node_zone,
                         metric.emaps_zone,
+                        metric.is_estimated,
+                        json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                     ),
                 )
                 saved_count += cursor.rowcount
@@ -212,34 +215,44 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 """
                 SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                        cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
-                       node_instance_type, node_zone, emaps_zone
+                       node_instance_type, node_zone, emaps_zone, is_estimated, estimation_reasons
                 FROM combined_metrics
                 WHERE "timestamp" BETWEEN ? AND ?
             """,
                 (start_time.isoformat(), end_time.isoformat()),
             )
             rows = cursor.fetchall()
-            metrics = [
-                CombinedMetric(
-                    pod_name=row[0],
-                    namespace=row[1],
-                    total_cost=row[2],
-                    co2e_grams=row[3],
-                    pue=row[4],
-                    grid_intensity=row[5],
-                    joules=row[6],
-                    cpu_request=row[7],
-                    memory_request=row[8],
-                    period=row[9],
-                    timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
-                    duration_seconds=row[11],
-                    grid_intensity_timestamp=datetime.fromisoformat(row[12]) if row[12] else None,
-                    node_instance_type=row[13],
-                    node_zone=row[14],
-                    emaps_zone=row[15],
+            metrics = []
+            for row in rows:
+                estimation_reasons = []
+                if row[17]:
+                    try:
+                        estimation_reasons = json.loads(row[17])
+                    except json.JSONDecodeError:
+                        pass
+
+                metrics.append(
+                    CombinedMetric(
+                        pod_name=row[0],
+                        namespace=row[1],
+                        total_cost=row[2],
+                        co2e_grams=row[3],
+                        pue=row[4],
+                        grid_intensity=row[5],
+                        joules=row[6],
+                        cpu_request=row[7],
+                        memory_request=row[8],
+                        period=row[9],
+                        timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
+                        duration_seconds=row[11],
+                        grid_intensity_timestamp=datetime.fromisoformat(row[12]) if row[12] else None,
+                        node_instance_type=row[13],
+                        node_zone=row[14],
+                        emaps_zone=row[15],
+                        is_estimated=bool(row[16]),
+                        estimation_reasons=estimation_reasons,
+                    )
                 )
-                for row in rows
-            ]
             return metrics
         except sqlite3.Error as e:
             logging.error(f"Could not read combined metrics: {e}")

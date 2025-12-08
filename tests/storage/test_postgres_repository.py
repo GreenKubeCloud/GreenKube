@@ -23,8 +23,15 @@ def mock_connection(mock_cursor):
 
 
 @pytest.fixture
-def repository(mock_connection):
-    return PostgresCarbonIntensityRepository(mock_connection)
+def mock_db_manager(mock_connection):
+    db_manager = MagicMock()
+    db_manager.get_connection.return_value = mock_connection
+    return db_manager
+
+
+@pytest.fixture
+def repository(mock_db_manager):
+    return PostgresCarbonIntensityRepository(mock_db_manager)
 
 
 def test_get_for_zone_at_time(repository, mock_cursor):
@@ -79,6 +86,8 @@ def test_write_combined_metrics(repository, mock_cursor, mock_connection):
         node_instance_type="t3.medium",
         node_zone="eu-west-1a",
         emaps_zone="FR",
+        is_estimated=True,
+        estimation_reasons=["default instance type"],
     )
 
     repository.write_combined_metrics([metric])
@@ -106,6 +115,8 @@ def test_read_combined_metrics(repository, mock_cursor):
             "node_instance_type": "t3.medium",
             "node_zone": "eu-west-1a",
             "emaps_zone": "FR",
+            "is_estimated": True,
+            "estimation_reasons": '["default instance type"]',  # JSON string from DB
         }
     ]
 
@@ -113,4 +124,6 @@ def test_read_combined_metrics(repository, mock_cursor):
 
     assert len(metrics) == 1
     assert metrics[0].pod_name == "test-pod"
+    assert metrics[0].is_estimated is True
+    assert metrics[0].estimation_reasons == ["default instance type"]
     mock_cursor.execute.assert_called_once()

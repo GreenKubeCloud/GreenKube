@@ -64,7 +64,7 @@ def get_repository() -> CarbonIntensityRepository:
         logger.info("Using PostgreSQL repository.")
         from ..core.db import db_manager
 
-        return PostgresCarbonIntensityRepository(db_manager.get_connection())
+        return PostgresCarbonIntensityRepository(db_manager)
     else:
         raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
 
@@ -85,7 +85,7 @@ def get_node_repository() -> NodeRepository:
     elif config.DB_TYPE == "postgres":
         from ..core.db import db_manager
 
-        return PostgresNodeRepository(db_manager.get_connection())
+        return PostgresNodeRepository(db_manager)
     else:
         # For now, only SQLite and Elasticsearch are supported for nodes
         logger.warning(

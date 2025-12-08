@@ -47,7 +47,27 @@ class DatabaseManager:
             raise
 
     def get_connection(self):
+        self.ensure_connection()
         return self.connection
+
+    def ensure_connection(self):
+        """
+        Checks if the connection is alive and reconnects if necessary.
+        """
+        if self.connection is None:
+            self.connect()
+            return
+
+        try:
+            # Lightweight check if connection is active
+            if self.db_type == "postgres":
+                if self.connection.closed != 0:
+                    logger.warning("PostgreSQL connection closed. Reconnecting...")
+                    self.connect()
+            # SQLite connections don't typically 'close' in the same way unless explicitly closed
+        except Exception as e:
+            logger.error(f"Error checking connection: {e}. Reconnecting...")
+            self.connect()
 
     def close(self):
         if self.connection:
@@ -127,6 +147,8 @@ class DatabaseManager:
                 node_instance_type TEXT,
                 node_zone TEXT,
                 emaps_zone TEXT,
+                is_estimated BOOLEAN,
+                estimation_reasons TEXT,
                 UNIQUE(pod_name, namespace, "timestamp")
             );
         """)
@@ -160,6 +182,14 @@ class DatabaseManager:
             pass
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN emaps_zone TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE combined_metrics ADD COLUMN is_estimated BOOLEAN")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE combined_metrics ADD COLUMN estimation_reasons TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -239,8 +269,11 @@ class DatabaseManager:
                 node_instance_type TEXT,
                 node_zone TEXT,
                 emaps_zone TEXT,
+                is_estimated BOOLEAN,
+                estimation_reasons TEXT,
                 UNIQUE(pod_name, namespace, timestamp)
             );
+            CREATE INDEX IF NOT EXISTS idx_combined_metrics_timestamp ON combined_metrics(timestamp);
         """)
 
         # --- Table for node_snapshots ---
@@ -259,6 +292,7 @@ class DatabaseManager:
                 memory_capacity_bytes BIGINT,
                 UNIQUE(node_name, timestamp)
             );
+            CREATE INDEX IF NOT EXISTS idx_node_snapshots_timestamp ON node_snapshots(timestamp);
         """)
 
         self.connection.commit()
