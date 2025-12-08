@@ -45,6 +45,8 @@ config:
     type: postgres
     # Path for the sqlite database file (only used if db.type is "sqlite")
     path: /data/greenkube_data.db
+    # Database schema (only used if db.type is "postgres")
+    schema: public
 
   # Persistence configuration for SQLite
   persistence:

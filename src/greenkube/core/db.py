@@ -30,7 +30,9 @@ class DatabaseManager:
                 self.connection = sqlite3.connect(config.DB_PATH)
                 logger.info("Successfully connected to SQLite database.")
             elif self.db_type == "postgres":
-                self.connection = psycopg2.connect(config.DB_CONNECTION_STRING)
+                self.connection = psycopg2.connect(
+                    config.DB_CONNECTION_STRING, options=f"-c search_path={config.DB_SCHEMA}"
+                )
                 logger.info("Successfully connected to PostgreSQL database.")
                 self.setup_postgres()
             elif self.db_type == "elasticsearch":
@@ -173,6 +175,9 @@ class DatabaseManager:
             return
 
         cursor = self.connection.cursor()
+
+        # Create schema if it doesn't exist
+        cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {config.DB_SCHEMA};")
 
         # --- Table for carbon_intensity_history ---
         cursor.execute("""
