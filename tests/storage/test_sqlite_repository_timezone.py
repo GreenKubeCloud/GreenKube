@@ -1,5 +1,7 @@
 import sqlite3
 import unittest
+from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
@@ -22,7 +24,14 @@ class TestSQLiteRepositoryTimezone(unittest.TestCase):
                 PRIMARY KEY (zone, datetime)
             )
         """)
-        self.repo = SQLiteCarbonIntensityRepository(self.conn)
+        self.db_manager = MagicMock()
+
+        @contextmanager
+        def scope():
+            yield self.conn
+
+        self.db_manager.connection_scope = scope
+        self.repo = SQLiteCarbonIntensityRepository(self.db_manager)
 
     def test_save_history_normalizes_timezone(self):
         # Arrange

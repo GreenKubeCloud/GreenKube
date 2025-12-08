@@ -15,7 +15,7 @@ from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 @pytest.fixture
 def sqlite_repo():
     db_manager.setup_sqlite(db_path=":memory:")
-    repo = SQLiteCarbonIntensityRepository(db_manager.get_connection())
+    repo = SQLiteCarbonIntensityRepository(db_manager)
     yield repo
     db_manager.close()
 

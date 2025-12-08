@@ -10,6 +10,8 @@ from greenkube.storage.postgres_node_repository import PostgresNodeRepository
 @pytest.fixture
 def mock_cursor():
     cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = None
     return cursor
 
 
@@ -23,7 +25,11 @@ def mock_connection(mock_cursor):
 @pytest.fixture
 def mock_db_manager(mock_connection):
     db_manager = MagicMock()
-    db_manager.get_connection.return_value = mock_connection
+    # Mock connection_scope as a context manager
+    scope = MagicMock()
+    scope.__enter__.return_value = mock_connection
+    scope.__exit__.return_value = None
+    db_manager.connection_scope.return_value = scope
     return db_manager
 
 

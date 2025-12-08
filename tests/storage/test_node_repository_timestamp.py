@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -7,10 +8,20 @@ from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 def test_save_nodes_uses_node_timestamp():
     # Arrange
+    mock_db_manager = MagicMock()
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
+    mock_cursor.__enter__.return_value = mock_cursor
+    mock_cursor.__exit__.return_value = None
     mock_conn.cursor.return_value = mock_cursor
-    repo = SQLiteNodeRepository(mock_conn)
+
+    @contextmanager
+    def scope():
+        yield mock_conn
+
+    mock_db_manager.connection_scope = scope
+
+    repo = SQLiteNodeRepository(mock_db_manager)
 
     specific_ts = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     node = NodeInfo(
@@ -41,10 +52,20 @@ def test_save_nodes_uses_node_timestamp():
 
 def test_save_nodes_uses_current_time_if_none():
     # Arrange
+    mock_db_manager = MagicMock()
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
+    mock_cursor.__enter__.return_value = mock_cursor
+    mock_cursor.__exit__.return_value = None
     mock_conn.cursor.return_value = mock_cursor
-    repo = SQLiteNodeRepository(mock_conn)
+
+    @contextmanager
+    def scope():
+        yield mock_conn
+
+    mock_db_manager.connection_scope = scope
+
+    repo = SQLiteNodeRepository(mock_db_manager)
 
     node = NodeInfo(
         name="test-node",
