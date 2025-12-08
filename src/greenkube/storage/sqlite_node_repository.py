@@ -10,14 +10,15 @@ from datetime import datetime, timezone
 from typing import List
 
 from greenkube.models.node import NodeInfo
+from greenkube.storage.base_repository import NodeRepository
 from greenkube.utils.date_utils import parse_iso_date
 
 logger = logging.getLogger(__name__)
 
 
-class NodeRepository:
+class SQLiteNodeRepository(NodeRepository):
     """
-    Repository for managing node data in the database.
+    SQLite implementation of NodeRepository.
     """
 
     def __init__(self, connection):
@@ -76,7 +77,7 @@ class NodeRepository:
 
         return saved_count
 
-    def get_snapshots(self, start: datetime, end: datetime) -> List[NodeInfo]:
+    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
         """
         Retrieves node snapshots within a time range.
         """

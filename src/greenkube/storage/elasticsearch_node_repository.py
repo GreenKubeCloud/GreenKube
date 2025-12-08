@@ -28,6 +28,7 @@ from elasticsearch.exceptions import (
 )
 
 from greenkube.models.node import NodeInfo
+from greenkube.storage.base_repository import NodeRepository
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ class NodeSnapshotDoc(Document):
         settings = {"number_of_shards": 1, "number_of_replicas": 0}
 
 
-class ElasticsearchNodeRepository:
+class ElasticsearchNodeRepository(NodeRepository):
     """
     Repository for managing node data in Elasticsearch.
     """

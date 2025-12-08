@@ -4,6 +4,54 @@ from datetime import datetime
 from typing import List
 
 from ..models.metrics import CombinedMetric
+from ..models.node import NodeInfo
+
+
+class NodeRepository(ABC):
+    """
+    Abstract base class for node data repositories.
+    Defines the contract for saving and retrieving node snapshots.
+    """
+
+    @abstractmethod
+    def save_nodes(self, nodes: List[NodeInfo]) -> int:
+        """
+        Saves node snapshots to the repository.
+
+        Args:
+            nodes: A list of NodeInfo objects to save.
+
+        Returns:
+            The number of records saved.
+        """
+        pass
+
+    @abstractmethod
+    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
+        """
+        Retrieves node snapshots within a time range.
+
+        Args:
+            start: Start datetime (inclusive).
+            end: End datetime (inclusive).
+
+        Returns:
+            A list of tuples (timestamp_str, NodeInfo).
+        """
+        pass
+
+    @abstractmethod
+    def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+        """
+        Retrieves the latest snapshot for each node before the given timestamp.
+
+        Args:
+            timestamp: The cutoff timestamp.
+
+        Returns:
+            A list of NodeInfo objects.
+        """
+        pass
 
 
 class CarbonIntensityRepository(ABC):

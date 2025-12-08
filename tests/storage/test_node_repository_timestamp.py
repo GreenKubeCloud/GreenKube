@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from greenkube.models.node import NodeInfo
-from greenkube.storage.node_repository import NodeRepository
+from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 
 def test_save_nodes_uses_node_timestamp():
@@ -10,7 +10,7 @@ def test_save_nodes_uses_node_timestamp():
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value = mock_cursor
-    repo = NodeRepository(mock_conn)
+    repo = SQLiteNodeRepository(mock_conn)
 
     specific_ts = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     node = NodeInfo(
@@ -44,7 +44,7 @@ def test_save_nodes_uses_current_time_if_none():
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value = mock_cursor
-    repo = NodeRepository(mock_conn)
+    repo = SQLiteNodeRepository(mock_conn)
 
     node = NodeInfo(
         name="test-node",

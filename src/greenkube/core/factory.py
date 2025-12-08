@@ -25,11 +25,11 @@ from ..core.processor import DataProcessor
 from ..energy.estimator import BasicEstimator
 
 # --- GreenKube Storage Imports ---
-from ..storage.base_repository import CarbonIntensityRepository
+from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
-from ..storage.node_repository import NodeRepository
+from ..storage.sqlite_node_repository import SQLiteNodeRepository
 from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def get_node_repository() -> NodeRepository:
     if config.DB_TYPE == "sqlite":
         from ..core.db import db_manager
 
-        return NodeRepository(db_manager.get_connection())
+        return SQLiteNodeRepository(db_manager.get_connection())
     elif config.DB_TYPE == "elasticsearch":
         from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
 
@@ -83,7 +83,7 @@ def get_node_repository() -> NodeRepository:
         )
         from ..core.db import db_manager
 
-        return NodeRepository(db_manager.get_connection())
+        return SQLiteNodeRepository(db_manager.get_connection())
 
 
 @lru_cache(maxsize=1)

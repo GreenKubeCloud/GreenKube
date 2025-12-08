@@ -16,8 +16,7 @@ from ..core.config import config
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..models.node import NodeZoneContext
-from ..storage.base_repository import CarbonIntensityRepository
-from ..storage.node_repository import NodeRepository
+from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 logger = logging.getLogger(__name__)

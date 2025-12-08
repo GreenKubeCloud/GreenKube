@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from greenkube.models.node import NodeInfo
-from greenkube.storage.node_repository import NodeRepository
+from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 # --- Fixtures ---
 
@@ -41,7 +41,7 @@ def db_connection():
 @pytest.fixture
 def node_repo(db_connection):
     """Creates an instance of the NodeRepository."""
-    return NodeRepository(db_connection)
+    return SQLiteNodeRepository(db_connection)
 
 
 # --- Sample Data ---
@@ -184,7 +184,7 @@ def test_save_nodes_multiple_snapshots(node_repo, db_connection):
     # Let's patch datetime in the module
     from unittest.mock import patch
 
-    with patch("greenkube.storage.node_repository.datetime") as mock_datetime:
+    with patch("greenkube.storage.sqlite_node_repository.datetime") as mock_datetime:
         # First save
         mock_datetime.now.return_value = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
         node_repo.save_nodes(SAMPLE_NODES)
@@ -228,6 +228,6 @@ def test_save_nodes_empty_list(node_repo):
 
 def test_save_nodes_no_connection():
     """Test behavior when connection is None."""
-    repo = NodeRepository(None)
+    repo = SQLiteNodeRepository(None)
     saved_count = repo.save_nodes(SAMPLE_NODES)
     assert saved_count == 0

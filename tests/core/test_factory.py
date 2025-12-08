@@ -3,11 +3,11 @@
 from unittest.mock import MagicMock, patch
 
 from greenkube.core.factory import get_node_repository
-from greenkube.storage.node_repository import NodeRepository
+from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 
 def test_get_node_repository_sqlite(monkeypatch):
-    """Test that get_node_repository returns a NodeRepository when DB_TYPE is sqlite."""
+    """Test that get_node_repository returns a SQLiteNodeRepository when DB_TYPE is sqlite."""
     monkeypatch.setenv("DB_TYPE", "sqlite")
 
     # Mock db_manager to avoid actual DB connection
@@ -15,7 +15,7 @@ def test_get_node_repository_sqlite(monkeypatch):
         mock_db_manager.get_connection.return_value = MagicMock()
 
         repo = get_node_repository()
-        assert isinstance(repo, NodeRepository)
+        assert isinstance(repo, SQLiteNodeRepository)
 
 
 def test_get_node_repository_singleton(monkeypatch):
