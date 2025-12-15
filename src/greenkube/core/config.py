@@ -102,6 +102,7 @@ class Config:
     DB_TYPE = os.getenv("DB_TYPE", "sqlite")
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
     DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+    DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
     ELECTRICITY_MAPS_TOKEN = _get_secret.__func__("ELECTRICITY_MAPS_TOKEN")
 
     # --- ELASTICSEARCH VARIABLES ---

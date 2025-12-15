@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "greenkube"
-version = "0.1.4" # Initial MVP version
+version = "0.1.5" # Initial MVP version
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre.56@gmail.com" },
 ]
@@ -36,7 +36,7 @@ dependencies = [
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
     "python-dotenv>=1.0.0", # For loading environment variables from .env files
-    # "psycopg2-binary>=2.9.0", # PostgreSQL database adapter (not supported yet)
+    "psycopg2-binary>=2.9.0", # PostgreSQL database adapter
     "schedule>=1.2.1", # For scheduling periodic tasks
     "kubernetes",
     "elasticsearch>=8.10.0", # Elasticsearch client

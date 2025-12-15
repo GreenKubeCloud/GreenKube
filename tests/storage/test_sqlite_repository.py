@@ -1,10 +1,13 @@
 # tests/storage/test_sqlite_repository.py
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
+from greenkube.core.exceptions import QueryError
 from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
@@ -37,9 +40,21 @@ def db_connection():
 
 
 @pytest.fixture
-def sqlite_repo(db_connection):
+def mock_db_manager(db_connection):
+    db_manager = MagicMock()
+
+    @contextmanager
+    def scope():
+        yield db_connection
+
+    db_manager.connection_scope = scope
+    return db_manager
+
+
+@pytest.fixture
+def sqlite_repo(mock_db_manager):
     """Creates an instance of the SQLiteCarbonIntensityRepository."""
-    return SQLiteCarbonIntensityRepository(db_connection)
+    return SQLiteCarbonIntensityRepository(mock_db_manager)
 
 
 # --- Sample Data ---
@@ -222,15 +237,35 @@ def test_get_for_zone_at_time_not_found_timestamp(sqlite_repo):
     assert result is None
 
 
-def test_get_for_zone_at_time_no_connection():
-    """Test behavior when connection is None during get."""
-    repo = SQLiteCarbonIntensityRepository(None)  # Simulate no connection
-    result = repo.get_for_zone_at_time(zone="ANY", timestamp=BASE_TIME.isoformat())
-    assert result is None
+def test_get_for_zone_at_time_db_error():
+    """Test behavior when DB raises an error."""
+    db_manager = MagicMock()
+
+    @contextmanager
+    def scope():
+        mock_conn = MagicMock()
+        mock_conn.cursor.side_effect = sqlite3.Error("DB Error")
+        yield mock_conn
+
+    db_manager.connection_scope = scope
+
+    repo = SQLiteCarbonIntensityRepository(db_manager)
+    with pytest.raises(QueryError):
+        repo.get_for_zone_at_time(zone="ANY", timestamp=BASE_TIME.isoformat())
 
 
-def test_save_history_no_connection():
-    """Test behavior when connection is None during save."""
-    repo = SQLiteCarbonIntensityRepository(None)  # Simulate no connection
-    saved_count = repo.save_history(SAMPLE_HISTORY_DATA, zone="ANY")
-    assert saved_count == 0
+def test_save_history_db_error():
+    """Test behavior when DB raises an error during save."""
+    db_manager = MagicMock()
+
+    @contextmanager
+    def scope():
+        mock_conn = MagicMock()
+        mock_conn.cursor.side_effect = sqlite3.Error("DB Error")
+        yield mock_conn
+
+    db_manager.connection_scope = scope
+
+    repo = SQLiteCarbonIntensityRepository(db_manager)
+    with pytest.raises(QueryError):
+        repo.save_history(SAMPLE_HISTORY_DATA, zone="ANY")
