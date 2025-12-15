@@ -32,7 +32,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     """
                     cursor.execute(query, (zone, time))
                     result = cursor.fetchone()
-                    return dict(result) if result else None
+                    return result["carbon_intensity"] if result else None
         except Exception as e:
             logger.error(f"Error fetching carbon intensity from Postgres: {e}")
             raise QueryError(f"Error fetching carbon intensity: {e}") from e

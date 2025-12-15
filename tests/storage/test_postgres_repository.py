@@ -43,7 +43,7 @@ def test_get_for_zone_at_time_success(repository, mock_db_manager):
     result = repository.get_for_zone_at_time(zone, time)
 
     # Verify
-    assert result == expected_result
+    assert result == expected_result["carbon_intensity"]
     cursor.execute.assert_called_once()
     args = cursor.execute.call_args[0]
     assert "SELECT * FROM carbon_intensity_history" in args[0]
