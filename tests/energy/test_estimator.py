@@ -233,3 +233,39 @@ def test_estimator_handles_cpu_utilization_over_100(estimator):
     # Energy = 7.0 Watts * 300 Seconds = 2100 Joules
     expected_joules = expected_power_watts * 300
     assert energy_results[0].joules == pytest.approx(expected_joules)
+
+
+def test_estimator_attributes_idle_energy_to_unallocated(estimator):
+    """
+    Tests that a node with no pods attributes its idle energy
+    to an 'Unallocated' pseudo-pod.
+    """
+    # Node with no pods
+    node_idle = NodeInstanceType(node="node-idle", instance_type="m5.large")
+
+    # Metrics with only the node, no pods on it
+    metrics = PrometheusMetric(
+        pod_cpu_usage=[],
+        node_instance_types=[node_idle],
+    )
+
+    # Act
+    energy_results = estimator.estimate(metrics)
+
+    # Assert
+    assert len(energy_results) == 1
+    result = energy_results[0]
+
+    assert result.pod_name == "Unallocated"
+    assert result.namespace == "System"
+    assert result.node == "node-idle"
+    assert result.is_estimated is True
+    assert "Node idle - energy attributed to system overhead" in result.estimation_reasons
+
+    # Calculate expected idle energy
+    profile = INSTANCE_PROFILES["m5.large"]
+    # Min Watts = 1.48 (approx)
+    expected_power = profile["minWatts"]
+    expected_joules = expected_power * 300  # 5 minutes
+
+    assert result.joules == pytest.approx(expected_joules)
