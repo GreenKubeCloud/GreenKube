@@ -48,7 +48,7 @@ class TestOpenCostCollector(unittest.TestCase):
     Test suite for the OpenCostCollector.
     """
 
-    @patch("greenkube.collectors.opencost_collector.requests.get")
+    @patch("greenkube.utils.http_client.requests.Session.get")
     def test_collect_parses_data_dynamically(self, mock_get):
         """
         Tests that the collect method correctly parses the API response.
@@ -61,10 +61,18 @@ class TestOpenCostCollector(unittest.TestCase):
         mock_response.json.return_value = MOCK_API_RESPONSE
         mock_get.return_value = mock_response
 
-        collector = OpenCostCollector()
+        # We must prevent _resolve_url from failing or trying to connect to real endpoints
+        # So we mock _resolve_url on the instance or ensure it returns something valid.
+        # But _resolve_url uses self.session.get too (via _probe).
+        # Since we mock Session.get, we need to handle calls from _resolve_url/_probe if they happen.
+        # However, _resolve_url checks config first.
+        # Let's mock _resolve_url to simplify.
 
-        # 2. Act
-        results = collector.collect()
+        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
+            collector = OpenCostCollector()
+
+            # 2. Act
+            results = collector.collect()
 
         # 3. Assert
         mock_data_items = MOCK_API_RESPONSE["data"][0]
@@ -93,7 +101,7 @@ class TestOpenCostCollector(unittest.TestCase):
 
         print("\nTestOpenCostCollector (dynamic): All assertions passed! ✅")
 
-    @patch("greenkube.collectors.opencost_collector.requests.get")
+    @patch("greenkube.utils.http_client.requests.Session.get")
     def test_collect_skips_items_with_missing_namespace(self, mock_get):
         """
         Tests that the collector gracefully skips an entry if its namespace is missing.
@@ -112,29 +120,38 @@ class TestOpenCostCollector(unittest.TestCase):
             ],  # Pas de namespace
         }
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = MALFORMED_RESPONSE
         mock_get.return_value = mock_response
-        collector = OpenCostCollector()
 
-        # 2. Act
-        results = collector.collect()
+        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
+            collector = OpenCostCollector()
+
+            # 2. Act
+            results = collector.collect()
 
         # 3. Assert
         # Seule l'entrée valide doit être conservée
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].pod_name, "pod-good")
 
-    @patch("greenkube.collectors.opencost_collector.requests.get")
+    @patch("greenkube.utils.http_client.requests.Session.get")
     def test_collect_handles_api_error_gracefully(self, mock_get):
         """
         Tests that the collector returns an empty list when the API call fails.
         """
         # 1. Arrange
         mock_get.side_effect = requests.exceptions.RequestException("API is down")
-        collector = OpenCostCollector()
 
-        # 2. Act
-        results = collector.collect()
+        # Depending on implementation, _resolve_url might fail if it probes and gets an error.
+        # Or if we mock _resolve_url, then collect fails.
+        # If we assume _resolve_url returns a valid URL, then collect calls get() which fails.
+
+        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
+            collector = OpenCostCollector()
+
+            # 2. Act
+            results = collector.collect()
 
         # 3. Assert
         # Le collecteur doit retourner une liste vide en cas d'erreur
