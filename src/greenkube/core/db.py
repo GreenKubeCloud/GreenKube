@@ -100,12 +100,9 @@ class DatabaseManager:
             self.connect()
             return
 
-        try:
-            # SQLite connections don't typically 'close' in the same way unless explicitly closed
-            pass
-        except Exception as e:
-            logger.error(f"Error checking connection: {e}. Reconnecting...")
-            self.connect()
+        # SQLite connections don't typically 'close' in the same way unless explicitly closed
+        # We can try a simple cursor operation to verify, but for now we assume it's fine if not None.
+        pass
 
     def close(self):
         if self.pool:
@@ -216,23 +213,23 @@ class DatabaseManager:
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN node_instance_type TEXT")
         except sqlite3.OperationalError:
-            pass
+            logger.debug("Column 'node_instance_type' already exists in combined_metrics.")
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN node_zone TEXT")
         except sqlite3.OperationalError:
-            pass
+            logger.debug("Column 'node_zone' already exists in combined_metrics.")
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN emaps_zone TEXT")
         except sqlite3.OperationalError:
-            pass
+            logger.debug("Column 'emaps_zone' already exists in combined_metrics.")
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN is_estimated BOOLEAN")
         except sqlite3.OperationalError:
-            pass
+            logger.debug("Column 'is_estimated' already exists in combined_metrics.")
         try:
             cursor.execute("ALTER TABLE combined_metrics ADD COLUMN estimation_reasons TEXT")
         except sqlite3.OperationalError:
-            pass
+            logger.debug("Column 'estimation_reasons' already exists in combined_metrics.")
 
         self.connection.commit()
         logger.info("SQLite schema is up to date.")

@@ -137,7 +137,7 @@ class BasicEstimator:
                     )
                     continue
                 except Exception:
-                    pass
+                    logger.debug("Failed to parse inferred CPU count from instance type '%s'", instance_type)
 
             if node not in self._warned_nodes:
                 logger.warning(

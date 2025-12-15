@@ -108,7 +108,12 @@ class DataProcessor:
                         try:
                             mapped = get_emaps_zone_from_cloud_zone(region, provider=provider)
                         except Exception:
-                            pass
+                            logger.warning(
+                                "Failed to map region '%s' (provider: %s) to Electricity Maps zone.",
+                                region,
+                                provider,
+                                exc_info=True,
+                            )
 
                     if mapped:
                         reasons.append(
@@ -234,9 +239,9 @@ class DataProcessor:
                                     req = pod_request_map.get((itm.namespace, itm.pod), 0.0)
                                     if req:
                                         itm.cpu_usage_cores = req
-            except Exception:
+            except Exception as e:
                 # If anything goes wrong, proceed with original prom_metrics
-                pass
+                logger.warning("Failed to adjust node utilization based on pod requests: %s", e, exc_info=True)
 
             # The estimator converts PrometheusMetric -> List[EnergyMetric]
             energy_metrics = self.estimator.estimate(prom_metrics)
@@ -604,6 +609,7 @@ class DataProcessor:
                     usage = float(val)
                     ts_f = float(ts_val)
                 except Exception:
+                    logger.debug("Skipping invalid metric value: ts=%s, val=%s", ts_val, val)
                     continue
                 key = (series_ns, pod)
                 samples[ts_f][key] += usage
@@ -703,7 +709,7 @@ class DataProcessor:
                         cores = int(inst.split("-", 1)[1])
                         return estimator._create_cpu_profile(cores)
                     except Exception:
-                        pass
+                        logger.debug("Failed to parse inferred CPU count from instance type '%s'", inst)
 
             # If we have cpu_capacity from snapshot but no known instance type profile,
             # we can try to estimate based on capacity
