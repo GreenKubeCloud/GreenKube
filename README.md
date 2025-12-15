@@ -22,7 +22,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 * **Prometheus-Based Energy Estimation:** Calculates pod-level energy consumption (Joules) using CPU usage data from Prometheus and a built-in library of instance power profiles.
 * **Optimization Recommendations:** Identifies "zombie" pods (idle but costly) and "oversized" pods (underutilized CPU) to help you rightsize and reduce waste.
 * **Pod & Namespace Reporting:** Generates detailed reports of CO2e emissions, energy usage, and (optional) costs per pod and namespace.
-* **Flexible Data Backends:** Supports SQLite (default) and Elasticsearch for storing and querying historical carbon intensity data.
+* **Flexible Data Backends:** Supports PostgreSQL (default), SQLite, and Elasticsearch for storing and querying historical carbon intensity data.
 * **Historical Analysis:** Report on energy and carbon usage over any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, etc.).
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (can be manually overridden).
 * **Helm Chart Deployment:** Easily deploy and configure GreenKube in any Kubernetes cluster via a public Helm repository.
@@ -62,23 +62,10 @@ Add your API token to the file. You can also configure your database type (e.g.,
 `my-values.yaml`:
 
 ```yaml
-# Uncomment to use Elasticsearch instead of the default SQLite (recommended)
-# config:
-#   db:
-#     type: "elasticsearch"
-
-# Configure the Elasticsearch hosts
-# elasticsearch:
-#   hosts: "http://your-elasticsearch-host:9200"
-
 secrets:
   # Get your API token from [https://www.electricitymaps.com/](https://www.electricitymaps.com/)
   # If not provided, a default value will be used for every zone
   electricityMapsToken: "YOUR_API_TOKEN_HERE"
-  # Provide credentials in the secrets section
-  # elasticsearch:
-  #   user: "elastic"
-  #   password: "your-password"
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)

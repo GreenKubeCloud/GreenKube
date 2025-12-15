@@ -120,9 +120,11 @@ class Config:
     DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
 
     # --- Database variables ---
-    DB_TYPE = os.getenv("DB_TYPE", "sqlite")
+    DB_TYPE = os.getenv("DB_TYPE", "postgres")
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
-    DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+    DB_CONNECTION_STRING = os.getenv(
+        "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
+    )
     DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
 
     # --- ELASTICSEARCH VARIABLES ---
