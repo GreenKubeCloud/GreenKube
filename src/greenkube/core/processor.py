@@ -819,9 +819,6 @@ class DataProcessor:
             if carbon_result is None:
                 skipped_carbon += 1
 
-            if carbon_result is None:
-                skipped_carbon += 1
-
             cost_metric = cost_map.get(pod_name)
             if cost_metric:
                 total_cost = cost_metric.total_cost
