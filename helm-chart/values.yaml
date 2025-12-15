@@ -8,14 +8,14 @@ image:
   repository: greenkube/greenkube
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.1.4
+  tag: 0.1.5
 
 serviceAccount:
   # Specifies whether a service account should be created
   create: true
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
-  name: ""
+  name: ''
 
 rbac:
   # Specifies whether RBAC resources (ClusterRole, ClusterRoleBinding) should be created
@@ -52,14 +52,14 @@ config:
   persistence:
     enabled: false
     # Storage Class Name (leave empty for default)
-    storageClassName: ""
+    storageClassName: ''
     accessMode: ReadWriteOnce
     size: 1Gi
 
   # Prometheus collector configuration
   prometheus:
     # If empty, GreenKube will attempt in-cluster discovery.
-    url: ""
+    url: ''
     verifyCerts: true
     # Prometheus query step (e.g., "5m", "1h"). Must be a divisor of 24 hours.
     queryRangeStep: 5m
@@ -71,7 +71,7 @@ config:
   # OpenCost collector configuration
   opencost:
     # If empty, GreenKube will attempt in-cluster discovery.
-    url: ""
+    url: ''
     verifyCerts: true
 
   # Threshold in cores below which Prometheus totals are considered too small
@@ -96,22 +96,22 @@ elasticsearch:
 # Users MUST provide the electricityMapsToken.
 secrets:
   # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
-  electricityMapsToken: ""
+  electricityMapsToken: ''
 
   # Connection string for PostgreSQL (only used if db.type is "postgres")
   # Example: "postgresql://user:password@host:port/dbname"
-  dbConnectionString: ""
+  dbConnectionString: ''
 
   # Prometheus authentication
   prometheus:
-    username: ""
-    password: ""
-    bearerToken: ""
+    username: ''
+    password: ''
+    bearerToken: ''
 
   # Elasticsearch authentication
   elasticsearch:
-    user: ""
-    password: ""
+    user: ''
+    password: ''
 
 # Pod resource requests and limits
 resources:
@@ -127,7 +127,7 @@ postgres:
   enabled: true
   image:
     repository: postgres
-    tag: "17-alpine"
+    tag: 17-alpine
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
@@ -136,4 +136,4 @@ postgres:
   persistence:
     enabled: true
     size: 1Gi
-    storageClassName: ""
+    storageClassName: ''
