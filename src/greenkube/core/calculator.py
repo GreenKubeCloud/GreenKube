@@ -1,6 +1,7 @@
 # src/greenkube/core/calculator.py
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -49,10 +50,12 @@ class CarbonCalculator:
         # Simple per-run cache: key = (zone, timestamp) -> intensity value
         # (float or None)
         self._intensity_cache = {}
+        self._lock = threading.Lock()
 
     def clear_cache(self):
         """Clears the internal intensity cache."""
-        self._intensity_cache.clear()
+        with self._lock:
+            self._intensity_cache.clear()
 
     def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
@@ -72,16 +75,44 @@ class CarbonCalculator:
         cache_key = (zone, normalized)
         grid_intensity_data = None
 
-        if cache_key in self._intensity_cache:
-            grid_intensity_data = self._intensity_cache[cache_key]
-        else:
-            grid_intensity_data = self.repository.get_for_zone_at_time(zone, normalized)
-            self._intensity_cache[cache_key] = grid_intensity_data  # Cache the result (even if None)
+        with self._lock:
+            if cache_key in self._intensity_cache:
+                grid_intensity_data = self._intensity_cache[cache_key]
+
+        # If not in cache, fetch it (outside lock to avoid holding it during I/O)
+        if grid_intensity_data is None and (
+            cache_key not in self._intensity_cache if hasattr(self, "_intensity_cache") else True
+        ):
+            # Double-check locking pattern or just fetch.
+            # Fetching twice is better than blocking.
+            # But wait, if we fetch, we want to store.
+            # Let's fetch then lock to store.
+
+            # Optimization: check again under lock if another thread fetched it?
+            # For simplicity, just fetch.
+
+            # Actually, the original code did:
+            # if cache_key in self._intensity_cache: ... else: fetch; store
+
+            # To match that safely:
+            fetched = False
+            with self._lock:
+                if cache_key in self._intensity_cache:
+                    grid_intensity_data = self._intensity_cache[cache_key]
+                    fetched = True
+
+            if not fetched:
+                grid_intensity_data = self.repository.get_for_zone_at_time(zone, normalized)
+                with self._lock:
+                    self._intensity_cache[cache_key] = grid_intensity_data
 
         grid_intensity_value = grid_intensity_data
 
         # A value of -1 in the cache indicates we've already warned for this key.
-        has_warned = self._intensity_cache.get(cache_key) == -1
+        # We need to check this under lock too
+        has_warned = False
+        with self._lock:
+            has_warned = self._intensity_cache.get(cache_key) == -1
 
         if grid_intensity_value is None:
             if not has_warned:
@@ -93,7 +124,8 @@ class CarbonCalculator:
                     config.DEFAULT_INTENSITY,
                 )
                 # Mark this cache key as warned to prevent re-logging.
-                self._intensity_cache[cache_key] = -1
+                with self._lock:
+                    self._intensity_cache[cache_key] = -1
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:
