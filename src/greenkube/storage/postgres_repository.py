@@ -126,16 +126,20 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     metrics = []
 
                     for row in results:
+                        # Create a copy to avoid modifying the original row if it were reused (though here it's fresh)
+                        # and to safely mutate for Pydantic
+                        metric_data = dict(row)
+
                         # Deserialize estimation_reasons from JSON string
-                        if "estimation_reasons" in row and isinstance(row["estimation_reasons"], str):
+                        if "estimation_reasons" in metric_data and isinstance(metric_data["estimation_reasons"], str):
                             try:
-                                row["estimation_reasons"] = json.loads(row["estimation_reasons"])
+                                metric_data["estimation_reasons"] = json.loads(metric_data["estimation_reasons"])
                             except json.JSONDecodeError:
-                                row["estimation_reasons"] = []
+                                metric_data["estimation_reasons"] = []
 
                         # Ensure timestamp fields are correctly handled if needed,
                         # though psycopg2 usually handles datetime objects well.
-                        metrics.append(CombinedMetric(**row))
+                        metrics.append(CombinedMetric(**metric_data))
 
                     return metrics
         except Exception as e:

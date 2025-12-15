@@ -81,6 +81,7 @@ class SQLiteNodeRepository(NodeRepository):
         """
         try:
             with self.db_manager.connection_scope() as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -93,26 +94,27 @@ class SQLiteNodeRepository(NodeRepository):
                     (start.isoformat(), end.isoformat()),
                 )
                 rows = cursor.fetchall()
-                # Return a list of (timestamp, NodeInfo) tuples
 
-                return [
-                    (
-                        row[9],  # timestamp string
-                        NodeInfo(
-                            name=row[0],
-                            instance_type=row[1],
-                            zone=row[2],
-                            region=row[3],
-                            cloud_provider=row[4],
-                            architecture=row[5],
-                            node_pool=row[6],
-                            cpu_capacity_cores=row[7],
-                            memory_capacity_bytes=row[8],
-                            timestamp=parse_iso_date(row[9]),  # Parse timestamp string to datetime
-                        ),
+                snapshots = []
+                for row in rows:
+                    snapshots.append(
+                        (
+                            row["timestamp"],
+                            NodeInfo(
+                                name=row["node_name"],
+                                instance_type=row["instance_type"],
+                                zone=row["zone"],
+                                region=row["region"],
+                                cloud_provider=row["cloud_provider"],
+                                architecture=row["architecture"],
+                                node_pool=row["node_pool"],
+                                cpu_capacity_cores=row["cpu_capacity_cores"],
+                                memory_capacity_bytes=row["memory_capacity_bytes"],
+                                timestamp=parse_iso_date(row["timestamp"]),
+                            ),
+                        )
                     )
-                    for row in rows
-                ]
+                return snapshots
 
         except sqlite3.Error as e:
             logging.error(f"Could not retrieve snapshots: {e}")
@@ -127,6 +129,7 @@ class SQLiteNodeRepository(NodeRepository):
         """
         try:
             with self.db_manager.connection_scope() as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 # SQL to get the latest snapshot per node before timestamp
                 cursor.execute(
@@ -137,7 +140,7 @@ class SQLiteNodeRepository(NodeRepository):
                     INNER JOIN (
                         SELECT node_name, MAX(timestamp) as max_ts
                         FROM node_snapshots
-                        WHERE timestamp < ?
+                        WHERE timestamp <= ?
                         GROUP BY node_name
                     ) latest ON ns.node_name = latest.node_name AND ns.timestamp = latest.max_ts
                 """,
@@ -146,16 +149,16 @@ class SQLiteNodeRepository(NodeRepository):
                 rows = cursor.fetchall()
                 return [
                     NodeInfo(
-                        name=row[0],
-                        instance_type=row[1],
-                        zone=row[2],
-                        region=row[3],
-                        cloud_provider=row[4],
-                        architecture=row[5],
-                        node_pool=row[6],
-                        cpu_capacity_cores=row[7],
-                        memory_capacity_bytes=row[8],
-                        timestamp=parse_iso_date(row[9]),  # Parse timestamp string to datetime
+                        name=row["node_name"],
+                        instance_type=row["instance_type"],
+                        zone=row["zone"],
+                        region=row["region"],
+                        cloud_provider=row["cloud_provider"],
+                        architecture=row["architecture"],
+                        node_pool=row["node_pool"],
+                        cpu_capacity_cores=row["cpu_capacity_cores"],
+                        memory_capacity_bytes=row["memory_capacity_bytes"],
+                        timestamp=parse_iso_date(row["timestamp"]),
                     )
                     for row in rows
                 ]

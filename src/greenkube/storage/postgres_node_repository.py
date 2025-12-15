@@ -62,7 +62,10 @@ class PostgresNodeRepository(NodeRepository):
             with self.db_manager.connection_scope() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                     query = """
-                        SELECT * FROM node_snapshots
+                        SELECT timestamp, node_name, instance_type, cpu_capacity_cores,
+                               architecture, cloud_provider, region, zone, node_pool,
+                               memory_capacity_bytes
+                        FROM node_snapshots
                         WHERE timestamp >= %s AND timestamp <= %s
                     """
                     cursor.execute(query, (start, end))
@@ -71,8 +74,6 @@ class PostgresNodeRepository(NodeRepository):
                     snapshots = []
                     for row in results:
                         timestamp_str = row.pop("timestamp").isoformat()
-                        # Remove id if present as it's not in NodeInfo
-                        row.pop("id", None)
                         # Map 'node_name' back to 'name'
                         row["name"] = row.pop("node_name")
                         snapshots.append((timestamp_str, NodeInfo(**row)))
@@ -91,7 +92,10 @@ class PostgresNodeRepository(NodeRepository):
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                     # Subquery to find the latest timestamp for each node before the cutoff
                     query = """
-                        SELECT DISTINCT ON (node_name) *
+                        SELECT DISTINCT ON (node_name)
+                               timestamp, node_name, instance_type, cpu_capacity_cores,
+                               architecture, cloud_provider, region, zone, node_pool,
+                               memory_capacity_bytes
                         FROM node_snapshots
                         WHERE timestamp <= %s
                         ORDER BY node_name, timestamp DESC
@@ -101,8 +105,10 @@ class PostgresNodeRepository(NodeRepository):
 
                     nodes = []
                     for row in results:
-                        # Remove id and timestamp (if not needed in NodeInfo, but NodeInfo has timestamp)
-                        row.pop("id", None)
+                        # NodeInfo expects 'timestamp' field, so we keep it but maybe need to parse it
+                        # or let Pydantic handle it
+                        # The row has 'timestamp' as datetime object from psycopg2
+
                         # Map 'node_name' back to 'name'
                         row["name"] = row.pop("node_name")
                         nodes.append(NodeInfo(**row))
