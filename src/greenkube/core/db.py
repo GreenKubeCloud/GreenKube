@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 
 import psycopg2
+import psycopg2.pool
 
 from .config import config
 
