@@ -111,6 +111,14 @@ class Config:
     # --- Logging variables ---
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+    # --- Network variables ---
+    # Standard User-Agent to identify the client and avoid being blocked by WAFs
+    USER_AGENT = os.getenv("USER_AGENT", "GreenKube/1.0.0 (+https://github.com/greenkube)")
+    # Default connection timeout (seconds)
+    DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
+    # Default read timeout (seconds)
+    DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
+
     # --- Database variables ---
     DB_TYPE = os.getenv("DB_TYPE", "sqlite")
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
@@ -209,6 +217,12 @@ class Config:
             logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
         if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
+
+        if not os.getenv("DEFAULT_ZONE"):
+            logging.warning(
+                f"DEFAULT_ZONE is not set. Using hardcoded default '{self.DEFAULT_ZONE}'. "
+                "This may result in inaccurate carbon intensity data if your cluster is not in France."
+            )
 
 
 # Instantiate the config to be imported by other modules

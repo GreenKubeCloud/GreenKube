@@ -100,9 +100,12 @@ class DatabaseManager:
             self.connect()
             return
 
-        # SQLite connections don't typically 'close' in the same way unless explicitly closed
-        # We can try a simple cursor operation to verify, but for now we assume it's fine if not None.
-        pass
+        # Verify connection is alive
+        try:
+            self.connection.cursor().execute("SELECT 1")
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            logger.warning("SQLite connection was closed or invalid. Reconnecting.")
+            self.connect()
 
     def close(self):
         if self.pool:

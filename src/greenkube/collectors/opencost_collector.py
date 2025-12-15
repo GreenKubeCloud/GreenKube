@@ -17,6 +17,7 @@ from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 from ..core.config import config
 from ..models.metrics import CostMetric
+from ..utils.http_client import get_http_session
 from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ class OpenCostCollector(BaseCollector):
     Collects cost allocation data from an OpenCost service via an Ingress.
     The endpoint URL is read from application configuration (`config.OPENCOST_API_URL`).
     """
+
+    def __init__(self):
+        self.session = get_http_session()
 
     def collect(self, window: str = "1d", timestamp: Optional[datetime] = None) -> List[CostMetric]:
         """
@@ -54,7 +58,8 @@ class OpenCostCollector(BaseCollector):
 
             def _fetch(u: str):
                 try:
-                    resp = requests.get(u, params=params, timeout=10, verify=verify_certs)
+                    # Use robust session
+                    resp = self.session.get(u, params=params, verify=verify_certs)
                     resp.raise_for_status()
                 except requests.exceptions.RequestException as exc:
                     logger.debug("Request to %s failed: %s", u, exc)
@@ -227,7 +232,8 @@ class OpenCostCollector(BaseCollector):
         verify_certs = config.OPENCOST_VERIFY_CERTS
         try:
             params = {"window": "1d", "aggregate": "pod"}
-            r = requests.get(url, params=params, timeout=5, verify=verify_certs)
+            # Use robust session (timeout handled by session adapter)
+            r = self.session.get(url, params=params, verify=verify_certs)
             r.raise_for_status()
             return True
         except Exception:
