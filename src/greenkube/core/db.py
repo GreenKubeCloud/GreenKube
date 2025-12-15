@@ -19,10 +19,12 @@ class DatabaseManager:
     """
 
     def __init__(self):
-        self.db_type = config.DB_TYPE
         self.connection = None
         self.pool = None
-        self.connect()
+
+    @property
+    def db_type(self):
+        return config.DB_TYPE
 
     def connect(self):
         """

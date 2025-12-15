@@ -29,12 +29,20 @@ def mock_settings_env_vars(monkeypatch):
     Pytest fixture to mock environment variables for the config module.
 
     This fixture runs automatically for every test (`autouse=True`). It uses
-    monkeypatch to set environment variables, ensuring that the application's
-    config is predictable and isolated from the actual environment.
+    monkeypatch to set environment variables AND updates the singleton config object,
+    ensuring consistency.
     """
+    from greenkube.core.config import config
+
+    # Set env vars
     monkeypatch.setenv("DB_TYPE", "sqlite")
-    monkeypatch.setenv("DB_PATH", ":memory:")  # Ensure config points to an in-memory db
+    monkeypatch.setenv("DB_PATH", ":memory:")
     monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "test-token")
+
+    # Patch config singleton attributes because they are loaded at import time
+    monkeypatch.setattr(config, "DB_TYPE", "sqlite")
+    monkeypatch.setattr(config, "DB_PATH", ":memory:")
+    monkeypatch.setattr(config, "ELECTRICITY_MAPS_TOKEN", "test-token")
 
 
 @pytest.fixture(autouse=True)
