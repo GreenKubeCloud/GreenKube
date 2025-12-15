@@ -108,7 +108,13 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 (zone, carbon_intensity, datetime, updated_at, created_at,
                                  emission_factor_type, is_estimated, estimation_method)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(zone, datetime) DO NOTHING;
+                            ON CONFLICT(zone, datetime)
+                            DO UPDATE SET
+                                carbon_intensity = excluded.carbon_intensity,
+                                updated_at = excluded.updated_at,
+                                is_estimated = excluded.is_estimated,
+                                estimation_method = excluded.estimation_method,
+                                emission_factor_type = excluded.emission_factor_type;
                         """,
                             (
                                 zone,

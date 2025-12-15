@@ -87,6 +87,36 @@ def test_save_history_success(repository, mock_db_manager):
     conn.commit.assert_called_once()
 
 
+def test_save_history_updates_existing_record(repository, mock_db_manager):
+    manager, cursor = mock_db_manager
+    # Setup
+    history_data = [
+        {
+            "zone": "FR",
+            "carbon_intensity": 60,
+            "datetime": datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc),
+            "emission_factor_type": "lifecycle",
+            "is_estimated": False,
+            "estimation_method": None,
+        }
+    ]
+
+    # Execute
+    repository.save_history(history_data)
+
+    # Verify
+    cursor.executemany.assert_called_once()
+    args = cursor.executemany.call_args[0]
+    query = args[0]
+
+    # Check that the query contains ON CONFLICT ... DO UPDATE
+    assert "ON CONFLICT(zone, datetime)" in query
+    assert "DO UPDATE SET" in query
+    assert "carbon_intensity = EXCLUDED.carbon_intensity" in query
+
+
 def test_write_combined_metrics_success(repository, mock_db_manager):
     manager, cursor = mock_db_manager
     # Setup

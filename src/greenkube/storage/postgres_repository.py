@@ -53,7 +53,13 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                              emission_factor_type, is_estimated, estimation_method)
                         VALUES (%(zone)s, %(carbon_intensity)s, %(datetime)s, %(updated_at)s, %(created_at)s,
                                 %(emission_factor_type)s, %(is_estimated)s, %(estimation_method)s)
-                        ON CONFLICT(zone, datetime) DO NOTHING;
+                        ON CONFLICT(zone, datetime)
+                        DO UPDATE SET
+                            carbon_intensity = EXCLUDED.carbon_intensity,
+                            updated_at = EXCLUDED.updated_at,
+                            is_estimated = EXCLUDED.is_estimated,
+                            estimation_method = EXCLUDED.estimation_method,
+                            emission_factor_type = EXCLUDED.emission_factor_type;
                     """
                     cursor.executemany(query, history_data)
                     conn.commit()
