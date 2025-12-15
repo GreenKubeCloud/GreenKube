@@ -6,6 +6,7 @@ import requests
 
 from ..core.config import config
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
+from ..utils.http_client import get_http_session
 from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class ElectricityMapsCollector(BaseCollector):
         """
         Initializes the collector. The 'zone' argument is no longer needed here.
         """
+        self.session = get_http_session()
         if not config.ELECTRICITY_MAPS_TOKEN:
             logger.warning("ELECTRICITY_MAPS_TOKEN is not set in the environment. Using default values.")
             self.api_token = None
@@ -40,7 +42,8 @@ class ElectricityMapsCollector(BaseCollector):
             logger.info(f"Fetching carbon intensity history for zone: {zone}...")
 
             try:
-                response = requests.get(history_url, headers=self.headers)
+                # Use the robust session with timeouts and retries
+                response = self.session.get(history_url, headers=self.headers)
                 response.raise_for_status()
                 data = response.json()
                 return data.get("history", [])

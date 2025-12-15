@@ -6,7 +6,6 @@ This data is the input for the BasicEstimator.
 """
 
 import logging
-from datetime import timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -21,6 +20,7 @@ from greenkube.models.prometheus_metrics import (
     PodCPUUsage,
     PrometheusMetric,
 )
+from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -449,12 +449,11 @@ class PrometheusCollector(BaseCollector):
 
         # Accept aware or naive datetimes; normalize to Z-suffixed ISO
         try:
-            params["start"] = start.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-            params["end"] = end.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        except Exception:
-            # Fallback to string conversion
-            params["start"] = str(start)
-            params["end"] = str(end)
+            params["start"] = to_iso_z(ensure_utc(start))
+            params["end"] = to_iso_z(ensure_utc(end))
+        except ValueError as e:
+            logger.error("Invalid date format for start/end: %s", e)
+            return []
 
         headers = {}
         if self.bearer_token:

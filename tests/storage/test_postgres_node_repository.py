@@ -72,7 +72,6 @@ def test_get_snapshots_success(repository, mock_db_manager):
     end = datetime(2023, 1, 1, 23, 59, tzinfo=timezone.utc)
 
     db_row = {
-        "id": 1,
         "node_name": "node1",
         "instance_type": "t3.medium",
         "cpu_capacity_cores": 2.0,
@@ -105,7 +104,6 @@ def test_get_latest_snapshots_before_success(repository, mock_db_manager):
     cutoff = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
 
     db_row = {
-        "id": 1,
         "node_name": "node1",
         "instance_type": "t3.medium",
         "cpu_capacity_cores": 2.0,

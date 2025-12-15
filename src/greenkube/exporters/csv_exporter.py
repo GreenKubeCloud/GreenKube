@@ -36,6 +36,16 @@ class CSVExporter(BaseExporter):
             writer = csv.DictWriter(fh, fieldnames=headers)
             writer.writeheader()
             for r in rows:
-                writer.writerow(r)
+                sanitized_row = {k: self._sanitize_cell(v) for k, v in r.items()}
+                writer.writerow(sanitized_row)
 
         return out_path
+
+    def _sanitize_cell(self, value: Any) -> Any:
+        """
+        Sanitize value to prevent CSV formula injection.
+        If the value is a string starting with =, +, -, or @, prefix it with a single quote.
+        """
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+            return f"'{value}"
+        return value

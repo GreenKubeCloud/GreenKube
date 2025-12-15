@@ -29,3 +29,25 @@ def test_csv_exporter_with_period(tmp_path):
     content = out.read_text(encoding="utf-8")
     assert "namespace" in content
     assert "default" in content
+
+
+def test_csv_exporter_injection(tmp_path):
+    exporter = CSVExporter()
+    out = tmp_path / "greenkube-report-injection.csv"
+    data = [
+        {
+            "pod_name": "=cmd|' /C calc'!A0",
+            "namespace": "default",
+        },
+        {
+            "pod_name": "normal-pod",
+            "namespace": "+bad-namespace",
+        },
+    ]
+    exporter.export(data, str(out))
+
+    content = out.read_text(encoding="utf-8")
+    # Verify escaping
+    assert "'=cmd|' /C calc'!A0" in content
+    assert "'+bad-namespace" in content
+    assert "normal-pod" in content

@@ -114,12 +114,16 @@ def test_save_history_new_records(sqlite_repo, db_connection):
     assert cursor.fetchone()[0] == 55.5
 
 
-def test_save_history_with_duplicates(sqlite_repo, db_connection):
-    """Test that saving duplicate records (same zone and datetime) are ignored."""
+def test_save_history_updates_duplicates(sqlite_repo, db_connection):
+    """Test that saving duplicate records (same zone and datetime) updates them."""
     # Arrange: Save initial data
     sqlite_repo.save_history(SAMPLE_HISTORY_DATA, zone="DUP-ZONE")
 
     # Act: Try saving the same data again, plus one new record
+    # Modify one of the existing records to verify update
+    modified_record = SAMPLE_HISTORY_DATA[0].copy()
+    modified_record["carbonIntensity"] = 999.9
+
     new_record = {
         "carbonIntensity": 70.0,
         "datetime": (BASE_TIME + timedelta(hours=1)).isoformat(),  # 11:00
@@ -129,16 +133,27 @@ def test_save_history_with_duplicates(sqlite_repo, db_connection):
         "isEstimated": False,
         "estimationMethod": None,
     }
-    data_with_duplicates = SAMPLE_HISTORY_DATA + [new_record]
-    saved_count = sqlite_repo.save_history(data_with_duplicates, zone="DUP-ZONE")
 
-    # Assert: Only the new record should be counted
-    assert saved_count == 1
+    # Construct input: modified existing record + other existing records + new record
+    data_with_updates = [modified_record] + SAMPLE_HISTORY_DATA[1:] + [new_record]
+
+    saved_count = sqlite_repo.save_history(data_with_updates, zone="DUP-ZONE")
+
+    # Assert: All records are processed (updated or inserted)
+    # SQLite rowcount for UPSERT is 1 per row affected
+    assert saved_count == 4
 
     # Verify total count in DB
     cursor = db_connection.cursor()
     cursor.execute("SELECT COUNT(*) FROM carbon_intensity_history WHERE zone=?", ("DUP-ZONE",))
     assert cursor.fetchone()[0] == 4  # Initial 3 + 1 new one
+
+    # Verify the update happened
+    cursor.execute(
+        "SELECT carbon_intensity FROM carbon_intensity_history WHERE datetime=?",
+        (to_iso_z(ensure_utc(modified_record["datetime"])),),
+    )
+    assert cursor.fetchone()[0] == 999.9
 
 
 def test_save_history_different_zones(sqlite_repo, db_connection):

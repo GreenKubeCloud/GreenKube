@@ -35,6 +35,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
         """
         try:
             with self.db_manager.connection_scope() as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
                 # Normalize the query timestamp to ensure it matches the stored format (Z suffix)
@@ -69,7 +70,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     cursor.execute(query, (zone, normalized_ts))
 
                 result = cursor.fetchone()
-                return result[0] if result else None
+                return result["carbon_intensity"] if result else None
         except sqlite3.Error as e:
             logger.error(f"Database error in get_for_zone_at_time for zone {zone} at {timestamp}: {e}")
             raise QueryError(f"Database error in get_for_zone_at_time: {e}") from e
@@ -108,7 +109,13 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 (zone, carbon_intensity, datetime, updated_at, created_at,
                                  emission_factor_type, is_estimated, estimation_method)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(zone, datetime) DO NOTHING;
+                            ON CONFLICT(zone, datetime)
+                            DO UPDATE SET
+                                carbon_intensity = excluded.carbon_intensity,
+                                updated_at = excluded.updated_at,
+                                is_estimated = excluded.is_estimated,
+                                estimation_method = excluded.estimation_method,
+                                emission_factor_type = excluded.emission_factor_type;
                         """,
                             (
                                 zone,
@@ -200,6 +207,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     def read_combined_metrics(self, start_time, end_time) -> List[CombinedMetric]:
         try:
             with self.db_manager.connection_scope() as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -215,31 +223,33 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 metrics = []
                 for row in rows:
                     estimation_reasons = []
-                    if row[17]:
+                    if row["estimation_reasons"]:
                         try:
-                            estimation_reasons = json.loads(row[17])
+                            estimation_reasons = json.loads(row["estimation_reasons"])
                         except json.JSONDecodeError:
                             pass
 
                     metrics.append(
                         CombinedMetric(
-                            pod_name=row[0],
-                            namespace=row[1],
-                            total_cost=row[2],
-                            co2e_grams=row[3],
-                            pue=row[4],
-                            grid_intensity=row[5],
-                            joules=row[6],
-                            cpu_request=row[7],
-                            memory_request=row[8],
-                            period=row[9],
-                            timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
-                            duration_seconds=row[11],
-                            grid_intensity_timestamp=datetime.fromisoformat(row[12]) if row[12] else None,
-                            node_instance_type=row[13],
-                            node_zone=row[14],
-                            emaps_zone=row[15],
-                            is_estimated=bool(row[16]),
+                            pod_name=row["pod_name"],
+                            namespace=row["namespace"],
+                            total_cost=row["total_cost"],
+                            co2e_grams=row["co2e_grams"],
+                            pue=row["pue"],
+                            grid_intensity=row["grid_intensity"],
+                            joules=row["joules"],
+                            cpu_request=row["cpu_request"],
+                            memory_request=row["memory_request"],
+                            period=row["period"],
+                            timestamp=datetime.fromisoformat(row["timestamp"]) if row["timestamp"] else None,
+                            duration_seconds=row["duration_seconds"],
+                            grid_intensity_timestamp=datetime.fromisoformat(row["grid_intensity_timestamp"])
+                            if row["grid_intensity_timestamp"]
+                            else None,
+                            node_instance_type=row["node_instance_type"],
+                            node_zone=row["node_zone"],
+                            emaps_zone=row["emaps_zone"],
+                            is_estimated=bool(row["is_estimated"]),
                             estimation_reasons=estimation_reasons,
                         )
                     )

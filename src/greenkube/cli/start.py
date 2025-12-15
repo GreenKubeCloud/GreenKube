@@ -165,15 +165,23 @@ def start(
         logger.info("Initial collection complete.")
 
         while not shutdown_requested["flag"]:
-            scheduler.run_pending()
+            try:
+                scheduler.run_pending()
+            except Exception as e:
+                logger.error(f"Error during scheduler execution: {e}", exc_info=True)
+
+            # Use wait with short interval for responsive shutdown or standard sleep
+            # Since sleep blocks, we can check flag more often or rely on signal handler to wake it up?
+            # Signal handler doesn't interrupt time.sleep() in Python 3 on all platforms consistently,
+            # but usually it raises an exception if not handled or just sets flag.
+            # To be safe, we just sleep.
             time.sleep(60)
 
         logger.info("🛑 Shutting down GreenKube service gracefully.")
 
     except KeyboardInterrupt:
-        # This might still be triggered in some edge cases
-        logger.info("\n🛑 Shutting down GreenKube service.")
-        raise typer.Exit()
+        logger.info("\n🛑 Interrupted by user. Shutting down GreenKube service.")
+        raise typer.Exit(code=0)
     except Exception as e:
         logger.error(f"❌ An unexpected error occurred during startup: {e}")
         logger.error("Startup failed: %s", traceback.format_exc())

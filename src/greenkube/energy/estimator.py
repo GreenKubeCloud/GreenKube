@@ -137,7 +137,7 @@ class BasicEstimator:
                     )
                     continue
                 except Exception:
-                    pass
+                    logger.debug("Failed to parse inferred CPU count from instance type '%s'", instance_type)
 
             if node not in self._warned_nodes:
                 logger.warning(
@@ -177,7 +177,10 @@ class BasicEstimator:
             node_pod_map[node].append((pod_key, cpu))
 
         # For each node compute node-level power and split it among pods proportionally
-        for node_name, pods_on_node in node_pod_map.items():
+        # Iterate over all nodes found in the metrics (both from instance types and from pod usage)
+        all_nodes = set(node_to_profile.keys()) | set(node_pod_map.keys())
+        for node_name in all_nodes:
+            pods_on_node = node_pod_map.get(node_name, [])
             profile = node_to_profile.get(node_name)
             if not profile:
                 if node_name not in self._warned_nodes:
@@ -257,6 +260,21 @@ class BasicEstimator:
                             "estimation_reasons": list(reasons),
                         }
                     )
+            else:
+                # No pods on node, but node is running (idle).
+                # Attribute idle power to "Unallocated"
+                energy_joules = min_watts * duration_seconds
+                reasons.append("Node idle - energy attributed to system overhead")
+                results.append(
+                    {
+                        "pod_name": "Unallocated",
+                        "namespace": "System",
+                        "joules": energy_joules,
+                        "node": node_name,
+                        "is_estimated": True,
+                        "estimation_reasons": list(reasons),
+                    }
+                )
         else:
             # Distribute node_power proportionally to each pod's share of CPU
             for pod_key, cpu_cores in pods_on_node:
