@@ -1,28 +1,22 @@
 # tests/energy/test_default_profile.py
+from unittest.mock import patch
+
 import pytest
 
+from greenkube.core.config import config as global_config
 from greenkube.energy.estimator import BasicEstimator
 from greenkube.models.prometheus_metrics import PodCPUUsage, PrometheusMetric
 
 
 @pytest.fixture
 def mock_config():
-    # Use the global config object and temporarily override defaults
-    from greenkube.core.config import config as global_config
-
-    old_vcores = global_config.DEFAULT_INSTANCE_VCORES
-    old_min = global_config.DEFAULT_INSTANCE_MIN_WATTS
-    old_max = global_config.DEFAULT_INSTANCE_MAX_WATTS
-    try:
-        global_config.DEFAULT_INSTANCE_VCORES = 2
-        global_config.DEFAULT_INSTANCE_MIN_WATTS = 2.0
-        global_config.DEFAULT_INSTANCE_MAX_WATTS = 12.0
-        # Return the global_config as the settings object for the estimator
+    # Use patch.object to safely override attributes on the global config object
+    with (
+        patch.object(global_config, "DEFAULT_INSTANCE_VCORES", 2),
+        patch.object(global_config, "DEFAULT_INSTANCE_MIN_WATTS", 2.0),
+        patch.object(global_config, "DEFAULT_INSTANCE_MAX_WATTS", 12.0),
+    ):
         yield global_config
-    finally:
-        global_config.DEFAULT_INSTANCE_VCORES = old_vcores
-        global_config.DEFAULT_INSTANCE_MIN_WATTS = old_min
-        global_config.DEFAULT_INSTANCE_MAX_WATTS = old_max
 
 
 def test_default_profile_joules_used(mock_config):
@@ -45,17 +39,12 @@ def test_default_profile_joules_used(mock_config):
 
 
 def test_configurable_defaults_affect_estimate():
-    from greenkube.core.config import config as global_config
-
-    old_vcores = global_config.DEFAULT_INSTANCE_VCORES
-    old_min = global_config.DEFAULT_INSTANCE_MIN_WATTS
-    old_max = global_config.DEFAULT_INSTANCE_MAX_WATTS
-
-    try:
-        global_config.DEFAULT_INSTANCE_VCORES = 1
-        global_config.DEFAULT_INSTANCE_MIN_WATTS = 1.0
-        global_config.DEFAULT_INSTANCE_MAX_WATTS = 5.0
-
+    # Use patch.object as a context manager for this specific test
+    with (
+        patch.object(global_config, "DEFAULT_INSTANCE_VCORES", 1),
+        patch.object(global_config, "DEFAULT_INSTANCE_MIN_WATTS", 1.0),
+        patch.object(global_config, "DEFAULT_INSTANCE_MAX_WATTS", 5.0),
+    ):
         estimator = BasicEstimator(settings=global_config)
         pod = PodCPUUsage(
             namespace="test",
@@ -73,7 +62,3 @@ def test_configurable_defaults_affect_estimate():
         expected_power = 1.0 + 0.5 * (5.0 - 1.0)
         expected_joules = expected_power * 300
         assert results[0].joules == pytest.approx(expected_joules)
-    finally:
-        global_config.DEFAULT_INSTANCE_VCORES = old_vcores
-        global_config.DEFAULT_INSTANCE_MIN_WATTS = old_min
-        global_config.DEFAULT_INSTANCE_MAX_WATTS = old_max
