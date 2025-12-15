@@ -20,6 +20,19 @@ class Config:
     Handles the application's configuration by loading values from environment variables.
     """
 
+    def __init__(self):
+        # --- Database variables ---
+        self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
+
+        # --- ELASTICSEARCH VARIABLES ---
+        self.ELASTICSEARCH_USER = self._get_secret("ELASTICSEARCH_USER")
+        self.ELASTICSEARCH_PASSWORD = self._get_secret("ELASTICSEARCH_PASSWORD")
+
+        # -- Prometheus variables ---
+        self.PROMETHEUS_BEARER_TOKEN = self._get_secret("PROMETHEUS_BEARER_TOKEN")
+        self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
+        self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
+
     @staticmethod
     def _get_secret(key: str, default: str = None) -> str:
         """
@@ -103,12 +116,9 @@ class Config:
     DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
     DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
     DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
-    ELECTRICITY_MAPS_TOKEN = _get_secret.__func__("ELECTRICITY_MAPS_TOKEN")
 
     # --- ELASTICSEARCH VARIABLES ---
     ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
-    ELASTICSEARCH_USER = _get_secret.__func__("ELASTICSEARCH_USER")
-    ELASTICSEARCH_PASSWORD = _get_secret.__func__("ELASTICSEARCH_PASSWORD")
     ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
         "true",
         "1",
@@ -134,9 +144,6 @@ class Config:
         "y",
         "yes",
     )
-    PROMETHEUS_BEARER_TOKEN = _get_secret.__func__("PROMETHEUS_BEARER_TOKEN")
-    PROMETHEUS_USERNAME = _get_secret.__func__("PROMETHEUS_USERNAME")
-    PROMETHEUS_PASSWORD = _get_secret.__func__("PROMETHEUS_PASSWORD")
     PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
         "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
     )
@@ -176,12 +183,18 @@ class Config:
         """
         Validates that the necessary configuration variables are set.
         """
-        if cls.DB_TYPE not in ["sqlite", "postgres", "elasticsearch"]:
+        # Note: Instance variables initialized in __init__ cannot be validated here easily
+        # unless we instantiate, but this method is @classmethod.
+        # However, we can check os.environ or rely on the fact that config is instantiated below.
+        pass
+
+    def validate_instance(self):
+        if self.DB_TYPE not in ["sqlite", "postgres", "elasticsearch"]:
             raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
-        if cls.DB_TYPE == "postgres" and not cls.DB_CONNECTION_STRING:
+        if self.DB_TYPE == "postgres" and not self.DB_CONNECTION_STRING:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
-        if cls.PROMETHEUS_QUERY_RANGE_STEP:
-            match = re.match(r"^(\d+)([smh])$", cls.PROMETHEUS_QUERY_RANGE_STEP.lower())
+        if self.PROMETHEUS_QUERY_RANGE_STEP:
+            match = re.match(r"^(\d+)([smh])$", self.PROMETHEUS_QUERY_RANGE_STEP.lower())
             if not match:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
 
@@ -192,12 +205,12 @@ class Config:
 
             if (24 * 3600) % step_seconds != 0:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
-        if not cls.ELECTRICITY_MAPS_TOKEN:
+        if not self.ELECTRICITY_MAPS_TOKEN:
             logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
-        if cls.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
+        if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
 
 # Instantiate the config to be imported by other modules
 config = Config()
-config.validate()
+config.validate_instance()
