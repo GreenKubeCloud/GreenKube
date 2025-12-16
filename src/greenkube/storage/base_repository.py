@@ -14,7 +14,7 @@ class NodeRepository(ABC):
     """
 
     @abstractmethod
-    def save_nodes(self, nodes: List[NodeInfo]) -> int:
+    async def save_nodes(self, nodes: List[NodeInfo]) -> int:
         """
         Saves node snapshots to the repository.
 
@@ -27,7 +27,7 @@ class NodeRepository(ABC):
         pass
 
     @abstractmethod
-    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
+    async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
         """
         Retrieves node snapshots within a time range.
 
@@ -41,7 +41,7 @@ class NodeRepository(ABC):
         pass
 
     @abstractmethod
-    def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
         """
         Retrieves the latest snapshot for each node before the given timestamp.
 
@@ -61,7 +61,7 @@ class CarbonIntensityRepository(ABC):
     """
 
     @abstractmethod
-    def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
+    async def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
 
@@ -75,7 +75,7 @@ class CarbonIntensityRepository(ABC):
         pass
 
     @abstractmethod
-    def save_history(self, history_data: list, zone: str) -> int:
+    async def save_history(self, history_data: list, zone: str) -> int:
         """
         Saves historical carbon intensity data for a specific zone.
 
@@ -89,14 +89,14 @@ class CarbonIntensityRepository(ABC):
         pass
 
     @abstractmethod
-    def write_combined_metrics(self, metrics: List[CombinedMetric]):
+    async def write_combined_metrics(self, metrics: List[CombinedMetric]):
         """
         Writes a list of CombinedMetric objects to the repository.
         """
         pass
 
     @abstractmethod
-    def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
+    async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
         Reads CombinedMetric objects from the repository within a given time range.
         """
