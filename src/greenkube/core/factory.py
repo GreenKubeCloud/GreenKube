@@ -48,18 +48,13 @@ def get_repository() -> CarbonIntensityRepository:
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch repository.")
-        try:
-            from ..storage import elasticsearch_repository as es_mod
-
-            es_mod.setup_connection()
-        except Exception as e:
-            logger.error(f"Failed to setup Elasticsearch connection: {e}")
+        # Connection setup should be handled by the application entry point
         return ElasticsearchCarbonIntensityRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite repository.")
         from ..core.db import db_manager
 
-        return SQLiteCarbonIntensityRepository(db_manager.get_connection())
+        return SQLiteCarbonIntensityRepository(db_manager)
     elif db_type == "postgres":
         logger.info("Using PostgreSQL repository.")
         from ..core.db import db_manager
@@ -77,7 +72,7 @@ def get_node_repository() -> NodeRepository:
     if config.DB_TYPE == "sqlite":
         from ..core.db import db_manager
 
-        return SQLiteNodeRepository(db_manager.get_connection())
+        return SQLiteNodeRepository(db_manager)
     elif config.DB_TYPE == "elasticsearch":
         from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
 
@@ -88,13 +83,14 @@ def get_node_repository() -> NodeRepository:
         return PostgresNodeRepository(db_manager)
     else:
         # For now, only SQLite and Elasticsearch are supported for nodes
+        # Wait, Postgres is also supported now.
         logger.warning(
             f"NodeRepository not implemented for DB_TYPE '{config.DB_TYPE}'. "
             "Using SQLite fallback if possible or failing."
         )
         from ..core.db import db_manager
 
-        return SQLiteNodeRepository(db_manager.get_connection())
+        return SQLiteNodeRepository(db_manager)
 
 
 @lru_cache(maxsize=1)
