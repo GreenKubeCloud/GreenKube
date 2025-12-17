@@ -1,4 +1,5 @@
 # src/greenkube/core/processor.py
+import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -156,56 +157,100 @@ class DataProcessor:
         logger.info("Starting data processing cycle...")
         combined_metrics = []
 
-        # Collect Prometheus metrics
-        node_instance_map = {}
-        try:
-            prom_metrics = await self.prometheus_collector.collect()
-            # If Prometheus did not return any node instance types, attempt a
-            # kube-api fallback via NodeCollector to obtain instance types.
-            node_types = getattr(prom_metrics, "node_instance_types", None)
-            if not node_types:
-                try:
-                    node_instances = await self.node_collector.collect_instance_types()
-                    # Ensure prom_metrics has a mutable list to append into
-                    if getattr(prom_metrics, "node_instance_types", None) is None:
-                        try:
-                            prom_metrics.node_instance_types = []
-                        except Exception:
-                            # If prom_metrics is a MagicMock or otherwise immutable,
-                            # create a local list to pass to the estimator instead.
-                            prom_metrics.node_instance_types = []
+        # Define internal helper tasks for parallel execution to maintain independent error handling
 
-                    # Convert to NodeInstanceType models expected by estimator
-                    from ..models.prometheus_metrics import NodeInstanceType
+        async def fetch_prometheus():
+            try:
+                prom_metrics = await self.prometheus_collector.collect()
+                node_instance_map = {}
+                # If Prometheus did not return any node instance types, attempt a
+                # kube-api fallback via NodeCollector to obtain instance types.
+                node_types = getattr(prom_metrics, "node_instance_types", None)
+                if not node_types:
+                    try:
+                        node_instances = await self.node_collector.collect_instance_types()
+                        # Ensure prom_metrics has a mutable list to append into
+                        if getattr(prom_metrics, "node_instance_types", None) is None:
+                            try:
+                                prom_metrics.node_instance_types = []
+                            except Exception:
+                                prom_metrics.node_instance_types = []
 
-                    for node, itype in node_instances.items():
-                        prom_metrics.node_instance_types.append(NodeInstanceType(node=node, instance_type=itype))
-                    if node_instances:
-                        node_instance_map = node_instances
-                        logger.info(
-                            "Used NodeCollector to populate %d instance-type(s) as fallback.",
-                            len(node_instances),
-                        )
-                except Exception as e:
-                    logger.debug("NodeCollector instance-type fallback failed: %s", e)
-            else:
-                # Populate map from prom_metrics
-                for item in node_types:
-                    node_instance_map[item.node] = item.instance_type
+                        # Convert to NodeInstanceType models expected by estimator
+                        from ..models.prometheus_metrics import NodeInstanceType
 
-            # Collect pod requests early so we can use them as a fallback when
-            # Prometheus reports extremely low node CPU usage (which can make
-            # energy attribution unstable).
+                        for node, itype in node_instances.items():
+                            prom_metrics.node_instance_types.append(NodeInstanceType(node=node, instance_type=itype))
+                        if node_instances:
+                            node_instance_map = node_instances
+                            logger.info(
+                                "Used NodeCollector to populate %d instance-type(s) as fallback.",
+                                len(node_instances),
+                            )
+                    except Exception as e:
+                        logger.debug("NodeCollector instance-type fallback failed: %s", e)
+                else:
+                    # Populate map from prom_metrics
+                    for item in node_types:
+                        node_instance_map[item.node] = item.instance_type
+
+                return prom_metrics, node_instance_map
+            except Exception as e:
+                logger.error("Failed to collect/estimate energy metrics from Prometheus: %s", e)
+                return None, {}
+
+        async def fetch_opencost():
+            try:
+                cost_metrics = await self.opencost_collector.collect()
+                logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
+                return {metric.pod_name: metric for metric in cost_metrics if metric.pod_name}
+            except Exception as e:
+                logger.error("Failed to collect data from OpenCost: %s", e)
+                return {}
+
+        async def fetch_pods():
             try:
                 pod_metrics = await self.pod_collector.collect()
                 # Build a simple map (namespace,pod) -> requested cores
-                pod_request_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
-            except Exception:
-                pod_request_map = {}
+                # And aggregate requests for CombinedMetric
+                req_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
 
-            # If Prometheus reports very small total CPU per node, replace or
-            # augment per-pod cpu_usage_cores with the pod request value to
-            # avoid giving every pod the node's minWatts energy.
+                agg_map = defaultdict(lambda: {"cpu": 0, "memory": 0})
+                for pm in pod_metrics:
+                    key = (pm.namespace, pm.pod_name)
+                    agg_map[key]["cpu"] += pm.cpu_request
+                    agg_map[key]["memory"] += pm.memory_request
+
+                return pod_metrics, req_map, agg_map
+            except Exception as e:
+                logger.error("Failed to collect data from PodCollector: %s", e)
+                return [], {}, {}
+
+        async def fetch_nodes():
+            try:
+                return await self.node_collector.collect() or {}
+            except Exception:
+                return {}
+
+        # Execute in parallel
+        (prom_result, opencost_result, pod_result, nodes_info) = await asyncio.gather(
+            fetch_prometheus(), fetch_opencost(), fetch_pods(), fetch_nodes()
+        )
+
+        prom_metrics, proxied_node_instance_map = prom_result
+        cost_map = opencost_result
+        pod_metrics_list, pod_request_map_simple, pod_request_map_agg = pod_result
+        pod_request_map = pod_request_map_agg
+
+        # Determine node_instance_map logic
+        # If we got it from prometheus fetch (via fallback logic), use it.
+        # Otherwise try to fill it from node collector explicitly if needed (though fallback handled it).
+        node_instance_map = proxied_node_instance_map
+
+        # --- Post-Processing / Dependency Logic ---
+
+        # 1. Adjust Node Utilization based on Pod Requests (if Prom CPU is low)
+        if prom_metrics:
             try:
                 # Compute node totals from prom_metrics
                 node_totals = {}
@@ -213,15 +258,11 @@ class DataProcessor:
                     node_totals.setdefault(item.node, 0.0)
                     node_totals[item.node] += item.cpu_usage_cores
 
-                # Threshold in cores below which Prometheus totals are considered too small
                 LOW_NODE_CPU_THRESHOLD = config.LOW_NODE_CPU_THRESHOLD
                 if node_totals:
                     # Build mapping pod->node (from prom_metrics) and node->list(items)
-                    pod_to_items = {}
                     node_to_items = {}
                     for item in prom_metrics.pod_cpu_usage:
-                        pod_key = (item.namespace, item.pod)
-                        pod_to_items[pod_key] = item
                         node_to_items.setdefault(item.node, []).append(item)
 
                     for node, total_cpu in node_totals.items():
@@ -229,44 +270,33 @@ class DataProcessor:
                             # Sum requests for pods on this node
                             total_reqs = 0.0
                             for itm in node_to_items.get(node, []):
-                                total_reqs += pod_request_map.get((itm.namespace, itm.pod), 0.0)
+                                total_reqs += pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
 
                             if total_reqs > 0:
-                                # Replace per-pod usage with request cores to compute
-                                # node utilization from declared requests rather than
-                                # noisy Prometheus usage.
                                 for itm in node_to_items.get(node, []):
-                                    req = pod_request_map.get((itm.namespace, itm.pod), 0.0)
+                                    req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
                                     if req:
                                         itm.cpu_usage_cores = req
             except Exception as e:
-                # If anything goes wrong, proceed with original prom_metrics
                 logger.warning("Failed to adjust node utilization based on pod requests: %s", e, exc_info=True)
 
-            # The estimator converts PrometheusMetric -> List[EnergyMetric]
-            energy_metrics = self.estimator.estimate(prom_metrics)
-            logger.info(
-                "Successfully estimated %d energy metrics from Prometheus.",
-                len(energy_metrics),
-            )
-        except Exception as e:
-            logger.error("Failed to collect/estimate energy metrics from Prometheus: %s", e)
-            energy_metrics = []  # Continue with empty list if Prometheus/estimator fails
+            # Estimate Energy
+            try:
+                energy_metrics = self.estimator.estimate(prom_metrics)
+                logger.info(
+                    "Successfully estimated %d energy metrics from Prometheus.",
+                    len(energy_metrics),
+                )
+            except Exception as e:
+                logger.error("Estimator failed: %s", e)
+                energy_metrics = []
+        else:
+            energy_metrics = []
 
-        # Precompute node -> Electricity Maps zone mapping once to avoid repeated
-        # translations/prints during per-pod processing.
-        try:
-            nodes_info = await self.node_collector.collect() or {}
-        except Exception:
-            nodes_info = {}
-
+        # 2. Emaps Context
         node_contexts = await self._get_node_emaps_map(nodes_info)
 
-        # Group energy metrics by emaps_zone so we can prefetch intensity once
-        # per zone and populate the calculator cache for all timestamps of
-        # metrics in that zone. This addresses the case where each pod has a
-        # slightly different timestamp but we only want one repository call
-        # per zone per run.
+        # Group energy metrics by emaps_zone so we can prefetch intensity
         zone_to_metrics = {}
         for em in energy_metrics:
             node_name = em.node
@@ -274,7 +304,10 @@ class DataProcessor:
             emaps_zone = context.emaps_zone if context else config.DEFAULT_ZONE
             zone_to_metrics.setdefault(emaps_zone, []).append(em)
 
-        for zone, metrics in zone_to_metrics.items():
+        # Prefetch Intensity in Parallel (optional optimization, but we can iterate for now)
+        # Or keep it sequential per zone as implementation detail allows await inside loop
+        # Prefetch Intensity in Parallel
+        async def prefetch_zone(zone, metrics):
             # Choose a representative timestamp for the repository query. Use
             # the latest timestamp among metrics to be conservative.
             representative_ts = max(m.timestamp for m in metrics)
@@ -359,33 +392,11 @@ class DataProcessor:
                 if cache_key_plus not in self.calculator._intensity_cache:
                     self.calculator._intensity_cache[cache_key_plus] = intensity
 
-        # 3. Collect Cost Data from OpenCost
-        try:
-            cost_metrics = await self.opencost_collector.collect()
-            logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
-            cost_map = {metric.pod_name: metric for metric in cost_metrics if metric.pod_name}
-        except Exception as e:
-            logger.error("Failed to collect data from OpenCost: %s", e)
-            cost_map = {}
+        if zone_to_metrics:
+            logger.info("Prefetching intensity for %d zones in parallel...", len(zone_to_metrics))
+            await asyncio.gather(*(prefetch_zone(z, m) for z, m in zone_to_metrics.items()))
 
-        # 4. Collect Pod Request Data from K8s API
-        try:
-            pod_metrics = await self.pod_collector.collect()
-            logger.info("Successfully collected %d pod request metrics.", len(pod_metrics))
-
-            # Aggregate container requests up to the pod level
-            pod_request_map = defaultdict(lambda: {"cpu": 0, "memory": 0})
-            for pod_metric in pod_metrics:
-                key = (pod_metric.namespace, pod_metric.pod_name)
-                pod_request_map[key]["cpu"] += pod_metric.cpu_request
-                pod_request_map[key]["memory"] += pod_metric.memory_request
-
-        except Exception as e:
-            logger.error("Failed to collect data from PodCollector: %s", e)
-            pod_request_map = {}
-
-        # Collect node metadata for CombinedMetric
-        # node_instance_map and node_cloud_zone_map are already collected above.
+        # Collect node metadata for CombinedMetric fallback
         if not node_instance_map:
             try:
                 node_instance_map = await self.node_collector.collect_instance_types() or {}
@@ -398,7 +409,6 @@ class DataProcessor:
             namespace = energy_metric.namespace
             pod_key = (namespace, pod_name)
 
-            # Find corresponding cost metric
             # Find corresponding cost metric
             cost_metric = cost_map.get(pod_name)
             if cost_metric:
@@ -801,7 +811,8 @@ class DataProcessor:
         # now build CombinedMetric list using calculator
         combined: List[CombinedMetric] = []
         try:
-            cost_metrics = await self.opencost_collector.collect()
+            # Use collect_range to get costs aggregated over the requested period
+            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
             cost_map = {c.pod_name: c for c in cost_metrics}
         except Exception:
             cost_map = {}

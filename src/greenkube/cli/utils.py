@@ -78,7 +78,7 @@ def get_normalized_window() -> (datetime, datetime):
     return end - step_delta, end
 
 
-def write_combined_metrics_to_database(last: Optional[str] = None) -> None:
+async def write_combined_metrics_to_database(last: Optional[str] = None) -> None:
     """
     Orchestrates the collection and saving of combined metrics data, avoiding duplicates.
     """
@@ -99,12 +99,12 @@ def write_combined_metrics_to_database(last: Optional[str] = None) -> None:
         start, end = get_normalized_window()
 
     try:
-        combined_data: List[CombinedMetric] = processor.run_range(start=start, end=end)
+        combined_data: List[CombinedMetric] = await processor.run_range(start=start, end=end)
         if not combined_data:
             logger.info("No new combined metrics data to save.")
             return
 
-        saved_count = repository.write_combined_metrics(combined_data)
+        saved_count = await repository.write_combined_metrics(combined_data)
         logger.info(f"Successfully saved {saved_count} new combined metrics records.")
 
     except Exception as e:
@@ -113,7 +113,7 @@ def write_combined_metrics_to_database(last: Optional[str] = None) -> None:
     logger.info("--- Finished combined metrics collection task ---")
 
 
-def read_combined_metrics_from_database(
+async def read_combined_metrics_from_database(
     start: datetime, end: datetime, namespace: Optional[str] = None
 ) -> List[CombinedMetric]:
     """
@@ -122,7 +122,7 @@ def read_combined_metrics_from_database(
     logger.info(f"--- Reading combined metrics from {start} to {end} ---")
     try:
         repository = get_repository()
-        data = repository.read_combined_metrics(start=start, end=end)
+        data = await repository.read_combined_metrics(start=start, end=end)
         logger.info(f"Found {len(data)} combined metrics records.")
 
         # Filter by namespace if provided
