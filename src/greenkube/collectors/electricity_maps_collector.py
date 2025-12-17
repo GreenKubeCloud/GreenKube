@@ -1,12 +1,11 @@
-# src/greenkube/collectors/electricity_maps_collector.py
 import logging
 from datetime import datetime, timezone
 
-import requests
+import httpx
 
 from ..core.config import config
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
-from ..utils.http_client import get_http_session
+from ..utils.http_client import get_async_http_client
 from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
@@ -24,15 +23,15 @@ class ElectricityMapsCollector(BaseCollector):
         """
         Initializes the collector. The 'zone' argument is no longer needed here.
         """
-        self.session = get_http_session()
         if not config.ELECTRICITY_MAPS_TOKEN:
             logger.warning("ELECTRICITY_MAPS_TOKEN is not set in the environment. Using default values.")
             self.api_token = None
+            self.headers = {}
         else:
             self.api_token = config.ELECTRICITY_MAPS_TOKEN
             self.headers = {"auth-token": self.api_token}
 
-    def collect(self, zone: str, target_datetime: datetime = None) -> list:
+    async def collect(self, zone: str, target_datetime: datetime = None) -> list:
         """
         Retrieves historical data for a specific zone and returns it.
         If the token is missing or the API call fails, it returns the default value.
@@ -41,15 +40,17 @@ class ElectricityMapsCollector(BaseCollector):
             history_url = f"{API_BASE_URL}/carbon-intensity/history?zone={zone}"
             logger.info(f"Fetching carbon intensity history for zone: {zone}...")
 
-            try:
-                # Use the robust session with timeouts and retries
-                response = self.session.get(history_url, headers=self.headers)
-                response.raise_for_status()
-                data = response.json()
-                return data.get("history", [])
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error fetching data from Electricity Maps API: {e}")
-                # Fallback to default values below
+            async with get_async_http_client() as client:
+                try:
+                    response = await client.get(history_url, headers=self.headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    return data.get("history", [])
+                except httpx.HTTPError as e:
+                    logger.error(f"Error fetching data from Electricity Maps API: {e}")
+                    # Fallback to default values below
+                except Exception as e:
+                    logger.error(f"Unexpected error fetching data from Electricity Maps API: {e}")
 
         # Fallback to default values
         logger.info(f"Using default grid intensity for zone: {zone}")

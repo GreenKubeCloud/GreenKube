@@ -1,12 +1,12 @@
 # src/greenkube/collectors/discovery/opencost.py
 import logging
-import warnings
 from typing import Optional
 
-import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
+import httpx
 
+# Not needed for httpx exactly, but we handle verify=False
 from greenkube.core.config import config
+from greenkube.utils.http_client import get_async_http_client
 
 from .base import BaseDiscovery
 
@@ -20,8 +20,8 @@ class OpenCostDiscovery(BaseDiscovery):
     probing the top contenders for a valid health check response.
     """
 
-    def discover(self) -> Optional[str]:
-        candidates = self._collect_candidates(
+    async def discover(self) -> Optional[str]:
+        candidates = await self._collect_candidates(
             "opencost",
             prefer_namespaces=("opencost",),
             prefer_ports=(9003, 8080),  # Port 9003 is common for OpenCost API
@@ -30,7 +30,7 @@ class OpenCostDiscovery(BaseDiscovery):
             logger.info("OpenCost discovery: no candidates found after scoring.")
             return None
 
-        result = self.probe_candidates(candidates, self._probe_opencost_endpoint)
+        result = await self.probe_candidates(candidates, self._probe_opencost_endpoint)
 
         if result:
             return result
@@ -38,7 +38,7 @@ class OpenCostDiscovery(BaseDiscovery):
         logger.warning("OpenCost discovery: Probed top candidates, but none responded to a /healthz check.")
         return None
 
-    def _probe_opencost_endpoint(self, base_url: str, score: int) -> bool:
+    async def _probe_opencost_endpoint(self, base_url: str, score: int) -> bool:
         """
         Probes a candidate URL to see if it's a valid OpenCost endpoint.
         Checks /healthz for a 2xx response.
@@ -47,31 +47,31 @@ class OpenCostDiscovery(BaseDiscovery):
         probe_url = f"{base_url.rstrip('/')}/healthz"
 
         verify_certs = config.OPENCOST_VERIFY_CERTS
-        # Only suppress SSL warnings if verification is explicitly disabled
-        if not verify_certs:
-            warnings.simplefilter("ignore", InsecureRequestWarning)
 
         try:
-            resp = requests.get(probe_url, timeout=3, verify=verify_certs)
-            status = resp.status_code
+            async with get_async_http_client(verify=verify_certs) as client:
+                resp = await client.get(probe_url)
+                status = resp.status_code
 
-            logger.info(
-                "Probing OpenCost candidate %s (score=%s) at path /healthz -> status=%s",
-                base_url,
-                score,
-                status,
-            )
+                logger.info(
+                    "Probing OpenCost candidate %s (score=%s) at path /healthz -> status=%s",
+                    base_url,
+                    score,
+                    status,
+                )
 
-            # OpenCost /healthz returns 200 OK on success
-            if 200 <= status < 300:
-                return True
+                # OpenCost /healthz returns 200 OK on success
+                if 200 <= status < 300:
+                    return True
 
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             logger.debug(
                 "OpenCost probe failed for %s (score=%s) at path /healthz -> %s",
                 base_url,
                 score,
                 e,
             )
+        except Exception as e:
+            logger.warning("Unexpected error probing OpenCost candidate %s: %s", base_url, e)
 
         return False

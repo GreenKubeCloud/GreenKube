@@ -3,14 +3,17 @@
 import logging
 from datetime import datetime, timezone
 
-from kubernetes import client, config
+from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client.rest import ApiException
 
 from greenkube.core.config import config as global_config
 
 from .base_collector import BaseCollector
 
 if False:  # TYPE_CHECKING
-    from greenkube.models.node import NodeInfo
+    pass
+
+from ..utils.k8s_utils import parse_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -19,36 +22,36 @@ class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
     def __init__(self):
-        # Attempt to load Kubernetes configuration. Prefer in-cluster, fall
-        # back to local kubeconfig. Only if one of these succeeds will we
-        # instantiate the CoreV1Api client. This mirrors expected test
-        # behavior where tests may patch the config and/or CoreV1Api.
-        config_loaded = False
+        self._api = None
+
+    async def _ensure_client(self):
+        """
+        Lazily initialize the Kubernetes Async client.
+        PROPOSAL: We use explicit context manager in collect() instead of persistent client?
+        However, configuration loading is global.
+        """
+        if self._api:
+            return self._api
+
         try:
-            config.load_incluster_config()
+            await config.load_incluster_config()
             logger.info("Loaded in-cluster Kubernetes configuration.")
-            config_loaded = True
+            self._api = client.CoreV1Api()
+            return self._api
         except config.ConfigException:
-            try:
-                config.load_kube_config()
-                logger.info("Loaded Kubernetes configuration from kubeconfig file.")
-                config_loaded = True
-            except config.ConfigException as e:
-                logger.warning("Kubernetes configuration not available: %s", e)
+            pass
 
-        if not config_loaded:
-            # No usable kube config found; disable cluster access.
-            self.v1 = None
-            return
-
-        # Create the API client (tests commonly patch this constructor).
         try:
-            self.v1 = client.CoreV1Api()
-        except Exception as e:
-            logger.warning("Failed to create Kubernetes API client: %s", e)
-            self.v1 = None
+            await config.load_kube_config()
+            logger.info("Loaded Kubernetes configuration from kubeconfig file.")
+            self._api = client.CoreV1Api()
+            return self._api
+        except config.ConfigException as e:
+            logger.warning("Kubernetes configuration not available: %s", e)
 
-    def collect(self) -> dict[str, "NodeInfo"]:
+        return None
+
+    async def collect(self) -> dict:
         """
         Collects comprehensive node information from Kubernetes.
 
@@ -59,12 +62,14 @@ class NodeCollector(BaseCollector):
         from greenkube.models.node import NodeInfo
 
         nodes_info = {}
-        if not getattr(self, "v1", None):
+        api = await self._ensure_client()
+        if not api:
             logger.debug("Kubernetes client not configured; skipping node collection.")
             return nodes_info
 
         try:
-            nodes = self.v1.list_node(watch=False)
+            # Async call
+            nodes = await api.list_node(watch=False)
             if not nodes.items:
                 logger.warning("No nodes found in the cluster.")
                 return nodes_info
@@ -112,38 +117,34 @@ class NodeCollector(BaseCollector):
             if not nodes_info:
                 logger.warning("No nodes found in the cluster.")
 
-        except client.ApiException as e:
+        except ApiException as e:
             logger.error("Kubernetes API error while listing nodes: %s", e)
             return {}
         except Exception as e:
             logger.error("An unexpected error occurred while collecting nodes: %s", e)
             return {}
+        finally:
+            # We should close the api client to avoid resource leak?
+            # self._api.api_client.close() ?
+            # Since we cache self._api, we might keep it open.
+            pass
 
         return nodes_info
 
-    def collect_detailed_info(self) -> dict:
+    async def collect_detailed_info(self) -> dict:
         """
         Collect comprehensive node information including cloud provider, instance type,
         zone, region, and other metadata.
-
-        Returns:
-            dict: node name -> dict with keys:
-                - instance_type: str
-                - zone: str
-                - region: str
-                - cloud_provider: str (ovh, azure, aws, gcp, or unknown)
-                - architecture: str (amd64, arm64, etc.)
-                - node_pool: str (if available)
         """
         nodes_info = {}
+        api = await self._ensure_client()
 
-        # If there's no configured Kubernetes client, return empty results.
-        if not getattr(self, "v1", None):
+        if not api:
             logger.debug("Kubernetes client not configured; skipping detailed node collection.")
             return nodes_info
 
         try:
-            nodes = self.v1.list_node(watch=False)
+            nodes = await api.list_node(watch=False)
             if not nodes.items:
                 logger.debug("No nodes found when collecting detailed info.")
                 return nodes_info
@@ -191,7 +192,7 @@ class NodeCollector(BaseCollector):
                     architecture,
                 )
 
-        except client.ApiException as e:
+        except ApiException as e:
             logger.error("Kubernetes API error while collecting detailed node info: %s", e)
             return {}
         except Exception as e:
@@ -203,12 +204,6 @@ class NodeCollector(BaseCollector):
     def _detect_cloud_provider(self, labels: dict) -> str:
         """
         Detect the cloud provider from node labels.
-
-        Args:
-            labels: Node labels dictionary
-
-        Returns:
-            str: Cloud provider name (ovh, azure, aws, gcp, or unknown)
         """
         # Check for OVH-specific labels
         if any(key.startswith("k8s.ovh.net/") for key in labels.keys()):
@@ -239,14 +234,6 @@ class NodeCollector(BaseCollector):
     def _extract_instance_type(self, labels: dict, node, cloud_provider: str) -> str:
         """
         Extract instance type from node labels with cloud-specific fallbacks.
-
-        Args:
-            labels: Node labels dictionary
-            node: Node object
-            cloud_provider: Detected cloud provider
-
-        Returns:
-            str: Instance type or inferred CPU-based type
         """
         # Try standard Kubernetes label first
         instance_type = labels.get("node.kubernetes.io/instance-type")
@@ -280,8 +267,7 @@ class NodeCollector(BaseCollector):
         try:
             capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
             if capacity and "cpu" in capacity:
-                from kubernetes.utils.quantity import parse_quantity
-
+                # Use shared parse_quantity
                 cpu_qty = parse_quantity(capacity["cpu"])
                 cpu_cores = int(cpu_qty)
                 return f"cpu-{cpu_cores}"
@@ -293,13 +279,6 @@ class NodeCollector(BaseCollector):
     def _extract_node_pool(self, labels: dict, cloud_provider: str) -> str:
         """
         Extract node pool name from cloud-specific labels.
-
-        Args:
-            labels: Node labels dictionary
-            cloud_provider: Detected cloud provider
-
-        Returns:
-            str: Node pool name or None
         """
         if cloud_provider == "ovh":
             return labels.get("k8s.ovh.net/nodepool")
@@ -312,13 +291,9 @@ class NodeCollector(BaseCollector):
 
         return None
 
-    def collect_instance_types(self) -> dict:
+    async def collect_instance_types(self) -> dict:
         """
         Collect node -> instance_type mapping using Kubernetes node labels.
-        The label key is configurable via `global_config.PROMETHEUS_NODE_INSTANCE_LABEL`.
-
-        Returns:
-            dict: node name -> instance_type (only entries where instance type label exists)
         """
         label_key = getattr(
             global_config,
@@ -327,13 +302,13 @@ class NodeCollector(BaseCollector):
         )
         node_instance_map = {}
 
-        # If there's no configured Kubernetes client, return empty results.
-        if not getattr(self, "v1", None):
+        api = await self._ensure_client()
+        if not api:
             logger.debug("Kubernetes client not configured; skipping instance type collection.")
             return node_instance_map
 
         try:
-            nodes = self.v1.list_node(watch=False)
+            nodes = await api.list_node(watch=False)
             if not nodes.items:
                 logger.debug("No nodes found when collecting instance types.")
                 return node_instance_map
@@ -353,14 +328,10 @@ class NodeCollector(BaseCollector):
 
                 # If explicit instance-type label is not available, attempt to
                 # infer instance size from the node capacity (number of CPUs).
-                # This helps produce more realistic energy estimates when
-                # cloud instance labels are absent.
                 try:
                     capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
                     if capacity and "cpu" in capacity:
-                        from kubernetes.utils.quantity import parse_quantity
-
-                        # Use parse_quantity to handle "4" or "4000m" correctly
+                        # Use shared parse_quantity
                         cpu_qty = parse_quantity(capacity["cpu"])
                         cpu_cores = int(cpu_qty)
 
@@ -377,7 +348,7 @@ class NodeCollector(BaseCollector):
                         "Could not infer instance type from capacity for node '%s': %s", node_name, e, exc_info=True
                     )
 
-        except client.ApiException as e:
+        except ApiException as e:
             logger.error("Kubernetes API error while listing nodes for instance types: %s", e)
             return {}
         except Exception as e:
@@ -391,8 +362,6 @@ class NodeCollector(BaseCollector):
         try:
             capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
             if capacity and "cpu" in capacity:
-                from kubernetes.utils.quantity import parse_quantity
-
                 cpu_qty = parse_quantity(capacity["cpu"])
                 return float(cpu_qty)
         except Exception as e:
@@ -404,8 +373,6 @@ class NodeCollector(BaseCollector):
         try:
             capacity = getattr(node, "status", None) and getattr(node.status, "capacity", None)
             if capacity and "memory" in capacity:
-                from kubernetes.utils.quantity import parse_quantity
-
                 mem_qty = parse_quantity(capacity["memory"])
                 return int(mem_qty)
         except Exception as e:

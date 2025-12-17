@@ -47,7 +47,7 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
 
-    def _get_node_emaps_map(self, nodes_info: dict = None) -> Dict[str, NodeZoneContext]:
+    async def _get_node_emaps_map(self, nodes_info: dict = None) -> Dict[str, NodeZoneContext]:
         """Collects node zones and maps them to Electricity Maps zones.
 
         Args:
@@ -58,7 +58,7 @@ class DataProcessor:
         """
         if nodes_info is None:
             try:
-                nodes_info = self.node_collector.collect()
+                nodes_info = await self.node_collector.collect()
                 if not nodes_info:
                     logger.warning(
                         "NodeCollector returned no zones. Using default zone '%s' for Electricity Maps lookup.",
@@ -151,7 +151,7 @@ class DataProcessor:
 
         return node_contexts
 
-    def run(self):
+    async def run(self):
         """Executes the data processing pipeline."""
         logger.info("Starting data processing cycle...")
         combined_metrics = []
@@ -159,13 +159,13 @@ class DataProcessor:
         # Collect Prometheus metrics
         node_instance_map = {}
         try:
-            prom_metrics = self.prometheus_collector.collect()
+            prom_metrics = await self.prometheus_collector.collect()
             # If Prometheus did not return any node instance types, attempt a
             # kube-api fallback via NodeCollector to obtain instance types.
             node_types = getattr(prom_metrics, "node_instance_types", None)
             if not node_types:
                 try:
-                    node_instances = self.node_collector.collect_instance_types()
+                    node_instances = await self.node_collector.collect_instance_types()
                     # Ensure prom_metrics has a mutable list to append into
                     if getattr(prom_metrics, "node_instance_types", None) is None:
                         try:
@@ -197,7 +197,7 @@ class DataProcessor:
             # Prometheus reports extremely low node CPU usage (which can make
             # energy attribution unstable).
             try:
-                pod_metrics = self.pod_collector.collect()
+                pod_metrics = await self.pod_collector.collect()
                 # Build a simple map (namespace,pod) -> requested cores
                 pod_request_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
             except Exception:
@@ -256,11 +256,11 @@ class DataProcessor:
         # Precompute node -> Electricity Maps zone mapping once to avoid repeated
         # translations/prints during per-pod processing.
         try:
-            nodes_info = self.node_collector.collect() or {}
+            nodes_info = await self.node_collector.collect() or {}
         except Exception:
             nodes_info = {}
 
-        node_contexts = self._get_node_emaps_map(nodes_info)
+        node_contexts = await self._get_node_emaps_map(nodes_info)
 
         # Group energy metrics by emaps_zone so we can prefetch intensity once
         # per zone and populate the calculator cache for all timestamps of
@@ -299,18 +299,20 @@ class DataProcessor:
             rep_dt_utc = rep_normalized_dt.astimezone(timezone.utc).replace(microsecond=0)
             rep_normalized_plus = rep_dt_utc.isoformat()
             try:
-                intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
+                intensity = await self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
                 if intensity is None:
                     # TICKET-007: Attempt live fetch if DB misses
                     logger.info(
                         "Intensity missing for zone %s at %s. Attempting live fetch.", zone, rep_normalized_plus
                     )
-                    history = self.electricity_maps_collector.collect(zone=zone, target_datetime=rep_normalized_dt)
+                    history = await self.electricity_maps_collector.collect(
+                        zone=zone, target_datetime=rep_normalized_dt
+                    )
                     if history:
-                        self.repository.save_history(history, zone)
+                        await self.repository.save_history(history, zone)
 
                     # Retry fetch from DB
-                    intensity = self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
+                    intensity = await self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
                 logger.info(
                     "Prefetched intensity for zone '%s' at '%s' (present=%s)",
                     zone,
@@ -359,7 +361,7 @@ class DataProcessor:
 
         # 3. Collect Cost Data from OpenCost
         try:
-            cost_metrics = self.opencost_collector.collect()
+            cost_metrics = await self.opencost_collector.collect()
             logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
             cost_map = {metric.pod_name: metric for metric in cost_metrics if metric.pod_name}
         except Exception as e:
@@ -368,7 +370,7 @@ class DataProcessor:
 
         # 4. Collect Pod Request Data from K8s API
         try:
-            pod_metrics = self.pod_collector.collect()
+            pod_metrics = await self.pod_collector.collect()
             logger.info("Successfully collected %d pod request metrics.", len(pod_metrics))
 
             # Aggregate container requests up to the pod level
@@ -386,7 +388,7 @@ class DataProcessor:
         # node_instance_map and node_cloud_zone_map are already collected above.
         if not node_instance_map:
             try:
-                node_instance_map = self.node_collector.collect_instance_types() or {}
+                node_instance_map = await self.node_collector.collect_instance_types() or {}
             except Exception:
                 node_instance_map = {}
 
@@ -455,7 +457,7 @@ class DataProcessor:
 
             # Calculate Carbon Emissions
             try:
-                carbon_result = self.calculator.calculate_emissions(
+                carbon_result = await self.calculator.calculate_emissions(
                     joules=energy_metric.joules,
                     zone=emaps_zone,
                     timestamp=energy_metric.timestamp,
@@ -501,7 +503,7 @@ class DataProcessor:
         self.calculator.clear_cache()
         return combined_metrics
 
-    def run_range(
+    async def run_range(
         self,
         start,
         end,
@@ -530,7 +532,7 @@ class DataProcessor:
                 end_dt = end
 
             if start_dt and end_dt:
-                stored_metrics = self.repository.read_combined_metrics(start_dt, end_dt)
+                stored_metrics = await self.repository.read_combined_metrics(start_dt, end_dt)
                 if stored_metrics:
                     logger.info(
                         "Found %d stored metrics in repository for range %s - %s",
@@ -573,7 +575,7 @@ class DataProcessor:
         rate_window = f"{chosen_step_sec}s"
         primary_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,container,node)"
         try:
-            results = self.prometheus_collector.collect_range(
+            results = await self.prometheus_collector.collect_range(
                 start=start, end=end, step=chosen_step, query=primary_query
             )
         except Exception:
@@ -583,7 +585,7 @@ class DataProcessor:
             )
             try:
                 fallback_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,node)"
-                results = self.prometheus_collector.collect_range(
+                results = await self.prometheus_collector.collect_range(
                     start=start, end=end, step=chosen_step, query=fallback_query
                 )
             except Exception:
@@ -625,9 +627,9 @@ class DataProcessor:
 
         # --- Historical Node Data Logic ---
         # 1. Fetch initial state (latest snapshot before start)
-        initial_snapshots = node_repository.get_latest_snapshots_before(start_dt)
+        initial_snapshots = await node_repository.get_latest_snapshots_before(start_dt)
         # 2. Fetch changes during the interval
-        snapshot_changes = node_repository.get_snapshots(start_dt, end_dt)
+        snapshot_changes = await node_repository.get_snapshots(start_dt, end_dt)
 
         # Build a timeline of node configurations
         # node_timeline[node_name] = [(timestamp, NodeInfo), ...]
@@ -681,7 +683,7 @@ class DataProcessor:
 
         # Fallback to current state if no history
         try:
-            current_node_map = node_collector.collect_instance_types() or {}
+            current_node_map = await node_collector.collect_instance_types() or {}
         except Exception:
             current_node_map = {}
 
@@ -720,7 +722,7 @@ class DataProcessor:
 
         # pod request maps
         try:
-            pod_metrics_list = pod_collector.collect()
+            pod_metrics_list = await pod_collector.collect()
             # Aggregate by (namespace, pod_name)
             pod_request_map_agg = defaultdict(int)
             pod_mem_map_agg = defaultdict(int)
@@ -769,7 +771,7 @@ class DataProcessor:
                     all_energy_metrics.append(m)
 
         # Prefetch intensities per zone/hour and populate calculator cache
-        node_contexts = self._get_node_emaps_map()
+        node_contexts = await self._get_node_emaps_map()
 
         zone_to_metrics = defaultdict(list)
         skipped_carbon = 0
@@ -790,7 +792,7 @@ class DataProcessor:
                 cache_key_z = (zone, key_z)
                 if cache_key_plus not in calculator._intensity_cache and cache_key_z not in calculator._intensity_cache:
                     try:
-                        intensity = repository.get_for_zone_at_time(zone, key_plus)
+                        intensity = await repository.get_for_zone_at_time(zone, key_plus)
                     except Exception:
                         intensity = None
                     calculator._intensity_cache[cache_key_plus] = intensity
@@ -799,14 +801,14 @@ class DataProcessor:
         # now build CombinedMetric list using calculator
         combined: List[CombinedMetric] = []
         try:
-            cost_metrics = self.opencost_collector.collect()
+            cost_metrics = await self.opencost_collector.collect()
             cost_map = {c.pod_name: c for c in cost_metrics}
         except Exception:
             cost_map = {}
 
         # Get cloud zones and instance types for metadata
         try:
-            nodes_info = self.node_collector.collect() or {}
+            nodes_info = await self.node_collector.collect() or {}
         except Exception:
             nodes_info = {}
 
@@ -819,7 +821,7 @@ class DataProcessor:
             node_context = node_contexts.get(node_name)
             zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
             try:
-                carbon_result = calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
+                carbon_result = await calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
             except Exception:
                 carbon_result = None
             if carbon_result is None:

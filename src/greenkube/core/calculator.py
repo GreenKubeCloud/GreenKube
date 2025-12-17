@@ -57,7 +57,7 @@ class CarbonCalculator:
         with self._lock:
             self._intensity_cache.clear()
 
-    def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
+    async def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 
         If intensity is missing in the repository, the configured default is used.
@@ -83,18 +83,6 @@ class CarbonCalculator:
         if grid_intensity_data is None and (
             cache_key not in self._intensity_cache if hasattr(self, "_intensity_cache") else True
         ):
-            # Double-check locking pattern or just fetch.
-            # Fetching twice is better than blocking.
-            # But wait, if we fetch, we want to store.
-            # Let's fetch then lock to store.
-
-            # Optimization: check again under lock if another thread fetched it?
-            # For simplicity, just fetch.
-
-            # Actually, the original code did:
-            # if cache_key in self._intensity_cache: ... else: fetch; store
-
-            # To match that safely:
             fetched = False
             with self._lock:
                 if cache_key in self._intensity_cache:
@@ -102,7 +90,7 @@ class CarbonCalculator:
                     fetched = True
 
             if not fetched:
-                grid_intensity_data = self.repository.get_for_zone_at_time(zone, normalized)
+                grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
                 with self._lock:
                     self._intensity_cache[cache_key] = grid_intensity_data
 
