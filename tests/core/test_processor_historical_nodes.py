@@ -1,17 +1,20 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from greenkube.core.processor import DataProcessor
 from greenkube.models.node import NodeInfo
 
 
-def test_run_range_uses_old_snapshot():
+@pytest.mark.asyncio
+async def test_run_range_uses_old_snapshot():
     """
     Verifies that run_range uses historical snapshots even if they are old.
     """
     # Arrange
     mock_repo = MagicMock()
-    mock_repo.read_combined_metrics.return_value = []
+    mock_repo.read_combined_metrics = AsyncMock(return_value=[])
     mock_node_repo = MagicMock()
 
     # Setup an old snapshot
@@ -30,17 +33,19 @@ def test_run_range_uses_old_snapshot():
     )
 
     # Mock get_latest_snapshots_before to return the old snapshot
-    mock_node_repo.get_latest_snapshots_before.return_value = [node_info]
-    mock_node_repo.get_snapshots.return_value = []  # No changes during the interval
+    mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[node_info])
+    mock_node_repo.get_snapshots = AsyncMock(return_value=[])  # No changes during the interval
 
     # Mock Prometheus collector to return usage for a pod on this node
     mock_prom = MagicMock()
-    mock_prom.collect_range.return_value = [
-        {
-            "metric": {"namespace": "default", "pod": "test-pod", "node": "node-1"},
-            "values": [(datetime.now(timezone.utc).timestamp(), "0.5")],
-        }
-    ]
+    mock_prom.collect_range = AsyncMock(
+        return_value=[
+            {
+                "metric": {"namespace": "default", "pod": "test-pod", "node": "node-1"},
+                "values": [(datetime.now(timezone.utc).timestamp(), "0.5")],
+            }
+        ]
+    )
 
     # Mock estimator to return a profile
     mock_estimator = MagicMock()
@@ -57,22 +62,22 @@ def test_run_range_uses_old_snapshot():
 
     # Mock calculator
     mock_calculator = MagicMock()
-    mock_calculator.calculate_emissions.return_value = MagicMock(
-        co2e_grams=50, grid_intensity=500, grid_intensity_timestamp=datetime.now(timezone.utc)
+    mock_calculator.calculate_emissions = AsyncMock(
+        return_value=MagicMock(co2e_grams=50, grid_intensity=500, grid_intensity_timestamp=datetime.now(timezone.utc))
     )
     mock_calculator.pue = 1.2
     mock_calculator._intensity_cache = {}
 
     mock_node_collector = MagicMock()
-    mock_node_collector.collect.return_value = {}
-    mock_node_collector.collect_instance_types.return_value = {"node-1": "current-type"}
+    mock_node_collector.collect = AsyncMock(return_value={})
+    mock_node_collector.collect_instance_types = AsyncMock(return_value={"node-1": "current-type"})
 
     processor = DataProcessor(
         prometheus_collector=mock_prom,
-        opencost_collector=MagicMock(),
+        opencost_collector=MagicMock(collect=AsyncMock()),
         node_collector=mock_node_collector,
-        pod_collector=MagicMock(),
-        electricity_maps_collector=MagicMock(),
+        pod_collector=MagicMock(collect=AsyncMock()),
+        electricity_maps_collector=MagicMock(collect=AsyncMock()),
         repository=mock_repo,
         node_repository=mock_node_repo,
         calculator=mock_calculator,
@@ -83,7 +88,7 @@ def test_run_range_uses_old_snapshot():
     end = datetime.now(timezone.utc)
 
     # Act
-    metrics = processor.run_range(start, end)
+    metrics = await processor.run_range(start, end)
 
     # Assert
     assert len(metrics) == 1

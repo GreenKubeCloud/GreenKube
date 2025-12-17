@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+import pytest
+
 from greenkube.core.config import config
 from greenkube.core.processor import DataProcessor
 from greenkube.models.node import NodeInfo
 
 
-def test_pue_and_zone_fallback():
+@pytest.mark.asyncio
+async def test_pue_and_zone_fallback():
     # Arrange
     mock_repo = MagicMock()
     mock_node_repo = MagicMock()
@@ -50,7 +53,7 @@ def test_pue_and_zone_fallback():
     )
 
     # Act - Test Zone Mapping Logic directly via private method
-    node_contexts = processor._get_node_emaps_map({"node-1": node_info})
+    node_contexts = await processor._get_node_emaps_map({"node-1": node_info})
 
     # Assert - Zone Mapping
     # us-east-1 should map to US-MISO-RTO or similar depending on mapping file,
