@@ -46,7 +46,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-    "requests-mock",
+    "respx",
+    "pytest-asyncio",
     "pytest>=7.0",
     "pytest-mock",
 ]
@@ -71,6 +72,7 @@ addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
+asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 where = ["src"]
