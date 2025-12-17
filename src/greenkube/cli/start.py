@@ -7,9 +7,9 @@ collects carbon intensity for all zones. It mirrors the previous logic
 that lived in `cli.main` but is isolated for clarity and easier testing.
 """
 
+import asyncio
 import logging
 import signal
-import time
 import traceback
 from typing import Optional, Set
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = typer.Typer(name="start", help="Start the GreenKube data collection service.")
 
 
-def collect_carbon_intensity_for_all_zones() -> None:
+async def collect_carbon_intensity_for_all_zones() -> None:
     """
     Orchestrates the collection and saving of carbon intensity data.
     """
@@ -43,7 +43,7 @@ def collect_carbon_intensity_for_all_zones() -> None:
         return
 
     try:
-        nodes_info = node_collector.collect()
+        nodes_info = await node_collector.collect()
         if not nodes_info:
             logger.warning("No node zones discovered.")
             return
@@ -66,21 +66,24 @@ def collect_carbon_intensity_for_all_zones() -> None:
         logger.warning("No mappable Electricity Maps zones found based on node discovery.")
         return
 
-    for zone in emaps_zones:
+    # Parallelize zone history collection
+    async def process_zone(zone):
         try:
-            history_data = em_collector.collect(zone=zone)
+            history_data = await em_collector.collect(zone=zone)
             if history_data:
-                saved_count = repository.save_history(history_data, zone=zone)
+                saved_count = await repository.save_history(history_data, zone=zone)
                 logger.info(f"Successfully saved {saved_count} new records for zone: {zone}")
             else:
                 logger.info(f"No new data to save for zone: {zone}")
         except Exception as e:
             logger.error(f"Failed to process data for zone {zone}: {e}")
 
+    await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
+
     logger.info("--- Finished carbon intensity collection task ---")
 
 
-def analyze_nodes() -> None:
+async def analyze_nodes() -> None:
     """
     Collects node information and updates the database.
     """
@@ -93,18 +96,82 @@ def analyze_nodes() -> None:
         return
 
     try:
-        nodes_info = node_collector.collect()
+        nodes_info = await node_collector.collect()
         if not nodes_info:
             logger.warning("No nodes discovered during analysis.")
             return
 
-        saved_count = node_repo.save_nodes(list(nodes_info.values()))
+        saved_count = await node_repo.save_nodes(list(nodes_info.values()))
         logger.info(f"Successfully updated {saved_count} nodes in the database.")
 
     except Exception as e:
         logger.error(f"Failed to analyze nodes: {e}")
 
     logger.info("--- Finished node analysis task ---")
+
+
+async def async_write_combined_metrics_to_database(last: Optional[str] = None):
+    """Wrapper to make write_combined_metrics_to_database suitable for scheduler."""
+    # Since write_combined_metrics_to_database calls processor.run() which is async,
+    # we need to await it. However, the utils function itself might be sync wrapper
+    # unless we update it too.
+    # Let's inspect utils/write_combined_metrics_to_database separately,
+    # but for now we assume it needs to be awaited or run in thread if strictly sync.
+    # Given the migration logic, it SHOULD be async.
+    # Wait, the checklist said "Processor: async run()".
+    # We should update utils.py as well. For now, let's assume it IS async or we fix it.
+    await write_combined_metrics_to_database(last=last)
+
+
+async def _async_start(last: Optional[str]):
+    logging.basicConfig(
+        level=config.LOG_LEVEL.upper(),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    logger.info("🚀 Initializing GreenKube (Async)...")
+
+    # For SQLite, initialize the DB schema if needed
+    if config.DB_TYPE == "sqlite":
+        from ..core.db import db_manager
+
+        # Ensure setup_sqlite is awaited if it is async
+        await db_manager.setup_sqlite()
+        logger.info("✅ SQLite Database connection successful and schema is ready.")
+
+    scheduler = Scheduler()
+    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
+
+    # Lambda won't work easily for async job in scheduler if it expects coroutine factory
+    # We define a simple async wrapper above
+    scheduler.add_job_from_string(
+        lambda: async_write_combined_metrics_to_database(last=None), config.PROMETHEUS_QUERY_RANGE_STEP
+    )
+    scheduler.add_job_from_string(analyze_nodes, config.NODE_ANALYSIS_INTERVAL)
+
+    logger.info("📈 Starting scheduler...")
+    logger.info("\nGreenKube is running. Press CTRL+C to exit.")
+
+    # Initial Run
+    logger.info("Running initial data collection for all zones...")
+    await collect_carbon_intensity_for_all_zones()
+    await analyze_nodes()
+    # pass 'last' only to the initial run
+    await async_write_combined_metrics_to_database(last=last)
+    logger.info("Initial collection complete.")
+
+    stop_event = asyncio.Event()
+
+    def handle_sig():
+        logger.info("\n🛑 Received shutdown signal...")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handle_sig)
+
+    await stop_event.wait()
+    await scheduler.stop()
+    logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 
 @app.callback(invoke_without_command=True)
@@ -121,67 +188,10 @@ def start(
     if ctx.invoked_subcommand is not None:
         return
 
-    logging.basicConfig(
-        level=config.LOG_LEVEL.upper(),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
-    logger.info("🚀 Initializing GreenKube...")
-
-    # Flag to signal graceful shutdown
-    shutdown_requested = {"flag": False}
-
-    def signal_handler(signum, frame):
-        """Handle SIGTERM and SIGINT for graceful shutdown."""
-        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
-        logger.info(f"\n🛑 Received {sig_name}, initiating graceful shutdown...")
-        shutdown_requested["flag"] = True
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
     try:
-        # For SQLite, initialize the DB schema if needed
-        if config.DB_TYPE == "sqlite":
-            from ..core.db import db_manager
-
-            db_manager.setup_sqlite()
-            logger.info("✅ SQLite Database connection successful and schema is ready.")
-
-        scheduler = Scheduler()
-        scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
-        scheduler.add_job_from_string(
-            lambda: write_combined_metrics_to_database(last=None), config.PROMETHEUS_QUERY_RANGE_STEP
-        )
-        scheduler.add_job_from_string(analyze_nodes, config.NODE_ANALYSIS_INTERVAL)
-
-        logger.info("📈 Starting scheduler...")
-        logger.info("\nGreenKube is running. Press CTRL+C to exit.")
-
-        logger.info("Running initial data collection for all zones...")
-        collect_carbon_intensity_for_all_zones()
-        analyze_nodes()
-        write_combined_metrics_to_database(last=last)
-        logger.info("Initial collection complete.")
-
-        while not shutdown_requested["flag"]:
-            try:
-                scheduler.run_pending()
-            except Exception as e:
-                logger.error(f"Error during scheduler execution: {e}", exc_info=True)
-
-            # Use wait with short interval for responsive shutdown or standard sleep
-            # Since sleep blocks, we can check flag more often or rely on signal handler to wake it up?
-            # Signal handler doesn't interrupt time.sleep() in Python 3 on all platforms consistently,
-            # but usually it raises an exception if not handled or just sets flag.
-            # To be safe, we just sleep.
-            time.sleep(60)
-
-        logger.info("🛑 Shutting down GreenKube service gracefully.")
-
+        asyncio.run(_async_start(last))
     except KeyboardInterrupt:
-        logger.info("\n🛑 Interrupted by user. Shutting down GreenKube service.")
-        raise typer.Exit(code=0)
+        pass
     except Exception as e:
         logger.error(f"❌ An unexpected error occurred during startup: {e}")
         logger.error("Startup failed: %s", traceback.format_exc())

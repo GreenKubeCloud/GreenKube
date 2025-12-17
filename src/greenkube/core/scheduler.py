@@ -1,52 +1,71 @@
-# src/greenkube/core/scheduler.py
-
+import asyncio
 import logging
 import re
-from typing import Callable
-
-import schedule
+from typing import Callable, Coroutine, List
 
 logger = logging.getLogger(__name__)
 
 
 class Scheduler:
     """
-    Manages the scheduling and execution of periodic tasks, such as data collection.
+    Manages the scheduling and execution of periodic async tasks using asyncio.
     """
 
     def __init__(self):
-        logger.info("Scheduler initialized.")
+        self.tasks: List[asyncio.Task] = []
+        logger.info("AsyncScheduler initialized.")
 
-    def add_job(self, job_func: Callable, interval_hours: int = 0, interval_minutes: int = 0):
-        """
-        Adds a new job to the schedule.
+    async def _run_periodically(self, interval_seconds: int, job_func: Callable[[], Coroutine]):
+        """Internal loop to run a job periodically."""
+        try:
+            while True:
+                try:
+                    await job_func()
+                except Exception as e:
+                    logger.error(f"Error in scheduled job '{job_func.__name__}': {e}", exc_info=True)
 
-        Args:
-            job_func (Callable): The function to be executed.
-            interval_hours (int): The interval in hours at which to run the job.
-            interval_minutes (int): The interval in minutes at which to run the job.
+                await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info(f"Job '{job_func.__name__}' cancelled.")
+            raise
+
+    def add_job(self, job_func: Callable[[], Coroutine], interval_hours: int = 0, interval_minutes: int = 0):
         """
+        Adds a new async job to the schedule.
+        """
+        interval_seconds = 0
         if interval_hours > 0:
-            schedule.every(interval_hours).hours.do(job_func)
+            interval_seconds = interval_hours * 3600
             logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_hours} hour(s).")
         elif interval_minutes > 0:
-            schedule.every(interval_minutes).minutes.do(job_func)
+            interval_seconds = interval_minutes * 60
             logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_minutes} minute(s).")
 
-    def add_job_from_string(self, job_func: Callable, interval_str: str):
-        """Adds a job based on a Prometheus-style duration string like '5m' or '1h'."""
+        if interval_seconds > 0:
+            task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
+            self.tasks.append(task)
+
+    def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str):
+        """
+        Adds a job based on a Prometheus-style duration string like '5m' or '1h'.
+        """
         match = re.match(r"^(\d+)([smh])$", interval_str.lower())
         if not match:
             raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
 
         value, unit = int(match.group(1)), match.group(2)
-        job = schedule.every(value)
-        getattr(job, {"s": "seconds", "m": "minutes", "h": "hours"}[unit]).do(job_func)
+        multipliers = {"s": 1, "m": 60, "h": 3600}
+        interval_seconds = value * multipliers[unit]
+
+        task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
+        self.tasks.append(task)
         logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_str}.")
 
-    def run_pending(self):
-        """
-        Runs all jobs that are scheduled to run.
-        This method should be called in a loop.
-        """
-        schedule.run_pending()
+    async def stop(self):
+        """Cancels all scheduled tasks."""
+        logger.info("Stopping scheduler...")
+        for task in self.tasks:
+            task.cancel()
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks.clear()
