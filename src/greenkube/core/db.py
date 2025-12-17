@@ -1,5 +1,6 @@
 # src/greenkube/core/db.py
 
+import asyncio
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ class DatabaseManager:
     def __init__(self):
         self.connection = None
         self.pool = None
+        self._lock = asyncio.Lock()
 
     @property
     def db_type(self):
@@ -29,34 +31,38 @@ class DatabaseManager:
         """
         Establishes a connection to the configured database.
         """
-        try:
-            if self.db_type == "sqlite":
-                self.connection = await aiosqlite.connect(config.DB_PATH)
-                self.connection.row_factory = aiosqlite.Row
-                logger.info("Successfully connected to SQLite database.")
-                await self.setup_sqlite()
-            elif self.db_type == "postgres":
-                try:
-                    self.pool = await asyncpg.create_pool(
-                        dsn=config.DB_CONNECTION_STRING,
-                        min_size=1,
-                        max_size=10,
-                        server_settings={"search_path": config.DB_SCHEMA},
-                    )
-                    logger.info("Successfully initialized PostgreSQL connection pool.")
-                    await self.setup_postgres()
-                except Exception as e:
-                    logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
-                    raise
-            elif self.db_type == "elasticsearch":
-                # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
-                logger.info("DB_TYPE is 'elasticsearch'. Connection will be managed by the specific repository.")
-                self.connection = None
-            else:
-                raise ValueError("Unsupported database type specified in config.")
-        except Exception as e:
-            logger.error(f"Could not connect to the database: {e}")
-            raise
+        async with self._lock:
+            if self.connection or self.pool:
+                return
+
+            try:
+                if self.db_type == "sqlite":
+                    self.connection = await aiosqlite.connect(config.DB_PATH)
+                    self.connection.row_factory = aiosqlite.Row
+                    logger.info("Successfully connected to SQLite database.")
+                    await self.setup_sqlite()
+                elif self.db_type == "postgres":
+                    try:
+                        self.pool = await asyncpg.create_pool(
+                            dsn=config.DB_CONNECTION_STRING,
+                            min_size=1,
+                            max_size=10,
+                            server_settings={"search_path": config.DB_SCHEMA},
+                        )
+                        logger.info("Successfully initialized PostgreSQL connection pool.")
+                        await self.setup_postgres()
+                    except Exception as e:
+                        logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
+                        raise
+                elif self.db_type == "elasticsearch":
+                    # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
+                    logger.info("DB_TYPE is 'elasticsearch'. Connection will be managed by the specific repository.")
+                    self.connection = None
+                else:
+                    raise ValueError("Unsupported database type specified in config.")
+            except Exception as e:
+                logger.error(f"Could not connect to the database: {e}")
+                raise
 
     @asynccontextmanager
     async def connection_scope(self):
@@ -83,17 +89,18 @@ class DatabaseManager:
                 await self.connect()
             return
 
-        if self.connection is None:
-            await self.connect()
-            return
+        # Fast check without lock first
+        if self.connection is not None:
+            # Verify connection is alive
+            try:
+                async with self.connection.execute("SELECT 1") as cursor:
+                    await cursor.fetchone()
+                return
+            except Exception:
+                logger.warning("SQLite connection was closed or invalid. Reconnecting.")
 
-        # Verify connection is alive
-        try:
-            async with self.connection.execute("SELECT 1") as cursor:
-                await cursor.fetchone()
-        except Exception:
-            logger.warning("SQLite connection was closed or invalid. Reconnecting.")
-            await self.connect()
+        # Reconnect with lock
+        await self.connect()
 
     async def close(self):
         if self.pool:
