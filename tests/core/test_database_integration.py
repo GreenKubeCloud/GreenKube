@@ -1,7 +1,7 @@
 # tests/core/test_database_integration.py
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,18 +13,20 @@ from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 # Fixture to initialize and clean up the SQLite database
 @pytest.fixture
-def sqlite_repo():
-    db_manager.setup_sqlite(db_path=":memory:")
+async def sqlite_repo():
+    await db_manager.setup_sqlite(db_path=":memory:")
     repo = SQLiteCarbonIntensityRepository(db_manager)
     yield repo
-    db_manager.close()
+    await db_manager.close()
 
 
 # Fixture to initialize and clean up the Elasticsearch database
 @pytest.fixture
 def elasticsearch_repo():
     repo = MagicMock(spec=ElasticsearchCarbonIntensityRepository)
-    repo.write_combined_metrics.return_value = 2
+    repo.write_combined_metrics = AsyncMock(return_value=2)
+    # read_combined_metrics needs to be awaitable
+    repo.read_combined_metrics = AsyncMock()
     repo.read_combined_metrics.return_value = [
         CombinedMetric(
             pod_name="pod-1",
@@ -46,7 +48,8 @@ def elasticsearch_repo():
     yield repo
 
 
-def test_write_and_read_combined_metrics_sqlite(sqlite_repo):
+@pytest.mark.asyncio
+async def test_write_and_read_combined_metrics_sqlite(sqlite_repo):
     """
     Tests writing and reading of combined metrics to and from the SQLite database.
     """
@@ -71,8 +74,8 @@ def test_write_and_read_combined_metrics_sqlite(sqlite_repo):
         ),
     ]
 
-    repo.write_combined_metrics(metrics)
-    read_metrics = repo.read_combined_metrics(
+    await repo.write_combined_metrics(metrics)
+    read_metrics = await repo.read_combined_metrics(
         start_time=timestamp - timedelta(minutes=1),
         end_time=timestamp + timedelta(minutes=1),
     )
@@ -82,7 +85,8 @@ def test_write_and_read_combined_metrics_sqlite(sqlite_repo):
     assert read_metrics[1].pod_name == "pod-2"
 
 
-def test_write_and_read_combined_metrics_elasticsearch(elasticsearch_repo):
+@pytest.mark.asyncio
+async def test_write_and_read_combined_metrics_elasticsearch(elasticsearch_repo):
     """
     Tests writing and reading of combined metrics to and from the Elasticsearch database.
     """
@@ -107,8 +111,8 @@ def test_write_and_read_combined_metrics_elasticsearch(elasticsearch_repo):
         ),
     ]
 
-    repo.write_combined_metrics(metrics)
-    read_metrics = repo.read_combined_metrics(
+    await repo.write_combined_metrics(metrics)
+    read_metrics = await repo.read_combined_metrics(
         start_time=timestamp - timedelta(minutes=1),
         end_time=timestamp + timedelta(minutes=1),
     )

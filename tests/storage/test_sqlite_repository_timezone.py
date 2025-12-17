@@ -1,17 +1,17 @@
-import sqlite3
-import unittest
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
+
+import aiosqlite
+import pytest
 
 from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
 
 
-class TestSQLiteRepositoryTimezone(unittest.TestCase):
-    def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.cursor = self.conn.cursor()
-        # Create table
-        self.cursor.execute("""
+@pytest.fixture
+async def db_connection():
+    # Setup in-memory DB with schema
+    async with aiosqlite.connect(":memory:") as conn:
+        await conn.execute("""
             CREATE TABLE carbon_intensity_history (
                 zone TEXT,
                 carbon_intensity REAL,
@@ -24,31 +24,38 @@ class TestSQLiteRepositoryTimezone(unittest.TestCase):
                 PRIMARY KEY (zone, datetime)
             )
         """)
-        self.db_manager = MagicMock()
+        await conn.commit()
+        yield conn
 
-        @contextmanager
-        def scope():
-            yield self.conn
 
-        self.db_manager.connection_scope = scope
-        self.repo = SQLiteCarbonIntensityRepository(self.db_manager)
+@pytest.mark.asyncio
+async def test_save_history_normalizes_timezone(db_connection):
+    # Arrange
+    db_manager = MagicMock()
 
-    def test_save_history_normalizes_timezone(self):
-        # Arrange
-        # Mixed formats: Z and +00:00
-        data = [
-            {"datetime": "2023-10-23T10:00:00Z", "carbonIntensity": 100},
-            {"datetime": "2023-10-23T11:00:00+00:00", "carbonIntensity": 110},
-        ]
+    @asynccontextmanager
+    async def scope():
+        yield db_connection
 
-        # Act
-        self.repo.save_history(data, "FR")
+    db_manager.connection_scope = scope
+    repo = SQLiteCarbonIntensityRepository(db_manager)
 
-        # Assert
-        self.cursor.execute("SELECT datetime FROM carbon_intensity_history ORDER BY datetime")
-        rows = self.cursor.fetchall()
+    # Mixed formats: Z and +00:00
+    data = [
+        {"datetime": "2023-10-23T10:00:00Z", "carbonIntensity": 100},
+        {"datetime": "2023-10-23T11:00:00+00:00", "carbonIntensity": 110},
+    ]
 
-        # Both should end with Z
-        # Currently, the second one will be stored as +00:00
-        self.assertEqual(rows[0][0], "2023-10-23T10:00:00Z")
-        self.assertEqual(rows[1][0], "2023-10-23T11:00:00Z")
+    # Act
+    await repo.save_history(data, "FR")
+
+    # Assert
+    async with db_connection.execute("SELECT datetime FROM carbon_intensity_history ORDER BY datetime") as cursor:
+        rows = await cursor.fetchall()
+
+        # Both should end with Z (normalized by repo)
+        # Verify the count first
+        assert len(rows) == 2
+
+        assert rows[0][0] == "2023-10-23T10:00:00Z"
+        assert rows[1][0] == "2023-10-23T11:00:00Z"
