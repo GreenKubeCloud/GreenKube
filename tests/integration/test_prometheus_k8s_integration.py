@@ -22,7 +22,8 @@ def dummy_config():
     return DummyConfig()
 
 
-def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
+@pytest.mark.asyncio
+async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     """Integration-like test: mock Prometheus HTTP responses and Kubernetes node labels."""
     # Mock PrometheusCollector._query_prometheus to return pod CPU metrics and no node labels
     sample_ts = datetime.now(timezone.utc).replace(minute=23, second=12, microsecond=0).isoformat()
@@ -46,20 +47,20 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
 
     # Patch the collector methods
     collector = PrometheusCollector(dummy_config)
-    monkeypatch.setattr(
-        collector,
-        "_query_prometheus",
-        lambda q: [pod_series] if "container_cpu_usage_seconds_total" in q else [],
-    )
+
+    async def mock_query_prometheus(client, q):
+        return [pod_series] if "container_cpu_usage_seconds_total" in q else []
+
+    monkeypatch.setattr(collector, "_query_prometheus", mock_query_prometheus)
 
     # Provide a dummy NodeCollector-like object so tests don't require a live cluster
     from greenkube.models.node import NodeInfo
 
     class DummyNodeCollector:
-        def collect_instance_types(self):
+        async def collect_instance_types(self):
             return {"node-1": "m5.large"}
 
-        def collect(self):
+        async def collect(self):
             return {
                 "node-1": NodeInfo(
                     name="node-1",
@@ -76,10 +77,13 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
 
     # Mock repository to return a known intensity for the normalized hour
     class DummyRepo:
-        def get_for_zone_at_time(self, zone, timestamp):
+        async def get_for_zone_at_time(self, zone, timestamp):
             # We expect timestamp normalized to the hour
             assert timestamp.endswith("00:00+00:00")
             return 120.0
+
+        async def save_history(self, history, zone):
+            pass
 
     repository = DummyRepo()
 
@@ -104,17 +108,19 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     est.estimate.return_value = [_energy_metric]
 
     # OpenCost and PodCollector mocks
+    from unittest.mock import AsyncMock
+
     opencost = MagicMock()
-    opencost.collect.return_value = []
+    opencost.collect = AsyncMock(return_value=[])
     pod_collector = MagicMock()
-    pod_collector.collect.return_value = []
+    pod_collector.collect = AsyncMock(return_value=[])
 
     dp = DataProcessor(
         prometheus_collector=collector,
         opencost_collector=opencost,
         node_collector=node_collector,
         pod_collector=pod_collector,
-        electricity_maps_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=repository,
         node_repository=MagicMock(),
         calculator=calc,
@@ -122,7 +128,7 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     )
 
     # Run the processing pipeline; we expect it to run without exceptions and produce 1 or 0 combined metrics
-    combined = dp.run()
+    combined = await dp.run()
 
     # Ensure a CombinedMetric was produced and contains expected intensity and co2e
     assert len(combined) >= 1, f"Expected at least 1 combined metric, got {len(combined)}"
@@ -135,7 +141,8 @@ def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     assert pytest.approx(cm.co2e_grams, rel=1e-6) == expected_co2e
 
 
-def test_normalization_day_and_none(monkeypatch, dummy_config):
+@pytest.mark.asyncio
+async def test_normalization_day_and_none(monkeypatch, dummy_config):
     """Test normalization granularity 'day' and 'none' behaviors."""
     from greenkube.core.config import config as core_config
 
@@ -152,7 +159,7 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
     )
 
     class DummyRepoDay:
-        def get_for_zone_at_time(self, zone, timestamp):
+        async def get_for_zone_at_time(self, zone, timestamp):
             # For 'day' we expect midnight normalization
             assert timestamp.endswith("00:00:00+00:00") or "T00:00:00" in timestamp
             return 200.0
@@ -168,12 +175,12 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
     )
     calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE)
     # Directly call calculate_emissions
-    res = calc_day.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
+    res = await calc_day.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res.grid_intensity == 200.0
 
     # None granularity (no normalization) should call repository with exact timestamp
     class DummyRepoNone:
-        def get_for_zone_at_time(self, zone, timestamp):
+        async def get_for_zone_at_time(self, zone, timestamp):
             # Expect same hour minute second as sample_dt
             assert timestamp.startswith(sample_dt.replace(tzinfo=timezone.utc).isoformat()[:13])
             return 250.0
@@ -185,5 +192,5 @@ def test_normalization_day_and_none(monkeypatch, dummy_config):
         raising=False,
     )
     calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE)
-    res2 = calc_none.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
+    res2 = await calc_none.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res2.grid_intensity == 250.0
