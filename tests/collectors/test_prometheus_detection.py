@@ -1,17 +1,17 @@
 # tests/collectors/test_prometheus_detection.py
 """
-Tests for Prometheus service detection (TDD first).
+Tests for Prometheus service detection.
 
 We expect PrometheusCollector to expose an `is_available()` method that
 returns True when Prometheus endpoints respond successfully, and False
 when no reachable endpoint is found or when no URL is configured.
 
-These tests mock HTTP responses and network errors.
+These tests mock HTTP responses and network errors using unittest.mock.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-import requests
-from requests_mock import ANY
 
 from greenkube.collectors.prometheus_collector import PrometheusCollector
 from greenkube.core.config import Config
@@ -25,44 +25,62 @@ def mock_config():
     return cfg
 
 
-def test_is_available_success(mock_config, requests_mock):
-    collector = PrometheusCollector(settings=mock_config)
+@pytest.mark.asyncio
+async def test_is_available_success(mock_config):
+    with patch(
+        "greenkube.collectors.prometheus_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_client.get.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
-    # Mock the primary candidate endpoint to return a successful response
-    # Use a simple 200 OK with JSON that indicates success
-    health_url = f"{collector.base_url.rstrip('/')}/api/v1/query"
-    requests_mock.get(health_url, json={"status": "success", "data": {"result": []}})
-
-    assert hasattr(collector, "is_available")
-    assert callable(getattr(collector, "is_available"))
-
-    assert collector.is_available() is True
+        collector = PrometheusCollector(settings=mock_config)
+        assert hasattr(collector, "is_available")
+        assert callable(getattr(collector, "is_available"))
+        assert await collector.is_available() is True
 
 
-def test_is_available_no_url_configured():
+@pytest.mark.asyncio
+async def test_is_available_no_url_configured():
     cfg = Config()
     cfg.PROMETHEUS_URL = None
     cfg.PROMETHEUS_QUERY_RANGE_STEP = "5m"
     collector = PrometheusCollector(settings=cfg)
-
     # With no base URL, is_available should return False
-    assert collector.is_available() is False
+    assert await collector.is_available() is False
 
 
-def test_is_available_connection_error(mock_config, requests_mock):
-    collector = PrometheusCollector(settings=mock_config)
+@pytest.mark.asyncio
+async def test_is_available_connection_error(mock_config):
+    with patch(
+        "greenkube.collectors.prometheus_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.get.side_effect = Exception("Connection refused")
+        mock_get_client.return_value = mock_client
 
-    # Make all requests raise a connection error
-    requests_mock.get(ANY, exc=requests.exceptions.ConnectionError("Connection refused"))
-
-    assert collector.is_available() is False
+        collector = PrometheusCollector(settings=mock_config)
+        assert await collector.is_available() is False
 
 
-def test_is_available_non_success_status(mock_config, requests_mock):
-    collector = PrometheusCollector(settings=mock_config)
+@pytest.mark.asyncio
+async def test_is_available_non_success_status(mock_config):
+    with patch(
+        "greenkube.collectors.prometheus_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json.return_value = {"status": "error"}
+        mock_response.raise_for_status.side_effect = Exception("HTTP Error")
+        mock_client.get.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
-    # Return non-success JSON payload
-    health_url = f"{collector.base_url.rstrip('/')}/api/v1/query"
-    requests_mock.get(health_url, status_code=500, json={"status": "error"})
-
-    assert collector.is_available() is False
+        collector = PrometheusCollector(settings=mock_config)
+        assert await collector.is_available() is False

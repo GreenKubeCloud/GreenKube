@@ -1,8 +1,11 @@
 # tests/collectors/test_electricity_maps_collector.py
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import requests
+import httpx
+import pytest
+import respx
+from httpx import Response
 
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 
@@ -16,9 +19,10 @@ MOCK_API_RESPONSE = {
 }
 
 
-@patch("greenkube.utils.http_client.requests.Session.get")
+@pytest.mark.asyncio
+@respx.mock
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_success(mock_config, mock_get):
+async def test_collect_success(mock_config):
     """
     Tests that the collector correctly calls the API and returns the data.
     """
@@ -26,38 +30,37 @@ def test_collect_success(mock_config, mock_get):
     # Simulate the presence of the API token
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = MOCK_API_RESPONSE
-    mock_get.return_value = mock_response
+    respx.get("https://api.electricitymaps.com/v3/carbon-intensity/history?zone=FR").mock(
+        return_value=Response(200, json=MOCK_API_RESPONSE)
+    )
 
     collector = ElectricityMapsCollector()
 
     # Act
-    result = collector.collect(zone="FR")
+    result = await collector.collect(zone="FR")
 
     # Assert
-    mock_get.assert_called_once_with(
-        "https://api.electricitymaps.com/v3/carbon-intensity/history?zone=FR",
-        headers={"auth-token": "test-token"},
-    )
     assert result == MOCK_API_RESPONSE["history"]
 
 
-@patch("greenkube.utils.http_client.requests.Session.get")
+@pytest.mark.asyncio
+@respx.mock
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_api_error_fallback(mock_config, mock_get):
+async def test_collect_api_error_fallback(mock_config):
     """
     Tests that the collector returns the default value in case of an API error.
     """
     # Arrange
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
-    mock_get.side_effect = requests.exceptions.RequestException("API Error")
+    respx.get("https://api.electricitymaps.com/v3/carbon-intensity/history?zone=FR").mock(
+        side_effect=httpx.HTTPError("API Error")
+    )
 
     collector = ElectricityMapsCollector()
 
     # Act
-    result = collector.collect(zone="FR")
+    # collect is async
+    result = await collector.collect(zone="FR")
 
     # Assert
     assert len(result) == 1
@@ -66,8 +69,9 @@ def test_collect_api_error_fallback(mock_config, mock_get):
     assert result[0]["isEstimated"] is True
 
 
+@pytest.mark.asyncio
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_no_token_fallback(mock_config):
+async def test_collect_no_token_fallback(mock_config):
     """
     Tests that the collector returns the default value if no token is configured.
     """
@@ -77,17 +81,19 @@ def test_collect_no_token_fallback(mock_config):
     collector = ElectricityMapsCollector()
 
     # Act
-    result = collector.collect(zone="FR")
+    result = await collector.collect(zone="FR")
 
     # Assert
     assert len(result) == 1
     assert result[0]["zone"] == "FR"
-    assert result[0]["carbonIntensity"] == 26  # Default for FR
+    # Note: 26 is the hardcoded default for FR in our default map or test setup
+    assert result[0]["carbonIntensity"] == 26
     assert result[0]["isEstimated"] is True
 
 
+@pytest.mark.asyncio
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_unknown_zone(mock_config):
+async def test_collect_unknown_zone(mock_config):
     """
     Tests that the collector returns an empty list for an unknown zone without a token.
     """
@@ -97,32 +103,29 @@ def test_collect_unknown_zone(mock_config):
     collector = ElectricityMapsCollector()
 
     # Act
-    result = collector.collect(zone="UNKNOWN_ZONE")
+    result = await collector.collect(zone="UNKNOWN_ZONE")
 
     # Assert
     assert result == []
 
 
-@patch("greenkube.utils.http_client.requests.Session.get")
+@pytest.mark.asyncio
+@respx.mock
 @patch("greenkube.collectors.electricity_maps_collector.config")
-def test_collect_timeout_handling(mock_config, mock_session_get):
+async def test_collect_timeout_handling(mock_config):
     """
-    Tests that the collector respects the timeout configuration (implicitly via session).
+    Tests that the collector requests are made properly (timeout handled by client factory).
     """
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
-    # We don't need to check the timeout arg explicitly if we rely on the session adapter,
-    # but we can verify the session call.
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = MOCK_API_RESPONSE
-    mock_session_get.return_value = mock_response
+    route = respx.get("https://api.electricitymaps.com/v3/carbon-intensity/history?zone=FR").mock(
+        return_value=Response(200, json=MOCK_API_RESPONSE)
+    )
 
     collector = ElectricityMapsCollector()
-    collector.collect(zone="FR")
+    await collector.collect(zone="FR")
 
-    # Verify get was called
-    mock_session_get.assert_called_once()
-    args, kwargs = mock_session_get.call_args
-    # Headers should be present
-    assert kwargs["headers"] == {"auth-token": "test-token"}
+    # Verify get was called with correct headers
+    assert route.called
+    request = route.calls.last.request
+    assert request.headers["auth-token"] == "test-token"

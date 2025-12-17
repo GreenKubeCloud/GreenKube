@@ -2,16 +2,16 @@
 """
 Tests for the PrometheusCollector using Test-Driven Development (TDD).
 
-We will mock all HTTP requests to the Prometheus API.
+We will mock all HTTP requests to the Prometheus API using respx.
 """
 
-import urllib.parse
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import httpx
 import pytest
-import requests
-from requests_mock import ANY
+import respx
+from httpx import Response
 
 from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
 from greenkube.collectors.prometheus_collector import PrometheusCollector
@@ -136,6 +136,7 @@ def mock_config():
     config = Config()
     config.PROMETHEUS_URL = "http://mock-prometheus:9090"
     config.PROMETHEUS_QUERY_RANGE_STEP = "5m"
+    config.PROMETHEUS_VERIFY_CERTS = True
     return config
 
 
@@ -148,21 +149,28 @@ def collector(mock_config):
 # --- Test Cases ---
 
 
-def test_collect_success(collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_success(collector):
     """
     Test the happy path: Prometheus is reachable and returns valid data.
     """
     mock_url = collector.base_url
-    # Note: the query has changed, requests_mock will find it dynamically
+
+    # Mock CPU query
     query_params_cpu = {"query": collector.cpu_usage_query}
-    url_cpu = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_cpu)}"
-    requests_mock.get(url_cpu, json=MOCK_CPU_USAGE_RESPONSE)
+    url_cpu_pattern = respx.get(f"{mock_url}/api/v1/query", params=query_params_cpu)
+    url_cpu_pattern.mock(return_value=Response(200, json=MOCK_CPU_USAGE_RESPONSE))
 
+    # Mock Node query
     query_params_node = {"query": collector.node_labels_query}
-    url_node = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_node)}"
-    requests_mock.get(url_node, json=MOCK_NODE_LABELS_RESPONSE)
+    url_node_pattern = respx.get(f"{mock_url}/api/v1/query", params=query_params_node)
+    url_node_pattern.mock(return_value=Response(200, json=MOCK_NODE_LABELS_RESPONSE))
 
-    result = collector.collect()
+    # Use a pattern that matches regardless of param order if above specific params fail
+    # But respx handles params matching well.
+
+    result = await collector.collect()
 
     assert isinstance(result, PrometheusMetric)
 
@@ -186,8 +194,10 @@ def test_collect_success(collector, requests_mock):
     assert result.node_instance_types[1].instance_type == "t3.medium"
 
 
+@pytest.mark.asyncio
+@respx.mock
 @patch.object(PrometheusDiscovery, "discover")
-def test_collect_with_no_url_triggers_discovery(mock_discover, collector, requests_mock):
+async def test_collect_with_no_url_triggers_discovery(mock_discover, collector):
     """
     Test that collect() triggers discovery when PROMETHEUS_URL is not set.
     """
@@ -198,18 +208,15 @@ def test_collect_with_no_url_triggers_discovery(mock_discover, collector, reques
     discovered_url = "http://discovered-prometheus:9090"
     mock_discover.return_value = discovered_url
 
-    # 2. Mock the API calls to the *discovered* URL. The initial query with a
-    #    blank URL will fail, triggering discovery.
-    requests_mock.get(
-        f"{discovered_url}/api/v1/query",
-        [
-            {"json": MOCK_CPU_USAGE_RESPONSE},
-            {"json": MOCK_NODE_LABELS_RESPONSE},
-        ],
+    # 2. Mock the API calls to the *discovered* URL.
+    # Use generic matching for simplicity as we call query twice
+    respx.get(f"{discovered_url}/api/v1/query").mock(
+        side_effect=[Response(200, json=MOCK_CPU_USAGE_RESPONSE), Response(200, json=MOCK_NODE_LABELS_RESPONSE)]
     )
 
     # 3. Call collect - this should now succeed via discovery
-    result = collector.collect()
+    # Note: connect_timeout logic in async client might need attention if we rely on it
+    result = await collector.collect()
 
     # 4. Assertions
     mock_discover.assert_called_once()
@@ -218,13 +225,15 @@ def test_collect_with_no_url_triggers_discovery(mock_discover, collector, reques
     assert len(result.node_instance_types) == 2
 
 
-def test_collect_connection_error(collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_connection_error(collector):
     """
     Test behavior when Prometheus is unreachable.
     """
-    requests_mock.get(ANY, exc=requests.exceptions.ConnectionError("Connection refused"))
+    respx.get(f"{collector.base_url}/api/v1/query").mock(side_effect=httpx.ConnectError("Connection refused"))
 
-    result = collector.collect()
+    result = await collector.collect()
 
     # Should fail gracefully and return an empty data object
     assert isinstance(result, PrometheusMetric)
@@ -232,13 +241,17 @@ def test_collect_connection_error(collector, requests_mock):
     assert len(result.node_instance_types) == 0
 
 
-def test_collect_api_error(collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_api_error(collector):
     """
     Test behavior when Prometheus returns an HTTP 500 or other error.
     """
-    requests_mock.get(ANY, status_code=500, json={"status": "error", "error": "Internal error"})
+    respx.get(f"{collector.base_url}/api/v1/query").mock(
+        return_value=Response(500, json={"status": "error", "error": "Internal error"})
+    )
 
-    result = collector.collect()
+    result = await collector.collect()
 
     # Should fail gracefully and return an empty data object
     assert isinstance(result, PrometheusMetric)
@@ -246,13 +259,15 @@ def test_collect_api_error(collector, requests_mock):
     assert len(result.node_instance_types) == 0
 
 
-def test_collect_empty_results(collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_empty_results(collector):
     """
     Test behavior when Prometheus is reachable but returns no data.
     """
-    requests_mock.get(ANY, json=MOCK_EMPTY_RESPONSE)
+    respx.get(f"{collector.base_url}/api/v1/query").mock(return_value=Response(200, json=MOCK_EMPTY_RESPONSE))
 
-    result = collector.collect()
+    result = await collector.collect()
 
     # Should return an empty data object
     assert isinstance(result, PrometheusMetric)
@@ -264,7 +279,7 @@ def test_parsing_malformed_cpu_data(collector):
     """
     Test that malformed data is gracefully handled and returns None.
     """
-    # This mock data has a string for value, but it's not a float
+    # This logic is synchronous parsing, so no async needed
     malformed_cpu_data = {
         "metric": {"namespace": "n", "pod": "p", "container": "c", "node": "n1"},
         "value": [0, "not-a-float"],
@@ -312,7 +327,9 @@ def test_parsing_nan_value(collector):
     assert collector._parse_cpu_data(nan_data) is None
 
 
-def test_collect_ignores_non_pod_series(collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_ignores_non_pod_series(collector):
     """
     Ensure collect() ignores node-level/non-pod series and only returns pod-level entries.
     """
@@ -341,15 +358,15 @@ def test_collect_ignores_non_pod_series(collector, requests_mock):
     }
 
     query_params_cpu = {"query": collector.cpu_usage_query}
-    url_cpu = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_cpu)}"
-    requests_mock.get(url_cpu, json=mixed_result)
+    respx.get(f"{mock_url}/api/v1/query", params=query_params_cpu).mock(return_value=Response(200, json=mixed_result))
 
     # Node labels empty to avoid interfering
     query_params_node = {"query": collector.node_labels_query}
-    url_node = f"{mock_url}/api/v1/query?{urllib.parse.urlencode(query_params_node)}"
-    requests_mock.get(url_node, json=MOCK_EMPTY_RESPONSE)
+    respx.get(f"{mock_url}/api/v1/query", params=query_params_node).mock(
+        return_value=Response(200, json=MOCK_EMPTY_RESPONSE)
+    )
 
-    result = collector.collect()
+    result = await collector.collect()
     # Only one pod-level entry should be returned
     assert len(result.pod_cpu_usage) == 1
     assert result.pod_cpu_usage[0].pod == "p1"
@@ -377,8 +394,10 @@ def test_parse_pod_series_variants(collector):
     assert p2.container == ""
 
 
-@patch.object(PrometheusCollector, "is_available")
-def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collector, requests_mock):
+@pytest.mark.asyncio
+@respx.mock
+@patch.object(PrometheusCollector, "_discover_and_update_url")
+async def test_collect_range_with_no_url_triggers_discovery(mock_discover_and_update, collector):
     """
     Test that collect_range() triggers discovery when PROMETHEUS_URL is not set.
     """
@@ -386,22 +405,22 @@ def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collect
     collector.base_url = None
     discovered_url = "http://discovered-prometheus:9090"
 
-    def side_effect():
+    async def side_effect(client):
         collector.base_url = discovered_url
         return True
 
-    mock_is_available.side_effect = side_effect
+    mock_discover_and_update.side_effect = side_effect
 
     # Mock the API call to the discovered URL
-    # The query_range endpoint has a different structure for its query params
-    # We will use a matcher to catch the request regardless of the exact query params
-    requests_mock.get(f"{discovered_url}/api/v1/query_range", json=MOCK_CPU_RANGE_RESPONSE)
+    respx.get(f"{discovered_url}/api/v1/query_range").mock(return_value=Response(200, json=MOCK_CPU_RANGE_RESPONSE))
 
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=1)
-    result = collector.collect_range(start_time, end_time)
 
-    mock_is_available.assert_called_once()
+    # collect_range is async now too
+    result = await collector.collect_range(start_time, end_time)
+
+    mock_discover_and_update.assert_called_once()
     assert collector.base_url == discovered_url
     assert len(result) == 1
     assert result[0]["metric"]["pod"] == "api-1"
@@ -410,10 +429,6 @@ def test_collect_range_with_no_url_triggers_discovery(mock_is_available, collect
 def test_update_url_respects_config_verify_certs(mock_config):
     """
     Test that _update_url respects the Config default for PROMETHEUS_VERIFY_CERTS.
-
-    This is a security test to ensure that when auto-discovery updates the URL
-    to HTTPS, the verify setting respects the Config default (True) instead of
-    defaulting to False, which would expose connections to MITM attacks.
     """
     # Create a collector with the default config (PROMETHEUS_VERIFY_CERTS = True)
     mock_config.PROMETHEUS_VERIFY_CERTS = True

@@ -1,4 +1,4 @@
-# tests/collectors/test_discovery.py
+# tests/collectors/discovery/test_opencost_discovery.py
 """
 TDD tests for service discovery helpers.
 
@@ -8,6 +8,8 @@ existing in different namespaces.
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 from greenkube.collectors import discovery
 
@@ -29,35 +31,40 @@ def make_svc(name, namespace, ports, labels=None):
     return svc
 
 
-def test_discover_opencost_by_name_and_port(monkeypatch):
+@pytest.mark.asyncio
+async def test_discover_opencost_by_name_and_port(monkeypatch):
     svc = make_svc("opencost-api", "opencost", [{"port": 8080, "name": "http"}])
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("opencost")
+    url = await discovery.discover_service_dns("opencost")
     assert url is not None
     assert "opencost-api.opencost.svc.cluster.local" in url
     assert ":8080" in url
 
 
-def test_discover_opencost_not_found(monkeypatch):
+@pytest.mark.asyncio
+async def test_discover_opencost_not_found(monkeypatch):
     svc = make_svc("some", "default", [{"port": 9090, "name": "http"}])
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("opencost")
+    url = await discovery.discover_service_dns("opencost")
     assert url is None
 
 
-def test_opencost_prefers_9003_over_8080(monkeypatch):
+@pytest.mark.asyncio
+async def test_opencost_prefers_9003_over_8080(monkeypatch):
     # Single service exposing both ports; discovery should pick 9003 per prefer_ports
     svc = make_svc(
         "opencost-api",
@@ -66,11 +73,12 @@ def test_opencost_prefers_9003_over_8080(monkeypatch):
     )
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("opencost")
+    url = await discovery.discover_service_dns("opencost")
     assert url is not None
     assert ":9003" in url

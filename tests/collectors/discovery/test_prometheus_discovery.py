@@ -1,4 +1,4 @@
-# tests/collectors/test_discovery.py
+# tests/collectors/discovery/test_prometheus_discovery.py
 """
 TDD tests for service discovery helpers.
 
@@ -8,6 +8,8 @@ existing in different namespaces.
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 
 def make_svc(name, namespace, ports, labels=None):
@@ -27,7 +29,8 @@ def make_svc(name, namespace, ports, labels=None):
     return svc
 
 
-def test_discover_prometheus_by_name(monkeypatch):
+@pytest.mark.asyncio
+async def test_discover_prometheus_by_name(monkeypatch):
     from greenkube.collectors import discovery
 
     # Mock CoreV1Api to return a list with a prometheus service
@@ -35,33 +38,40 @@ def test_discover_prometheus_by_name(monkeypatch):
     svc2 = make_svc("some-other", "default", [{"port": 8080, "name": "http"}])
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc1, svc2])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("prometheus")
+    # Mock probes to avoid HTTP calls (though BaseDiscovery skips them in tests)
+    # We rely on BaseDiscovery bypassing probes in tests when PYTEST_CURRENT_TEST is set.
+
+    url = await discovery.discover_service_dns("prometheus")
     assert url is not None
     assert "prometheus-k8s.monitoring.svc.cluster.local" in url
     assert ":9090" in url
 
 
-def test_discover_prometheus_not_found(monkeypatch):
+@pytest.mark.asyncio
+async def test_discover_prometheus_not_found(monkeypatch):
     from greenkube.collectors import discovery
 
     svc = make_svc("other", "default", [{"port": 8080, "name": "http"}])
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("prometheus")
+    url = await discovery.discover_service_dns("prometheus")
     assert url is None
 
 
-def test_prometheus_prefers_namespace_and_labels(monkeypatch):
+@pytest.mark.asyncio
+async def test_prometheus_prefers_namespace_and_labels(monkeypatch):
     from greenkube.collectors import discovery
 
     # service without preferred labels in default namespace
@@ -75,12 +85,13 @@ def test_prometheus_prefers_namespace_and_labels(monkeypatch):
     )
 
     class MockCore:
-        def list_service_for_all_namespaces(self, **kwargs):
+        async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc_default, svc_monitor])
 
     monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
 
-    url = discovery.discover_service_dns("prometheus")
+    url = await discovery.discover_service_dns("prometheus")
     assert url is not None
     # should pick the monitoring one with labels
     assert "prometheus-k8s.monitoring.svc.cluster.local" in url
