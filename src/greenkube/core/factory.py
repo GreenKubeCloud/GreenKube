@@ -106,14 +106,14 @@ def get_processor() -> DataProcessor:
         node_repository = get_node_repository()
 
         # 2. Instantiate all collectors
-        prometheus_collector = PrometheusCollector()
+        prometheus_collector = PrometheusCollector(config)
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
         electricity_maps_collector = ElectricityMapsCollector()
 
         # 3. Instantiate Calculator and Estimator
-        calculator = CarbonCalculator()
+        calculator = CarbonCalculator(repository)
         estimator = BasicEstimator(config)
 
         # 4. Instantiate and return DataProcessor

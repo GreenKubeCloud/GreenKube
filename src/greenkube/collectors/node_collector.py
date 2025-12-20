@@ -34,7 +34,7 @@ class NodeCollector(BaseCollector):
             return self._api
 
         try:
-            await config.load_incluster_config()
+            config.load_incluster_config()
             logger.info("Loaded in-cluster Kubernetes configuration.")
             self._api = client.CoreV1Api()
             return self._api
@@ -42,7 +42,7 @@ class NodeCollector(BaseCollector):
             pass
 
         try:
-            await config.load_kube_config()
+            config.load_kube_config()
             logger.info("Loaded Kubernetes configuration from kubeconfig file.")
             self._api = client.CoreV1Api()
             return self._api

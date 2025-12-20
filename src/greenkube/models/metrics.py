@@ -141,7 +141,7 @@ class CombinedMetric(BaseModel):
     node_instance_type: Optional[str] = None
     node_zone: Optional[str] = Field(None, description="Cloud provider zone")
     emaps_zone: Optional[str] = Field(None, description="Electricity Maps zone")
-    is_estimated: bool = Field(False, description="Whether the metric relies on estimated values.")
+    is_estimated: Optional[bool] = Field(False, description="Whether the metric relies on estimated values.")
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

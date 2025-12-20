@@ -17,15 +17,18 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
     async def get_for_zone_at_time(self, zone: str, timestamp: str) -> Optional[float]:
         try:
             async with self.db_manager.connection_scope() as conn:
+                # Parse timestamp string to datetime object
+                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
                 # Use $n placeholders for asyncpg
                 query = """
                     SELECT carbon_intensity
-                    FROM carbon_intensity
-                    WHERE zone = $1 AND timestamp <= $2
-                    ORDER BY timestamp DESC
+                    FROM carbon_intensity_history
+                    WHERE zone = $1 AND datetime <= $2
+                    ORDER BY datetime DESC
                     LIMIT 1
                 """
-                row = await conn.fetchrow(query, zone, timestamp)
+                row = await conn.fetchrow(query, zone, ts)
                 if row:
                     return row["carbon_intensity"]
                 return None
@@ -40,13 +43,13 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
         try:
             async with self.db_manager.connection_scope() as conn:
                 query = """
-                    INSERT INTO carbon_intensity (
-                        zone, carbon_intensity, timestamp, updated_at, created_at,
+                    INSERT INTO carbon_intensity_history (
+                        zone, carbon_intensity, datetime, updated_at, created_at,
                         emission_factor_type, is_estimated, estimation_method
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8
                     )
-                    ON CONFLICT (zone, timestamp) DO UPDATE SET
+                    ON CONFLICT (zone, datetime) DO UPDATE SET
                         carbon_intensity = EXCLUDED.carbon_intensity,
                         updated_at = EXCLUDED.updated_at,
                         emission_factor_type = EXCLUDED.emission_factor_type;
@@ -59,13 +62,23 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     if ts and isinstance(ts, str):
                         ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
+                    # Parse updated_at
+                    updated_at = record.get("updatedAt")
+                    if updated_at and isinstance(updated_at, str):
+                        updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+
+                    # Parse created_at
+                    created_at = record.get("createdAt")
+                    if created_at and isinstance(created_at, str):
+                        created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+
                     records.append(
                         (
                             zone,
                             record.get("carbonIntensity"),
                             ts,
-                            record.get("updatedAt"),
-                            record.get("createdAt"),
+                            updated_at,
+                            created_at,
                             record.get("emissionFactorType"),
                             record.get("isEstimated"),
                             record.get("estimationMethod"),
@@ -86,7 +99,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
         try:
             async with self.db_manager.connection_scope() as conn:
                 query = """
-                    INSERT INTO CA_metrics (
+                    INSERT INTO combined_metrics (
                         pod_name, namespace, total_cost, co2e_grams,
                         pue, grid_intensity, joules, cpu_request,
                         memory_request, period, timestamp,
@@ -101,6 +114,21 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         $14, $15,
                         $16, $17::jsonb
                     )
+                    ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
+                        total_cost = EXCLUDED.total_cost,
+                        co2e_grams = EXCLUDED.co2e_grams,
+                        pue = EXCLUDED.pue,
+                        grid_intensity = EXCLUDED.grid_intensity,
+                        joules = EXCLUDED.joules,
+                        cpu_request = EXCLUDED.cpu_request,
+                        memory_request = EXCLUDED.memory_request,
+                        period = EXCLUDED.period,
+                        duration_seconds = EXCLUDED.duration_seconds,
+                        grid_intensity_timestamp = EXCLUDED.grid_intensity_timestamp,
+                        node_instance_type = EXCLUDED.node_instance_type,
+                        node_zone = EXCLUDED.node_zone,
+                        emaps_zone = EXCLUDED.emaps_zone,
+                        estimation_reasons = EXCLUDED.estimation_reasons;
                 """
 
                 metrics_data = []

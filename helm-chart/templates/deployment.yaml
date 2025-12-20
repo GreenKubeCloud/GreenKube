@@ -34,6 +34,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
+            - secretRef:
+                name: electricity-maps
+                optional: true
 
 
           # Explicitly map Prometheus-related variables from the ConfigMap/Secret
