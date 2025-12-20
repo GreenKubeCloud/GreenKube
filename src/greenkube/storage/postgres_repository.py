@@ -105,14 +105,14 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         memory_request, period, timestamp,
                         duration_seconds, grid_intensity_timestamp,
                         node_instance_type, node_zone,
-                        emaps_zone, estimation_reasons
+                        emaps_zone, estimation_reasons, is_estimated
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
                         $9, $10, $11,
                         $12, $13,
                         $14, $15,
-                        $16, $17::jsonb
+                        $16, $17::jsonb, $18
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -128,7 +128,8 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         node_instance_type = EXCLUDED.node_instance_type,
                         node_zone = EXCLUDED.node_zone,
                         emaps_zone = EXCLUDED.emaps_zone,
-                        estimation_reasons = EXCLUDED.estimation_reasons;
+                        estimation_reasons = EXCLUDED.estimation_reasons,
+                        is_estimated = EXCLUDED.is_estimated;
                 """
 
                 metrics_data = []
@@ -155,12 +156,18 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                             metric.node_zone,
                             metric.emaps_zone,
                             reasons_json,
+                            metric.is_estimated,
                         )
                     )
+
+                if metrics_data:
+                    # Debug log removed
+                    pass
 
                 await conn.executemany(query, metrics_data)
                 # No commit needed as asyncpg usually autocommits or we rely on explicit transaction
                 logger.info(f"Saved {len(metrics)} combined metrics to Postgres.")
+                return len(metrics)
         except Exception as e:
             logger.error(f"Error writing combined metrics to Postgres: {e}")
             raise QueryError(f"Error writing combined metrics: {e}") from e
