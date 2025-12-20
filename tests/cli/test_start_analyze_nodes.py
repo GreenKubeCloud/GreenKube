@@ -19,6 +19,7 @@ async def test_analyze_nodes_success():
         mock_collector = MockCollector.return_value
         # Mock collect as async
         mock_collector.collect = AsyncMock()
+        mock_collector.close = AsyncMock()
 
         mock_repo = MagicMock()
         # Mock save_nodes as async
@@ -50,6 +51,7 @@ async def test_analyze_nodes_no_nodes():
     ):
         mock_collector = MockCollector.return_value
         mock_collector.collect = AsyncMock(return_value={})
+        mock_collector.close = AsyncMock()
 
         mock_repo = MagicMock()
         mock_get_repo.return_value = mock_repo
@@ -71,6 +73,7 @@ async def test_analyze_nodes_exception():
     ):
         mock_collector = MockCollector.return_value
         mock_collector.collect = AsyncMock(side_effect=Exception("API Error"))
+        mock_collector.close = AsyncMock()
 
         mock_repo = MagicMock()
         mock_get_repo.return_value = mock_repo

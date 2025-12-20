@@ -27,7 +27,7 @@ runner = CliRunner()
 def test_report_delegates_to_report_range(mocker, args):
     """When a range or grouping flag is present, `report` should call processor.run_range."""
     mock_repo = mocker.MagicMock()
-    mock_repo.read_combined_metrics.return_value = []
+    mock_repo.read_combined_metrics = mocker.AsyncMock(return_value=[])
     mocker.patch("greenkube.cli.report.get_repository", return_value=mock_repo)
 
     result = runner.invoke(app, args)
@@ -39,7 +39,7 @@ def test_report_format_without_output_uses_processor(mocker):
     """`--output` by itself must not trigger range delegation; it should run the processor flow."""
     # Patch the get_repository used by the report submodule
     repo_inst = MagicMock()
-    repo_inst.read_combined_metrics.return_value = []
+    repo_inst.read_combined_metrics = mocker.AsyncMock(return_value=[])
     mocker.patch("greenkube.cli.report.get_repository", return_value=repo_inst)
 
     result = runner.invoke(app, ["report", "--output", "json"])

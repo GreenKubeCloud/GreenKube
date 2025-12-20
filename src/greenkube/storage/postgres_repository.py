@@ -17,8 +17,11 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
     async def get_for_zone_at_time(self, zone: str, timestamp: str) -> Optional[float]:
         try:
             async with self.db_manager.connection_scope() as conn:
-                # Parse timestamp string to datetime object
-                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                # Parse timestamp string to datetime object if needed
+                if isinstance(timestamp, datetime):
+                    ts = timestamp
+                else:
+                    ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
                 # Use $n placeholders for asyncpg
                 query = """

@@ -41,8 +41,17 @@ async def test_discover_prometheus_by_name(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc1, svc2])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     # Mock probes to avoid HTTP calls (though BaseDiscovery skips them in tests)
     # We rely on BaseDiscovery bypassing probes in tests when PYTEST_CURRENT_TEST is set.
@@ -63,8 +72,17 @@ async def test_discover_prometheus_not_found(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     url = await discovery.discover_service_dns("prometheus")
     assert url is None
@@ -88,8 +106,17 @@ async def test_prometheus_prefers_namespace_and_labels(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc_default, svc_monitor])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     url = await discovery.discover_service_dns("prometheus")
     assert url is not None

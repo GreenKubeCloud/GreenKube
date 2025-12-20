@@ -39,8 +39,18 @@ async def test_discover_opencost_by_name_and_port(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    # Patch ApiClient to be an async context manager yielding a dummy
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     url = await discovery.discover_service_dns("opencost")
     assert url is not None
@@ -56,8 +66,17 @@ async def test_discover_opencost_not_found(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     url = await discovery.discover_service_dns("opencost")
     assert url is None
@@ -76,8 +95,17 @@ async def test_opencost_prefers_9003_over_8080(monkeypatch):
         async def list_service_for_all_namespaces(self, **kwargs):
             return SimpleNamespace(items=[svc])
 
-    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda: MockCore())
-    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.client.CoreV1Api", lambda *a, **k: MockCore())
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.CoreV1Api", lambda *a, **k: MockCore())
+
+    class MockApiClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
     url = await discovery.discover_service_dns("opencost")
     assert url is not None
