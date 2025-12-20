@@ -81,6 +81,9 @@ def recommend(
             logger.error(f"An error occurred during recommendation generation: {e}")
             logger.error("Recommendation generation failed: %s", traceback.format_exc())
             raise typer.Exit(code=1)
+        finally:
+            if "processor" in locals():
+                await processor.close()
 
     try:
         asyncio.run(_recommend_async())

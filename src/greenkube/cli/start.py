@@ -81,6 +81,10 @@ async def collect_carbon_intensity_for_all_zones() -> None:
     await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
 
     logger.info("--- Finished carbon intensity collection task ---")
+    if "node_collector" in locals():
+        await node_collector.close()
+    if "em_collector" in locals():
+        await em_collector.close()
 
 
 async def analyze_nodes() -> None:
@@ -106,6 +110,9 @@ async def analyze_nodes() -> None:
 
     except Exception as e:
         logger.error(f"Failed to analyze nodes: {e}")
+    finally:
+        if "node_collector" in locals():
+            await node_collector.close()
 
     logger.info("--- Finished node analysis task ---")
 

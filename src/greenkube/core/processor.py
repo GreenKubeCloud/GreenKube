@@ -510,8 +510,18 @@ class DataProcessor:
                 )
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
+        logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
         self.calculator.clear_cache()
         return combined_metrics
+
+    async def close(self):
+        """Close all collectors to release resources."""
+        await self.prometheus_collector.close()
+        await self.opencost_collector.close()
+        await self.node_collector.close()
+        await self.pod_collector.close()
+        await self.electricity_maps_collector.close()
+        logger.debug("DataProcessor closed all collectors.")
 
     async def run_range(
         self,

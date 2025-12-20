@@ -131,6 +131,13 @@ class NodeCollector(BaseCollector):
 
         return nodes_info
 
+    async def close(self):
+        """Close the Kubernetes API client if it exists."""
+        if self._api:
+            await self._api.api_client.close()
+            logger.debug("NodeCollector Kubernetes client closed.")
+            self._api = None
+
     async def collect_detailed_info(self) -> dict:
         """
         Collect comprehensive node information including cloud provider, instance type,

@@ -23,3 +23,9 @@ class BaseCollector(ABC):
         Pydantic models.
         """
         pass
+
+    async def close(self):
+        """
+        Clean up resources (e.g., close HTTP sessions or API clients).
+        """
+        pass

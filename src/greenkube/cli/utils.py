@@ -109,6 +109,9 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
 
     except Exception as e:
         logger.error(f"Failed to process and save combined metrics data: {e}", exc_info=True)
+    finally:
+        if "processor" in locals() and processor:
+            await processor.close()
 
     logger.info("--- Finished combined metrics collection task ---")
 

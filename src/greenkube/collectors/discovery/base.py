@@ -54,17 +54,19 @@ class BaseDiscovery:
         # monkeypatch `greenkube.collectors.discovery.client.CoreV1Api` and
         # expect it to be used without requiring a kubeconfig to be loadable.
         try:
-            v1 = client.CoreV1Api()
-            services = await v1.list_service_for_all_namespaces()
-            return services.items
+            async with client.ApiClient() as api_client:
+                v1 = client.CoreV1Api(api_client)
+                services = await v1.list_service_for_all_namespaces()
+                return services.items
         except Exception:
             # If direct construction fails, attempt to load kube config and retry.
             if not await self._load_kube_config_quietly():
                 return None
             try:
-                v1 = client.CoreV1Api()
-                services = await v1.list_service_for_all_namespaces()
-                return services.items
+                async with client.ApiClient() as api_client:
+                    v1 = client.CoreV1Api(api_client)
+                    services = await v1.list_service_for_all_namespaces()
+                    return services.items
             except Exception as e:
                 logger.debug("Failed to list services for discovery after loading kube config: %s", e)
                 return None

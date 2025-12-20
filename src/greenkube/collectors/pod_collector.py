@@ -33,7 +33,7 @@ class PodCollector(BaseCollector):
 
         try:
             # Try loading in-cluster config first
-            await config.load_incluster_config()
+            config.load_incluster_config()
             self._api = client.CoreV1Api()
             logger.info("PodCollector initialized with in-cluster config.")
             return self._api
@@ -41,7 +41,7 @@ class PodCollector(BaseCollector):
             pass
 
         try:
-            await config.load_kube_config()
+            config.load_kube_config()
             self._api = client.CoreV1Api()
             logger.info("PodCollector initialized with kubeconfig.")
             return self._api
@@ -97,3 +97,10 @@ class PodCollector(BaseCollector):
 
         logger.debug(f"Collected {len(pod_metrics)} pod/container request metrics.")
         return pod_metrics
+
+    async def close(self):
+        """Close the Kubernetes API client if it exists."""
+        if self._api:
+            await self._api.api_client.close()
+            logger.debug("PodCollector Kubernetes client closed.")
+            self._api = None
