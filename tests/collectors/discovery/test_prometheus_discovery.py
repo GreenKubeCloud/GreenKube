@@ -53,6 +53,11 @@ async def test_discover_prometheus_by_name(monkeypatch):
 
     monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
+    async def mock_ensure_k8s_config():
+        return True
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.ensure_k8s_config", mock_ensure_k8s_config)
+
     # Mock probes to avoid HTTP calls (though BaseDiscovery skips them in tests)
     # We rely on BaseDiscovery bypassing probes in tests when PYTEST_CURRENT_TEST is set.
 
@@ -83,6 +88,11 @@ async def test_discover_prometheus_not_found(monkeypatch):
             pass
 
     monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
+
+    async def mock_ensure_k8s_config():
+        return True
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.ensure_k8s_config", mock_ensure_k8s_config)
 
     url = await discovery.discover_service_dns("prometheus")
     assert url is None
@@ -117,6 +127,11 @@ async def test_prometheus_prefers_namespace_and_labels(monkeypatch):
             pass
 
     monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
+
+    async def mock_ensure_k8s_config():
+        return True
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.ensure_k8s_config", mock_ensure_k8s_config)
 
     url = await discovery.discover_service_dns("prometheus")
     assert url is not None

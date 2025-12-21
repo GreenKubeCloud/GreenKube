@@ -52,6 +52,11 @@ async def test_discover_opencost_by_name_and_port(monkeypatch):
 
     monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
 
+    async def mock_ensure_k8s_config():
+        return True
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.ensure_k8s_config", mock_ensure_k8s_config)
+
     url = await discovery.discover_service_dns("opencost")
     assert url is not None
     assert "opencost-api.opencost.svc.cluster.local" in url
@@ -106,6 +111,11 @@ async def test_opencost_prefers_9003_over_8080(monkeypatch):
             pass
 
     monkeypatch.setattr("greenkube.collectors.discovery.base.client.ApiClient", MockApiClient)
+
+    async def mock_ensure_k8s_config():
+        return True
+
+    monkeypatch.setattr("greenkube.collectors.discovery.base.ensure_k8s_config", mock_ensure_k8s_config)
 
     url = await discovery.discover_service_dns("opencost")
     assert url is not None
