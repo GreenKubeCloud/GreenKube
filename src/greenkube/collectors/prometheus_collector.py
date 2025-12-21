@@ -5,6 +5,7 @@ PrometheusCollector fetches CPU usage and node instance type metrics.
 This data is the input for the BasicEstimator.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -74,7 +75,13 @@ class PrometheusCollector(BaseCollector):
         Returns a PrometheusMetric object containing lists of parsed data.
         """
         async with get_async_http_client() as client:
-            cpu_results = await self._query_prometheus(client, self.cpu_usage_query)
+            # Launch queries concurrently to reduce latency
+            cpu_future = self._query_prometheus(client, self.cpu_usage_query)
+            node_future = self._query_prometheus(client, self.node_labels_query)
+
+            # Wait for both primary queries
+            cpu_results, node_results = await asyncio.gather(cpu_future, node_future)
+
             # If the standard grouped query returned no results, try fallback
             if not cpu_results:
                 fallback_query = (
@@ -82,8 +89,6 @@ class PrometheusCollector(BaseCollector):
                 )
                 logger.info("Falling back to container_cpu_usage grouped without 'container' label")
                 cpu_results = await self._query_prometheus(client, fallback_query)
-
-            node_results = await self._query_prometheus(client, self.node_labels_query)
 
         parsed_cpu_usage = []
         malformed_cpu_count = 0
@@ -172,15 +177,6 @@ class PrometheusCollector(BaseCollector):
         if self.username and self.password:
             auth = (self.username, self.password)
 
-        # To handle 'verify', let's instantiate client with verify=self.verify
-        # Is getting a fresh client cheap? Yes.
-        # But `get_async_http_client` sets standard timeouts/retries.
-
-        # New strategy: Don't use `get_async_http_client` context strictly if I need custom verify.
-        # I'll use `httpx.AsyncClient(verify=self.verify, ...)` inside `collect`?
-        # Or make `_query_prometheus` handle it?
-        # I'll modify `collect` to open the client with correct settings.
-
         return await self._query_run_loop(client, candidates, params, headers, auth, query)
 
     async def _query_run_loop(self, client, candidates, params, headers, auth, query):
@@ -188,9 +184,6 @@ class PrometheusCollector(BaseCollector):
         last_err = None
         for query_url in candidates:
             try:
-                # Note: httpx request-level verify is deprecated. We should configure client.
-                # If the passed client has different verify, we might issue.
-                # Assuming client is configured correctly by caller.
                 response = await client.get(
                     query_url,
                     params=params,
@@ -232,8 +225,6 @@ class PrometheusCollector(BaseCollector):
         # Attempt discovery once when configured endpoints fail.
         # We need to act carefully. _discover_and_update_url might change self.base_url
         if await self._discover_and_update_url(client):
-            # Retry with new URL. We need to recalculate candidates.
-            # Recursive call?
             return await self._query_prometheus(client, query)
 
         return []
@@ -285,14 +276,8 @@ class PrometheusCollector(BaseCollector):
             self.verify = False
 
     async def _discover_and_update_url(self, client: httpx.AsyncClient) -> bool:
-        # Note: PrometheusDiscovery is likely sync. We can wrap it or just call it.
-        # Ideally we refactor PrometheusDiscovery too. For now let's assume it's sync blocking.
-        # It calls K8s API (sync) - wait, K8s is also becoming async.
-        # If I switched K8s lib to async, then `PrometheusDiscovery` will break if it uses old lib.
-        # `PrometheusDiscovery` likely uses `kubernetes` (sync). I need to check it.
         try:
             pd = PrometheusDiscovery()
-            # PrometheusDiscovery.discover is async
             discovered = await pd.discover()
             if discovered and discovered != self.base_url:
                 logger.info("Prometheus discovery returned %s", discovered)
@@ -314,10 +299,6 @@ class PrometheusCollector(BaseCollector):
                     old_url = self.base_url
                     old_verify = self.verify
                     self._update_url(url)
-                    # Use a new client or existing?
-                    # If we changed self.verify, the existing client might have wrong verify.
-                    # This is tricky with passed client.
-                    # For probe, we might tolerate existing client settings or create new one.
                     if await self._probe_url(client, url):
                         logger.info("Prometheus responded at well-known URL %s", url)
                         return True
