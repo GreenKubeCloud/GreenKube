@@ -52,7 +52,6 @@ def mock_k8s_api():
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 @patch("greenkube.collectors.pod_collector.get_core_v1_api")
 async def test_pod_collector_success(mock_get_api, mock_k8s_api):
     """Tests the successful collection of pod and container requests."""

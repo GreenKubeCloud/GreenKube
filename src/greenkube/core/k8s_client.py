@@ -32,7 +32,7 @@ async def ensure_k8s_config() -> bool:
         # Try in-cluster config first
         try:
             logger.debug("Attempting to load in-cluster Kubernetes config...")
-            await asyncio.to_thread(config.load_incluster_config)
+            config.load_incluster_config()
             logger.info("Loaded in-cluster Kubernetes configuration.")
             _CONFIG_LOADED = True
             return True
@@ -44,7 +44,7 @@ async def ensure_k8s_config() -> bool:
         # Try local kubeconfig
         try:
             logger.debug("Attempting to load local kubeconfig...")
-            await asyncio.to_thread(config.load_kube_config)
+            await config.load_kube_config()
             logger.info("Loaded Kubernetes configuration from kubeconfig file.")
             _CONFIG_LOADED = True
             return True
