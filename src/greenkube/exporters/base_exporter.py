@@ -13,6 +13,6 @@ class BaseExporter(ABC):
     DEFAULT_FILENAME: str = "greenkube-report"
 
     @abstractmethod
-    def export(self, data: List[Dict[str, Any]], path: str | None = None) -> str:
+    async def export(self, data: List[Dict[str, Any]], path: str | None = None) -> str:
         """Export the provided data to disk. Return the written path."""
         raise NotImplementedError()

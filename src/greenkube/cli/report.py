@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 app = typer.Typer(help="Generate and export FinGreenOps reports.", add_completion=False)
 
 
-def handle_export(
+async def handle_export(
     data: List[CombinedMetric],
     output_options: OutputOptions,
 ):
@@ -65,7 +65,7 @@ def handle_export(
         raise typer.Exit(code=1)
 
     try:
-        written_path = exporter.export(rows, str(output_path))
+        written_path = await exporter.export(rows, str(output_path))
         logger.info(f"Successfully exported report to {written_path}")
         print(f"Report exported to: {written_path}", file=sys.stderr)
 
@@ -170,12 +170,12 @@ def report(
                 if not output.is_enabled:
                     ConsoleReporter().report(data=[])
                 else:
-                    handle_export(data=[], output_options=output)
+                    await handle_export(data=[], output_options=output)
                 return  # Exit gracefully
 
             # Handle Output
             if output.is_enabled:
-                handle_export(
+                await handle_export(
                     data=combined_data,
                     output_options=output,
                 )

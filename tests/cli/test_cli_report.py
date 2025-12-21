@@ -143,7 +143,7 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
     class DummyExporter:
         DEFAULT_FILENAME = "greenkube-report.csv"
 
-        def export(self, data, path=None):
+        async def export(self, data, path=None):
             written["path"] = path
             return path
 
