@@ -52,14 +52,13 @@ def mock_k8s_api():
 
 
 @pytest.mark.asyncio
-@patch("greenkube.collectors.pod_collector.client.CoreV1Api")
-@patch("greenkube.collectors.pod_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.pod_collector.config.load_incluster_config", new_callable=MagicMock)
-async def test_pod_collector_success(mock_load_incluster, mock_load_kube, mock_core_v1_api, mock_k8s_api):
+@pytest.mark.asyncio
+@patch("greenkube.collectors.pod_collector.get_core_v1_api")
+async def test_pod_collector_success(mock_get_api, mock_k8s_api):
     """Tests the successful collection of pod and container requests."""
     # Patch the k8s client to return our mock
     # mock_load_incluster.side_effect = AsyncMock() # Removed: config loading is sync
-    mock_core_v1_api.return_value = mock_k8s_api
+    mock_get_api.return_value = mock_k8s_api
 
     collector = PodCollector()
     results = await collector.collect()
@@ -96,13 +95,12 @@ async def test_pod_collector_success(mock_load_incluster, mock_load_kube, mock_c
 
 
 @pytest.mark.asyncio
-@patch("greenkube.collectors.pod_collector.client.CoreV1Api")
-@patch("greenkube.collectors.pod_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.pod_collector.config.load_incluster_config", new_callable=MagicMock)
-async def test_pod_collector_api_error(mock_load_incluster, mock_load_kube, mock_core_v1_api, mock_k8s_api):
+@pytest.mark.asyncio
+@patch("greenkube.collectors.pod_collector.get_core_v1_api")
+async def test_pod_collector_api_error(mock_get_api, mock_k8s_api):
     """Tests exception handling during the K8s API call."""
     # mock_load_incluster.side_effect = AsyncMock() # Removed
-    mock_core_v1_api.return_value = mock_k8s_api
+    mock_get_api.return_value = mock_k8s_api
     mock_k8s_api.list_pod_for_all_namespaces.side_effect = Exception("K8s API Error")
 
     collector = PodCollector()

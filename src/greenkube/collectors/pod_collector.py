@@ -7,9 +7,8 @@ from the Kubernetes API.
 import logging
 from typing import List
 
-from kubernetes_asyncio import client, config
-
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
 
 from ..utils.k8s_utils import parse_cpu_request, parse_memory_request
@@ -31,24 +30,13 @@ class PodCollector(BaseCollector):
         if self._api:
             return self._api
 
-        try:
-            # Try loading in-cluster config first
-            config.load_incluster_config()
-            self._api = client.CoreV1Api()
-            logger.info("PodCollector initialized with in-cluster config.")
-            return self._api
-        except config.ConfigException:
-            pass
+        self._api = await get_core_v1_api()
+        if self._api:
+            logger.debug("PodCollector initialized with centralized config.")
+        else:
+            logger.warning("PodCollector could not initialize Kubernetes client.")
 
-        try:
-            config.load_kube_config()
-            self._api = client.CoreV1Api()
-            logger.info("PodCollector initialized with kubeconfig.")
-            return self._api
-        except config.ConfigException:
-            logger.warning("Could not configure Kubernetes client. Neither in-cluster nor local config found.")
-
-        return None
+        return self._api
 
     async def collect(self) -> List[PodMetric]:
         """

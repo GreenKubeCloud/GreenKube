@@ -3,10 +3,10 @@
 import logging
 from datetime import datetime, timezone
 
-from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.rest import ApiException
 
 from greenkube.core.config import config as global_config
+from greenkube.core.k8s_client import get_core_v1_api
 
 from .base_collector import BaseCollector
 
@@ -26,30 +26,13 @@ class NodeCollector(BaseCollector):
 
     async def _ensure_client(self):
         """
-        Lazily initialize the Kubernetes Async client.
-        PROPOSAL: We use explicit context manager in collect() instead of persistent client?
-        However, configuration loading is global.
+        Lazily initialize the Kubernetes Async client using the centralized thread-safe loader.
         """
         if self._api:
             return self._api
 
-        try:
-            config.load_incluster_config()
-            logger.info("Loaded in-cluster Kubernetes configuration.")
-            self._api = client.CoreV1Api()
-            return self._api
-        except config.ConfigException:
-            pass
-
-        try:
-            config.load_kube_config()
-            logger.info("Loaded Kubernetes configuration from kubeconfig file.")
-            self._api = client.CoreV1Api()
-            return self._api
-        except config.ConfigException as e:
-            logger.warning("Kubernetes configuration not available: %s", e)
-
-        return None
+        self._api = await get_core_v1_api()
+        return self._api
 
     async def collect(self) -> dict:
         """

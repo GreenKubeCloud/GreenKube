@@ -6,8 +6,6 @@ from kubernetes_asyncio import client
 
 # We need to import the module where ConfigException lives to patch effectively if we were mocking it,
 # but here we just want to avoid mocking the class itself.
-from kubernetes_asyncio import config as k8s_config
-
 from greenkube.collectors.node_collector import NodeCollector
 
 # --- Mock Kubernetes Objects ---
@@ -52,10 +50,8 @@ def create_mock_node_detailed(name, labels, capacity_cpu="4"):
 # --- Test Cases ---
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_success_with_zones(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_success_with_zones(mock_get_api):
     """
     Tests successful collection when nodes have zone labels.
     """
@@ -70,9 +66,9 @@ async def test_collect_success_with_zones(mock_core_v1_api, mock_load_incluster,
     # Bottom: CoreV1Api -> mock_load_kube (var name) -> incorrect name
 
     # Let's verify usage:
-    # We want CoreV1Api mock to be configured with return_value.
-    # CoreV1Api is the 1st arg (mock_core_v1_api).
-    mock_api_instance = mock_core_v1_api.return_value
+    # We want get_core_v1_api to return the mock instance
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
 
     mock_node_list = client.V1NodeList(
         items=[
@@ -96,15 +92,14 @@ async def test_collect_success_with_zones(mock_core_v1_api, mock_load_incluster,
     assert result["node-2"].zone == "us-west-2b"
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_partial_zones(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_partial_zones(mock_get_api):
     """
     Tests collection when some nodes have zone labels and others don't.
     """
     # Patches: 1. load_kube (mock_load_kube), 2. load_incluster (mock_load_incluster), 3. CoreV1Api (mock_core_v1_api)
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
     mock_node_list = client.V1NodeList(
         items=[
             create_mock_node("node-1", "us-east-1a"),
@@ -126,14 +121,13 @@ async def test_collect_partial_zones(mock_core_v1_api, mock_load_incluster, mock
     assert result["node-missing-label"].zone is None
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_no_zone_labels(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_no_zone_labels(mock_get_api):
     """
     Tests collection when nodes exist but none have the zone label.
     """
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
     mock_node_list = client.V1NodeList(items=[create_mock_node("node-no-label-1"), create_mock_node("node-no-label-2")])
     mock_api_instance.list_node = AsyncMock(return_value=mock_node_list)
 
@@ -148,14 +142,13 @@ async def test_collect_no_zone_labels(mock_core_v1_api, mock_load_incluster, moc
     assert result["node-no-label-1"].zone is None
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_no_nodes(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_no_nodes(mock_get_api):
     """
     Tests collection when the cluster returns no nodes.
     """
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
     mock_node_list = client.V1NodeList(items=[])
     mock_api_instance.list_node = AsyncMock(return_value=mock_node_list)
 
@@ -168,14 +161,13 @@ async def test_collect_no_nodes(mock_core_v1_api, mock_load_incluster, mock_load
     assert result == {}
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_api_error(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_api_error(mock_get_api):
     """
     Tests that the collector handles Kubernetes API errors gracefully.
     """
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
     # AsyncMock raising exception. Note the import of ApiException from rest in collector
     from kubernetes_asyncio.client.rest import ApiException
 
@@ -190,14 +182,13 @@ async def test_collect_api_error(mock_core_v1_api, mock_load_incluster, mock_loa
     assert result == {}
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_unexpected_error(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_unexpected_error(mock_get_api):
     """
     Tests that the collector handles unexpected errors during processing.
     """
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
     mock_api_instance.list_node = AsyncMock(side_effect=Exception("Something went wrong"))
 
     collector = NodeCollector()
@@ -209,12 +200,11 @@ async def test_collect_unexpected_error(mock_core_v1_api, mock_load_incluster, m
     assert result == {}
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_collect_detailed_info_ovh(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_detailed_info_ovh(mock_get_api):
     """Test detailed info collection for OVH nodes."""
-    mock_api_instance = mock_core_v1_api.return_value
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
 
     ovh_labels = {
         "k8s.ovh.net/nodepool": "019841a6-24bd-7e0e-b35f-86bfe7d13189",
@@ -236,17 +226,15 @@ async def test_collect_detailed_info_ovh(mock_core_v1_api, mock_load_incluster, 
     assert node_info["instance_type"] == "b3-8"
 
 
-@patch("greenkube.collectors.node_collector.config.load_kube_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.config.load_incluster_config", new_callable=MagicMock)
-@patch("greenkube.collectors.node_collector.client.CoreV1Api")
-async def test_init_fails_gracefully(mock_core_v1_api, mock_load_incluster, mock_load_kube):
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_init_fails_gracefully(mock_get_api):
     """
     Tests that if both config loading methods fail, we handle it.
     """
     # Patches: 1. load_kube (mock_load_kube), 2. load_incluster (mock_load_incluster), 3. CoreV1Api (mock_core_v1_api)
     # Assuming k8s_config.ConfigException is available
-    mock_load_incluster.side_effect = k8s_config.ConfigException("Fail")
-    mock_load_kube.side_effect = k8s_config.ConfigException("Fail")
+    # Simulate failure to get API client (returns None)
+    mock_get_api.return_value = None
 
     collector = NodeCollector()
 

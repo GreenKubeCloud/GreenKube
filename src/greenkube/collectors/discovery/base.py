@@ -10,7 +10,9 @@ import os
 import socket
 from typing import Callable, Optional, Sequence
 
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
+
+from greenkube.core.k8s_client import ensure_k8s_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +24,6 @@ class BaseDiscovery:
     # Base only knows about the default namespace preference; app-specific
     # preferred namespaces should live in the subclass implementations.
     common_namespaces = ("default",)
-
-    async def _load_kube_config_quietly(self) -> bool:
-        try:
-            await config.load_incluster_config()
-            return True
-        except Exception:
-            try:
-                await config.load_kube_config()
-                return True
-            except Exception:
-                logger.debug("Could not load kube config for discovery")
-                return False
 
     async def list_services(self) -> Optional[Sequence[client.V1Service]]:
         # When running under pytest, avoid making real Kubernetes API calls
@@ -60,7 +50,7 @@ class BaseDiscovery:
                 return services.items
         except Exception:
             # If direct construction fails, attempt to load kube config and retry.
-            if not await self._load_kube_config_quietly():
+            if not await ensure_k8s_config():
                 return None
             try:
                 async with client.ApiClient() as api_client:
