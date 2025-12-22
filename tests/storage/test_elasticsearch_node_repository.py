@@ -48,6 +48,7 @@ SAMPLE_NODES = [
         node_pool="default",
         cpu_capacity_cores=2.0,
         memory_capacity_bytes=8589934592,
+        embodied_emissions_kg=100.5,
     ),
 ]
 
@@ -78,6 +79,7 @@ async def test_save_nodes_success(es_node_repo, mock_bulk, mock_connections):
     assert actions[0]["_index"] == "greenkube_node_snapshots"
     assert actions[0]["_source"]["node_name"] == "node-1"
     assert actions[0]["_source"]["cpu_capacity_cores"] == 2.0
+    assert actions[0]["_source"]["embodied_emissions_kg"] == 100.5
 
 
 @pytest.mark.asyncio
@@ -116,6 +118,7 @@ async def test_get_snapshots(es_node_repo, mock_connections):
             cloud_provider="aws",
             architecture="amd64",
             node_pool="default",
+            embodied_emissions_kg=50.0,
         )
 
     mock_search.filter.return_value.sort.return_value.scan = MagicMock(side_effect=async_scan)
@@ -130,6 +133,7 @@ async def test_get_snapshots(es_node_repo, mock_connections):
         ts, info = snapshots[0]
         assert ts == "2023-01-01T12:00:00+00:00"
         assert info.name == "node-1"
+        assert info.embodied_emissions_kg == 50.0
 
 
 @pytest.mark.asyncio
@@ -165,6 +169,7 @@ async def test_get_latest_snapshots_before(es_node_repo, mock_connections):
                     "architecture": "amd64",
                     "node_pool": "default",
                     "timestamp": "2023-01-01T11:00:00+00:00",
+                    "embodied_emissions_kg": 75.0,
                 }
             }
         ]
@@ -176,3 +181,4 @@ async def test_get_latest_snapshots_before(es_node_repo, mock_connections):
         assert len(snapshots) == 1
         assert snapshots[0].name == "node-1"
         assert snapshots[0].cpu_capacity_cores == 2.0
+        assert snapshots[0].embodied_emissions_kg == 75.0
