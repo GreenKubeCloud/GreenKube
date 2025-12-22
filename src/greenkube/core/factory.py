@@ -12,6 +12,7 @@ from functools import lru_cache
 import typer
 
 # --- GreenKube Collector Imports ---
+from ..collectors.boavizta_collector import BoaviztaCollector
 from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
@@ -29,6 +30,7 @@ from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
+from ..storage.embodied_repository import EmbodiedRepository
 from ..storage.postgres_node_repository import PostgresNodeRepository
 from ..storage.postgres_repository import PostgresCarbonIntensityRepository
 from ..storage.sqlite_node_repository import SQLiteNodeRepository
@@ -94,6 +96,17 @@ def get_node_repository() -> NodeRepository:
 
 
 @lru_cache(maxsize=1)
+def get_embodied_repository() -> EmbodiedRepository:
+    """
+    Factory function to get the embodied emissions repository.
+    """
+    from ..core.db import db_manager
+
+    return EmbodiedRepository(db_manager)
+    return EmbodiedRepository(db_manager)
+
+
+@lru_cache(maxsize=1)
 def get_processor() -> DataProcessor:
     """
     Factory function to instantiate and return a fully configured DataProcessor.
@@ -104,6 +117,7 @@ def get_processor() -> DataProcessor:
         # 1. Get the repository
         repository = get_repository()
         node_repository = get_node_repository()
+        embodied_repository = get_embodied_repository()
 
         # 2. Instantiate all collectors
         prometheus_collector = PrometheusCollector(config)
@@ -111,6 +125,7 @@ def get_processor() -> DataProcessor:
         node_collector = NodeCollector()
         pod_collector = PodCollector()
         electricity_maps_collector = ElectricityMapsCollector()
+        boavizta_collector = BoaviztaCollector()
 
         # 3. Instantiate Calculator and Estimator
         calculator = CarbonCalculator(repository)
@@ -123,8 +138,10 @@ def get_processor() -> DataProcessor:
             node_collector=node_collector,
             pod_collector=pod_collector,
             electricity_maps_collector=electricity_maps_collector,
+            boavizta_collector=boavizta_collector,
             repository=repository,
             node_repository=node_repository,
+            embodied_repository=embodied_repository,
             calculator=calculator,
             estimator=estimator,
         )
