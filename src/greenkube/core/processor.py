@@ -787,7 +787,7 @@ class DataProcessor:
                 )
 
                 for m in calculated_metrics:
-                    m["timestamp"] = sample_dt
+                    m.timestamp = sample_dt
                     all_energy_metrics.append(m)
 
         # Prefetch intensities per zone/hour and populate calculator cache
@@ -796,14 +796,14 @@ class DataProcessor:
         zone_to_metrics = defaultdict(list)
         skipped_carbon = 0
         for em in all_energy_metrics:
-            node_name = em["node"]
+            node_name = em.node
             context = node_contexts.get(node_name)
             zone = context.emaps_zone if context else config.DEFAULT_ZONE
             zone_to_metrics[zone].append(em)
 
         for zone, metrics in zone_to_metrics.items():
             for m in metrics:
-                ts = m["timestamp"]
+                ts = m.timestamp
                 key_dt = ts.replace(minute=0, second=0, microsecond=0)
                 key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
                 key_plus = key_dt_utc.isoformat()
@@ -834,11 +834,11 @@ class DataProcessor:
             nodes_info = {}
 
         for em in all_energy_metrics:
-            pod_name = em["pod_name"]
-            em_namespace = em["namespace"]
-            node_name = em["node"]
-            joules = em["joules"]
-            ts = em["timestamp"]
+            pod_name = em.pod_name
+            em_namespace = em.namespace
+            node_name = em.node
+            joules = em.joules
+            ts = em.timestamp
             node_context = node_contexts.get(node_name)
             zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
             try:
@@ -862,9 +862,10 @@ class DataProcessor:
             # EnergyMetric from estimator is a dict here because of calculate_node_energy return type in run_range
             # Wait, calculate_node_energy returns dicts, but run_range appends them to all_energy_metrics
             # So em is a dict.
-            if em.get("is_estimated"):
+            # 1. From Energy Estimation (Instance Profile)
+            if em.is_estimated:
                 is_estimated = True
-                estimation_reasons.extend(em.get("estimation_reasons", []))
+                estimation_reasons.extend(em.estimation_reasons)
 
             # 2. From Zone Mapping
             if node_context:

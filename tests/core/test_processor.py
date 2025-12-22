@@ -794,7 +794,7 @@ async def test_run_range_uses_historical_node_data(
 
     # Let's mock calculate_node_energy to return dummy metrics so run_range completes
     data_processor.estimator.calculate_node_energy.return_value = [
-        {"pod_name": "pod-A", "namespace": "ns-1", "joules": 100, "node": "node-1"}
+        EnergyMetric(pod_name="pod-A", namespace="ns-1", joules=100, node="node-1")
     ]
 
     # We also need to mock instance_profiles in estimator if we want profile lookup to work,

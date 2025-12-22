@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.core.processor import DataProcessor
+from greenkube.models.metrics import EnergyMetric
 from greenkube.models.node import NodeInfo
 
 
@@ -51,13 +52,13 @@ async def test_run_range_uses_old_snapshot():
     mock_estimator = MagicMock()
     mock_estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 10, "maxWatts": 100}}
     mock_estimator.calculate_node_energy.return_value = [
-        {
-            "pod_name": "test-pod",
-            "namespace": "default",
-            "joules": 100,
-            "node": "node-1",
-            "timestamp": datetime.now(timezone.utc),
-        }
+        EnergyMetric(
+            pod_name="test-pod",
+            namespace="default",
+            joules=100,
+            node="node-1",
+            timestamp=datetime.now(timezone.utc),
+        )
     ]
 
     # Mock calculator

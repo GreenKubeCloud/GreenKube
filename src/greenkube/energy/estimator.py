@@ -204,8 +204,7 @@ class BasicEstimator:
                 estimation_reasons=node_estimations.get(node_name, []),
             )
 
-            for m in calculated_metrics:
-                energy_metrics.append(EnergyMetric(**m))
+            energy_metrics.extend(calculated_metrics)
 
         logger.info(f"Energy estimation complete. {len(energy_metrics)} pod metrics created.")
         return energy_metrics
@@ -218,10 +217,10 @@ class BasicEstimator:
         pods_on_node: List[tuple],
         duration_seconds: float,
         estimation_reasons: List[str] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[EnergyMetric]:
         """
         Calculates energy for all pods on a specific node.
-        Returns a list of dictionaries containing pod energy data.
+        Returns a list of EnergyMetric objects containing pod energy data.
         """
         vcores = node_profile.get("vcores", 1)
         min_watts = node_profile.get("minWatts", 1.0)
@@ -251,14 +250,14 @@ class BasicEstimator:
                 for pod_key, cpu_cores in pods_on_node:
                     namespace, pod_name = pod_key
                     results.append(
-                        {
-                            "pod_name": pod_name,
-                            "namespace": namespace,
-                            "joules": energy_per_pod,
-                            "node": node_name,
-                            "is_estimated": is_estimated,
-                            "estimation_reasons": list(reasons),
-                        }
+                        EnergyMetric(
+                            pod_name=pod_name,
+                            namespace=namespace,
+                            joules=energy_per_pod,
+                            node=node_name,
+                            is_estimated=is_estimated,
+                            estimation_reasons=list(reasons),
+                        )
                     )
             else:
                 # No pods on node, but node is running (idle).
@@ -266,14 +265,14 @@ class BasicEstimator:
                 energy_joules = min_watts * duration_seconds
                 reasons.append("Node idle - energy attributed to system overhead")
                 results.append(
-                    {
-                        "pod_name": "Unallocated",
-                        "namespace": "System",
-                        "joules": energy_joules,
-                        "node": node_name,
-                        "is_estimated": True,
-                        "estimation_reasons": list(reasons),
-                    }
+                    EnergyMetric(
+                        pod_name="Unallocated",
+                        namespace="System",
+                        joules=energy_joules,
+                        node=node_name,
+                        is_estimated=True,
+                        estimation_reasons=list(reasons),
+                    )
                 )
         else:
             # Distribute node_power proportionally to each pod's share of CPU
@@ -283,13 +282,13 @@ class BasicEstimator:
                 pod_power = node_power_watts * share
                 energy_joules = pod_power * duration_seconds
                 results.append(
-                    {
-                        "pod_name": pod_name,
-                        "namespace": namespace,
-                        "joules": energy_joules,
-                        "node": node_name,
-                        "is_estimated": is_estimated,
-                        "estimation_reasons": list(reasons),
-                    }
+                    EnergyMetric(
+                        pod_name=pod_name,
+                        namespace=namespace,
+                        joules=energy_joules,
+                        node=node_name,
+                        is_estimated=is_estimated,
+                        estimation_reasons=list(reasons),
+                    )
                 )
         return results
