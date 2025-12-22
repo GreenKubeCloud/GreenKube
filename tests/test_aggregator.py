@@ -22,6 +22,7 @@ def test_aggregate_metrics_daily():
             pue=1.5,
             cpu_request=500,
             memory_request=1024,
+            embodied_co2e_grams=5,
         ),
         CombinedMetric(
             pod_name="pod-1",
@@ -35,6 +36,7 @@ def test_aggregate_metrics_daily():
             pue=1.6,
             cpu_request=500,
             memory_request=1024,
+            embodied_co2e_grams=7,
         ),
         # Metric for another pod, should not be aggregated with the first two
         CombinedMetric(
@@ -63,6 +65,7 @@ def test_aggregate_metrics_daily():
     # Verify summed values
     assert agg_pod1.joules == 300  # 100 + 200
     assert agg_pod1.co2e_grams == 30  # 10 + 20
+    assert agg_pod1.embodied_co2e_grams == 12  # 5 + 7
     assert agg_pod1.total_cost == 3  # 1 + 2
     assert agg_pod1.duration_seconds == 600  # 300 + 300
 

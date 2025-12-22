@@ -221,6 +221,16 @@ def mock_electricity_maps_collector():
 
 
 @pytest.fixture
+def mock_boavizta_collector():
+    """Provides a mock BoaviztaCollector."""
+    from unittest.mock import AsyncMock
+
+    mock = MagicMock()
+    mock.get_server_impact = AsyncMock(return_value=None)
+    return mock
+
+
+@pytest.fixture
 def mock_node_repository():
     """Provides a mock NodeRepository."""
     from unittest.mock import AsyncMock
@@ -232,14 +242,27 @@ def mock_node_repository():
 
 
 @pytest.fixture
+def mock_embodied_repository():
+    """Provides a mock EmbodiedRepository."""
+    from unittest.mock import AsyncMock
+
+    mock = MagicMock()
+    mock.get_profile = AsyncMock(return_value=None)
+    mock.save_profile = AsyncMock()
+    return mock
+
+
+@pytest.fixture
 def data_processor(
     mock_prometheus_collector,
     mock_opencost_collector,
     mock_node_collector,
     mock_pod_collector,
     mock_electricity_maps_collector,
+    mock_boavizta_collector,
     mock_repository,
     mock_node_repository,
+    mock_embodied_repository,
     mock_calculator,
 ):
     """
@@ -260,8 +283,10 @@ def data_processor(
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         electricity_maps_collector=mock_electricity_maps_collector,
+        boavizta_collector=mock_boavizta_collector,
         repository=mock_repository,  # Pass the mock repository
         node_repository=mock_node_repository,
+        embodied_repository=mock_embodied_repository,
         calculator=mock_calculator,  # Pass the mock calculator
         estimator=estimator_mock,
     )
@@ -417,10 +442,12 @@ async def test_processor_uses_default_zone_when_node_zone_missing(
         node_collector=mock_node_collector_instance,  # Use the configured instance
         pod_collector=MagicMock(collect=AsyncMock(return_value=[])),
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
+        embodied_repository=MagicMock(get_profile=AsyncMock(return_value=None), save_profile=AsyncMock()),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -596,10 +623,12 @@ async def test_processor_aggregates_pod_requests(
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
+        embodied_repository=MagicMock(get_profile=AsyncMock(return_value=None), save_profile=AsyncMock()),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -639,10 +668,12 @@ async def test_processor_handles_missing_pod_requests(
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
+        embodied_repository=MagicMock(get_profile=AsyncMock(return_value=None), save_profile=AsyncMock()),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -702,10 +733,12 @@ async def test_processor_nodecollector_instance_type_fallback(
         node_collector=mock_node_collector,
         pod_collector=MagicMock(collect=AsyncMock(return_value=[])),
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
+        embodied_repository=MagicMock(get_profile=AsyncMock(return_value=None), save_profile=AsyncMock()),
         calculator=mock_calculator,
         estimator=estimator_spy,
     )

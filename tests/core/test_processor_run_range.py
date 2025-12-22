@@ -35,7 +35,9 @@ async def test_run_range_uses_repository():
         pod_collector=MagicMock(),
         electricity_maps_collector=MagicMock(),
         repository=mock_repo,
-        node_repository=MagicMock(),
+        node_repository=AsyncMock(),
+        embodied_repository=AsyncMock(),
+        boavizta_collector=AsyncMock(),
         calculator=MagicMock(),
         estimator=MagicMock(),
     )

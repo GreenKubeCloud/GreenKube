@@ -81,6 +81,8 @@ async def test_run_range_uses_old_snapshot():
         electricity_maps_collector=MagicMock(collect=AsyncMock()),
         repository=mock_repo,
         node_repository=mock_node_repo,
+        embodied_repository=AsyncMock(),
+        boavizta_collector=AsyncMock(),
         calculator=mock_calculator,
         estimator=mock_estimator,
     )
