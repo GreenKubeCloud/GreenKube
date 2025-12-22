@@ -231,3 +231,21 @@ def test_report_range_yearly_flag(mocker, mock_reporter):
     result = runner.invoke(app, ["report", "--yearly"])
     assert result.exit_code == 0
     mock_reporter.report.assert_called_once()
+
+
+def test_version_command():
+    """Test that `greenkube version` prints the version."""
+    from greenkube import __version__
+
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert f"GreenKube version: {__version__}" in result.output
+
+
+def test_version_flag():
+    """Test that `greenkube --version` prints the version."""
+    from greenkube import __version__
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert f"GreenKube version: {__version__}" in result.output
