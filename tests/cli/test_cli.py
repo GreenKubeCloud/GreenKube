@@ -206,20 +206,8 @@ def test_unknown_command_shows_help():
 
 def test_report_range_monthly_flag(mocker, mock_reporter):
     """Tests that --monthly aggregates are accepted and reporter called."""
-    mock_resp = MagicMock()
-    # Provide a single sample with ISO timestamps spanning two months
-    mock_resp.json.return_value = {
-        "data": {
-            "result": [
-                {
-                    "metric": {"namespace": "default", "pod": "p1"},
-                    "values": [["1696118400", "0.1"]],
-                },
-            ]
-        }
-    }
-    mock_resp.raise_for_status.return_value = None
-    mocker.patch("requests.get", return_value=mock_resp)
+    # mock_resp usage removed as requests is no longer used
+    # mock_resp provided unused data structure that is now fetched from repo
 
     mock_repo = mocker.patch("greenkube.cli.report.get_repository")
     repo_inst = MagicMock()
@@ -233,19 +221,7 @@ def test_report_range_monthly_flag(mocker, mock_reporter):
 
 def test_report_range_yearly_flag(mocker, mock_reporter):
     """Tests that --yearly aggregates are accepted and reporter called."""
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = {
-        "data": {
-            "result": [
-                {
-                    "metric": {"namespace": "default", "pod": "p1"},
-                    "values": [["1696118400", "0.1"]],
-                },
-            ]
-        }
-    }
-    mock_resp.raise_for_status.return_value = None
-    mocker.patch("requests.get", return_value=mock_resp)
+    # mock_resp usage removed as requests is no longer used
 
     mock_repo = mocker.patch("greenkube.cli.report.get_repository")
     repo_inst = MagicMock()
