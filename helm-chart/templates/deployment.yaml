@@ -35,7 +35,7 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             - secretRef:
-                name: electricity-maps
+                name: {{ include "greenkube.fullname" . }}
                 optional: true
 
 

@@ -21,6 +21,9 @@ data:
   ELASTICSEARCH_HOSTS: {{ .Values.elasticsearch.hosts | quote }}
   ELASTICSEARCH_INDEX_NAME: {{ .Values.elasticsearch.indexName | quote }}
   ELASTICSEARCH_VERIFY_CERTS: {{ .Values.elasticsearch.verifyCerts | quote }}
+  
+  # --- Boavizta Config ---
+  BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
 
   # --- Prometheus Collector Config ---
   {{- if .Values.config.prometheus.url }}
