@@ -45,6 +45,7 @@ class NodeSnapshotDoc(Document):
     zone = Keyword()
     node_pool = Keyword()
     memory_capacity_bytes = Long()
+    embodied_emissions_kg = Float()
 
     class Index:
         name = "greenkube_node_snapshots"
@@ -91,6 +92,7 @@ class ElasticsearchNodeRepository(NodeRepository):
                         "zone": node.zone,
                         "node_pool": node.node_pool,
                         "memory_capacity_bytes": node.memory_capacity_bytes,
+                        "embodied_emissions_kg": node.embodied_emissions_kg,
                     },
                 }
             )
@@ -134,6 +136,7 @@ class ElasticsearchNodeRepository(NodeRepository):
                     cpu_capacity_cores=hit.cpu_capacity_cores,
                     memory_capacity_bytes=hit.memory_capacity_bytes,
                     timestamp=hit.timestamp,
+                    embodied_emissions_kg=hit.embodied_emissions_kg,
                 )
                 ts = hit.timestamp
                 if isinstance(ts, datetime):
@@ -188,6 +191,7 @@ class ElasticsearchNodeRepository(NodeRepository):
                             cpu_capacity_cores=hit.get("cpu_capacity_cores"),
                             memory_capacity_bytes=hit.get("memory_capacity_bytes"),
                             timestamp=hit.get("timestamp"),
+                            embodied_emissions_kg=hit.get("embodied_emissions_kg"),
                         )
                         results.append(node_info)
 

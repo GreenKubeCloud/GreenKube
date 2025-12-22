@@ -65,6 +65,7 @@ def aggregate_metrics(
     for (namespace, pod, period), items in groups.items():
         total_joules = sum(i.joules for i in items)
         total_co2 = sum(i.co2e_grams for i in items)
+        total_embodied_co2 = sum(i.embodied_co2e_grams for i in items)
         total_cost = sum(i.total_cost for i in items)
         total_duration = sum(i.duration_seconds for i in items if i.duration_seconds is not None)
 
@@ -88,6 +89,7 @@ def aggregate_metrics(
             period=(None if period == "__now__" else period),
             total_cost=total_cost,
             co2e_grams=total_co2,
+            embodied_co2e_grams=total_embodied_co2,
             pue=weighted_pue,
             grid_intensity=weighted_grid,
             joules=total_joules,

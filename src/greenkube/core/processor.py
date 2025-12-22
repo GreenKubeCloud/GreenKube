@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
+from greenkube.collectors.boavizta_collector import BoaviztaCollector
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 from greenkube.utils.date_utils import parse_iso_date
 
@@ -18,6 +19,7 @@ from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..models.node import NodeZoneContext
 from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
+from ..storage.embodied_repository import EmbodiedRepository
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,10 @@ class DataProcessor:
         node_collector: NodeCollector,
         pod_collector: PodCollector,
         electricity_maps_collector: ElectricityMapsCollector,
+        boavizta_collector: BoaviztaCollector,
         repository: CarbonIntensityRepository,
         node_repository: NodeRepository,
+        embodied_repository: EmbodiedRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
     ):
@@ -43,8 +47,10 @@ class DataProcessor:
         self.node_collector = node_collector
         self.pod_collector = pod_collector
         self.electricity_maps_collector = electricity_maps_collector
+        self.boavizta_collector = boavizta_collector
         self.repository = repository
         self.node_repository = node_repository
+        self.embodied_repository = embodied_repository
         self.calculator = calculator
         self.estimator = estimator
 
@@ -403,6 +409,74 @@ class DataProcessor:
             except Exception:
                 node_instance_map = {}
 
+        # Prefetch Boavizta Data
+        # We need a unique set of (provider, instance_type) for lookup
+        unique_nodes_for_boavizta = set()
+        if nodes_info:
+            for node_name, info in nodes_info.items():
+                if info.cloud_provider and info.instance_type:
+                    unique_nodes_for_boavizta.add((info.cloud_provider, info.instance_type))
+
+        # Populate Cache in Parallel
+        # 1. Check DB first
+        boavizta_cache = {}  # Map (provider, type) -> profile_dict
+
+        missing_in_db = []
+        for provider, itype in unique_nodes_for_boavizta:
+            profile = await self.embodied_repository.get_profile(provider, itype)
+            if profile:
+                boavizta_cache[(provider, itype)] = profile
+            else:
+                missing_in_db.append((provider, itype))
+
+        # 2. Fetch missing from API
+        async def fetch_and_save_boavizta(provider, instance_type):
+            try:
+                impact = await self.boavizta_collector.get_server_impact(
+                    provider=provider, instance_type=instance_type, verbose=True
+                )
+                if impact and impact.impacts and impact.impacts.gwp and impact.impacts.gwp.manufacture:
+                    # Parse GWP from Pydantic model
+                    gwp_embedded_kg = impact.impacts.gwp.manufacture
+                    if gwp_embedded_kg:
+                        # Default lifespan 4 years (35040 hours) per config requirement
+                        # but API doesn't return it usually
+                        lifespan = 35040
+
+                        await self.embodied_repository.save_profile(
+                            provider=provider, instance_type=instance_type, gwp=gwp_embedded_kg, lifespan=lifespan
+                        )
+                        return (provider, instance_type), {
+                            "gwp_manufacture": gwp_embedded_kg,
+                            "lifespan_hours": lifespan,
+                        }
+            except Exception as e:
+                logger.warning(f"Failed to fetch/save Boavizta profile for {provider}/{instance_type}: {e}")
+            return None
+
+        if missing_in_db:
+            logger.info(f"Fetching {len(missing_in_db)} missing Boavizta profiles from API...")
+            results = await asyncio.gather(*(fetch_and_save_boavizta(p, i) for p, i in missing_in_db))
+            for res in results:
+                if res:
+                    key, val = res
+                    boavizta_cache[key] = val
+
+        # Update NodeInfo with embodied emissions and save snapshots
+        if nodes_info:
+            for node_name, info in nodes_info.items():
+                if info.cloud_provider and info.instance_type:
+                    key = (info.cloud_provider, info.instance_type)
+                    profile = boavizta_cache.get(key)
+                    if profile:
+                        info.embodied_emissions_kg = profile.get("gwp_manufacture")
+
+            try:
+                await self.node_repository.save_nodes(list(nodes_info.values()))
+                logger.info("Saved %d node snapshots.", len(nodes_info))
+            except Exception as e:
+                logger.warning("Failed to save node snapshots: %s", e)
+
         # 5. Combine and Calculate
         for energy_metric in energy_metrics:
             pod_name = energy_metric.pod_name
@@ -465,6 +539,43 @@ class DataProcessor:
                 is_estimated = True
                 estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
 
+            # 5. Embodied Emissions (Boavizta)
+            embodied_emissions_grams = 0.0
+            node_info = nodes_info.get(node_name)
+            if node_info and node_info.cloud_provider and node_info.instance_type:
+                key = (node_info.cloud_provider, node_info.instance_type)
+                profile = boavizta_cache.get(key)
+
+                if profile:
+                    try:
+                        gwp_kg = profile.get("gwp_manufacture")
+                        lifespan = profile.get("lifespan_hours")
+
+                        # Calculate share
+                        node_capacity = 0
+                        if node_info.instance_type:
+                            prof = self.estimator.instance_profiles.get(node_info.instance_type)
+                            if prof:
+                                node_capacity = prof["vcores"]
+
+                        cpu_share = 0.0
+                        if node_capacity > 0 and pod_requests["cpu"] > 0:
+                            cpu_share = (pod_requests["cpu"] / 1000.0) / node_capacity
+                            cpu_share = min(cpu_share, 1.0)
+
+                        duration = self.estimator.query_range_step_sec
+
+                        embodied_emissions_grams = self.calculator.calculate_embodied_emissions(
+                            gwp_manufacture_kg=gwp_kg,
+                            lifespan_hours=lifespan,
+                            duration_seconds=duration,
+                            share=cpu_share,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error calculating embodied emissions for {node_name}: {e}")
+
+            # Calculate Carbon Emissions
+
             # Calculate Carbon Emissions
             try:
                 carbon_result = await self.calculator.calculate_emissions(
@@ -501,6 +612,7 @@ class DataProcessor:
                     emaps_zone=emaps_zone,
                     is_estimated=is_estimated,
                     estimation_reasons=estimation_reasons,
+                    embodied_co2e_grams=embodied_emissions_grams,
                 )
                 combined_metrics.append(combined)
             else:

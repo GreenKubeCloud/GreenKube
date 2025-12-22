@@ -26,11 +26,11 @@ class PostgresNodeRepository(NodeRepository):
                     INSERT INTO node_snapshots (
                         timestamp, node_name, instance_type, cpu_capacity_cores,
                         architecture, cloud_provider, region, zone, node_pool,
-                        memory_capacity_bytes
+                        memory_capacity_bytes, embodied_emissions_kg
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8, $9,
-                        $10
+                        $10, $11
                     )
                     ON CONFLICT (node_name, timestamp) DO NOTHING
                 """
@@ -50,6 +50,7 @@ class PostgresNodeRepository(NodeRepository):
                             node.zone,
                             node.node_pool,
                             node.memory_capacity_bytes,
+                            node.embodied_emissions_kg,
                         )
                     )
 
@@ -69,7 +70,7 @@ class PostgresNodeRepository(NodeRepository):
                 query = """
                     SELECT timestamp, node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes
+                           memory_capacity_bytes, embodied_emissions_kg
                     FROM node_snapshots
                     WHERE timestamp >= $1 AND timestamp <= $2
                 """
@@ -104,7 +105,7 @@ class PostgresNodeRepository(NodeRepository):
                     SELECT DISTINCT ON (node_name)
                            timestamp, node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes
+                           memory_capacity_bytes, embodied_emissions_kg
                     FROM node_snapshots
                     WHERE timestamp <= $1
                     ORDER BY node_name, timestamp DESC
