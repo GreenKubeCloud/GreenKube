@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import List
 
+import aiosqlite
+
 from greenkube.core.exceptions import QueryError
 from greenkube.models.node import NodeInfo
 from greenkube.storage.base_repository import NodeRepository
@@ -25,7 +27,7 @@ class SQLiteNodeRepository(NodeRepository):
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    def save_nodes(self, nodes: List[NodeInfo]) -> int:
+    async def save_nodes(self, nodes: List[NodeInfo]) -> int:
         """
         Saves node snapshots to the database.
         """
@@ -33,13 +35,12 @@ class SQLiteNodeRepository(NodeRepository):
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            with self.db_manager.connection_scope() as conn:
-                cursor = conn.cursor()
+            async with self.db_manager.connection_scope() as conn:
                 for node in nodes:
                     try:
                         # Use node.timestamp if available, otherwise use current time
                         ts = node.timestamp.isoformat() if node.timestamp else now
-                        cursor.execute(
+                        cursor = await conn.execute(
                             """
                             INSERT INTO node_snapshots
                                 (timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
@@ -66,7 +67,7 @@ class SQLiteNodeRepository(NodeRepository):
                     except Exception as e:
                         logging.error(f"Unexpected error processing node {node.name}: {e}")
 
-                conn.commit()
+                await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
             logging.error(f"Failed to commit transaction for nodes: {e}")
@@ -75,15 +76,14 @@ class SQLiteNodeRepository(NodeRepository):
             logging.error(f"Unexpected error in save_nodes: {e}")
             raise QueryError(f"Unexpected error in save_nodes: {e}") from e
 
-    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
+    async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
         """
         Retrieves node snapshots within a time range.
         """
         try:
-            with self.db_manager.connection_scope() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
                     """
                     SELECT node_name, instance_type, zone, region, cloud_provider, architecture,
                            node_pool, cpu_capacity_cores, memory_capacity_bytes, timestamp
@@ -92,29 +92,29 @@ class SQLiteNodeRepository(NodeRepository):
                     ORDER BY timestamp ASC
                 """,
                     (start.isoformat(), end.isoformat()),
-                )
-                rows = cursor.fetchall()
+                ) as cursor:
+                    rows = await cursor.fetchall()
 
-                snapshots = []
-                for row in rows:
-                    snapshots.append(
-                        (
-                            row["timestamp"],
-                            NodeInfo(
-                                name=row["node_name"],
-                                instance_type=row["instance_type"],
-                                zone=row["zone"],
-                                region=row["region"],
-                                cloud_provider=row["cloud_provider"],
-                                architecture=row["architecture"],
-                                node_pool=row["node_pool"],
-                                cpu_capacity_cores=row["cpu_capacity_cores"],
-                                memory_capacity_bytes=row["memory_capacity_bytes"],
-                                timestamp=parse_iso_date(row["timestamp"]),
-                            ),
+                    snapshots = []
+                    for row in rows:
+                        snapshots.append(
+                            (
+                                row["timestamp"],
+                                NodeInfo(
+                                    name=row["node_name"],
+                                    instance_type=row["instance_type"],
+                                    zone=row["zone"],
+                                    region=row["region"],
+                                    cloud_provider=row["cloud_provider"],
+                                    architecture=row["architecture"],
+                                    node_pool=row["node_pool"],
+                                    cpu_capacity_cores=row["cpu_capacity_cores"],
+                                    memory_capacity_bytes=row["memory_capacity_bytes"],
+                                    timestamp=parse_iso_date(row["timestamp"]),
+                                ),
+                            )
                         )
-                    )
-                return snapshots
+                    return snapshots
 
         except sqlite3.Error as e:
             logging.error(f"Could not retrieve snapshots: {e}")
@@ -123,16 +123,15 @@ class SQLiteNodeRepository(NodeRepository):
             logging.error(f"Unexpected error in get_snapshots: {e}")
             raise QueryError(f"Unexpected error in get_snapshots: {e}") from e
 
-    def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
         """
         Retrieves the latest snapshot for each node before the given timestamp.
         """
         try:
-            with self.db_manager.connection_scope() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
                 # SQL to get the latest snapshot per node before timestamp
-                cursor.execute(
+                async with conn.execute(
                     """
                     SELECT ns.node_name, ns.instance_type, ns.zone, ns.region, ns.cloud_provider,
                            ns.architecture, ns.node_pool, ns.cpu_capacity_cores, ns.memory_capacity_bytes, ns.timestamp
@@ -145,23 +144,23 @@ class SQLiteNodeRepository(NodeRepository):
                     ) latest ON ns.node_name = latest.node_name AND ns.timestamp = latest.max_ts
                 """,
                     (timestamp.isoformat(),),
-                )
-                rows = cursor.fetchall()
-                return [
-                    NodeInfo(
-                        name=row["node_name"],
-                        instance_type=row["instance_type"],
-                        zone=row["zone"],
-                        region=row["region"],
-                        cloud_provider=row["cloud_provider"],
-                        architecture=row["architecture"],
-                        node_pool=row["node_pool"],
-                        cpu_capacity_cores=row["cpu_capacity_cores"],
-                        memory_capacity_bytes=row["memory_capacity_bytes"],
-                        timestamp=parse_iso_date(row["timestamp"]),
-                    )
-                    for row in rows
-                ]
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [
+                        NodeInfo(
+                            name=row["node_name"],
+                            instance_type=row["instance_type"],
+                            zone=row["zone"],
+                            region=row["region"],
+                            cloud_provider=row["cloud_provider"],
+                            architecture=row["architecture"],
+                            node_pool=row["node_pool"],
+                            cpu_capacity_cores=row["cpu_capacity_cores"],
+                            memory_capacity_bytes=row["memory_capacity_bytes"],
+                            timestamp=parse_iso_date(row["timestamp"]),
+                        )
+                        for row in rows
+                    ]
         except sqlite3.Error as e:
             logging.error(f"Could not retrieve latest snapshots: {e}")
             raise QueryError(f"Could not retrieve latest snapshots: {e}") from e

@@ -5,10 +5,11 @@ PrometheusCollector fetches CPU usage and node instance type metrics.
 This data is the input for the BasicEstimator.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-import requests
+import httpx
 from pydantic import ValidationError
 
 from greenkube.collectors.base_collector import BaseCollector
@@ -21,6 +22,7 @@ from greenkube.models.prometheus_metrics import (
     PrometheusMetric,
 )
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
+from greenkube.utils.http_client import get_async_http_client
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -38,7 +40,8 @@ class PrometheusCollector(BaseCollector):
         self.settings = settings
         self.base_url = settings.PROMETHEUS_URL
         self.query_range_step = settings.PROMETHEUS_QUERY_RANGE_STEP
-        self.timeout = 10
+        # Configured in http_client, but we can pass explicit timeouts if essential.
+        # self.timeout = 10
 
         # TLS verify and auth support
         self.verify = getattr(settings, "PROMETHEUS_VERIFY_CERTS", True)
@@ -62,27 +65,30 @@ class PrometheusCollector(BaseCollector):
         # Build a query that filters nodes which have the configured instance-type label.
         self.node_labels_query = f"kube_node_labels{{{self.node_instance_label_key}!=''}}"
         # Use a BaseDiscovery instance to access in-cluster and DNS helpers
-        # without duplicating logic. This keeps tests from needing a full
-        # PrometheusDiscovery instance and prevents AttributeError when
-        # calling _is_running_in_cluster() in probe fallbacks.
+        # without duplicating logic.
         self._discovery = BaseDiscovery()
 
-    def collect(self) -> PrometheusMetric:
+    async def collect(self) -> PrometheusMetric:
         """
         Fetch all required metrics from Prometheus.
 
         Returns a PrometheusMetric object containing lists of parsed data.
         """
-        cpu_results = self._query_prometheus(self.cpu_usage_query)
-        # If the standard grouped query returned no results (some setups omit the 'container' label),
-        # try a fallback that doesn't require 'container' and groups only by namespace/pod/node.
-        if not cpu_results:
-            fallback_query = (
-                f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
-            )
-            logger.info("Falling back to container_cpu_usage grouped without 'container' label")
-            cpu_results = self._query_prometheus(fallback_query)
-        node_results = self._query_prometheus(self.node_labels_query)
+        async with get_async_http_client() as client:
+            # Launch queries concurrently to reduce latency
+            cpu_future = self._query_prometheus(client, self.cpu_usage_query)
+            node_future = self._query_prometheus(client, self.node_labels_query)
+
+            # Wait for both primary queries
+            cpu_results, node_results = await asyncio.gather(cpu_future, node_future)
+
+            # If the standard grouped query returned no results, try fallback
+            if not cpu_results:
+                fallback_query = (
+                    f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
+                )
+                logger.info("Falling back to container_cpu_usage grouped without 'container' label")
+                cpu_results = await self._query_prometheus(client, fallback_query)
 
         parsed_cpu_usage = []
         malformed_cpu_count = 0
@@ -90,17 +96,12 @@ class PrometheusCollector(BaseCollector):
         non_pod_skipped = 0
 
         for item in cpu_results:
-            # Many Prometheus setups return node-level aggregates or other series that do
-            # not include pod/namespace labels. We only care about pod-level metrics here.
             metric = item.get("metric", {})
             if not metric or "namespace" not in metric or "pod" not in metric:
-                # Skip non-pod series; emit a DEBUG-level message so developers can
-                # inspect skipped series without polluting INFO/WARN logs.
                 logger.debug("Skipping non-pod Prometheus series: %s", item)
                 non_pod_skipped += 1
                 continue
 
-            # Try parsing with container first; if labels are missing, try the no-container parser.
             parsed_item = self._parse_cpu_data(item)
             if not parsed_item:
                 parsed_item = self._parse_cpu_data_no_container(item)
@@ -155,14 +156,10 @@ class PrometheusCollector(BaseCollector):
             node_instance_types=parsed_node_types,
         )
 
-    def _query_prometheus(self, query: str) -> List[Dict[str, Any]]:
+    async def _query_prometheus(self, client: httpx.AsyncClient, query: str) -> List[Dict[str, Any]]:
         """
         Internal helper to run a query against the Prometheus API.
-
-        Returns the 'result' list from the JSON response, or [] on failure.
         """
-        # If base_url is not set, this part will fail and fall through to discovery.
-        # Normalize base URL and try a couple of common endpoint forms.
         base = self.base_url.rstrip("/") if self.base_url else ""
         candidates = [
             f"{base}/api/v1/query",
@@ -180,17 +177,18 @@ class PrometheusCollector(BaseCollector):
         if self.username and self.password:
             auth = (self.username, self.password)
 
+        return await self._query_run_loop(client, candidates, params, headers, auth, query)
+
+    async def _query_run_loop(self, client, candidates, params, headers, auth, query):
+        # Helper to avoid recursion depth or duplicated code
         last_err = None
         for query_url in candidates:
             try:
-                logger.info("Querying Prometheus at %s", query_url)
-                response = requests.get(
+                response = await client.get(
                     query_url,
                     params=params,
                     headers=headers,
                     auth=auth,
-                    timeout=self.timeout,
-                    verify=self.verify,
                 )
                 response.raise_for_status()
 
@@ -207,11 +205,7 @@ class PrometheusCollector(BaseCollector):
                 logger.info("Prometheus at %s returned %d result(s)", query_url, len(results))
                 return results
 
-            except requests.exceptions.SSLError as e:
-                last_err = e
-                logger.warning("TLS/SSL error querying Prometheus at %s: %s", query_url, e)
-                continue
-            except requests.exceptions.RequestException as e:
+            except httpx.HTTPError as e:
                 last_err = e
                 logger.debug("Failed to connect to Prometheus at %s: %s", query_url, e)
                 continue
@@ -220,41 +214,32 @@ class PrometheusCollector(BaseCollector):
                 logger.error("Unexpected error querying Prometheus at %s: %s", query_url, e)
                 continue
 
-        # If we reach here, all candidates failed
         if last_err:
             logger.error("All Prometheus query endpoints failed. Last error: %s", last_err)
         else:
-            logger.error("Prometheus queries returned no results for query: %s", query)
+            if not candidates:
+                pass  # No URL set
+            else:
+                logger.error("Prometheus queries returned no results for query: %s", query)
 
         # Attempt discovery once when configured endpoints fail.
-        if self._discover_and_update_url():
-            # Retry with new URL
-            return self._query_prometheus(query)
+        # We need to act carefully. _discover_and_update_url might change self.base_url
+        if await self._discover_and_update_url(client):
+            return await self._query_prometheus(client, query)
 
         return []
 
-    def is_available(self) -> bool:
-        """
-        Probe Prometheus endpoints quickly to determine availability.
+    async def is_available(self) -> bool:
+        async with get_async_http_client(verify=self.verify) as client:
+            if self.base_url and await self._probe_url(client, self.base_url):
+                return True
 
-        Returns True if at least one candidate query endpoint responds with
-        a success-like payload (HTTP 200 and JSON with status 'success').
-        If no configured base URL is reachable, attempt cluster service
-        discovery and probe the discovered DNS endpoint.
-        """
+            if await self._discover_and_update_url(client):
+                return True
 
-        # If configured URL works, we're good
-        if self.base_url and self._probe_url(self.base_url):
-            return True
+            return False
 
-        # Try discovery and probe the discovered endpoint
-        if self._discover_and_update_url():
-            return True
-
-        logger.debug("Prometheus is not available on any candidate endpoints")
-        return False
-
-    def _probe_url(self, u: str) -> bool:
+    async def _probe_url(self, client: httpx.AsyncClient, u: str) -> bool:
         base = u.rstrip("/")
         candidates = [
             f"{base}/api/v1/query",
@@ -265,25 +250,20 @@ class PrometheusCollector(BaseCollector):
         headers = {}
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
-
         auth = None
         if self.username and self.password:
             auth = (self.username, self.password)
-
         params = {"query": "up"}
 
         for url in candidates:
             try:
-                # When probing, we might want to be lenient with verify if it's a new URL
-                # but for now use self.verify which might have been updated by _update_url
-                resp = requests.get(url, params=params, headers=headers, auth=auth, timeout=3, verify=self.verify)
+                resp = await client.get(url, params=params, headers=headers, auth=auth)
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("status") == "success":
                     logger.debug("Prometheus is available at %s", url)
                     return True
             except Exception:
-                logger.debug("Prometheus probe failed for %s", url)
                 continue
         return False
 
@@ -295,10 +275,10 @@ class PrometheusCollector(BaseCollector):
         else:
             self.verify = False
 
-    def _discover_and_update_url(self) -> bool:
+    async def _discover_and_update_url(self, client: httpx.AsyncClient) -> bool:
         try:
             pd = PrometheusDiscovery()
-            discovered = pd.discover()
+            discovered = await pd.discover()
             if discovered and discovered != self.base_url:
                 logger.info("Prometheus discovery returned %s", discovered)
                 self._update_url(discovered)
@@ -316,50 +296,93 @@ class PrometheusCollector(BaseCollector):
             for host in hosts:
                 for scheme in ("http", "https"):
                     url = f"{scheme}://{host}"
-                    # Temporarily update URL to probe it with correct verify settings
                     old_url = self.base_url
                     old_verify = self.verify
                     self._update_url(url)
-                    if self._probe_url(url):
+                    if await self._probe_url(client, url):
                         logger.info("Prometheus responded at well-known URL %s", url)
                         return True
-                    # Revert if failed
                     self.base_url = old_url
                     self.verify = old_verify
         return False
 
-    def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:
-        """
-        Parses a single item from the CPU query result.
-        Returns a PodCPUUsage model or None if parsing fails.
-        """
-        metric = item.get("metric", {})
-        # Value is an array like [<timestamp>, "<value>"]. We take the string value.
-        value_str = item.get("value", [None, None])[1]
+    # Parsing methods _parse_cpu_data ... remain unchanged/same logic
 
-        # If the metric contains NaN or missing value, treat as unparsable and return None.
+    async def collect_range(
+        self, start, end, step: Optional[str] = None, query: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        step = step or self.query_range_step
+        q = query or self.cpu_usage_query
+
+        async with get_async_http_client(verify=self.verify) as client:
+            if not self.base_url:
+                # Attempt discovery
+                await self._discover_and_update_url(client)
+
+            if not self.base_url:
+                # log warning
+                return []
+
+            base = self.base_url.rstrip("/")
+            candidates = [
+                f"{base}/api/v1/query_range",
+                f"{base}/query_range",
+                f"{base}/prometheus/api/v1/query_range",
+            ]
+            params = {"query": q, "start": None, "end": None, "step": step}
+            try:
+                params["start"] = to_iso_z(ensure_utc(start))
+                params["end"] = to_iso_z(ensure_utc(end))
+            except ValueError:
+                return []
+
+            headers = {}
+            if self.bearer_token:
+                headers["Authorization"] = f"Bearer {self.bearer_token}"
+            auth = None
+            if self.username and self.password:
+                auth = (self.username, self.password)
+
+            for query_url in candidates:
+                try:
+                    response = await client.get(query_url, params=params, headers=headers, auth=auth)
+                    response.raise_for_status()
+                    data = response.json()
+                    # Check success
+                    if data.get("status") != "success":
+                        continue
+
+                    results = data.get("data", {}).get("result", [])
+                    if not results and "container" in q:
+                        # Fallback
+                        fallback_query = (
+                            f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
+                            " by (namespace, pod, node)"
+                        )
+                        return await self.collect_range(start, end, step=step, query=fallback_query)
+
+                    return results
+
+                except Exception:
+                    continue
+            return []
+
+    # Keeping parsing methods
+    def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
         if value_str is None or value_str == "NaN":
             return None
-
-        # Validate required labels are present; if any are missing, return None and let
-        # the caller aggregate malformed items for a single warning.
         namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
         pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
         container = metric.get("container") or metric.get("container_name")
         node = metric.get("node") or metric.get("kubernetes_node")
-
         if not all((namespace, pod, container, node)):
             return None
-
         try:
-            data_to_validate = {
-                "namespace": namespace,
-                "pod": pod,
-                "container": container,
-                "node": node,
-                "cpu_usage_cores": float(value_str),
-            }
-            return PodCPUUsage(**data_to_validate)
+            return PodCPUUsage(
+                namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=float(value_str)
+            )
         except (TypeError, ValueError, ValidationError):
             # Validation failed (bad types); return None for aggregation by caller.
             return None
@@ -386,132 +409,18 @@ class PrometheusCollector(BaseCollector):
             return None
 
         try:
-            data_to_validate = {
-                "namespace": namespace,
-                "pod": pod,
-                "container": container,
-                "node": node,
-                "cpu_usage_cores": float(value_str),
-            }
-            return PodCPUUsage(**data_to_validate)
+            return PodCPUUsage(
+                namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=float(value_str)
+            )
         except (TypeError, ValueError, ValidationError):
             return None
 
     def _parse_node_data(self, item: Dict[str, Any]) -> Optional[NodeInstanceType]:
-        """
-        Parses a single item from the node labels query result.
-        Returns a NodeInstanceType model or None if parsing fails.
-        """
         metric = item.get("metric", {})
-
-        # Use the configured instance label key (it may vary across environments).
         label_key = self.node_instance_label_key
         if not all(k in metric for k in ("node", label_key)):
             return None
-
         try:
-            data_to_validate = {
-                "node": metric["node"],
-                "instance_type": metric[label_key],
-            }
-            return NodeInstanceType(**data_to_validate)
+            return NodeInstanceType(node=metric["node"], instance_type=metric[label_key])
         except ValidationError:
             return None
-
-    def collect_range(
-        self, start, end, step: Optional[str] = None, query: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Query Prometheus `query_range` endpoint and return the raw series results.
-
-        Returns the list under data.result or [] on error. If query is not
-        provided, uses the standard CPU usage query. Falls back to a query
-        without the 'container' label when needed.
-        """
-        if not self.base_url:
-            logger.info("PROMETHEUS_URL is not set; attempting discovery.")
-            self.is_available()
-
-        if not self.base_url:
-            logger.warning("PROMETHEUS_URL is not set and discovery failed. Skipping Prometheus range collection.")
-            return []
-
-        step = step or self.query_range_step
-        q = query or self.cpu_usage_query
-
-        base = self.base_url.rstrip("/")
-        candidates = [
-            f"{base}/api/v1/query_range",
-            f"{base}/query_range",
-            f"{base}/prometheus/api/v1/query_range",
-        ]
-
-        params = {"query": q, "start": None, "end": None, "step": step}
-
-        # Accept aware or naive datetimes; normalize to Z-suffixed ISO
-        try:
-            params["start"] = to_iso_z(ensure_utc(start))
-            params["end"] = to_iso_z(ensure_utc(end))
-        except ValueError as e:
-            logger.error("Invalid date format for start/end: %s", e)
-            return []
-
-        headers = {}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-
-        auth = None
-        if self.username and self.password:
-            auth = (self.username, self.password)
-
-        last_err = None
-        for query_url in candidates:
-            try:
-                logger.info("Querying Prometheus range at %s", query_url)
-                response = requests.get(
-                    query_url,
-                    params=params,
-                    headers=headers,
-                    auth=auth,
-                    timeout=self.timeout,
-                    verify=self.verify,
-                )
-                response.raise_for_status()
-                data = response.json()
-                if data.get("status") != "success":
-                    logger.warning(
-                        "Prometheus range returned non-success for %s: %s",
-                        query_url,
-                        data.get("error", "Unknown"),
-                    )
-                    continue
-
-                results = data.get("data", {}).get("result", [])
-                # If no results and we used the container query, try fallback
-                if not results and "container" in q:
-                    fallback_query = (
-                        f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
-                        " by (namespace, pod, node)"
-                    )
-                    logger.info("Falling back to containerless grouped CPU query for range")
-                    return self.collect_range(start, end, step=step, query=fallback_query)
-
-                logger.info("Prometheus range at %s returned %d series", query_url, len(results))
-                return results
-            except requests.exceptions.RequestException as e:
-                last_err = e
-                logger.debug("Failed range query to Prometheus at %s: %s", query_url, e)
-                continue
-            except Exception as e:
-                last_err = e
-                logger.error(
-                    "Unexpected error during Prometheus range query at %s: %s",
-                    query_url,
-                    e,
-                )
-                continue
-
-        if last_err:
-            logger.error("All Prometheus range endpoints failed. Last error: %s", last_err)
-        else:
-            logger.error("Prometheus range queries returned no results for query: %s", q)
-        return []

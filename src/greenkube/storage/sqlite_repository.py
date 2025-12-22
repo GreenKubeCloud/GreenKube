@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import List
 
+import aiosqlite
+
 from greenkube.models.metrics import CombinedMetric
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
@@ -28,15 +30,14 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
         """
         self.db_manager = db_manager
 
-    def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
+    async def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
         Only considers data from the last 48 hours to avoid using stale values.
         """
         try:
-            with self.db_manager.connection_scope() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
 
                 # Normalize the query timestamp to ensure it matches the stored format (Z suffix)
                 try:
@@ -57,7 +58,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         ORDER BY datetime DESC
                         LIMIT 1
                     """
-                    cursor.execute(query, (zone, normalized_ts, lookback_limit))
+                    params = (zone, normalized_ts, lookback_limit)
                 else:
                     # Fallback: use original query without time bound if timestamp parsing fails
                     query = """
@@ -67,10 +68,11 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         ORDER BY datetime DESC
                         LIMIT 1
                     """
-                    cursor.execute(query, (zone, normalized_ts))
+                    params = (zone, normalized_ts)
 
-                result = cursor.fetchone()
-                return result["carbon_intensity"] if result else None
+                async with conn.execute(query, params) as cursor:
+                    result = await cursor.fetchone()
+                    return result["carbon_intensity"] if result else None
         except sqlite3.Error as e:
             logger.error(f"Database error in get_for_zone_at_time for zone {zone} at {timestamp}: {e}")
             raise QueryError(f"Database error in get_for_zone_at_time: {e}") from e
@@ -78,7 +80,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             logger.error(f"Unexpected error in get_for_zone_at_time: {e}")
             raise QueryError(f"Unexpected error in get_for_zone_at_time: {e}") from e
 
-    def save_history(self, history_data: list, zone: str) -> int:
+    async def save_history(self, history_data: list, zone: str) -> int:
         """
         Saves historical carbon intensity data to the SQLite database.
         It ignores records that would be duplicates based on zone and datetime.
@@ -86,8 +88,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
         saved_count = 0
 
         try:
-            with self.db_manager.connection_scope() as conn:
-                cursor = conn.cursor()
+            async with self.db_manager.connection_scope() as conn:
                 for record in history_data:
                     # Basic validation that record is a dictionary
                     if not isinstance(record, dict):
@@ -103,7 +104,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                             normalized_dt = None
 
                         # Use default value None if key is missing
-                        cursor.execute(
+                        cursor = await conn.execute(
                             """
                             INSERT INTO carbon_intensity_history
                                 (zone, carbon_intensity, datetime, updated_at, created_at,
@@ -129,6 +130,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                             ),
                         )
                         # cursor.rowcount will be 1 for a successful insert, 0 for conflict/no insert
+                        # actually for ON CONFLICT DO UPDATE it might be 1?
                         saved_count += cursor.rowcount
                     except sqlite3.Error as e:
                         # Use logging for errors
@@ -137,7 +139,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         # Catch potential errors from record.get() if record structure is unexpected
                         logging.error(f"Unexpected error processing record {record}: {e}")
 
-                conn.commit()
+                await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
             logging.error(f"Failed to commit transaction: {e}")
@@ -146,11 +148,10 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             logging.error(f"Unexpected error in save_history: {e}")
             raise QueryError(f"Unexpected error in save_history: {e}") from e
 
-    def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         saved_count = 0
         try:
-            with self.db_manager.connection_scope() as conn:
-                cursor = conn.cursor()
+            async with self.db_manager.connection_scope() as conn:
                 for metric in metrics:
                     try:
                         timestamp_iso = metric.timestamp.isoformat() if metric.timestamp else None
@@ -158,7 +159,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                             metric.grid_intensity_timestamp.isoformat() if metric.grid_intensity_timestamp else None
                         )
 
-                        cursor.execute(
+                        cursor = await conn.execute(
                             """
                             INSERT INTO combined_metrics
                                  (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
@@ -195,7 +196,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     except Exception as e:
                         logging.error(f"Unexpected error processing combined metric {metric.pod_name}: {e}")
 
-                conn.commit()
+                await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
             logging.error(f"Failed to commit transaction for combined_metrics: {e}")
@@ -204,12 +205,11 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             logging.error(f"Unexpected error in write_combined_metrics: {e}")
             raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
 
-    def read_combined_metrics(self, start_time, end_time) -> List[CombinedMetric]:
+    async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:
-            with self.db_manager.connection_scope() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
                     """
                     SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                            cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
@@ -218,42 +218,42 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     WHERE "timestamp" BETWEEN ? AND ?
                 """,
                     (start_time.isoformat(), end_time.isoformat()),
-                )
-                rows = cursor.fetchall()
-                metrics = []
-                for row in rows:
-                    estimation_reasons = []
-                    if row["estimation_reasons"]:
-                        try:
-                            estimation_reasons = json.loads(row["estimation_reasons"])
-                        except json.JSONDecodeError:
-                            pass
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    metrics = []
+                    for row in rows:
+                        estimation_reasons = []
+                        if row["estimation_reasons"]:
+                            try:
+                                estimation_reasons = json.loads(row["estimation_reasons"])
+                            except json.JSONDecodeError:
+                                pass
 
-                    metrics.append(
-                        CombinedMetric(
-                            pod_name=row["pod_name"],
-                            namespace=row["namespace"],
-                            total_cost=row["total_cost"],
-                            co2e_grams=row["co2e_grams"],
-                            pue=row["pue"],
-                            grid_intensity=row["grid_intensity"],
-                            joules=row["joules"],
-                            cpu_request=row["cpu_request"],
-                            memory_request=row["memory_request"],
-                            period=row["period"],
-                            timestamp=datetime.fromisoformat(row["timestamp"]) if row["timestamp"] else None,
-                            duration_seconds=row["duration_seconds"],
-                            grid_intensity_timestamp=datetime.fromisoformat(row["grid_intensity_timestamp"])
-                            if row["grid_intensity_timestamp"]
-                            else None,
-                            node_instance_type=row["node_instance_type"],
-                            node_zone=row["node_zone"],
-                            emaps_zone=row["emaps_zone"],
-                            is_estimated=bool(row["is_estimated"]),
-                            estimation_reasons=estimation_reasons,
+                        metrics.append(
+                            CombinedMetric(
+                                pod_name=row["pod_name"],
+                                namespace=row["namespace"],
+                                total_cost=row["total_cost"],
+                                co2e_grams=row["co2e_grams"],
+                                pue=row["pue"],
+                                grid_intensity=row["grid_intensity"],
+                                joules=row["joules"],
+                                cpu_request=row["cpu_request"],
+                                memory_request=row["memory_request"],
+                                period=row["period"],
+                                timestamp=datetime.fromisoformat(row["timestamp"]) if row["timestamp"] else None,
+                                duration_seconds=row["duration_seconds"],
+                                grid_intensity_timestamp=datetime.fromisoformat(row["grid_intensity_timestamp"])
+                                if row["grid_intensity_timestamp"]
+                                else None,
+                                node_instance_type=row["node_instance_type"],
+                                node_zone=row["node_zone"],
+                                emaps_zone=row["emaps_zone"],
+                                is_estimated=bool(row["is_estimated"]),
+                                estimation_reasons=estimation_reasons,
+                            )
                         )
-                    )
-                return metrics
+                    return metrics
         except sqlite3.Error as e:
             logging.error(f"Could not read combined metrics: {e}")
             raise QueryError(f"Could not read combined metrics: {e}") from e

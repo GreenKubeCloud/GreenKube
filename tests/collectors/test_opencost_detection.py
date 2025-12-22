@@ -1,15 +1,15 @@
 # tests/collectors/test_opencost_detection.py
 """
-Tests for OpenCost service detection (TDD first).
+Tests for OpenCost service detection.
 
 We expect OpenCostCollector to expose an `is_available()` method that
 returns True when the OpenCost API URL responds successfully, False
 when unreachable, and False when no URL is configured.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-import requests
-from requests_mock import ANY
 
 from greenkube.collectors.opencost_collector import OpenCostCollector
 from greenkube.core.config import config as global_config
@@ -22,35 +22,59 @@ def set_opencost_url(monkeypatch):
     yield
 
 
-def test_opencost_is_available_success(set_opencost_url, requests_mock):
-    oc = OpenCostCollector()
+@pytest.mark.asyncio
+async def test_opencost_is_available_success(set_opencost_url):
+    with patch(
+        "greenkube.collectors.opencost_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": []}
+        mock_client.get.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
-    requests_mock.get(global_config.OPENCOST_API_URL, status_code=200, json={"data": []})
-
-    assert hasattr(oc, "is_available")
-    assert callable(getattr(oc, "is_available"))
-
-    assert oc.is_available() is True
+        oc = OpenCostCollector()
+        assert await oc.is_available() is True
 
 
-def test_opencost_is_available_no_url(monkeypatch):
+@pytest.mark.asyncio
+async def test_opencost_is_available_no_url(monkeypatch):
     # Clear config URL
     monkeypatch.setattr(global_config, "OPENCOST_API_URL", None)
     oc = OpenCostCollector()
-    assert oc.is_available() is False
+    assert await oc.is_available() is False
 
 
-def test_opencost_is_available_connection_error(set_opencost_url, requests_mock):
-    oc = OpenCostCollector()
+@pytest.mark.asyncio
+async def test_opencost_is_available_connection_error(set_opencost_url):
+    with patch(
+        "greenkube.collectors.opencost_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.get.side_effect = Exception(
+            "Connection refused"
+        )  # httpx exception would be better but generic exception covers it
+        mock_get_client.return_value = mock_client
 
-    requests_mock.get(ANY, exc=requests.exceptions.ConnectionError("Connection refused"))
+        oc = OpenCostCollector()
+        assert await oc.is_available() is False
 
-    assert oc.is_available() is False
 
+@pytest.mark.asyncio
+async def test_opencost_is_available_non_200(set_opencost_url):
+    with patch(
+        "greenkube.collectors.opencost_collector.get_async_http_client", new_callable=MagicMock
+    ) as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.status_code = 502
+        mock_response.raise_for_status.side_effect = Exception("HTTP Error")
+        mock_client.get.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
-def test_opencost_is_available_non_200(set_opencost_url, requests_mock):
-    oc = OpenCostCollector()
-
-    requests_mock.get(global_config.OPENCOST_API_URL, status_code=502, text="Bad gateway")
-
-    assert oc.is_available() is False
+        oc = OpenCostCollector()
+        assert await oc.is_available() is False

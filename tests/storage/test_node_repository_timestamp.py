@@ -1,22 +1,33 @@
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from greenkube.models.node import NodeInfo
 from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 
-def test_save_nodes_uses_node_timestamp():
+@pytest.mark.asyncio
+async def test_save_nodes_uses_node_timestamp():
     # Arrange
     mock_db_manager = MagicMock()
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_cursor.__enter__.return_value = mock_cursor
-    mock_cursor.__exit__.return_value = None
-    mock_conn.cursor.return_value = mock_cursor
 
-    @contextmanager
-    def scope():
+    # Mock cursor context manager
+    mock_cursor = MagicMock()
+    # execute, fetchone, etc should be awaitable
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchone = AsyncMock()
+
+    async def mock_execute(*args, **kwargs):
+        return mock_cursor
+
+    mock_conn.execute = AsyncMock(side_effect=mock_execute)
+    mock_conn.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def scope():
         yield mock_conn
 
     mock_db_manager.connection_scope = scope
@@ -38,11 +49,13 @@ def test_save_nodes_uses_node_timestamp():
     )
 
     # Act
-    repo.save_nodes([node])
+    await repo.save_nodes([node])
 
     # Assert
     # Check that execute was called with the specific timestamp
-    args, _ = mock_cursor.execute.call_args
+    # In async loop, we are calling `async with conn.execute(...) as cursor:`
+    # So `conn.execute` is called.
+    args, _ = mock_conn.execute.call_args
     query, params = args
 
     # The first parameter should be the timestamp string
@@ -50,17 +63,30 @@ def test_save_nodes_uses_node_timestamp():
     assert inserted_ts == specific_ts.isoformat()
 
 
-def test_save_nodes_uses_current_time_if_none():
+@pytest.mark.asyncio
+async def test_save_nodes_uses_current_time_if_none():
     # Arrange
     mock_db_manager = MagicMock()
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_cursor.__enter__.return_value = mock_cursor
-    mock_cursor.__exit__.return_value = None
-    mock_conn.cursor.return_value = mock_cursor
 
-    @contextmanager
-    def scope():
+    # Mock cursor context manager - actually in SQLiteNodeRepository we use `async with conn.execute(...)`
+    # so conn.execute is the context manager entry point presumably?
+    # Or calls `execute` on connection directly which returns an awaitable cursor or context manager.
+    # aiosqlite `conn.execute()` returns a context manager that upon enter yields cursor.
+
+    # Let's mock `conn.execute` to return an async context manager that yields a cursor
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+
+    @asynccontextmanager
+    async def mock_execute_cm(*args, **kwargs):
+        yield mock_cursor
+
+    mock_conn.execute = MagicMock(side_effect=mock_execute_cm)
+    mock_conn.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def scope():
         yield mock_conn
 
     mock_db_manager.connection_scope = scope
@@ -81,10 +107,10 @@ def test_save_nodes_uses_current_time_if_none():
     )
 
     # Act
-    repo.save_nodes([node])
+    await repo.save_nodes([node])
 
     # Assert
-    args, _ = mock_cursor.execute.call_args
+    args, _ = mock_conn.execute.call_args
     query, params = args
 
     # The first parameter should be a timestamp string (current time)

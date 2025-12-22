@@ -3,6 +3,7 @@
 Implements the consolidated `report` command for the GreenKube CLI.
 """
 
+import asyncio
 import logging
 import sys
 import traceback
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 app = typer.Typer(help="Generate and export FinGreenOps reports.", add_completion=False)
 
 
-def handle_export(
+async def handle_export(
     data: List[CombinedMetric],
     output_options: OutputOptions,
 ):
@@ -64,7 +65,7 @@ def handle_export(
         raise typer.Exit(code=1)
 
     try:
-        written_path = exporter.export(rows, str(output_path))
+        written_path = await exporter.export(rows, str(output_path))
         logger.info(f"Successfully exported report to {written_path}")
         print(f"Report exported to: {written_path}", file=sys.stderr)
 
@@ -138,54 +139,62 @@ def report(
     output = OutputOptions(output_format=output_format, output_path=output_path)
     report_options = ReportOptions(aggregate=aggregate)
 
-    combined_data: List[CombinedMetric] = []
+    async def _report_async():
+        combined_data: List[CombinedMetric] = []
+        try:
+            # If requested, update the database with the latest metrics first.
+            if update_data:
+                await write_combined_metrics_to_database(last=last)
+
+            repository = get_repository()
+
+            start, end = get_report_time_range(filters.last)
+
+            combined_data = await repository.read_combined_metrics(start_time=start, end_time=end)
+
+            if filters.namespace:
+                combined_data = [item for item in combined_data if item.namespace == filters.namespace]
+
+            if report_options.aggregate:
+                combined_data = aggregate_metrics(
+                    combined_data,
+                    hourly=grouping.hourly,
+                    daily=grouping.daily,
+                    weekly=grouping.weekly,
+                    monthly=grouping.monthly,
+                    yearly=grouping.yearly,
+                )
+
+            if not combined_data:
+                logger.warning("No combined data was found in the database for the given time range.")
+                if not output.is_enabled:
+                    ConsoleReporter().report(data=[])
+                else:
+                    await handle_export(data=[], output_options=output)
+                return  # Exit gracefully
+
+            # Handle Output
+            if output.is_enabled:
+                await handle_export(
+                    data=combined_data,
+                    output_options=output,
+                )
+            else:
+                # Default to console output
+                console_reporter = ConsoleReporter()
+                console_reporter.report(data=combined_data)
+
+        except typer.Exit:
+            raise
+        except Exception as e:
+            logger.error(f"An error occurred during report generation: {e}")
+            logger.error("Report generation failed: %s", traceback.format_exc())
+            raise typer.Exit(code=1)
 
     try:
-        # If requested, update the database with the latest metrics first.
-        if update_data:
-            write_combined_metrics_to_database(last=last)
-
-        repository = get_repository()
-
-        start, end = get_report_time_range(filters.last)
-
-        combined_data = repository.read_combined_metrics(start_time=start, end_time=end)
-
-        if filters.namespace:
-            combined_data = [item for item in combined_data if item.namespace == filters.namespace]
-
-        if report_options.aggregate:
-            combined_data = aggregate_metrics(
-                combined_data,
-                hourly=grouping.hourly,
-                daily=grouping.daily,
-                weekly=grouping.weekly,
-                monthly=grouping.monthly,
-                yearly=grouping.yearly,
-            )
-
-        if not combined_data:
-            logger.warning("No combined data was found in the database for the given time range.")
-            if not output.is_enabled:
-                ConsoleReporter().report(data=[])
-            else:
-                handle_export(data=[], output_options=output)
-            raise typer.Exit(code=0)
-
-        # Handle Output
-        if output.is_enabled:
-            handle_export(
-                data=combined_data,
-                output_options=output,
-            )
-        else:
-            # Default to console output
-            console_reporter = ConsoleReporter()
-            console_reporter.report(data=combined_data)
-
+        asyncio.run(_report_async())
     except typer.Exit:
         raise
     except Exception as e:
-        logger.error(f"An error occurred during report generation: {e}")
-        logger.error("Report generation failed: %s", traceback.format_exc())
+        logger.error(f"An unexpected error occurred: {e}")
         raise typer.Exit(code=1)

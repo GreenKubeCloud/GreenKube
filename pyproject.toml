@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "greenkube"
-version = "0.1.5" # Initial MVP version
+version = "0.1.6" # Initial MVP version
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre.56@gmail.com" },
 ]
@@ -32,20 +32,23 @@ classifiers = [
 # These are the libraries required for the tool to run
 dependencies = [
     "typer[all]>=0.9.0", # For building a clean command-line interface (CLI)
-    "requests>=2.31.0",  # For making HTTP requests to APIs (Prometheus, carbon intensity)
+    "httpx>=0.25.0",  # Async HTTP client
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
     "python-dotenv>=1.0.0", # For loading environment variables from .env files
-    "psycopg2-binary>=2.9.0", # PostgreSQL database adapter
-    "schedule>=1.2.1", # For scheduling periodic tasks
-    "kubernetes",
+    "asyncpg>=0.28.0", # Async PostgreSQL database adapter
+    "aiosqlite>=0.19.0", # Async SQLite driver
+    "kubernetes_asyncio>=28.0.0", # Async Kubernetes client
+    "anyio>=4.0.0", # High level async library
     "elasticsearch>=8.10.0", # Elasticsearch client
-    "elasticsearch-dsl>=8.10.0"
+    "elasticsearch-dsl>=8.10.0",
+    "aiofiles>=23.2.0" # Async file I/O
 ]
 
 [project.optional-dependencies]
 test = [
-    "requests-mock",
+    "respx",
+    "pytest-asyncio",
     "pytest>=7.0",
     "pytest-mock",
 ]
@@ -70,6 +73,7 @@ addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
+asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 where = ["src"]

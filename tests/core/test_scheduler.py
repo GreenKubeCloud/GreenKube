@@ -1,34 +1,48 @@
 # tests/core/test_scheduler.py
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
 
 from greenkube.core.scheduler import Scheduler
 
 
-# A simple function to be used as a mock job
-def dummy_job():
-    pass
-
-
-@patch("schedule.every")
-def test_add_job_schedules_correctly(mock_every):
+@pytest.mark.asyncio
+async def test_add_job_schedules_correctly():
     """
-    Tests that the Scheduler's add_job method correctly calls the 'schedule'
-    library with the right parameters.
+    Tests that the Scheduler's add_job method correctly adds a task to the asyncio loop.
     """
-    # Arrange
-    # We create a mock object that allows us to chain calls like schedule.every(1).hours.do(...)
-    mock_hours = MagicMock()
-    mock_every.return_value.hours = mock_hours
-
     scheduler = Scheduler()
-    interval = 5
+    mock_job = MagicMock()
+
+    async def async_job():
+        mock_job()
 
     # Act
-    scheduler.add_job(dummy_job, interval_hours=interval)
+    scheduler.add_job(async_job, interval_hours=1)
 
     # Assert
-    # Check that schedule.every(5) was called
-    mock_every.assert_called_once_with(interval)
-    # Check that .hours.do(dummy_job) was called on the result
-    mock_hours.do.assert_called_once_with(dummy_job)
+    assert len(scheduler.tasks) == 1
+    task = scheduler.tasks[0]
+    assert not task.done()
+
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_add_job_from_string_schedules_correctly():
+    """
+    Tests that add_job_from_string parses correct string and adds task.
+    """
+    scheduler = Scheduler()
+    mock_job = MagicMock()
+
+    async def async_job():
+        mock_job()
+
+    # Act
+    scheduler.add_job_from_string(async_job, "1h")
+
+    # Assert
+    assert len(scheduler.tasks) == 1
+    await scheduler.stop()

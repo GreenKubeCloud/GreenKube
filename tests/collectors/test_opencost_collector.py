@@ -1,17 +1,18 @@
 # tests/collectors/test_opencost_collector.py
 """
-Unit tests for the OpenCostCollector.
+Unit tests for the OpenCostCollector using pytest-asyncio and respx.
 """
 
-import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import requests
+import httpx
+import pytest
+import respx
+from httpx import Response
 
 from greenkube.collectors.opencost_collector import OpenCostCollector
 
 # Source de vérité pour les données de test.
-# Si le format de l'API change, on ne modifie que cet objet.
 MOCK_API_RESPONSE = {
     "code": 200,
     "data": [
@@ -43,117 +44,114 @@ MOCK_API_RESPONSE = {
 }
 
 
-class TestOpenCostCollector(unittest.TestCase):
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_parses_data_dynamically():
     """
-    Test suite for the OpenCostCollector.
+    Tests that the collect method correctly parses the API response.
     """
+    # 1. Arrange
+    # Mock _resolve_url to return a fixed URL so we know where to expect requests
+    fixed_url = "http://opencost:9003"
 
-    @patch("greenkube.utils.http_client.requests.Session.get")
-    def test_collect_parses_data_dynamically(self, mock_get):
-        """
-        Tests that the collect method correctly parses the API response.
-        This test is ROBUST: it validates the transformation logic without
-        hardcoding specific values from the mock data in the assertions.
-        """
-        # 1. Arrange
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = MOCK_API_RESPONSE
-        mock_get.return_value = mock_response
+    # Mock the API call
+    respx.get(f"{fixed_url}", params={"window": "1d", "aggregate": "pod"}).mock(
+        return_value=Response(200, json=MOCK_API_RESPONSE)
+    )
 
-        # We must prevent _resolve_url from failing or trying to connect to real endpoints
-        # So we mock _resolve_url on the instance or ensure it returns something valid.
-        # But _resolve_url uses self.session.get too (via _probe).
-        # Since we mock Session.get, we need to handle calls from _resolve_url/_probe if they happen.
-        # However, _resolve_url checks config first.
-        # Let's mock _resolve_url to simplify.
+    # We need to mock _resolve_url.
+    # Since we refactor the collector to be async, _resolve_url likely becomes async.
+    # We define an async side effect.
+    async def mock_resolve_url(client):
+        return fixed_url
 
-        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
-            collector = OpenCostCollector()
+    with patch.object(OpenCostCollector, "_resolve_url", side_effect=mock_resolve_url):
+        collector = OpenCostCollector()
 
-            # 2. Act
-            results = collector.collect()
+        # 2. Act
+        results = await collector.collect()
 
-        # 3. Assert
-        mock_data_items = MOCK_API_RESPONSE["data"][0]
-        # Vérifier que le nombre de métriques créées correspond au nombre d'entrées
-        self.assertEqual(len(results), len(mock_data_items))
+    # 3. Assert
+    mock_data_items = MOCK_API_RESPONSE["data"][0]
+    # Vérifier que le nombre de métriques créées correspond au nombre d'entrées
+    assert len(results) == len(mock_data_items)
 
-        # Créer un dictionnaire pour retrouver facilement les résultats
-        results_map = {metric.pod_name: metric for metric in results}
+    # Créer un dictionnaire pour retrouver facilement les résultats
+    results_map = {metric.pod_name: metric for metric in results}
 
-        # Itérer sur les données de test et vérifier chaque transformation
-        for pod_id, mock_item_data in mock_data_items.items():
-            expected_pod_name = mock_item_data["properties"]["pod"]
-            self.assertIn(
-                expected_pod_name,
-                results_map,
-                f"Le pod '{expected_pod_name}' est manquant dans les résultats",
-            )
+    # Itérer sur les données de test et vérifier chaque transformation
+    for pod_id, mock_item_data in mock_data_items.items():
+        expected_pod_name = mock_item_data["properties"]["pod"]
+        assert expected_pod_name in results_map, f"Le pod '{expected_pod_name}' est manquant dans les résultats"
 
-            result_metric = results_map[expected_pod_name]
+        result_metric = results_map[expected_pod_name]
 
-            # Valider la transformation
-            self.assertEqual(result_metric.namespace, mock_item_data["properties"]["namespace"])
-            self.assertAlmostEqual(result_metric.total_cost, mock_item_data.get("totalCost", 0.0))
-            self.assertAlmostEqual(result_metric.cpu_cost, mock_item_data.get("cpuCost", 0.0))
-            self.assertAlmostEqual(result_metric.ram_cost, mock_item_data.get("ramCost", 0.0))
+        # Valider la transformation
+        assert result_metric.namespace == mock_item_data["properties"]["namespace"]
+        assert result_metric.total_cost == pytest.approx(mock_item_data.get("totalCost", 0.0))
+        assert result_metric.cpu_cost == pytest.approx(mock_item_data.get("cpuCost", 0.0))
+        assert result_metric.ram_cost == pytest.approx(mock_item_data.get("ramCost", 0.0))
 
-        print("\nTestOpenCostCollector (dynamic): All assertions passed! ✅")
 
-    @patch("greenkube.utils.http_client.requests.Session.get")
-    def test_collect_skips_items_with_missing_namespace(self, mock_get):
-        """
-        Tests that the collector gracefully skips an entry if its namespace is missing.
-        """
-        # 1. Arrange
-        MALFORMED_RESPONSE = {
-            "code": 200,
-            "data": [
-                {
-                    "pod-good": {
-                        "properties": {"namespace": "good-ns", "pod": "pod-good"},
-                        "totalCost": 1.0,
-                    },
-                    "pod-bad": {"properties": {"pod": "pod-bad"}, "totalCost": 2.0},
-                }
-            ],  # Pas de namespace
-        }
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = MALFORMED_RESPONSE
-        mock_get.return_value = mock_response
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_skips_items_with_missing_namespace():
+    """
+    Tests that the collector gracefully skips an entry if its namespace is missing.
+    """
+    # 1. Arrange
+    MALFORMED_RESPONSE = {
+        "code": 200,
+        "data": [
+            {
+                "pod-good": {
+                    "properties": {"namespace": "good-ns", "pod": "pod-good"},
+                    "totalCost": 1.0,
+                },
+                "pod-bad": {"properties": {"pod": "pod-bad"}, "totalCost": 2.0},
+            }
+        ],  # Pas de namespace
+    }
+    fixed_url = "http://opencost:9003"
 
-        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
-            collector = OpenCostCollector()
+    respx.get(f"{fixed_url}").mock(return_value=Response(200, json=MALFORMED_RESPONSE))
 
-            # 2. Act
-            results = collector.collect()
+    async def mock_resolve_url(client):
+        return fixed_url
 
-        # 3. Assert
-        # Seule l'entrée valide doit être conservée
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].pod_name, "pod-good")
+    with patch.object(OpenCostCollector, "_resolve_url", side_effect=mock_resolve_url):
+        collector = OpenCostCollector()
 
-    @patch("greenkube.utils.http_client.requests.Session.get")
-    def test_collect_handles_api_error_gracefully(self, mock_get):
-        """
-        Tests that the collector returns an empty list when the API call fails.
-        """
-        # 1. Arrange
-        mock_get.side_effect = requests.exceptions.RequestException("API is down")
+        # 2. Act
+        results = await collector.collect()
 
-        # Depending on implementation, _resolve_url might fail if it probes and gets an error.
-        # Or if we mock _resolve_url, then collect fails.
-        # If we assume _resolve_url returns a valid URL, then collect calls get() which fails.
+    # 3. Assert
+    # Seule l'entrée valide doit être conservée
+    assert len(results) == 1
+    assert results[0].pod_name == "pod-good"
 
-        with patch.object(OpenCostCollector, "_resolve_url", return_value="http://opencost"):
-            collector = OpenCostCollector()
 
-            # 2. Act
-            results = collector.collect()
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_handles_api_error_gracefully():
+    """
+    Tests that the collector returns an empty list when the API call fails.
+    """
+    # 1. Arrange
+    fixed_url = "http://opencost:9003"
 
-        # 3. Assert
-        # Le collecteur doit retourner une liste vide en cas d'erreur
-        self.assertIsInstance(results, list)
-        self.assertEqual(len(results), 0)
+    respx.get(f"{fixed_url}").mock(side_effect=httpx.HTTPError("API is down"))
+
+    async def mock_resolve_url(client):
+        return fixed_url
+
+    with patch.object(OpenCostCollector, "_resolve_url", side_effect=mock_resolve_url):
+        collector = OpenCostCollector()
+
+        # 2. Act
+        results = await collector.collect()
+
+    # 3. Assert
+    # Le collecteur doit retourner une liste vide en cas d'erreur
+    assert isinstance(results, list)
+    assert len(results) == 0

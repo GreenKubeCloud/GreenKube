@@ -10,22 +10,19 @@ from typing import List
 
 from elasticsearch_dsl import Date, Document, Float, Keyword, Long
 
-# Import connections and bulk conditionally
+# Import connections conditionally
 if "connections" not in globals():
     try:
         from elasticsearch_dsl import connections
     except Exception:
         connections = None
 
-if "bulk" not in globals():
-    try:
-        from elasticsearch.helpers import bulk
-    except Exception:
-        bulk = None
+# Import async_bulk helper
+try:
+    from elasticsearch.helpers import async_bulk
+except ImportError:
+    async_bulk = None
 
-from elasticsearch.exceptions import (
-    ConnectionError,
-)
 
 from greenkube.models.node import NodeInfo
 from greenkube.storage.base_repository import NodeRepository
@@ -61,19 +58,11 @@ class ElasticsearchNodeRepository(NodeRepository):
 
     def __init__(self):
         """
-        Initializes the repository and ensures the Elasticsearch index exists.
+        Initializes the repository. Connection setup and index creation handled externally.
         """
-        try:
-            conn = connections.get_connection("default")
-            if not conn.ping():
-                raise ConnectionError("Elasticsearch connection lost before init.")
+        pass
 
-            NodeSnapshotDoc.init()
-            logging.info(f"Elasticsearch index '{NodeSnapshotDoc.Index.name}' is ready.")
-        except Exception as e:
-            logging.error(f"Failed to initialize ElasticsearchNodeRepository: {e}")
-
-    def save_nodes(self, nodes: List[NodeInfo]) -> int:
+    async def save_nodes(self, nodes: List[NodeInfo]) -> int:
         """
         Saves node snapshots to Elasticsearch.
         """
@@ -111,7 +100,7 @@ class ElasticsearchNodeRepository(NodeRepository):
 
         try:
             conn = connections.get_connection("default")
-            success_count, errors = bulk(
+            success_count, errors = await async_bulk(
                 client=conn,
                 actions=actions,
                 raise_on_error=True,
@@ -125,17 +114,15 @@ class ElasticsearchNodeRepository(NodeRepository):
             logging.error(f"Failed to save node snapshots to Elasticsearch: {e}")
             return 0
 
-    def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
+    async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
         """
         Retrieves node snapshots within a time range.
         """
         try:
             s = NodeSnapshotDoc.search().filter("range", timestamp={"gte": start, "lte": end}).sort("timestamp")
-            # Use scan to get all results
-            hits = s.scan()
 
             results = []
-            for hit in hits:
+            async for hit in s.scan():
                 node_info = NodeInfo(
                     name=hit.node_name,
                     instance_type=hit.instance_type,
@@ -148,8 +135,6 @@ class ElasticsearchNodeRepository(NodeRepository):
                     memory_capacity_bytes=hit.memory_capacity_bytes,
                     timestamp=hit.timestamp,
                 )
-                # hit.timestamp is usually a datetime object or string depending on deserialization
-                # elasticsearch-dsl usually returns datetime if mapped as Date
                 ts = hit.timestamp
                 if isinstance(ts, datetime):
                     ts_str = ts.isoformat()
@@ -163,7 +148,7 @@ class ElasticsearchNodeRepository(NodeRepository):
             logging.error(f"Failed to retrieve snapshots from Elasticsearch: {e}")
             return []
 
-    def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
         """
         Retrieves the latest snapshot for each node before the given timestamp.
         """
@@ -182,28 +167,29 @@ class ElasticsearchNodeRepository(NodeRepository):
                 "latest_snapshot", "top_hits", size=1, sort=[{"timestamp": {"order": "desc"}}]
             )
 
-            # We don't need hits, just aggs
-            response = s.execute()
+            # We don't need hits from main query, just aggs
+            response = await s.execute()
 
             results = []
-            for bucket in response.aggregations.nodes.buckets:
-                hits = bucket.latest_snapshot.hits.hits
-                if hits:
-                    hit = hits[0]["_source"]
-                    # Map dict to NodeInfo
-                    node_info = NodeInfo(
-                        name=hit.get("node_name"),
-                        instance_type=hit.get("instance_type"),
-                        zone=hit.get("zone"),
-                        region=hit.get("region"),
-                        cloud_provider=hit.get("cloud_provider"),
-                        architecture=hit.get("architecture"),
-                        node_pool=hit.get("node_pool"),
-                        cpu_capacity_cores=hit.get("cpu_capacity_cores"),
-                        memory_capacity_bytes=hit.get("memory_capacity_bytes"),
-                        timestamp=hit.get("timestamp"),
-                    )
-                    results.append(node_info)
+            if hasattr(response, "aggregations") and hasattr(response.aggregations, "nodes"):
+                for bucket in response.aggregations.nodes.buckets:
+                    hits = bucket.latest_snapshot.hits.hits
+                    if hits:
+                        hit = hits[0]["_source"]
+                        # Map dict to NodeInfo
+                        node_info = NodeInfo(
+                            name=hit.get("node_name"),
+                            instance_type=hit.get("instance_type"),
+                            zone=hit.get("zone"),
+                            region=hit.get("region"),
+                            cloud_provider=hit.get("cloud_provider"),
+                            architecture=hit.get("architecture"),
+                            node_pool=hit.get("node_pool"),
+                            cpu_capacity_cores=hit.get("cpu_capacity_cores"),
+                            memory_capacity_bytes=hit.get("memory_capacity_bytes"),
+                            timestamp=hit.get("timestamp"),
+                        )
+                        results.append(node_info)
 
             return results
 

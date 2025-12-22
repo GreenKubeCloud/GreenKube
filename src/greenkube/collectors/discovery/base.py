@@ -10,7 +10,9 @@ import os
 import socket
 from typing import Callable, Optional, Sequence
 
-from kubernetes import client, config
+from kubernetes_asyncio import client
+
+from greenkube.core.k8s_client import ensure_k8s_config
 
 logger = logging.getLogger(__name__)
 
@@ -23,49 +25,31 @@ class BaseDiscovery:
     # preferred namespaces should live in the subclass implementations.
     common_namespaces = ("default",)
 
-    def _load_kube_config_quietly(self) -> bool:
-        try:
-            config.load_incluster_config()
-            return True
-        except Exception:
-            try:
-                config.load_kube_config()
-                return True
-            except Exception:
-                logger.debug("Could not load kube config for discovery")
-                return False
-
-    def list_services(self) -> Optional[Sequence[client.V1Service]]:
+    async def list_services(self) -> Optional[Sequence[client.V1Service]]:
         # When running under pytest, avoid making real Kubernetes API calls
         # unless the test has explicitly monkeypatched `client.CoreV1Api`.
-        # This lets discovery tests provide their own mock CoreV1Api while
-        # preventing accidental network calls in other tests.
         if "PYTEST_CURRENT_TEST" in os.environ:
             try:
                 core_api_mod = getattr(client.CoreV1Api, "__module__", "")
             except Exception:
                 core_api_mod = ""
-            # If CoreV1Api appears to be the real kubernetes client, short-circuit.
             if core_api_mod.startswith("kubernetes"):
                 logger.debug("list_services short-circuited under PYTEST_CURRENT_TEST because CoreV1Api is real")
                 return None
 
-        # First try to construct the API client directly. Tests commonly
-        # monkeypatch `greenkube.collectors.discovery.client.CoreV1Api` and
-        # expect it to be used without requiring a kubeconfig to be loadable.
         try:
-            v1 = client.CoreV1Api()
-            return v1.list_service_for_all_namespaces().items
-        except Exception:
-            # If direct construction fails, attempt to load kube config and retry.
-            if not self._load_kube_config_quietly():
+            # Ensure config is loaded (thread-safe, async-compatible)
+            if not await ensure_k8s_config():
                 return None
-            try:
-                v1 = client.CoreV1Api()
-                return v1.list_service_for_all_namespaces().items
-            except Exception as e:
-                logger.debug("Failed to list services for discovery after loading kube config: %s", e)
-                return None
+
+            async with client.ApiClient() as api_client:
+                v1 = client.CoreV1Api(api_client)
+                services = await v1.list_service_for_all_namespaces()
+                return services.items
+
+        except Exception as e:
+            logger.debug("Failed to list services for discovery: %s", e)
+            return None
 
     def pick_port(self, ports) -> Optional[int]:
         if not ports:
@@ -100,11 +84,11 @@ class BaseDiscovery:
         except Exception:
             return False
 
-    def discover(self, hint: str) -> Optional[str]:
+    async def discover(self, hint: str) -> Optional[str]:
         """Fallback discover implementation: delegates to generic collector with no
         special namespace or port preferences.
         """
-        candidates = self._collect_candidates(hint)
+        candidates = await self._collect_candidates(hint)
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -115,7 +99,7 @@ class BaseDiscovery:
             return f"{scheme}://{host}:{port}"
         return None
 
-    def probe_candidates(self, candidates: list, probe_func: Callable[[str, int], bool]) -> Optional[str]:
+    async def probe_candidates(self, candidates: list, probe_func: Callable[[str, int], bool]) -> Optional[str]:
         """
         Iterates over candidates and probes them using the provided function.
         Returns the base URL of the first successful candidate.
@@ -141,12 +125,12 @@ class BaseDiscovery:
                 continue
 
             base_url = f"{scheme}://{host}:{port}"
-            if probe_func(base_url, score):
+            if await probe_func(base_url, score):
                 return base_url
 
         return None
 
-    def _collect_candidates(
+    async def _collect_candidates(
         self,
         hint: str,
         prefer_namespaces: Optional[Sequence[str]] = None,
@@ -164,7 +148,7 @@ class BaseDiscovery:
         - name_boost, ns_boost, namespace_boost: scoring weights
         Returns a list of tuples (score, name, namespace, port).
         """
-        services = self.list_services()
+        services = await self.list_services()
         if not services:
             return []
 

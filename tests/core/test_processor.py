@@ -110,48 +110,67 @@ SAMPLE_CALCULATION_RESULT_D = CarbonCalculationResult(
 def mock_kepler_collector():
     """Provides a mock collector placeholder (was Kepler in older versions)."""
     mock = MagicMock()
-    mock.collect.return_value = SAMPLE_ENERGY_METRICS
+    # Mock collect as async
+    from unittest.mock import AsyncMock
+
+    mock.collect = AsyncMock(return_value=SAMPLE_ENERGY_METRICS)
     return mock
 
 
 @pytest.fixture
 def mock_prometheus_collector():
     """Provides a mock PrometheusCollector that returns a PrometheusMetric placeholder."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    mock.collect.return_value = MagicMock(spec=PrometheusMetric)
+    prom_metric_mock = MagicMock(spec=PrometheusMetric)
+    prom_metric_mock.pod_cpu_usage = []
+    prom_metric_mock.node_instance_types = []
+    mock.collect = AsyncMock(return_value=prom_metric_mock)
+    mock.collect_range = AsyncMock(return_value=[])
     return mock
 
 
 @pytest.fixture
 def mock_opencost_collector():
     """Provides a mock OpenCostCollector."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    mock.collect.return_value = SAMPLE_COST_METRICS
+    mock.collect = AsyncMock(return_value=SAMPLE_COST_METRICS)
     return mock
 
 
 @pytest.fixture
 def mock_node_collector():
     """Provides a mock NodeCollector that returns NodeInfo objects."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    mock.collect.return_value = SAMPLE_NODE_INFO
-    mock.collect_instance_types.return_value = {"node-1": "m5.large", "node-2": "m5.large"}
+    mock.collect = AsyncMock(return_value=SAMPLE_NODE_INFO)
+    mock.collect_instance_types = AsyncMock(return_value={"node-1": "m5.large", "node-2": "m5.large"})
     return mock
 
 
 @pytest.fixture
 def mock_pod_collector():
     """Provides a mock PodCollector."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    mock.collect.return_value = []
+    mock.collect = AsyncMock(return_value=[])
     return mock
 
 
 @pytest.fixture
 def mock_repository():
     """Provides a mock CarbonIntensityRepository."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    # Configure mock behavior if needed for specific tests
+    mock.get_for_zone_at_time = AsyncMock(return_value=None)
+    mock.save_history = AsyncMock()
+    mock.read_combined_metrics = AsyncMock(return_value=[])
     return mock
 
 
@@ -161,7 +180,8 @@ def mock_calculator():
     mock = MagicMock()
 
     # Configure a side effect to return different results based on input
-    def calculate_side_effect(joules, zone, timestamp):
+    # Configure a side effect to return different results based on input
+    async def calculate_side_effect(joules, zone, timestamp):
         # Determine pod name based on joules for simplified mapping in tests
         pod_name = None
         if joules == 1000000:
@@ -186,22 +206,28 @@ def mock_calculator():
 
     mock.calculate_emissions.side_effect = calculate_side_effect
     mock.pue = config.DEFAULT_PUE  # Set the pue attribute as the processor reads it
+    mock._intensity_cache = {}  # Initialize the cache
     return mock
 
 
 @pytest.fixture
 def mock_electricity_maps_collector():
     """Provides a mock ElectricityMapsCollector."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
+    mock.collect = AsyncMock(return_value=[])
     return mock
 
 
 @pytest.fixture
 def mock_node_repository():
     """Provides a mock NodeRepository."""
+    from unittest.mock import AsyncMock
+
     mock = MagicMock()
-    mock.get_latest_snapshots_before.return_value = []
-    mock.get_snapshots.return_value = []
+    mock.get_latest_snapshots_before = AsyncMock(return_value=[])
+    mock.get_snapshots = AsyncMock(return_value=[])
     return mock
 
 
@@ -244,8 +270,9 @@ def data_processor(
 # --- Test Cases ---
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_combines_data_correctly(mock_translator, data_processor, mock_calculator):
+async def test_processor_combines_data_correctly(mock_translator, data_processor, mock_calculator):
     """
     Tests the main success path: combines data from all sources correctly.
     """
@@ -264,7 +291,7 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
     # Configure calculator mock results (side effect in fixture handles this now)
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert len(combined_results) == 4  # Expect all 4 metrics to be processed
@@ -314,8 +341,9 @@ def test_processor_combines_data_correctly(mock_translator, data_processor, mock
     )
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_estimates_missing_cost_data(mock_translator, data_processor, mock_calculator):
+async def test_processor_estimates_missing_cost_data(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor uses the default cost when OpenCost data is missing for a pod,
     but still calculates emissions.
@@ -335,7 +363,7 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
     # (side effect in fixture handles this now)
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert len(combined_results) == 4  # Still expect 4 results
@@ -359,9 +387,10 @@ def test_processor_estimates_missing_cost_data(mock_translator, data_processor, 
     )
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.NodeCollector")  # Patch NodeCollector instantiation
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_uses_default_zone_when_node_zone_missing(
+async def test_processor_uses_default_zone_when_node_zone_missing(
     mock_translator,
     mock_node_collector_class,
     mock_prometheus_collector,
@@ -375,19 +404,23 @@ def test_processor_uses_default_zone_when_node_zone_missing(
     """
     # Arrange
     # Configure the NodeCollector mock *instance* to return an empty dict
+    from unittest.mock import AsyncMock
+
     mock_node_collector_instance = mock_node_collector_class.return_value
-    mock_node_collector_instance.collect.return_value = {}  # Simulate no zones found
-    mock_node_collector_instance.collect_instance_types.return_value = {}  # Simulate no instance types
+    mock_node_collector_instance.collect = AsyncMock(return_value={})  # Simulate no zones found
+    mock_node_collector_instance.collect_instance_types = AsyncMock(return_value={})  # Simulate no instance types
 
     # Need to instantiate processor manually here because the fixture uses the class mock incorrectly
     data_processor = DataProcessor(
         prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector_instance,  # Use the configured instance
-        pod_collector=MagicMock(),
-        electricity_maps_collector=MagicMock(),
+        pod_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=mock_repository,
-        node_repository=MagicMock(),
+        node_repository=MagicMock(
+            get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
+        ),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -398,7 +431,7 @@ def test_processor_uses_default_zone_when_node_zone_missing(
     # Configure calculator mock results (side effect in fixture handles this now)
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert len(combined_results) == 4  # Should still process all metrics
@@ -418,7 +451,8 @@ def test_processor_uses_default_zone_when_node_zone_missing(
     mock_translator.assert_not_called()
 
 
-def test_processor_handles_prometheus_failure(
+@pytest.mark.asyncio
+async def test_processor_handles_prometheus_failure(
     data_processor,
     mock_prometheus_collector,
     mock_opencost_collector,
@@ -432,7 +466,7 @@ def test_processor_handles_prometheus_failure(
     mock_prometheus_collector.collect.side_effect = Exception("Prometheus API down")
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert combined_results == []  # No energy data, so no combined metrics
@@ -442,7 +476,8 @@ def test_processor_handles_prometheus_failure(
     mock_calculator.calculate_emissions.assert_not_called()  # No energy data to calculate
 
 
-def test_processor_handles_opencost_failure(
+@pytest.mark.asyncio
+async def test_processor_handles_opencost_failure(
     data_processor, mock_opencost_collector, mock_node_collector, mock_calculator
 ):
     """
@@ -455,7 +490,7 @@ def test_processor_handles_opencost_failure(
     # (side effect in fixture handles this now)
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert len(combined_results) == 4  # Should still process all energy metrics
@@ -469,8 +504,9 @@ def test_processor_handles_opencost_failure(
     mock_node_collector.collect.assert_called_once()
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_handles_calculator_failure(mock_translator, data_processor, mock_calculator):
+async def test_processor_handles_calculator_failure(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor skips a metric if the calculator fails for it,
     but continues processing others.
@@ -488,15 +524,26 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
     mock_translator.side_effect = translator_side_effect
 
     # Make calculator fail only for the second call (pod-B)
-    mock_calculator.calculate_emissions.side_effect = [
-        SAMPLE_CALCULATION_RESULT_A,
-        Exception("Calculation failed!"),  # Failure for pod-B
-        SAMPLE_CALCULATION_RESULT_C,
-        SAMPLE_CALCULATION_RESULT_D,
-    ]
+    # Make calculator fail only for the second call (pod-B)
+    results_iterator = iter(
+        [
+            SAMPLE_CALCULATION_RESULT_A,
+            Exception("Calculation failed!"),  # Failure for pod-B
+            SAMPLE_CALCULATION_RESULT_C,
+            SAMPLE_CALCULATION_RESULT_D,
+        ]
+    )
+
+    async def side_effect(*args, **kwargs):
+        val = next(results_iterator)
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    mock_calculator.calculate_emissions.side_effect = side_effect
 
     # Act
-    combined_results = data_processor.run()
+    combined_results = await data_processor.run()
 
     # Assert
     assert len(combined_results) == 3  # Only 3 metrics should be successfully combined
@@ -509,8 +556,9 @@ def test_processor_handles_calculator_failure(mock_translator, data_processor, m
     assert mock_calculator.calculate_emissions.call_count == 4
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_aggregates_pod_requests(
+async def test_processor_aggregates_pod_requests(
     mock_translator,
     mock_prometheus_collector,
     mock_opencost_collector,
@@ -537,19 +585,21 @@ def test_processor_aggregates_pod_requests(
         ),
     ]
 
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     mock_pod_collector = MagicMock()
-    mock_pod_collector.collect.return_value = pod_metrics
+    mock_pod_collector.collect = AsyncMock(return_value=pod_metrics)
 
     dp = DataProcessor(
         prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
-        electricity_maps_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=mock_repository,
-        node_repository=MagicMock(),
+        node_repository=MagicMock(
+            get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
+        ),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
@@ -558,7 +608,7 @@ def test_processor_aggregates_pod_requests(
     mock_translator.return_value = "US-CISO-NE"
 
     # Act
-    combined = dp.run()
+    combined = await dp.run()
 
     # Assert: find pod-A and verify cpu_request and memory_request are summed
     metric_a = next((m for m in combined if m.pod_name == "pod-A"), None)
@@ -567,8 +617,9 @@ def test_processor_aggregates_pod_requests(
     assert metric_a.memory_request == (128 + 64) * 1024 * 1024
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_handles_missing_pod_requests(
+async def test_processor_handles_missing_pod_requests(
     mock_translator,
     mock_prometheus_collector,
     mock_opencost_collector,
@@ -577,33 +628,36 @@ def test_processor_handles_missing_pod_requests(
     mock_calculator,
 ):
     """If PodCollector returns empty or fails, cpu_request and memory_request should be zero for combined metrics."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     mock_pod_collector = MagicMock()
-    mock_pod_collector.collect.return_value = []
+    mock_pod_collector.collect = AsyncMock(return_value=[])
 
     dp = DataProcessor(
         prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
         pod_collector=mock_pod_collector,
-        electricity_maps_collector=MagicMock(),
+        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=mock_repository,
-        node_repository=MagicMock(),
+        node_repository=MagicMock(
+            get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
+        ),
         calculator=mock_calculator,
         estimator=MagicMock(estimate=lambda *_: SAMPLE_ENERGY_METRICS),
     )
 
     mock_translator.return_value = "US-CISO-NE"
 
-    combined = dp.run()
+    combined = await dp.run()
     for m in combined:
         assert m.cpu_request == 0 or isinstance(m.cpu_request, int)
         assert m.memory_request == 0 or isinstance(m.memory_request, int)
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_processor_nodecollector_instance_type_fallback(
+async def test_processor_nodecollector_instance_type_fallback(
     mock_translator,
     mock_prometheus_collector,
     mock_opencost_collector,
@@ -615,7 +669,7 @@ def test_processor_nodecollector_instance_type_fallback(
     If Prometheus returns no node instance types, DataProcessor should call
     NodeCollector.collect_instance_types() and supply those to the estimator.
     """
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from greenkube.models.prometheus_metrics import (
         NodeInstanceType,
@@ -646,16 +700,18 @@ def test_processor_nodecollector_instance_type_fallback(
         prometheus_collector=mock_prometheus_collector,
         opencost_collector=mock_opencost_collector,
         node_collector=mock_node_collector,
-        pod_collector=MagicMock(),
-        electricity_maps_collector=MagicMock(),
+        pod_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=mock_repository,
-        node_repository=MagicMock(),
+        node_repository=MagicMock(
+            get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
+        ),
         calculator=mock_calculator,
         estimator=estimator_spy,
     )
 
     # Run
-    dp.run()
+    await dp.run()
 
     # Assert NodeCollector.collect_instance_types was called
     mock_node_collector.collect_instance_types.assert_called_once()
@@ -668,8 +724,9 @@ def test_processor_nodecollector_instance_type_fallback(
     assert called_metric.node_instance_types[0].instance_type == "m5.large"
 
 
+@pytest.mark.asyncio
 @patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
-def test_run_range_uses_historical_node_data(
+async def test_run_range_uses_historical_node_data(
     mock_translator,
     data_processor,
     mock_prometheus_collector,
@@ -749,7 +806,7 @@ def test_run_range_uses_historical_node_data(
 
     # Act
     # Act
-    data_processor.run_range(start, end)
+    await data_processor.run_range(start, end)
 
     # Assert
     # Verify that get_latest_snapshots_before and get_snapshots were called

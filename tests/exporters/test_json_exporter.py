@@ -1,19 +1,23 @@
 # tests/exporters/test_json_exporter.py
 import json
 
+import pytest
+
 from greenkube.exporters.json_exporter import JSONExporter
 
 
-def test_json_exporter_empty_data(tmp_path):
+@pytest.mark.asyncio
+async def test_json_exporter_empty_data(tmp_path):
     exporter = JSONExporter()
     out = tmp_path / "greenkube-report.json"
-    exporter.export([], str(out))
+    await exporter.export([], str(out))
     assert out.exists()
     content = json.loads(out.read_text(encoding="utf-8"))
     assert isinstance(content, list)
 
 
-def test_json_exporter_with_period(tmp_path):
+@pytest.mark.asyncio
+async def test_json_exporter_with_period(tmp_path):
     exporter = JSONExporter()
     out = tmp_path / "greenkube-report.json"
     data = [
@@ -24,7 +28,7 @@ def test_json_exporter_with_period(tmp_path):
             "memory": 128,
         },
     ]
-    exporter.export(data, str(out))
+    await exporter.export(data, str(out))
     assert out.exists()
     content = json.loads(out.read_text(encoding="utf-8"))
     assert content[0]["namespace"] == "default"

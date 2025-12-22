@@ -16,10 +16,16 @@ class BaseCollector(ABC):
     """
 
     @abstractmethod
-    def collect(self) -> List[Any]:
+    async def collect(self) -> List[Any]:
         """
         The main method for a collector. It should fetch data from its
         source (e.g., an API, a file), parse it, and return a list of
         Pydantic models.
+        """
+        pass
+
+    async def close(self):
+        """
+        Clean up resources (e.g., close HTTP sessions or API clients).
         """
         pass

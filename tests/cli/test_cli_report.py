@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from typer.testing import CliRunner
 
@@ -10,8 +10,9 @@ from greenkube.models.metrics import CombinedMetric
 
 def make_dummy_processor(return_items=None):
     proc = MagicMock()
-    proc.run = MagicMock(return_value=return_items or [])
-    proc.run_range = MagicMock(return_value=return_items or [])
+    proc.run = AsyncMock(return_value=return_items or [])
+    proc.run_range = AsyncMock(return_value=return_items or [])
+    proc.close = AsyncMock()
     proc.estimator = MagicMock()
     proc.calculator = MagicMock()
     proc.repository = MagicMock()
@@ -41,7 +42,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
     ]
 
     dummy_repo = MagicMock()
-    dummy_repo.read_combined_metrics.return_value = items
+    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
     monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
 
     reported = []
@@ -66,7 +67,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
 def test_report_with_range_delegates_to_report_range(monkeypatch):
     # Arrange: patch the repository to capture calls
     mock_repo = MagicMock()
-    mock_repo.read_combined_metrics.return_value = []
+    mock_repo.read_combined_metrics = AsyncMock(return_value=[])
     monkeypatch.setattr(report_mod, "get_repository", lambda: mock_repo)
 
     runner = CliRunner()
@@ -133,7 +134,7 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
         )
     ]
     dummy_repo = MagicMock()
-    dummy_repo.read_combined_metrics.return_value = items
+    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
     monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
 
     # Patch exporters to write to tmp_path and capture call
@@ -142,7 +143,7 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
     class DummyExporter:
         DEFAULT_FILENAME = "greenkube-report.csv"
 
-        def export(self, data, path=None):
+        async def export(self, data, path=None):
             written["path"] = path
             return path
 

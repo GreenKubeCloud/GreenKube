@@ -1,10 +1,10 @@
 # tests/storage/test_node_repository.py
 
-import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiosqlite
 import pytest
 
 from greenkube.core.exceptions import QueryError
@@ -15,38 +15,35 @@ from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 
 
 @pytest.fixture
-def db_connection():
+async def db_connection():
     """Creates an in-memory SQLite database connection for testing."""
-    conn = sqlite3.connect(":memory:")
-    cursor = conn.cursor()
-    # Create the table schema needed for the repository
-    cursor.execute("""
-        CREATE TABLE node_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            node_name TEXT NOT NULL,
-            instance_type TEXT,
-            cpu_capacity_cores REAL,
-            architecture TEXT,
-            cloud_provider TEXT,
-            region TEXT,
-            zone TEXT,
-            node_pool TEXT,
-            memory_capacity_bytes INTEGER,
-            UNIQUE(node_name, timestamp)
-        );
-    """)
-    conn.commit()
-    yield conn
-    conn.close()
+    async with aiosqlite.connect(":memory:") as conn:
+        await conn.execute("""
+            CREATE TABLE node_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                node_name TEXT NOT NULL,
+                instance_type TEXT,
+                cpu_capacity_cores REAL,
+                architecture TEXT,
+                cloud_provider TEXT,
+                region TEXT,
+                zone TEXT,
+                node_pool TEXT,
+                memory_capacity_bytes INTEGER,
+                UNIQUE(node_name, timestamp)
+            );
+        """)
+        await conn.commit()
+        yield conn
 
 
 @pytest.fixture
-def mock_db_manager(db_connection):
+async def mock_db_manager(db_connection):
     db_manager = MagicMock()
 
-    @contextmanager
-    def scope():
+    @asynccontextmanager
+    async def scope():
         yield db_connection
 
     db_manager.connection_scope = scope
@@ -54,7 +51,7 @@ def mock_db_manager(db_connection):
 
 
 @pytest.fixture
-def node_repo(mock_db_manager):
+async def node_repo(mock_db_manager):
     """Creates an instance of the NodeRepository."""
     return SQLiteNodeRepository(mock_db_manager)
 
@@ -90,26 +87,30 @@ SAMPLE_NODES = [
 # --- Test Cases ---
 
 
-def test_save_nodes_new_snapshots(node_repo, db_connection):
+@pytest.mark.asyncio
+async def test_save_nodes_new_snapshots(node_repo, db_connection):
     """Test saving multiple new node snapshots successfully."""
     # Act
-    saved_count = node_repo.save_nodes(SAMPLE_NODES)
+    saved_count = await node_repo.save_nodes(SAMPLE_NODES)
 
     # Assert
     assert saved_count == 2
 
     # Verify data in DB
-    cursor = db_connection.cursor()
-    cursor.execute("SELECT COUNT(*) FROM node_snapshots")
-    assert cursor.fetchone()[0] == 2
+    async with db_connection.execute("SELECT COUNT(*) FROM node_snapshots") as cursor:
+        row = await cursor.fetchone()
+        assert row[0] == 2
 
-    cursor.execute("SELECT instance_type, cpu_capacity_cores FROM node_snapshots WHERE node_name=?", ("node-1",))
-    row = cursor.fetchone()
-    assert row[0] == "m5.large"
-    assert row[1] == 2.0
+    async with db_connection.execute(
+        "SELECT instance_type, cpu_capacity_cores FROM node_snapshots WHERE node_name=?", ("node-1",)
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row[0] == "m5.large"
+        assert row[1] == 2.0
 
 
-def test_get_snapshots(node_repo):
+@pytest.mark.asyncio
+async def test_get_snapshots(node_repo):
     """Test retrieving snapshots within a time range."""
     # Insert some data
     node1 = NodeInfo(
@@ -123,7 +124,7 @@ def test_get_snapshots(node_repo):
         cpu_capacity_cores=2.0,
         memory_capacity_bytes=4000000000,
     )
-    node_repo.save_nodes([node1])
+    await node_repo.save_nodes([node1])
 
     # Wait a bit or mock time? save_nodes uses datetime.now(timezone.utc).
     # Since we can't easily mock datetime inside the method without patching,
@@ -132,24 +133,23 @@ def test_get_snapshots(node_repo):
     start = datetime.now(timezone.utc) - timedelta(minutes=1)
     end = datetime.now(timezone.utc) + timedelta(minutes=1)
 
-    snapshots = node_repo.get_snapshots(start, end)
+    snapshots = await node_repo.get_snapshots(start, end)
     assert len(snapshots) == 1
     ts, info = snapshots[0]
     assert info.name == "node-1"
     assert info.cpu_capacity_cores == 2.0
 
 
-def test_get_latest_snapshots_before(node_repo, db_connection):
+@pytest.mark.asyncio
+async def test_get_latest_snapshots_before(node_repo, db_connection):
     """Test retrieving latest snapshots before a timestamp."""
     # We need to simulate history.
     # Since save_nodes uses current time, we might need to manually insert for testing history
     # or patch datetime.
 
-    cursor = db_connection.cursor()
-
     # Insert snapshot at T-10m
     t1 = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-    cursor.execute(
+    await db_connection.execute(
         """
         INSERT INTO node_snapshots (
             timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
@@ -162,7 +162,7 @@ def test_get_latest_snapshots_before(node_repo, db_connection):
 
     # Insert snapshot at T-5m (updated capacity)
     t2 = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    cursor.execute(
+    await db_connection.execute(
         """
         INSERT INTO node_snapshots (
             timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
@@ -173,11 +173,11 @@ def test_get_latest_snapshots_before(node_repo, db_connection):
         (t2, "node-1", "t3.large", 4.0, "amd64", "aws", "us-east-1", "us-east-1a", "default", 8000000000),
     )
 
-    db_connection.commit()
+    await db_connection.commit()
 
     # Query at T-2m (should get T-5m snapshot)
     query_time = datetime.now(timezone.utc) - timedelta(minutes=2)
-    snapshots = node_repo.get_latest_snapshots_before(query_time)
+    snapshots = await node_repo.get_latest_snapshots_before(query_time)
 
     assert len(snapshots) == 1
     assert snapshots[0].name == "node-1"
@@ -185,14 +185,15 @@ def test_get_latest_snapshots_before(node_repo, db_connection):
 
     # Query at T-7m (should get T-10m snapshot)
     query_time_old = datetime.now(timezone.utc) - timedelta(minutes=7)
-    snapshots_old = node_repo.get_latest_snapshots_before(query_time_old)
+    snapshots_old = await node_repo.get_latest_snapshots_before(query_time_old)
 
     assert len(snapshots_old) == 1
     assert snapshots_old[0].name == "node-1"
     assert snapshots_old[0].cpu_capacity_cores == 2.0
 
 
-def test_save_nodes_multiple_snapshots(node_repo, db_connection):
+@pytest.mark.asyncio
+async def test_save_nodes_multiple_snapshots(node_repo, db_connection):
     """Test saving multiple snapshots over time."""
     # Arrange & Act
 
@@ -202,7 +203,7 @@ def test_save_nodes_multiple_snapshots(node_repo, db_connection):
     with patch("greenkube.storage.sqlite_node_repository.datetime") as mock_datetime:
         # First save
         mock_datetime.now.return_value = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-        node_repo.save_nodes(SAMPLE_NODES)
+        await node_repo.save_nodes(SAMPLE_NODES)
 
         # Second save (1 hour later)
         mock_datetime.now.return_value = datetime(2025, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
@@ -218,41 +219,48 @@ def test_save_nodes_multiple_snapshots(node_repo, db_connection):
             cpu_capacity_cores=4.0,
             memory_capacity_bytes=17179869184,
         )
-        saved_count = node_repo.save_nodes([updated_node])
+        saved_count = await node_repo.save_nodes([updated_node])
 
     # Assert
     assert saved_count == 1
 
     # Verify total snapshots
-    cursor = db_connection.cursor()
-    cursor.execute("SELECT COUNT(*) FROM node_snapshots WHERE node_name=?", ("node-1",))
-    assert cursor.fetchone()[0] == 2
+    async with db_connection.execute("SELECT COUNT(*) FROM node_snapshots WHERE node_name=?", ("node-1",)) as cursor:
+        row = await cursor.fetchone()
+        assert row[0] == 2
 
     # Verify latest snapshot
-    cursor.execute(
+    async with db_connection.execute(
         "SELECT instance_type FROM node_snapshots WHERE node_name=? ORDER BY timestamp DESC LIMIT 1", ("node-1",)
-    )
-    assert cursor.fetchone()[0] == "m5.xlarge"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row[0] == "m5.xlarge"
 
 
-def test_save_nodes_empty_list(node_repo):
+@pytest.mark.asyncio
+async def test_save_nodes_empty_list(node_repo):
     """Test saving an empty list of nodes."""
-    saved_count = node_repo.save_nodes([])
+    saved_count = await node_repo.save_nodes([])
     assert saved_count == 0
 
 
-def test_save_nodes_db_error():
+@pytest.mark.asyncio
+async def test_save_nodes_db_error():
     """Test behavior when DB raises an error."""
     db_manager = MagicMock()
 
-    @contextmanager
-    def scope():
+    @asynccontextmanager
+    async def scope():
         mock_conn = MagicMock()
-        mock_conn.cursor.side_effect = sqlite3.Error("DB Error")
+
+        async def mock_executemany(*args, **kwargs):
+            raise aiosqlite.Error("DB Error")
+
+        mock_conn.executemany = AsyncMock(side_effect=mock_executemany)
         yield mock_conn
 
     db_manager.connection_scope = scope
 
     repo = SQLiteNodeRepository(db_manager)
     with pytest.raises(QueryError):
-        repo.save_nodes(SAMPLE_NODES)
+        await repo.save_nodes(SAMPLE_NODES)

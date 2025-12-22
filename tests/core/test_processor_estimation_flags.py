@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,14 +12,16 @@ from greenkube.models.prometheus_metrics import NodeInstanceType, PodCPUUsage, P
 @pytest.fixture
 def mock_components():
     return {
-        "prom": MagicMock(),
-        "opencost": MagicMock(),
-        "node": MagicMock(),
-        "pod": MagicMock(),
-        "emaps": MagicMock(),
-        "repo": MagicMock(),
-        "node_repo": MagicMock(),
-        "calc": MagicMock(),
+        "prom": MagicMock(collect=AsyncMock(), collect_range=AsyncMock()),
+        "opencost": MagicMock(collect=AsyncMock()),
+        "node": MagicMock(collect=AsyncMock(), collect_instance_types=AsyncMock()),
+        "pod": MagicMock(collect=AsyncMock()),
+        "emaps": MagicMock(collect=AsyncMock()),
+        "repo": MagicMock(
+            get_for_zone_at_time=AsyncMock(), save_history=AsyncMock(), read_combined_metrics=AsyncMock()
+        ),
+        "node_repo": MagicMock(get_latest_snapshots_before=AsyncMock(), get_snapshots=AsyncMock()),
+        "calc": MagicMock(calculate_emissions=AsyncMock()),
         "est": MagicMock(),
     }
 
@@ -39,7 +41,8 @@ def processor(mock_components):
     )
 
 
-def test_run_full_defaults(processor, mock_components):
+@pytest.mark.asyncio
+async def test_run_full_defaults(processor, mock_components):
     # Arrange
     # 1. Prometheus returns data
     mock_components["prom"].collect.return_value = PrometheusMetric(
@@ -80,12 +83,13 @@ def test_run_full_defaults(processor, mock_components):
     mock_components["opencost"].collect.return_value = []
 
     # 5. Calculator returns a result
+    mock_components["calc"].calculate_emissions.side_effect = None
     mock_components["calc"].calculate_emissions.return_value = MagicMock(
         co2e_grams=50.0, grid_intensity=100.0, grid_intensity_timestamp=datetime.now(timezone.utc)
     )
 
     # Act
-    metrics = processor.run()
+    metrics = await processor.run()
 
     # Assert
     assert len(metrics) == 1
@@ -99,7 +103,8 @@ def test_run_full_defaults(processor, mock_components):
     assert "Unknown provider" in reasons_str or "No PUE profile" in reasons_str
 
 
-def test_run_no_defaults(processor, mock_components):
+@pytest.mark.asyncio
+async def test_run_no_defaults(processor, mock_components):
     # Arrange
     # 1. Prometheus
     mock_components["prom"].collect.return_value = PrometheusMetric(
@@ -162,7 +167,7 @@ def test_run_no_defaults(processor, mock_components):
     # Patch the zone mapper to ensure it returns a value
     with patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone", return_value="US-TEST"):
         # Act
-        metrics = processor.run()
+        metrics = await processor.run()
 
     # Assert
     assert len(metrics) == 1

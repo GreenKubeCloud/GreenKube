@@ -1,6 +1,6 @@
 # tests/core/test_calculator.py
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,10 +21,13 @@ TEST_INTENSITY = 150.0  # gCO2e/kWh
 @pytest.fixture
 def mock_repository():
     """Creates a mock for the CarbonIntensityRepository."""
-    return MagicMock()
+    mock = MagicMock()
+    mock.get_for_zone_at_time = AsyncMock()
+    return mock
 
 
-def test_calculate_emissions_success(mock_repository):
+@pytest.mark.asyncio
+async def test_calculate_emissions_success(mock_repository):
     """
     Verifies the correct calculation of emissions when carbon intensity data is available.
     """
@@ -35,7 +38,7 @@ def test_calculate_emissions_success(mock_repository):
     # -----------------------------------------------
 
     # Act
-    result = calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
+    result = await calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
 
     # Assert
     # 1. Verify repository call
@@ -50,7 +53,8 @@ def test_calculate_emissions_success(mock_repository):
     assert result.grid_intensity == TEST_INTENSITY
 
 
-def test_calculate_emissions_no_intensity_data(mock_repository):
+@pytest.mark.asyncio
+async def test_calculate_emissions_no_intensity_data(mock_repository):
     """
     Verifies that the calculation applies the formula using the configured
     DEFAULT_INTENSITY when carbon intensity data is unavailable.
@@ -63,7 +67,7 @@ def test_calculate_emissions_no_intensity_data(mock_repository):
     # --- Removed the hardcoded effective_default_intensity variable ---
 
     # Act
-    result = calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
+    result = await calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
 
     # Assert
     # 1. Verify repository call
@@ -78,10 +82,10 @@ def test_calculate_emissions_no_intensity_data(mock_repository):
     # -------------------------------------------
 
 
-def test_calculate_emissions_zero_joules(mock_repository):
+@pytest.mark.asyncio
+async def test_calculate_emissions_zero_joules(mock_repository):
     """
-    Verifies that the calculation returns 0 CO2e when joule consumption is 0,
-    but still reports the available grid intensity.
+    Verifies that the calculation returns result based on joule consumption.
     """
     # Arrange
     mock_repository.get_for_zone_at_time.return_value = TEST_INTENSITY
@@ -90,8 +94,8 @@ def test_calculate_emissions_zero_joules(mock_repository):
     # -----------------------------------------------
 
     # Act
-    result = calculator.calculate_emissions(
-        joules=0.1,  # Zero consumption
+    result = await calculator.calculate_emissions(
+        joules=0.1,  # consumption
         zone=TEST_ZONE,
         timestamp=TEST_TIMESTAMP,
     )
@@ -100,7 +104,7 @@ def test_calculate_emissions_zero_joules(mock_repository):
     # Repository is still called to get the grid intensity
     mock_repository.get_for_zone_at_time.assert_called_once_with(TEST_ZONE, TEST_TIMESTAMP)
 
-    # CO2e result must be 0 (as per formula with 0 joules)
+    # CO2e result must be calculated
     expected_co2e_zero_joules = (0.1 / config.JOULES_PER_KWH) * config.DEFAULT_PUE * TEST_INTENSITY
     assert result.co2e_grams == pytest.approx(expected_co2e_zero_joules)
     # Grid intensity is still reported

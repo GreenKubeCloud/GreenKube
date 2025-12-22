@@ -5,12 +5,13 @@ from the Kubernetes API.
 """
 
 import logging
-from typing import List, Optional
-
-from kubernetes import client, config
+from typing import List
 
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
+
+from ..utils.k8s_utils import parse_cpu_request, parse_memory_request
 
 logger = logging.getLogger(__name__)
 
@@ -22,76 +23,35 @@ class PodCollector(BaseCollector):
     """
 
     def __init__(self):
-        try:
-            # Try loading in-cluster config first
-            config.load_incluster_config()
-        except config.ConfigException:
-            # Try kubeconfig; if that also fails, warn but still attempt to
-            # create the CoreV1Api object. Tests often patch CoreV1Api and
-            # expect the collector to use the patched API even when config
-            # loading isn't possible in the test environment.
-            try:
-                config.load_kube_config()
-            except config.ConfigException:
-                logger.warning("Could not configure Kubernetes client. Neither in-cluster nor local config found.")
+        self._api = None
 
-        # Attempt to create the API client regardless of config loader outcome.
-        try:
-            self.v1 = client.CoreV1Api()
-            logger.info("PodCollector initialized with Kubernetes client.")
-        except Exception as e:
-            logger.warning("Failed to create Kubernetes API client: %s", e)
-            self.v1 = None
-            logger.debug("PodCollector initialized without Kubernetes client.")
+    async def _ensure_client(self):
+        """Lazily initialize the Kubernetes Client."""
+        if self._api:
+            return self._api
 
-    def _parse_cpu_request(self, cpu: Optional[str]) -> int:
-        """Converts K8s CPU string to millicores (int) using parse_quantity.
+        self._api = await get_core_v1_api()
+        if self._api:
+            logger.debug("PodCollector initialized with centralized config.")
+        else:
+            logger.warning("PodCollector could not initialize Kubernetes client.")
 
-        Supports formats like "250m", "0.5", "1" and returns millicores.
-        """
-        if not cpu:
-            return 0
-        try:
-            from kubernetes.utils.quantity import parse_quantity
+        return self._api
 
-            # parse_quantity returns a Decimal representing cores
-            cores = parse_quantity(cpu)
-            # Convert to millicores (multiply by 1000)
-            millicores = int(cores * 1000)
-            return millicores
-        except Exception as e:
-            logger.warning(f"Could not parse CPU request value '{cpu}': {e}")
-            return 0
-
-    def _parse_memory_request(self, memory: Optional[str]) -> int:
-        """Converts K8s memory string to bytes (int) using parse_quantity.
-
-        Supports binary (Ki, Mi, Gi, Ti) and decimal (K, M, G, T) units.
-        """
-        if not memory:
-            return 0
-        try:
-            from kubernetes.utils.quantity import parse_quantity
-
-            # parse_quantity returns a Decimal representing bytes
-            bytes_val = int(parse_quantity(memory))
-            return bytes_val
-        except Exception as e:
-            logger.warning(f"Could not parse memory request value '{memory}': {e}")
-            return 0
-
-    def collect(self) -> List[PodMetric]:
+    async def collect(self) -> List[PodMetric]:
         """
         Fetches all pods and extracts their container resource requests.
         """
         pod_metrics: List[PodMetric] = []
+        api = await self._ensure_client()
+
         # If there's no configured Kubernetes client, return empty list.
-        if not getattr(self, "v1", None):
+        if not api:
             logger.debug("Kubernetes client not configured; skipping pod collection.")
             return pod_metrics
 
         try:
-            pod_list = self.v1.list_pod_for_all_namespaces(watch=False)
+            pod_list = await api.list_pod_for_all_namespaces(watch=False)
 
             for pod in pod_list.items:
                 pod_name = pod.metadata.name
@@ -107,8 +67,8 @@ class PodCollector(BaseCollector):
                     cpu_request_str = requests.get("cpu")
                     memory_request_str = requests.get("memory")
 
-                    cpu_request = self._parse_cpu_request(cpu_request_str)
-                    memory_request = self._parse_memory_request(memory_request_str)
+                    cpu_request = parse_cpu_request(cpu_request_str)
+                    memory_request = parse_memory_request(memory_request_str)
 
                     pod_metrics.append(
                         PodMetric(
@@ -125,3 +85,10 @@ class PodCollector(BaseCollector):
 
         logger.debug(f"Collected {len(pod_metrics)} pod/container request metrics.")
         return pod_metrics
+
+    async def close(self):
+        """Close the Kubernetes API client if it exists."""
+        if self._api:
+            await self._api.api_client.close()
+            logger.debug("PodCollector Kubernetes client closed.")
+            self._api = None
