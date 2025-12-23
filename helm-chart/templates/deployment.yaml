@@ -16,6 +16,7 @@ spec:
     spec:
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
+      automountServiceAccountToken: true
       {{- end }}
       {{- if eq .Values.config.db.type "sqlite" }}
       securityContext:
