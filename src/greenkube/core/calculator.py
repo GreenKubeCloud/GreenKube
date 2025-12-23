@@ -132,3 +132,20 @@ class CarbonCalculator:
             grid_intensity=grid_intensity_value,
             grid_intensity_timestamp=normalized_dt,
         )
+
+    def calculate_embodied_emissions(
+        self, gwp_manufacture_kg: float, lifespan_hours: float, duration_seconds: float, share: float = 1.0
+    ) -> float:
+        """
+        Calculates the allocated embodied emissions (Scope 3) in grams.
+
+        Formula: (gwp_kg * 1000 / lifespan_hours) * (duration_seconds / 3600) * share
+        """
+        if lifespan_hours <= 0:
+            return 0.0
+
+        gwp_grams = gwp_manufacture_kg * 1000.0
+        rate_grams_per_hour = gwp_grams / lifespan_hours
+        duration_hours = duration_seconds / 3600.0
+
+        return rate_grams_per_hour * duration_hours * share

@@ -143,5 +143,8 @@ class CombinedMetric(BaseModel):
     emaps_zone: Optional[str] = Field(None, description="Electricity Maps zone")
     is_estimated: Optional[bool] = Field(False, description="Whether the metric relies on estimated values.")
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
+    embodied_co2e_grams: Optional[float] = Field(
+        0.0, description="The allocated embodied carbon emissions in grams of CO2 equivalent."
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

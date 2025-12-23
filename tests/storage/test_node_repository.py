@@ -31,6 +31,7 @@ async def db_connection():
                 zone TEXT,
                 node_pool TEXT,
                 memory_capacity_bytes INTEGER,
+                embodied_emissions_kg REAL,
                 UNIQUE(node_name, timestamp)
             );
         """)

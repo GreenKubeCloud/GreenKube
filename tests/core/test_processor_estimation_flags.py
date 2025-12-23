@@ -20,7 +20,9 @@ def mock_components():
         "repo": MagicMock(
             get_for_zone_at_time=AsyncMock(), save_history=AsyncMock(), read_combined_metrics=AsyncMock()
         ),
-        "node_repo": MagicMock(get_latest_snapshots_before=AsyncMock(), get_snapshots=AsyncMock()),
+        "node_repo": AsyncMock(
+            get_latest_snapshots_before=AsyncMock(), get_snapshots=AsyncMock(), save_nodes=AsyncMock()
+        ),
         "calc": MagicMock(calculate_emissions=AsyncMock()),
         "est": MagicMock(),
     }
@@ -36,6 +38,8 @@ def processor(mock_components):
         electricity_maps_collector=mock_components["emaps"],
         repository=mock_components["repo"],
         node_repository=mock_components["node_repo"],
+        embodied_repository=AsyncMock(),
+        boavizta_collector=AsyncMock(),
         calculator=mock_components["calc"],
         estimator=mock_components["est"],
     )

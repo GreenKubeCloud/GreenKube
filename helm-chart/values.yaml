@@ -7,6 +7,7 @@ replicaCount: 1
 image:
   repository: greenkube/greenkube
   pullPolicy: IfNotPresent
+
   # Overrides the image tag whose default is the chart appVersion.
   tag: 0.1.6
 
@@ -37,6 +38,10 @@ config:
 
   # Max age for historical node data in days
   nodeDataMaxAgeDays: 30
+
+  # Boavizta configuration
+  boavizta:
+    url: "https://api.boavizta.org"
 
   # Database configuration
   db:
@@ -96,7 +101,10 @@ elasticsearch:
 # Users MUST provide the electricityMapsToken.
 secrets:
   # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
-  electricityMapsToken: ''
+  electricityMapsToken: "dummy_token"
+  
+  # Boavizta API Token (Optional)
+  boaviztaToken: ""
 
   # Connection string for PostgreSQL (only used if db.type is "postgres")
   # Example: "postgresql://user:password@host:port/dbname"

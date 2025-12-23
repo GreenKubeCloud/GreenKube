@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,7 +12,7 @@ from greenkube.models.node import NodeInfo
 async def test_pue_and_zone_fallback():
     # Arrange
     mock_repo = MagicMock()
-    mock_node_repo = MagicMock()
+    mock_node_repo = AsyncMock()
     mock_prom = MagicMock()
     mock_estimator = MagicMock()
     mock_calculator = MagicMock()
@@ -48,6 +48,8 @@ async def test_pue_and_zone_fallback():
         electricity_maps_collector=MagicMock(),
         repository=mock_repo,
         node_repository=mock_node_repo,
+        embodied_repository=AsyncMock(),
+        boavizta_collector=AsyncMock(),
         calculator=mock_calculator,
         estimator=mock_estimator,
     )

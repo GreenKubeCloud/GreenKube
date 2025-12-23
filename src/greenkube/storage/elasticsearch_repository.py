@@ -61,6 +61,7 @@ class CombinedMetricDoc(Document):
     namespace = Keyword(required=True)
     total_cost = Float()
     co2e_grams = Float()
+    embodied_co2e_grams = Float()
     pue = Float()
     grid_intensity = Float()
     joules = Float()
@@ -73,6 +74,8 @@ class CombinedMetricDoc(Document):
     node_instance_type = Keyword()
     node_zone = Keyword()
     emaps_zone = Keyword()
+    is_estimated = Keyword()
+    estimation_reasons = Text()
 
     class Index:
         name = "greenkube_combined_metrics"
@@ -112,14 +115,17 @@ async def setup_elasticsearch():
         # We need to import NodeSnapshotDoc here to avoid circular dependencies at top level if any,
         # or just to keep initialization logic centralized.
         from .elasticsearch_node_repository import NodeSnapshotDoc
+        from .embodied_repository import InstanceCarbonProfileDoc
 
         await CarbonIntensityDoc.init()
         await CombinedMetricDoc.init()
         await NodeSnapshotDoc.init()
+        await InstanceCarbonProfileDoc.init()
 
         logging.info(f"Elasticsearch index '{config.ELASTICSEARCH_INDEX_NAME}' is ready.")
         logging.info(f"Elasticsearch index '{CombinedMetricDoc.Index.name}' is ready.")
         logging.info(f"Elasticsearch index '{NodeSnapshotDoc.Index.name}' is ready.")
+        logging.info(f"Elasticsearch index '{InstanceCarbonProfileDoc.Index.name}' is ready.")
 
         return True
 

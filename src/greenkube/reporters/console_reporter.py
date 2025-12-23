@@ -54,6 +54,7 @@ class ConsoleReporter(BaseReporter):
                 table.add_column("Period", style="magenta")
             table.add_column("Total Cost ($)", style="green", justify="right")
             table.add_column("CO2e (g)", style="red", justify="right")
+            table.add_column("Embodied CO2e (g)", style="blue", justify="right")
             table.add_column("Energy (Joules)", style="yellow", justify="right")
             table.add_column("CPU Req (m)", style="blue", justify="right")
             table.add_column("Mem Req (Mi)", style="blue", justify="right")
@@ -66,6 +67,7 @@ class ConsoleReporter(BaseReporter):
             for item in sorted_data:
                 mem_mib = item.memory_request / (1024 * 1024) if item.memory_request else 0.0
                 period = getattr(item, "period", None)
+                embodied_val = item.embodied_co2e_grams if item.embodied_co2e_grams is not None else 0.0
 
                 row = [
                     item.pod_name,
@@ -77,6 +79,7 @@ class ConsoleReporter(BaseReporter):
                     [
                         f"{item.total_cost:.4f}",
                         f"{item.co2e_grams:.2f}",
+                        f"{embodied_val:.2f}",
                         f"{item.joules:.0f}",
                         f"{item.cpu_request}",
                         f"{mem_mib:.1f}",

@@ -122,7 +122,9 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         pod_collector=pod_collector,
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         repository=repository,
-        node_repository=MagicMock(),
+        node_repository=AsyncMock(),
+        embodied_repository=AsyncMock(),
+        boavizta_collector=AsyncMock(),
         calculator=calc,
         estimator=est,
     )

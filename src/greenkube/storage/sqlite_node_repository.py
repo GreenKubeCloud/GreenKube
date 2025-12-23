@@ -44,8 +44,8 @@ class SQLiteNodeRepository(NodeRepository):
                             """
                             INSERT INTO node_snapshots
                                 (timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
-                                 cloud_provider, region, zone, node_pool, memory_capacity_bytes)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 cloud_provider, region, zone, node_pool, memory_capacity_bytes, embodied_emissions_kg)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(node_name, timestamp) DO NOTHING;
                         """,
                             (
@@ -59,6 +59,7 @@ class SQLiteNodeRepository(NodeRepository):
                                 node.zone,
                                 node.node_pool,
                                 node.memory_capacity_bytes,
+                                node.embodied_emissions_kg,
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -86,7 +87,7 @@ class SQLiteNodeRepository(NodeRepository):
                 async with conn.execute(
                     """
                     SELECT node_name, instance_type, zone, region, cloud_provider, architecture,
-                           node_pool, cpu_capacity_cores, memory_capacity_bytes, timestamp
+                           node_pool, cpu_capacity_cores, memory_capacity_bytes, timestamp, embodied_emissions_kg
                     FROM node_snapshots
                     WHERE timestamp >= ? AND timestamp <= ?
                     ORDER BY timestamp ASC
@@ -111,6 +112,7 @@ class SQLiteNodeRepository(NodeRepository):
                                     cpu_capacity_cores=row["cpu_capacity_cores"],
                                     memory_capacity_bytes=row["memory_capacity_bytes"],
                                     timestamp=parse_iso_date(row["timestamp"]),
+                                    embodied_emissions_kg=row["embodied_emissions_kg"],
                                 ),
                             )
                         )
@@ -134,7 +136,8 @@ class SQLiteNodeRepository(NodeRepository):
                 async with conn.execute(
                     """
                     SELECT ns.node_name, ns.instance_type, ns.zone, ns.region, ns.cloud_provider,
-                           ns.architecture, ns.node_pool, ns.cpu_capacity_cores, ns.memory_capacity_bytes, ns.timestamp
+                           ns.architecture, ns.node_pool, ns.cpu_capacity_cores, ns.memory_capacity_bytes, ns.timestamp,
+                           ns.embodied_emissions_kg
                     FROM node_snapshots ns
                     INNER JOIN (
                         SELECT node_name, MAX(timestamp) as max_ts
@@ -158,6 +161,7 @@ class SQLiteNodeRepository(NodeRepository):
                             cpu_capacity_cores=row["cpu_capacity_cores"],
                             memory_capacity_bytes=row["memory_capacity_bytes"],
                             timestamp=parse_iso_date(row["timestamp"]),
+                            embodied_emissions_kg=row["embodied_emissions_kg"],
                         )
                         for row in rows
                     ]

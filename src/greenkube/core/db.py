@@ -203,7 +203,22 @@ class DatabaseManager:
                     zone TEXT,
                     node_pool TEXT,
                     memory_capacity_bytes INTEGER,
+                    embodied_emissions_kg REAL,
                     UNIQUE(node_name, timestamp)
+                );
+            """)
+
+            # --- Table for instance_carbon_profiles ---
+            await self.connection.execute("""
+                CREATE TABLE IF NOT EXISTS instance_carbon_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    instance_type TEXT NOT NULL,
+                    gwp_manufacture REAL NOT NULL,
+                    lifespan_hours INTEGER NOT NULL,
+                    source TEXT,
+                    last_updated TEXT,
+                    UNIQUE(provider, instance_type)
                 );
             """)
 
@@ -227,6 +242,10 @@ class DatabaseManager:
                 pass
             try:
                 await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN estimation_reasons TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE node_snapshots ADD COLUMN embodied_emissions_kg REAL")
             except sqlite3.OperationalError:
                 pass
 
@@ -309,6 +328,7 @@ class DatabaseManager:
                     emaps_zone TEXT,
                     is_estimated BOOLEAN,
                     estimation_reasons TEXT,
+                    embodied_co2e_grams REAL,
                     UNIQUE(pod_name, namespace, timestamp)
                 );
                 CREATE INDEX IF NOT EXISTS idx_combined_metrics_timestamp ON combined_metrics(timestamp);
@@ -328,10 +348,49 @@ class DatabaseManager:
                     zone TEXT,
                     node_pool TEXT,
                     memory_capacity_bytes BIGINT,
+                    embodied_emissions_kg REAL,
                     UNIQUE(node_name, timestamp)
                 );
                 CREATE INDEX IF NOT EXISTS idx_node_snapshots_timestamp ON node_snapshots(timestamp);
             """)
+
+            # --- Table for instance_carbon_profiles ---
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS instance_carbon_profiles (
+                    id SERIAL PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    instance_type TEXT NOT NULL,
+                    gwp_manufacture REAL NOT NULL,
+                    lifespan_hours INTEGER NOT NULL,
+                    source TEXT,
+                    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(provider, instance_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_instance_profiles_type ON instance_carbon_profiles(
+                    provider, instance_type
+                );
+            """)
+
+            # --- Migrations ---
+            # Use 'ADD COLUMN IF NOT EXISTS' which works in Postgres 9.6+
+            try:
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node_instance_type TEXT;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node_zone TEXT;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS emaps_zone TEXT;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS is_estimated BOOLEAN;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS estimation_reasons TEXT;")
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS embodied_co2e_grams REAL DEFAULT 0.0;"
+                )
+
+                # Fix any existing NULLs for non-nullable fields or fields where we expect a default
+                await conn.execute(
+                    "UPDATE combined_metrics SET embodied_co2e_grams = 0.0 WHERE embodied_co2e_grams IS NULL;"
+                )
+
+                await conn.execute("ALTER TABLE node_snapshots ADD COLUMN IF NOT EXISTS embodied_emissions_kg REAL;")
+            except Exception as e:
+                logger.warning(f"Migration warning (non-critical): {e}")
 
             # No commit() needed for asyncpg (autocommit is default in some contexts).
             # asyncpg connection usage usually auto-commits if not in transaction.

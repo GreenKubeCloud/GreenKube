@@ -35,6 +35,7 @@ class NodeInfo(BaseModel):
     cpu_capacity_cores: Optional[float] = Field(None, description="CPU capacity in cores")
     memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
+    embodied_emissions_kg: Optional[float] = Field(None, description="Manufactured emissions in kgCO2eq")
 
 
 class NodeZoneContext(BaseModel):

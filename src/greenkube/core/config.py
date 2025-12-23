@@ -24,6 +24,10 @@ class Config:
         # --- Database variables ---
         self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
 
+        # --- Boavizta variables ---
+        self.BOAVIZTA_API_URL = os.getenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
+        self.BOAVIZTA_TOKEN = self._get_secret("BOAVIZTA_TOKEN")
+
         # --- ELASTICSEARCH VARIABLES ---
         self.ELASTICSEARCH_USER = self._get_secret("ELASTICSEARCH_USER")
         self.ELASTICSEARCH_PASSWORD = self._get_secret("ELASTICSEARCH_PASSWORD")
@@ -108,7 +112,10 @@ class Config:
     DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
     JOULES_PER_KWH = 3.6e6
 
-    # --- Logging variables ---
+    # --- Boavizta default params ---
+    DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
+
+    # --- Network variables check ---
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
     # --- Network variables ---

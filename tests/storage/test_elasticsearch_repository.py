@@ -302,6 +302,7 @@ async def test_setup_connection_success(mock_es_connections_module):
             patch("greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init", new_callable=AsyncMock),
             patch("greenkube.storage.elasticsearch_repository.CombinedMetricDoc.init", new_callable=AsyncMock),
             patch("greenkube.storage.elasticsearch_node_repository.NodeSnapshotDoc.init", new_callable=AsyncMock),
+            patch("greenkube.storage.embodied_repository.InstanceCarbonProfileDoc.init", new_callable=AsyncMock),
         ):
             await setup_elasticsearch()
 

@@ -62,6 +62,7 @@ def test_console_reporter_with_data(mocker):
         call("Namespace", style="cyan"),
         call("Total Cost ($)", style="green", justify="right"),
         call("CO2e (g)", style="red", justify="right"),
+        call("Embodied CO2e (g)", style="blue", justify="right"),
         call("Energy (Joules)", style="yellow", justify="right"),
         call("CPU Req (m)", style="blue", justify="right"),
         call("Mem Req (Mi)", style="blue", justify="right"),
@@ -78,6 +79,7 @@ def test_console_reporter_with_data(mocker):
             "e-commerce",
             "15.7500",
             "250.50",
+            "0.00",
             "0",
             "0",
             "0.0",
@@ -89,6 +91,7 @@ def test_console_reporter_with_data(mocker):
             "security",
             "5.1000",
             "80.20",
+            "0.00",
             "0",
             "0",
             "0.0",
@@ -139,8 +142,8 @@ def test_console_reporter_includes_cpu_and_memory(mocker):
     for call_args in added_rows:
         args = call_args.args
         if "pod-1" in args:
-            # memory is at position 6 (0-based): pod, ns, cost, co2e, joules, cpu, mem, intensity, pue
-            mem_str = args[6]
+            # memory is at position 7 (0-based): pod, ns, cost, co2e, embodied, joules, cpu, mem, intensity, pue
+            mem_str = args[7]
             assert mem_str == "50.0" or mem_str.startswith("50.0")
             found = True
     assert found, "Row for pod-1 not found in calls"
