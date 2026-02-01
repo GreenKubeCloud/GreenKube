@@ -99,8 +99,6 @@ class DataProcessor:
                         )
 
                 if mapped:
-                    # Direct mapping success
-                    pass
                     logger.info(
                         "Node '%s' cloud zone '%s' (provider: %s) -> Electricity Maps zone '%s'",
                         node_name,
@@ -622,7 +620,6 @@ class DataProcessor:
                 )
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
-        logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
         self.calculator.clear_cache()
         return combined_metrics
 
@@ -633,6 +630,7 @@ class DataProcessor:
         await self.node_collector.close()
         await self.pod_collector.close()
         await self.electricity_maps_collector.close()
+        await self.boavizta_collector.close()
         logger.debug("DataProcessor closed all collectors.")
 
     async def run_range(
