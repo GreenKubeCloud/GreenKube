@@ -119,15 +119,12 @@ async def analyze_nodes() -> None:
 
 async def async_write_combined_metrics_to_database(last: Optional[str] = None):
     """Wrapper to make write_combined_metrics_to_database suitable for scheduler."""
-    # Since write_combined_metrics_to_database calls processor.run() which is async,
-    # we need to await it. However, the utils function itself might be sync wrapper
-    # unless we update it too.
-    # Let's inspect utils/write_combined_metrics_to_database separately,
-    # but for now we assume it needs to be awaited or run in thread if strictly sync.
-    # Given the migration logic, it SHOULD be async.
-    # Wait, the checklist said "Processor: async run()".
-    # We should update utils.py as well. For now, let's assume it IS async or we fix it.
     await write_combined_metrics_to_database(last=last)
+
+
+async def scheduled_write_metrics():
+    """Scheduled task wrapper for writing combined metrics (always uses last=None)."""
+    await async_write_combined_metrics_to_database(last=None)
 
 
 async def _async_start(last: Optional[str]):
@@ -148,11 +145,7 @@ async def _async_start(last: Optional[str]):
     scheduler = Scheduler()
     scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
 
-    # Lambda won't work easily for async job in scheduler if it expects coroutine factory
-    # We define a simple async wrapper above
-    scheduler.add_job_from_string(
-        lambda: async_write_combined_metrics_to_database(last=None), config.PROMETHEUS_QUERY_RANGE_STEP
-    )
+    scheduler.add_job_from_string(scheduled_write_metrics, config.PROMETHEUS_QUERY_RANGE_STEP)
     scheduler.add_job_from_string(analyze_nodes, config.NODE_ANALYSIS_INTERVAL)
 
     logger.info("📈 Starting scheduler...")
