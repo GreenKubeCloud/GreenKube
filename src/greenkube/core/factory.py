@@ -103,7 +103,6 @@ def get_embodied_repository() -> EmbodiedRepository:
     from ..core.db import db_manager
 
     return EmbodiedRepository(db_manager)
-    return EmbodiedRepository(db_manager)
 
 
 @lru_cache(maxsize=1)
