@@ -74,36 +74,37 @@ class CarbonCalculator:
         normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
         grid_intensity_data = None
+        cache_hit = False
 
         with self._lock:
             if cache_key in self._intensity_cache:
-                grid_intensity_data = self._intensity_cache[cache_key]
+                cached_value = self._intensity_cache[cache_key]
+                cache_hit = True
+                # Cache stores either: actual intensity value, or None if already warned
+                if cached_value is not None:
+                    grid_intensity_data = cached_value
 
         # If not in cache, fetch it (outside lock to avoid holding it during I/O)
-        if grid_intensity_data is None and (
-            cache_key not in self._intensity_cache if hasattr(self, "_intensity_cache") else True
-        ):
-            fetched = False
+        if not cache_hit:
+            grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
             with self._lock:
-                if cache_key in self._intensity_cache:
-                    grid_intensity_data = self._intensity_cache[cache_key]
-                    fetched = True
-
-            if not fetched:
-                grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
-                with self._lock:
-                    self._intensity_cache[cache_key] = grid_intensity_data
+                # Store the fetched value (may be None if not found)
+                self._intensity_cache[cache_key] = grid_intensity_data
 
         grid_intensity_value = grid_intensity_data
 
-        # A value of -1 in the cache indicates we've already warned for this key.
-        # We need to check this under lock too
-        has_warned = False
-        with self._lock:
-            has_warned = self._intensity_cache.get(cache_key) == -1
-
+        # Use default if intensity data is missing
         if grid_intensity_value is None:
-            if not has_warned:
+            # Only warn once per cache key by checking if we've already cached None
+            should_warn = False
+            with self._lock:
+                if cache_key not in self._intensity_cache or self._intensity_cache[cache_key] is None:
+                    if not cache_hit:
+                        should_warn = True
+                    # Mark as cached (None means we've handled this missing case)
+                    self._intensity_cache[cache_key] = None
+
+            if should_warn:
                 logger = logging.getLogger(__name__)
                 logger.warning(
                     "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
@@ -111,9 +112,6 @@ class CarbonCalculator:
                     normalized_dt.isoformat(),
                     config.DEFAULT_INTENSITY,
                 )
-                # Mark this cache key as warned to prevent re-logging.
-                with self._lock:
-                    self._intensity_cache[cache_key] = -1
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:

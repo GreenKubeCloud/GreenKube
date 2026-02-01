@@ -190,6 +190,11 @@ def report(
             logger.error(f"An error occurred during report generation: {e}")
             logger.error("Report generation failed: %s", traceback.format_exc())
             raise typer.Exit(code=1)
+        finally:
+            # Close the database connection to allow clean exit
+            from ..core.db import db_manager
+
+            await db_manager.close()
 
     try:
         asyncio.run(_report_async())
