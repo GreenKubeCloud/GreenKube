@@ -28,12 +28,13 @@ async def test_run_range_uses_repository():
         ]
     )
 
+    # Use AsyncMock for collectors that have async close() methods
     processor = DataProcessor(
-        prometheus_collector=MagicMock(),
-        opencost_collector=MagicMock(),
-        node_collector=MagicMock(),
-        pod_collector=MagicMock(),
-        electricity_maps_collector=MagicMock(),
+        prometheus_collector=AsyncMock(),
+        opencost_collector=AsyncMock(),
+        node_collector=AsyncMock(),
+        pod_collector=AsyncMock(),
+        electricity_maps_collector=AsyncMock(),
         repository=mock_repo,
         node_repository=AsyncMock(),
         embodied_repository=AsyncMock(),

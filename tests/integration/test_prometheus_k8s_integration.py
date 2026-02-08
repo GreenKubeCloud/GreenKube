@@ -107,20 +107,23 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     )
     est.estimate.return_value = [_energy_metric]
 
-    # OpenCost and PodCollector mocks
+    # OpenCost and PodCollector mocks - use AsyncMock for async close() compatibility
     from unittest.mock import AsyncMock
 
-    opencost = MagicMock()
+    opencost = AsyncMock()
     opencost.collect = AsyncMock(return_value=[])
-    pod_collector = MagicMock()
+    pod_collector = AsyncMock()
     pod_collector.collect = AsyncMock(return_value=[])
+
+    emaps_collector = AsyncMock()
+    emaps_collector.collect = AsyncMock(return_value=[])
 
     dp = DataProcessor(
         prometheus_collector=collector,
         opencost_collector=opencost,
         node_collector=node_collector,
         pod_collector=pod_collector,
-        electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
+        electricity_maps_collector=emaps_collector,
         repository=repository,
         node_repository=AsyncMock(),
         embodied_repository=AsyncMock(),

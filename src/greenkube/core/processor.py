@@ -573,8 +573,6 @@ class DataProcessor:
                         logger.warning(f"Error calculating embodied emissions for {node_name}: {e}")
 
             # Calculate Carbon Emissions
-
-            # Calculate Carbon Emissions
             try:
                 carbon_result = await self.calculator.calculate_emissions(
                     joules=energy_metric.joules,

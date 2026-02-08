@@ -11,19 +11,47 @@ from greenkube.models.prometheus_metrics import NodeInstanceType, PodCPUUsage, P
 
 @pytest.fixture
 def mock_components():
+    # Use AsyncMock for all collectors to prevent coroutine warnings
+    prom = AsyncMock()
+    prom.collect = AsyncMock()
+    prom.collect_range = AsyncMock()
+
+    opencost = AsyncMock()
+    opencost.collect = AsyncMock()
+
+    node = AsyncMock()
+    node.collect = AsyncMock()
+    node.collect_instance_types = AsyncMock()
+
+    pod = AsyncMock()
+    pod.collect = AsyncMock()
+
+    emaps = AsyncMock()
+    emaps.collect = AsyncMock()
+
+    repo = AsyncMock()
+    repo.get_for_zone_at_time = AsyncMock()
+    repo.save_history = AsyncMock()
+    repo.read_combined_metrics = AsyncMock()
+
+    node_repo = AsyncMock()
+    node_repo.get_latest_snapshots_before = AsyncMock()
+    node_repo.get_snapshots = AsyncMock()
+    node_repo.save_nodes = AsyncMock()
+
+    calc = AsyncMock()
+    calc.calculate_emissions = AsyncMock()
+    calc.clear_cache = MagicMock()  # sync method
+
     return {
-        "prom": MagicMock(collect=AsyncMock(), collect_range=AsyncMock()),
-        "opencost": MagicMock(collect=AsyncMock()),
-        "node": MagicMock(collect=AsyncMock(), collect_instance_types=AsyncMock()),
-        "pod": MagicMock(collect=AsyncMock()),
-        "emaps": MagicMock(collect=AsyncMock()),
-        "repo": MagicMock(
-            get_for_zone_at_time=AsyncMock(), save_history=AsyncMock(), read_combined_metrics=AsyncMock()
-        ),
-        "node_repo": AsyncMock(
-            get_latest_snapshots_before=AsyncMock(), get_snapshots=AsyncMock(), save_nodes=AsyncMock()
-        ),
-        "calc": MagicMock(calculate_emissions=AsyncMock()),
+        "prom": prom,
+        "opencost": opencost,
+        "node": node,
+        "pod": pod,
+        "emaps": emaps,
+        "repo": repo,
+        "node_repo": node_repo,
+        "calc": calc,
         "est": MagicMock(),
     }
 
@@ -87,7 +115,6 @@ async def test_run_full_defaults(processor, mock_components):
     mock_components["opencost"].collect.return_value = []
 
     # 5. Calculator returns a result
-    mock_components["calc"].calculate_emissions.side_effect = None
     mock_components["calc"].calculate_emissions.return_value = MagicMock(
         co2e_grams=50.0, grid_intensity=100.0, grid_intensity_timestamp=datetime.now(timezone.utc)
     )

@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# Local development files
+current_task.md
+
 # Data files
 *.csv
 *.json
@@ -218,3 +221,4 @@ __marimo__/
 !instance_power_profiles.csv
 !provider_power_estimates.csv
 !cloud_region_electricity_maps_mapping.csv
+.github/instructions/ai_instructions.instructions.md
