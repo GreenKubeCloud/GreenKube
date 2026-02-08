@@ -1,5 +1,17 @@
-# --- STAGE 1: Builder ---
-# This stage builds the Python package and installs dependencies
+# --- STAGE 1: Frontend Build ---
+# Builds the SvelteKit SPA into static files
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --ignore-scripts 2>/dev/null || npm install --ignore-scripts
+
+COPY frontend/ .
+RUN npm run build && rm -rf node_modules
+
+# --- STAGE 2: Python Builder ---
+# Builds the Python package and installs dependencies
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
@@ -18,7 +30,7 @@ COPY src /app/src
 # We install into /install to easily copy it to the final stage
 RUN pip install --no-cache-dir . --prefix=/install
 
-# --- STAGE 2: Final Image ---
+# --- STAGE 3: Final Image ---
 # This stage creates the final, lean image
 FROM python:3.11-slim-bookworm
 
@@ -31,6 +43,9 @@ RUN useradd -m -s /bin/bash greenkube
 # This copies the 'greenkube' executable to /usr/local/bin
 # and the Python libraries to /usr/local/lib/python3.11/site-packages
 COPY --from=builder /install /usr/local
+
+# Copy the SPA frontend build into /app/frontend
+COPY --from=frontend-builder /frontend/build /app/frontend
 
 # Set the working directory to the user's home
 WORKDIR /home/greenkube

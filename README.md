@@ -17,11 +17,13 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.1.6)
+## ✨ Features (Version 0.1.7)
 
+* **Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
+* **REST API:** Full-featured FastAPI backend with endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included.
 * **Prometheus-Based Energy Estimation:** Calculates pod-level energy consumption (Joules) using CPU usage data from Prometheus and a built-in library of instance power profiles.
 * **Optimization Recommendations:** Identifies "zombie" pods (idle but costly) and "oversized" pods (underutilized CPU) to help you rightsize and reduce waste.
-* **Pod & Namespace Reporting:** Generates detailed reports of CO2e emissions, energy usage, and (optional) costs per pod and namespace.
+* **Pod & Namespace Reporting:** Generates detailed reports of CO₂e emissions, energy usage, and (optional) costs per pod and namespace.
 * **Flexible Data Backends:** Supports PostgreSQL (default), SQLite, and Elasticsearch for storing and querying historical carbon intensity data.
 * **Historical Analysis:** Report on energy and carbon usage over any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, etc.).
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (can be manually overridden).
@@ -53,28 +55,25 @@ helm repo update
 
 ### 2. Configure Your Installation
 
-GreenKube requires an API token from Electricity Maps to fetch grid carbon intensity data. If not provided, a default value will be used for every zone.
-
-#### i. Create a file named `my-values.yaml`.
-
-Add your API token to the file. You can also configure your database type (e.g., elasticsearch) and other settings here.
-
-`my-values.yaml`:
+Create a file named `my-values.yaml` to customize your deployment:
 
 ```yaml
 secrets:
-  # Get your API token from [https://www.electricitymaps.com/](https://www.electricitymaps.com/)
-  # If not provided, a default value will be used for every zone
+  # Get your API token from https://www.electricitymaps.com/
+  # Optional: without it, GreenKube uses a default carbon intensity
+  # value (configurable via config.defaultIntensity) for all zones.
   electricityMapsToken: "YOUR_API_TOKEN_HERE"
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)
 # config:
 #   prometheus:
-#     url: "[http://prometheus-k8s.monitoring.svc.cluster.local:9090](http://prometheus-k8s.monitoring.svc.cluster.local:9090)"
+#     url: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
 ```
 
-#### ii. Install the Chart
+> **Note:** GreenKube works without an Electricity Maps token. When no token is provided, a default carbon intensity value (`config.defaultIntensity`, default: 500 gCO₂e/kWh) is used for all zones. This gives approximate results. For accurate, zone-specific carbon data, provide a token from [Electricity Maps](https://www.electricitymaps.com/).
+
+#### Install the Chart
 
 Install the Helm chart into a dedicated namespace (e.g., `greenkube`):
 
@@ -85,7 +84,42 @@ helm install greenkube greenkube/greenkube \
   --create-namespace
 ```
 
-This will deploy GreenKube, which runs as a service (greenkube start) to continuously collect carbon intensity data.
+This deploys GreenKube with the collector, the API server, and the web dashboard — all in a single image.
+
+## 🖥️ Web Dashboard
+
+GreenKube ships with a built-in web dashboard (SvelteKit SPA served by the API). Once deployed, access it via port-forward:
+
+```bash
+kubectl port-forward svc/greenkube-api 8000:8000 -n greenkube
+```
+
+Then open [http://localhost:8000](http://localhost:8000) in your browser.
+
+The dashboard includes:
+- **Dashboard** — KPI cards (CO₂, cost, energy, pods), time-series charts, namespace breakdown, top pods
+- **Metrics** — Sortable and searchable per-pod metrics table with energy and cost charts
+- **Nodes** — Cluster node inventory with CPU/memory capacity bars and hardware profiles
+- **Recommendations** — Actionable suggestions (zombie pods, CPU rightsizing) with potential savings
+- **Settings** — Current configuration, API health status, and version info
+
+## 🔌 API Reference
+
+The API is available at `/api/v1` and serves both JSON endpoints and the web dashboard.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/health` | Health check and version |
+| `GET /api/v1/version` | Application version |
+| `GET /api/v1/config` | Current configuration |
+| `GET /api/v1/metrics?namespace=&last=24h` | Per-pod metrics |
+| `GET /api/v1/metrics/summary?namespace=&last=24h` | Aggregated summary |
+| `GET /api/v1/metrics/timeseries?granularity=day&last=7d` | Time-series data |
+| `GET /api/v1/namespaces` | List of active namespaces |
+| `GET /api/v1/nodes` | Cluster node inventory |
+| `GET /api/v1/recommendations?namespace=` | Optimization recommendations |
+
+Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 
 ## 📈 Running Reports & Getting Recommendations
 

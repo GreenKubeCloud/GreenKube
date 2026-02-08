@@ -1,65 +1,16 @@
-🌿 GreenKube has been installed!
+🌿 GreenKube {{ .Chart.AppVersion }} deployed!
 
-Release: {{ .Release.Name }}
-{{- if .Values.config.api.enabled }}
-✅ The API is ready and healthy.
-{{- end }}
-The application is running as a Deployment and will continuously collect carbon intensity data.
 {{- if .Values.config.api.enabled }}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  API Access
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-The API is available within the cluster at:
-  http://{{ include "greenkube.fullname" . }}-api:{{ .Values.config.api.port }}/api/v1
-
-To access from your machine:
+📊 Dashboard & API:
   kubectl port-forward svc/{{ include "greenkube.fullname" . }}-api {{ .Values.config.api.port }}:{{ .Values.config.api.port }}
-
-Then open:
-  Health:           http://localhost:{{ .Values.config.api.port }}/api/v1/health
-  Metrics:          http://localhost:{{ .Values.config.api.port }}/api/v1/metrics
-  Metrics Summary:  http://localhost:{{ .Values.config.api.port }}/api/v1/metrics/summary
-  Nodes:            http://localhost:{{ .Values.config.api.port }}/api/v1/nodes
-  Recommendations:  http://localhost:{{ .Values.config.api.port }}/api/v1/recommendations
-  OpenAPI Docs:     http://localhost:{{ .Values.config.api.port }}/docs
+  → http://localhost:{{ .Values.config.api.port }}
 {{- end }}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Configuration
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚠️  WARNING: ACTION REQUIRED
-
-This chart will not function until you provide an API token for Electricity Maps.
-
-You can provide this token by editing your values.yaml:
-  secrets.electricityMapsToken: "YOUR_TOKEN"
-
-Then upgrade:
-  helm upgrade {{ .Release.Name }} . -f values.yaml
-
-OR create the secret manually:
-  kubectl create secret generic {{ include "greenkube.fullname" . }} \
-    --from-literal=ELECTRICITY_MAPS_TOKEN='YOUR_API_TOKEN_HERE' \
-    --dry-run=client -o yaml | kubectl apply -f -
-
-You may also need to set credentials for Prometheus and Elasticsearch in your values.yaml or in the secret.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CLI Usage
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-View Logs:
+📋 Logs:
   kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -f
 
-Run an On-Demand Report:
-  POD_NAME=$(kubectl get pods -l app.kubernetes.io/name={{ include "greenkube.name" . }} -o jsonpath='{.items[0].metadata.name}')
-  kubectl exec -it $POD_NAME -- greenkube report
+💡 No Electricity Maps token? GreenKube uses default carbon intensity values ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
+   For accurate data, set your token: secrets.electricityMapsToken in values.yaml
 
-Run a Namespaced Report:
-  kubectl exec -it $POD_NAME -- greenkube report --namespace my-app
-
-Get Recommendations:
-  kubectl exec -it $POD_NAME -- greenkube recommend
+📖 Full documentation: https://github.com/GreenKubeCloud/GreenKube

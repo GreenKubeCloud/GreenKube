@@ -11,7 +11,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from greenkube.api.dependencies import get_carbon_repository
-from greenkube.api.schemas import MetricsSummaryResponse
+from greenkube.api.schemas import MetricsSummaryResponse, TimeseriesPoint
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CarbonIntensityRepository
 
@@ -96,3 +96,56 @@ async def metrics_summary(
         pod_count=len(pods),
         namespace_count=len(namespaces),
     )
+
+
+_GRANULARITY_FORMATS = {
+    "hour": "%Y-%m-%dT%H:00:00Z",
+    "day": "%Y-%m-%dT00:00:00Z",
+    "week": "%Y-W%V",
+    "month": "%Y-%m-01T00:00:00Z",
+}
+
+
+@router.get("/metrics/timeseries", response_model=List[TimeseriesPoint])
+async def metrics_timeseries(
+    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    granularity: Optional[str] = Query("hour", description="Grouping: 'hour', 'day', 'week', 'month'."),
+    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+):
+    """Return time-series data aggregated by the specified granularity."""
+    if granularity not in _GRANULARITY_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid granularity '{granularity}'. Use: {', '.join(_GRANULARITY_FORMATS.keys())}.",
+        )
+
+    start, end = _get_time_range(last)
+    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
+    if namespace:
+        metrics = [m for m in metrics if m.namespace == namespace]
+
+    fmt = _GRANULARITY_FORMATS[granularity]
+    from collections import defaultdict
+
+    buckets: dict[str, list[CombinedMetric]] = defaultdict(list)
+    for m in metrics:
+        if m.timestamp:
+            key = m.timestamp.strftime(fmt)
+            buckets[key].append(m)
+
+    result = []
+    for ts_key in sorted(buckets.keys()):
+        items = buckets[ts_key]
+        result.append(
+            TimeseriesPoint(
+                timestamp=ts_key,
+                co2e_grams=sum(m.co2e_grams for m in items),
+                embodied_co2e_grams=sum(m.embodied_co2e_grams or 0.0 for m in items),
+                total_cost=sum(m.total_cost for m in items),
+                joules=sum(m.joules for m in items),
+                pod_count=len({m.pod_name for m in items}),
+                namespace_count=len({m.namespace for m in items}),
+            )
+        )
+    return result

@@ -31,6 +31,18 @@ class MetricsSummaryResponse(BaseModel):
     namespace_count: int = Field(0, description="Number of unique namespaces.")
 
 
+class TimeseriesPoint(BaseModel):
+    """A single data point in a time-series aggregation."""
+
+    timestamp: str = Field(..., description="The bucket timestamp (ISO 8601 or week format).")
+    co2e_grams: float = Field(0.0, description="Total operational CO2e in grams for this bucket.")
+    embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams for this bucket.")
+    total_cost: float = Field(0.0, description="Total cost in dollars for this bucket.")
+    joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
+    pod_count: int = Field(0, description="Number of unique pods in this bucket.")
+    namespace_count: int = Field(0, description="Number of unique namespaces in this bucket.")
+
+
 class ConfigResponse(BaseModel):
     """Non-sensitive configuration values."""
 

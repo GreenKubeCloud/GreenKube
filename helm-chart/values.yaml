@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.1.7
+  tag: 0.1.8
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -88,6 +88,26 @@ config:
     host: 0.0.0.0
     port: 8000
 
+    # Liveness probe: restarts the container if the API becomes unresponsive.
+    livenessProbe:
+      enabled: true
+      path: /api/v1/health
+      initialDelaySeconds: 10
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+
+    # Readiness probe: removes the pod from service endpoints until the API is ready.
+    readinessProbe:
+      enabled: true
+      path: /api/v1/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+      successThreshold: 1
+
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
     # Default Power Usage Effectiveness (PUE). Overridden by cloudProvider-specific values if available.
@@ -104,9 +124,10 @@ elasticsearch:
   verifyCerts: true
 
 # Sensitive values that will be stored in a Kubernetes Secret.
-# Users MUST provide the electricityMapsToken.
 secrets:
-  # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
+  # Electricity Maps API Token (Optional)
+  # Without it, GreenKube uses the default carbon intensity value (config.defaultIntensity).
+  # Get yours at: https://www.electricitymaps.com/
   electricityMapsToken: dummy_token
 
   # Boavizta API Token (Optional)
