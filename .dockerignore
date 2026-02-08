@@ -16,7 +16,8 @@ docs
 data
 .git
 *.csv
-*.json
+data/*.json
+api.boavizta.org-openapi.json
 helm-chart
 k8s
 .github
