@@ -49,6 +49,9 @@ class PrometheusCollector(BaseCollector):
         self.username = getattr(settings, "PROMETHEUS_USERNAME", None)
         self.password = getattr(settings, "PROMETHEUS_PASSWORD", None)
 
+        # Reusable HTTP client (lazily initialized)
+        self._client: Optional[httpx.AsyncClient] = None
+
         # Query for average CPU usage in cores over the last step.
         # We filter for containers with a name, which is standard.
         self.cpu_usage_query = (
@@ -68,27 +71,39 @@ class PrometheusCollector(BaseCollector):
         # without duplicating logic.
         self._discovery = BaseDiscovery()
 
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the reusable HTTP client, creating it lazily if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_http_client(verify=self.verify)
+        return self._client
+
+    async def close(self):
+        """Close the reusable HTTP client to release connection pool resources."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
     async def collect(self) -> PrometheusMetric:
         """
         Fetch all required metrics from Prometheus.
 
         Returns a PrometheusMetric object containing lists of parsed data.
         """
-        async with get_async_http_client() as client:
-            # Launch queries concurrently to reduce latency
-            cpu_future = self._query_prometheus(client, self.cpu_usage_query)
-            node_future = self._query_prometheus(client, self.node_labels_query)
+        client = await self._get_client()
+        # Launch queries concurrently to reduce latency
+        cpu_future = self._query_prometheus(client, self.cpu_usage_query)
+        node_future = self._query_prometheus(client, self.node_labels_query)
 
-            # Wait for both primary queries
-            cpu_results, node_results = await asyncio.gather(cpu_future, node_future)
+        # Wait for both primary queries
+        cpu_results, node_results = await asyncio.gather(cpu_future, node_future)
 
-            # If the standard grouped query returned no results, try fallback
-            if not cpu_results:
-                fallback_query = (
-                    f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
-                )
-                logger.info("Falling back to container_cpu_usage grouped without 'container' label")
-                cpu_results = await self._query_prometheus(client, fallback_query)
+        # If the standard grouped query returned no results, try fallback
+        if not cpu_results:
+            fallback_query = (
+                f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
+            )
+            logger.info("Falling back to container_cpu_usage grouped without 'container' label")
+            cpu_results = await self._query_prometheus(client, fallback_query)
 
         parsed_cpu_usage = []
         malformed_cpu_count = 0
@@ -230,14 +245,14 @@ class PrometheusCollector(BaseCollector):
         return []
 
     async def is_available(self) -> bool:
-        async with get_async_http_client(verify=self.verify) as client:
-            if self.base_url and await self._probe_url(client, self.base_url):
-                return True
+        client = await self._get_client()
+        if self.base_url and await self._probe_url(client, self.base_url):
+            return True
 
-            if await self._discover_and_update_url(client):
-                return True
+        if await self._discover_and_update_url(client):
+            return True
 
-            return False
+        return False
 
     async def _probe_url(self, client: httpx.AsyncClient, u: str) -> bool:
         base = u.rstrip("/")
@@ -314,58 +329,58 @@ class PrometheusCollector(BaseCollector):
         step = step or self.query_range_step
         q = query or self.cpu_usage_query
 
-        async with get_async_http_client(verify=self.verify) as client:
-            if not self.base_url:
-                # Attempt discovery
-                await self._discover_and_update_url(client)
+        client = await self._get_client()
+        if not self.base_url:
+            # Attempt discovery
+            await self._discover_and_update_url(client)
 
-            if not self.base_url:
-                # log warning
-                return []
-
-            base = self.base_url.rstrip("/")
-            candidates = [
-                f"{base}/api/v1/query_range",
-                f"{base}/query_range",
-                f"{base}/prometheus/api/v1/query_range",
-            ]
-            params = {"query": q, "start": None, "end": None, "step": step}
-            try:
-                params["start"] = to_iso_z(ensure_utc(start))
-                params["end"] = to_iso_z(ensure_utc(end))
-            except ValueError:
-                return []
-
-            headers = {}
-            if self.bearer_token:
-                headers["Authorization"] = f"Bearer {self.bearer_token}"
-            auth = None
-            if self.username and self.password:
-                auth = (self.username, self.password)
-
-            for query_url in candidates:
-                try:
-                    response = await client.get(query_url, params=params, headers=headers, auth=auth)
-                    response.raise_for_status()
-                    data = response.json()
-                    # Check success
-                    if data.get("status") != "success":
-                        continue
-
-                    results = data.get("data", {}).get("result", [])
-                    if not results and "container" in q:
-                        # Fallback
-                        fallback_query = (
-                            f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
-                            " by (namespace, pod, node)"
-                        )
-                        return await self.collect_range(start, end, step=step, query=fallback_query)
-
-                    return results
-
-                except Exception:
-                    continue
+        if not self.base_url:
+            # log warning
             return []
+
+        base = self.base_url.rstrip("/")
+        candidates = [
+            f"{base}/api/v1/query_range",
+            f"{base}/query_range",
+            f"{base}/prometheus/api/v1/query_range",
+        ]
+        params = {"query": q, "start": None, "end": None, "step": step}
+        try:
+            params["start"] = to_iso_z(ensure_utc(start))
+            params["end"] = to_iso_z(ensure_utc(end))
+        except ValueError:
+            return []
+
+        headers = {}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        auth = None
+        if self.username and self.password:
+            auth = (self.username, self.password)
+
+        for query_url in candidates:
+            try:
+                response = await client.get(query_url, params=params, headers=headers, auth=auth)
+                response.raise_for_status()
+                data = response.json()
+                # Check success
+                if data.get("status") != "success":
+                    continue
+
+                results = data.get("data", {}).get("result", [])
+                if not results and "container" in q:
+                    # Fallback
+                    fallback_query = (
+                        f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
+                        " by (namespace, pod, node)"
+                    )
+                    return await self.collect_range(start, end, step=step, query=fallback_query)
+
+                return results
+
+            except Exception:
+                continue
+        return []
 
     # Keeping parsing methods
     def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:
