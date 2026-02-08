@@ -5,7 +5,7 @@ description: A Helm chart for GreenKube to measure, understand, and reduce the
 type: application
 icon: 
   https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.1.7
-appVersion: 0.1.7
+version: 0.1.8
+appVersion: 0.1.8
 
 
