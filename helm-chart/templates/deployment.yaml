@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         {{- include "greenkube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: app
     spec:
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
@@ -81,6 +82,59 @@ spec:
             - name: data
               mountPath: /data
             {{- end }}
+        {{- if .Values.config.api.enabled }}
+        - name: {{ .Chart.Name }}-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["greenkube-api"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "greenkube.fullname" . }}
+            - secretRef:
+                name: {{ include "greenkube.fullname" . }}
+                optional: true
+          env:
+            {{- if eq .Values.config.db.type "postgres" }}
+            - name: DB_SCHEMA
+              value: {{ .Values.config.db.schema | quote }}
+            - name: DB_CONNECTION_STRING
+              {{- if .Values.postgres.enabled }}
+              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: DB_CONNECTION_STRING
+              {{- end }}
+            {{- end }}
+          ports:
+            - name: http-api
+              containerPort: {{ .Values.config.api.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http-api
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http-api
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: secrets
+              mountPath: /etc/greenkube/secrets
+              readOnly: true
+        {{- end }}
       volumes:
         - name: secrets
           secret:

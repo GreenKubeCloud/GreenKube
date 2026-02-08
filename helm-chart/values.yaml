@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.1.6
+  tag: 0.1.7
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -41,7 +41,7 @@ config:
 
   # Boavizta configuration
   boavizta:
-    url: "https://api.boavizta.org"
+    url: https://api.boavizta.org
 
   # Database configuration
   db:
@@ -82,6 +82,12 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
+  # API server configuration
+  api:
+    enabled: true
+    host: 0.0.0.0
+    port: 8000
+
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
     # Default Power Usage Effectiveness (PUE). Overridden by cloudProvider-specific values if available.
@@ -101,10 +107,10 @@ elasticsearch:
 # Users MUST provide the electricityMapsToken.
 secrets:
   # -- REQUIRED: Get this from https://www.electricitymaps.com/ --
-  electricityMapsToken: "dummy_token"
-  
+  electricityMapsToken: dummy_token
+
   # Boavizta API Token (Optional)
-  boaviztaToken: ""
+  boaviztaToken: ''
 
   # Connection string for PostgreSQL (only used if db.type is "postgres")
   # Example: "postgresql://user:password@host:port/dbname"

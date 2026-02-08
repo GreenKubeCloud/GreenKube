@@ -1,0 +1,41 @@
+{{- if .Values.config.api.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "greenkube.fullname" . }}-ready-check
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ready-check
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ready-check
+          image: "busybox:1.36"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "⏳ Waiting for GreenKube API to become healthy..."
+              for i in $(seq 1 30); do
+                RESPONSE=$(wget -qO- http://{{ include "greenkube.fullname" . }}-api:{{ .Values.config.api.port }}/api/v1/health 2>/dev/null || true)
+                if echo "$RESPONSE" | grep -q '"status":"ok"'; then
+                  echo "✅ GreenKube API is healthy!"
+                  exit 0
+                fi
+                echo "  Attempt $i/30 — not ready yet, retrying in 4s..."
+                sleep 4
+              done
+              echo "⚠️  Timed out waiting for API health endpoint after 120s."
+              exit 1
+{{- end }}
+

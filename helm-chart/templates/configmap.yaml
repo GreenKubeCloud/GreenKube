@@ -42,6 +42,12 @@ data:
   
   LOW_NODE_CPU_THRESHOLD: {{ .Values.config.lowNodeCpuThreshold | quote }}
   
+  # --- API Config ---
+  {{- if .Values.config.api.enabled }}
+  API_HOST: {{ .Values.config.api.host | quote }}
+  API_PORT: {{ .Values.config.api.port | quote }}
+  {{- end }}
+
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}
   DEFAULT_INSTANCE_VCORES: {{ .vcores | quote }}
