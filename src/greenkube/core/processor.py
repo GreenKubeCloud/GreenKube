@@ -645,6 +645,11 @@ class DataProcessor:
         a list of CombinedMetric objects for the requested range. Optional
         parameters mirror the CLI behavior (namespace filter, monthly/yearly
         aggregation).
+
+        To avoid OOM for large clusters over long periods, the range is
+        processed in day-sized chunks. Each chunk fetches Prometheus data,
+        computes energy and carbon metrics, appends results, and releases
+        intermediate objects before moving to the next chunk.
         """
         # Try to read from repository first to use historical metadata if available
         try:
@@ -674,10 +679,6 @@ class DataProcessor:
         except Exception as e:
             logger.warning("Failed to read stored metrics: %s", e)
 
-        # Helper to format ISO with Z
-        def iso_z(dt):
-            return dt.replace(microsecond=0).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
         # Determine safe step if not provided
         def parse_duration_to_seconds(s: str) -> int:
             s = str(s).strip()
@@ -694,58 +695,11 @@ class DataProcessor:
 
         cfg_step_str = config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = parse_duration_to_seconds(cfg_step_str)
-        # Use the configured step directly. The logic to increase it was causing fewer data points for long ranges.
         chosen_step_sec = cfg_step_sec
         chosen_step = f"{chosen_step_sec}s"
-
-        # Use the Prometheus collector to fetch range-series
-        # The rate window should match the step to avoid gaps/overlaps.
         rate_window = f"{chosen_step_sec}s"
-        primary_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,container,node)"
-        try:
-            results = await self.prometheus_collector.collect_range(
-                start=start, end=end, step=chosen_step, query=primary_query
-            )
-        except Exception:
-            # If collector raises, fall back to empty results to continue pipeline
-            logger.warning(
-                "Prometheus collector failed to return range results; attempting fallback query via collector."
-            )
-            try:
-                fallback_query = f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,node)"
-                results = await self.prometheus_collector.collect_range(
-                    start=start, end=end, step=chosen_step, query=fallback_query
-                )
-            except Exception:
-                results = []
 
-        # parse results into samples
-        samples = defaultdict(lambda: defaultdict(float))
-        pod_node_map_by_ts = defaultdict(dict)
-        for series in results:
-            metric = series.get("metric", {}) or {}
-            series_ns = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name")
-            pod = (
-                metric.get("pod")
-                or metric.get("pod_name")
-                or metric.get("kubernetes_pod_name")
-                or metric.get("container")
-            )
-            node = metric.get("node") or metric.get("kubernetes_node") or ""
-            if not series_ns or not pod:
-                continue
-            for ts_val, val in series.get("values", []):
-                try:
-                    usage = float(val)
-                    ts_f = float(ts_val)
-                except Exception:
-                    logger.debug("Skipping invalid metric value: ts=%s, val=%s", ts_val, val)
-                    continue
-                key = (series_ns, pod)
-                samples[ts_f][key] += usage
-                pod_node_map_by_ts[ts_f][key] = node
-
-        # Prepare processor components
+        # --- Shared setup (fetched once, reused across chunks) ---
         estimator = self.estimator
         calculator = self.calculator
         repository = self.repository
@@ -753,50 +707,30 @@ class DataProcessor:
         node_collector = self.node_collector
         pod_collector = self.pod_collector
 
-        # --- Historical Node Data Logic ---
-        # 1. Fetch initial state (latest snapshot before start)
+        # Historical Node Data
         initial_snapshots = await node_repository.get_latest_snapshots_before(start_dt)
-        # 2. Fetch changes during the interval
         snapshot_changes = await node_repository.get_snapshots(start_dt, end_dt)
 
-        # Build a timeline of node configurations
-        # node_timeline[node_name] = [(timestamp, NodeInfo), ...]
         node_timeline = defaultdict(list)
-
-        # Populate initial state
         for node_info in initial_snapshots:
-            # Use node_info.timestamp if available, otherwise fallback to start_dt
-            # This ensures we track the actual age of the snapshot
             ts = node_info.timestamp if node_info.timestamp else start_dt
             node_timeline[node_info.name].append((ts, node_info))
-
-        # Add changes
         for ts_str, node_info in snapshot_changes:
-            # Ensure timestamp is datetime
             if isinstance(ts_str, str):
                 change_dt = parse_iso_date(ts_str)
             else:
                 change_dt = ts_str
-
             if change_dt:
                 node_timeline[node_info.name].append((change_dt, node_info))
-
-        # Sort timelines
         for node_name in node_timeline:
             node_timeline[node_name].sort(key=lambda x: x[0])
 
         def get_node_info_at(node_name: str, timestamp: datetime):
-            """Finds the active NodeInfo for a node at a specific time."""
             timeline = node_timeline.get(node_name)
             if not timeline:
                 return None
-
-            # Find the latest snapshot <= timestamp
-            # Since timeline is sorted, we can iterate backwards or use bisect
-            # Given the small number of changes per node usually, linear scan backwards is fine
             for ts, info in reversed(timeline):
                 if ts <= timestamp:
-                    # Check for staleness
                     age = timestamp - ts
                     if age > timedelta(days=config.NODE_DATA_MAX_AGE_DAYS):
                         logger.warning(
@@ -809,49 +743,37 @@ class DataProcessor:
                     return info
             return None
 
-        # Fallback to current state if no history
         try:
             current_node_map = await node_collector.collect_instance_types() or {}
         except Exception:
             current_node_map = {}
 
         def profile_for_node(node_name: str, timestamp: datetime):
-            # Try historical data first
             node_info = get_node_info_at(node_name, timestamp)
             inst = None
             cpu_capacity = None
-
             if node_info:
                 inst = node_info.instance_type
                 cpu_capacity = node_info.cpu_capacity_cores
             else:
-                # Fallback to current state
                 inst = current_node_map.get(node_name)
-
             if inst:
                 profile = estimator.instance_profiles.get(inst)
                 if profile:
                     return profile
-
-                # Fallback logic for unknown instance types or "cpu-X" types
                 if isinstance(inst, str) and inst.startswith("cpu-"):
                     try:
                         cores = int(inst.split("-", 1)[1])
                         return estimator._create_cpu_profile(cores)
                     except Exception:
                         logger.debug("Failed to parse inferred CPU count from instance type '%s'", inst)
-
-            # If we have cpu_capacity from snapshot but no known instance type profile,
-            # we can try to estimate based on capacity
             if cpu_capacity:
                 return estimator._create_cpu_profile(cpu_capacity)
-
             return estimator.DEFAULT_INSTANCE_PROFILE
 
-        # pod request maps
+        # Pod request maps (current snapshot, reused across chunks)
         try:
             pod_metrics_list = await pod_collector.collect()
-            # Aggregate by (namespace, pod_name)
             pod_request_map_agg = defaultdict(int)
             pod_mem_map_agg = defaultdict(int)
             for p in pod_metrics_list:
@@ -864,54 +786,130 @@ class DataProcessor:
             pod_request_map = {}
             pod_mem_map = {}
 
-        all_energy_metrics = []
-
-        # Normalize samples by the chosen step to avoid floating point timestamp issues
-        normalized_samples = defaultdict(lambda: defaultdict(float))
-        for ts_f, pod_map in samples.items():
-            normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
-            for pod_key, cpu_usage in pod_map.items():
-                normalized_samples[normalized_ts_f][pod_key] += cpu_usage
-
-        for ts_f, pod_map in sorted(normalized_samples.items()):
-            sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
-
-            pod_cpu_usage = pod_map
-            node_total_cpu = defaultdict(float)
-            node_pod_map = defaultdict(list)
-            for pod_key, cpu in pod_cpu_usage.items():
-                node = pod_node_map_by_ts.get(ts_f, {}).get(pod_key) or ""
-                node_total_cpu[node] += cpu
-                node_pod_map[node].append((pod_key, cpu))
-
-            for node_name, pods_on_node in node_pod_map.items():
-                profile = profile_for_node(node_name, sample_dt)
-                calculated_metrics = estimator.calculate_node_energy(
-                    node_name=node_name,
-                    node_profile=profile,
-                    node_total_cpu=node_total_cpu.get(node_name, 0.0),
-                    pods_on_node=pods_on_node,
-                    duration_seconds=chosen_step_sec,
-                )
-
-                for m in calculated_metrics:
-                    m.timestamp = sample_dt
-                    all_energy_metrics.append(m)
-
-        # Prefetch intensities per zone/hour and populate calculator cache
+        # Node contexts for zone mapping (reused across chunks)
         node_contexts = await self._get_node_emaps_map()
 
-        zone_to_metrics = defaultdict(list)
-        skipped_carbon = 0
-        for em in all_energy_metrics:
-            node_name = em.node
-            context = node_contexts.get(node_name)
-            zone = context.emaps_zone if context else config.DEFAULT_ZONE
-            zone_to_metrics[zone].append(em)
+        # Cost data (reused across chunks)
+        try:
+            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
+            cost_map = {c.pod_name: c for c in cost_metrics}
+        except Exception:
+            cost_map = {}
 
-        for zone, metrics in zone_to_metrics.items():
-            for m in metrics:
-                ts = m.timestamp
+        # Cloud zones and instance types for metadata (reused across chunks)
+        try:
+            nodes_info = await self.node_collector.collect() or {}
+        except Exception:
+            nodes_info = {}
+
+        # --- Chunked processing ---
+        # Split the time range into day-sized chunks to limit peak memory usage.
+        CHUNK_SIZE = timedelta(days=1)
+        combined: List[CombinedMetric] = []
+        chunk_start = start_dt
+        skipped_carbon = 0
+
+        while chunk_start < end_dt:
+            chunk_end = min(chunk_start + CHUNK_SIZE, end_dt)
+            logger.debug("Processing chunk: %s -> %s", chunk_start, chunk_end)
+
+            # Fetch Prometheus range data for this chunk
+            primary_query = (
+                f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,container,node)"
+            )
+            try:
+                results = await self.prometheus_collector.collect_range(
+                    start=chunk_start, end=chunk_end, step=chosen_step, query=primary_query
+                )
+            except Exception:
+                logger.warning(
+                    "Prometheus collector failed for chunk %s -> %s; attempting fallback.",
+                    chunk_start,
+                    chunk_end,
+                )
+                try:
+                    fallback_query = (
+                        f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,node)"
+                    )
+                    results = await self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=fallback_query
+                    )
+                except Exception:
+                    results = []
+
+            # Parse results into samples for this chunk
+            samples = defaultdict(lambda: defaultdict(float))
+            pod_node_map_by_ts = defaultdict(dict)
+            for series in results:
+                metric = series.get("metric", {}) or {}
+                series_ns = (
+                    metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name")
+                )
+                pod = (
+                    metric.get("pod")
+                    or metric.get("pod_name")
+                    or metric.get("kubernetes_pod_name")
+                    or metric.get("container")
+                )
+                node = metric.get("node") or metric.get("kubernetes_node") or ""
+                if not series_ns or not pod:
+                    continue
+                for ts_val, val in series.get("values", []):
+                    try:
+                        usage = float(val)
+                        ts_f = float(ts_val)
+                    except Exception:
+                        continue
+                    key = (series_ns, pod)
+                    samples[ts_f][key] += usage
+                    pod_node_map_by_ts[ts_f][key] = node
+
+            # Release raw results to free memory
+            del results
+
+            # Compute energy metrics for this chunk
+            chunk_energy_metrics = []
+
+            normalized_samples = defaultdict(lambda: defaultdict(float))
+            for ts_f, pod_map in samples.items():
+                normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
+                for pod_key, cpu_usage in pod_map.items():
+                    normalized_samples[normalized_ts_f][pod_key] += cpu_usage
+
+            for ts_f, pod_map in sorted(normalized_samples.items()):
+                sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
+
+                node_total_cpu = defaultdict(float)
+                node_pod_map = defaultdict(list)
+                for pod_key, cpu in pod_map.items():
+                    node = pod_node_map_by_ts.get(ts_f, {}).get(pod_key) or ""
+                    node_total_cpu[node] += cpu
+                    node_pod_map[node].append((pod_key, cpu))
+
+                for node_name, pods_on_node in node_pod_map.items():
+                    profile = profile_for_node(node_name, sample_dt)
+                    calculated_metrics = estimator.calculate_node_energy(
+                        node_name=node_name,
+                        node_profile=profile,
+                        node_total_cpu=node_total_cpu.get(node_name, 0.0),
+                        pods_on_node=pods_on_node,
+                        duration_seconds=chosen_step_sec,
+                    )
+                    for m in calculated_metrics:
+                        m.timestamp = sample_dt
+                        chunk_energy_metrics.append(m)
+
+            # Release intermediate sample data
+            del samples
+            del pod_node_map_by_ts
+            del normalized_samples
+
+            # Prefetch carbon intensities for this chunk's energy metrics
+            for em in chunk_energy_metrics:
+                node_name = em.node
+                context = node_contexts.get(node_name)
+                zone = context.emaps_zone if context else config.DEFAULT_ZONE
+                ts = em.timestamp
                 key_dt = ts.replace(minute=0, second=0, microsecond=0)
                 key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
                 key_plus = key_dt_utc.isoformat()
@@ -926,113 +924,95 @@ class DataProcessor:
                     calculator._intensity_cache[cache_key_plus] = intensity
                     calculator._intensity_cache[cache_key_z] = intensity
 
-        # now build CombinedMetric list using calculator
-        combined: List[CombinedMetric] = []
-        try:
-            # Use collect_range to get costs aggregated over the requested period
-            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
-            cost_map = {c.pod_name: c for c in cost_metrics}
-        except Exception:
-            cost_map = {}
+            # Build CombinedMetric objects for this chunk
+            for em in chunk_energy_metrics:
+                pod_name = em.pod_name
+                em_namespace = em.namespace
+                node_name = em.node
+                joules = em.joules
+                ts = em.timestamp
+                node_context = node_contexts.get(node_name)
+                zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
+                try:
+                    carbon_result = await calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
+                except Exception:
+                    carbon_result = None
+                if carbon_result is None:
+                    skipped_carbon += 1
 
-        # Get cloud zones and instance types for metadata
-        try:
-            nodes_info = await self.node_collector.collect() or {}
-        except Exception:
-            nodes_info = {}
+                cost_metric = cost_map.get(pod_name)
+                total_cost = cost_metric.total_cost if cost_metric else config.DEFAULT_COST
 
-        for em in all_energy_metrics:
-            pod_name = em.pod_name
-            em_namespace = em.namespace
-            node_name = em.node
-            joules = em.joules
-            ts = em.timestamp
-            node_context = node_contexts.get(node_name)
-            zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
-            try:
-                carbon_result = await calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
-            except Exception:
-                carbon_result = None
-            if carbon_result is None:
-                skipped_carbon += 1
+                estimation_reasons = []
+                is_estimated = False
 
-            cost_metric = cost_map.get(pod_name)
-            if cost_metric:
-                total_cost = cost_metric.total_cost
-            else:
-                total_cost = config.DEFAULT_COST
-
-            # Collect estimation reasons
-            estimation_reasons = []
-            is_estimated = False
-
-            # 1. From Energy Estimation (Instance Profile)
-            # EnergyMetric from estimator is a dict here because of calculate_node_energy return type in run_range
-            # Wait, calculate_node_energy returns dicts, but run_range appends them to all_energy_metrics
-            # So em is a dict.
-            # 1. From Energy Estimation (Instance Profile)
-            if em.is_estimated:
-                is_estimated = True
-                estimation_reasons.extend(em.estimation_reasons)
-
-            # 2. From Zone Mapping
-            if node_context:
-                if node_context.is_estimated:
+                if em.is_estimated:
                     is_estimated = True
-                    estimation_reasons.extend(node_context.estimation_reasons)
-            else:
-                is_estimated = True
-                estimation_reasons.append(
-                    f"Node '{node_name}' not found in zone map. Used default zone '{config.DEFAULT_ZONE}'"
-                )
+                    estimation_reasons.extend(em.estimation_reasons)
 
-            # 3. From Cost
-            if not cost_metric:
-                is_estimated = True
-                estimation_reasons.append(f"No cost data for pod '{pod_name}'. Used default cost {config.DEFAULT_COST}")
-
-            # 4. From PUE
-            provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-            pue = config.get_pue_for_provider(provider)
-            if not provider:
-                is_estimated = True
-                estimation_reasons.append(f"Unknown provider for node '{node_name}'. Used default PUE {pue}")
-            elif f"default_{provider.lower()}" not in config.DATACENTER_PUE_PROFILES:
-                is_estimated = True
-                estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
-
-            cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
-            mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
-            if carbon_result:
-                combined.append(
-                    CombinedMetric(
-                        pod_name=pod_name,
-                        namespace=em_namespace,
-                        period=None,
-                        total_cost=total_cost,
-                        timestamp=ts,
-                        duration_seconds=chosen_step_sec,
-                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
-                        co2e_grams=carbon_result.co2e_grams,
-                        pue=config.get_pue_for_provider(
-                            nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-                        ),
-                        grid_intensity=carbon_result.grid_intensity,
-                        joules=joules,
-                        cpu_request=cpu_req,
-                        memory_request=mem_req,
-                        node=node_name,
-                        node_instance_type=(
-                            nodes_info.get(node_name).instance_type
-                            if nodes_info.get(node_name)
-                            else current_node_map.get(node_name)
-                        ),
-                        node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
-                        emaps_zone=zone,
-                        is_estimated=is_estimated,
-                        estimation_reasons=estimation_reasons,
+                if node_context:
+                    if node_context.is_estimated:
+                        is_estimated = True
+                        estimation_reasons.extend(node_context.estimation_reasons)
+                else:
+                    is_estimated = True
+                    estimation_reasons.append(
+                        f"Node '{node_name}' not found in zone map. Used default zone '{config.DEFAULT_ZONE}'"
                     )
-                )
+
+                if not cost_metric:
+                    is_estimated = True
+                    estimation_reasons.append(
+                        f"No cost data for pod '{pod_name}'. Used default cost {config.DEFAULT_COST}"
+                    )
+
+                provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                pue = config.get_pue_for_provider(provider)
+                if not provider:
+                    is_estimated = True
+                    estimation_reasons.append(f"Unknown provider for node '{node_name}'. Used default PUE {pue}")
+                elif f"default_{provider.lower()}" not in config.DATACENTER_PUE_PROFILES:
+                    is_estimated = True
+                    estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
+
+                cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
+                mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
+                if carbon_result:
+                    combined.append(
+                        CombinedMetric(
+                            pod_name=pod_name,
+                            namespace=em_namespace,
+                            period=None,
+                            total_cost=total_cost,
+                            timestamp=ts,
+                            duration_seconds=chosen_step_sec,
+                            grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
+                            co2e_grams=carbon_result.co2e_grams,
+                            pue=config.get_pue_for_provider(
+                                nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                            ),
+                            grid_intensity=carbon_result.grid_intensity,
+                            joules=joules,
+                            cpu_request=cpu_req,
+                            memory_request=mem_req,
+                            node=node_name,
+                            node_instance_type=(
+                                nodes_info.get(node_name).instance_type
+                                if nodes_info.get(node_name)
+                                else current_node_map.get(node_name)
+                            ),
+                            node_zone=nodes_info.get(node_name).zone if nodes_info.get(node_name) else None,
+                            emaps_zone=zone,
+                            is_estimated=is_estimated,
+                            estimation_reasons=estimation_reasons,
+                        )
+                    )
+
+            # Release chunk energy metrics before next iteration
+            del chunk_energy_metrics
+
+            # Advance to next chunk
+            chunk_start = chunk_end
 
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
