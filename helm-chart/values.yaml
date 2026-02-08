@@ -82,6 +82,12 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
+  # API server configuration
+  api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8000
+
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
     # Default Power Usage Effectiveness (PUE). Overridden by cloudProvider-specific values if available.

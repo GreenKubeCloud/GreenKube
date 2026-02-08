@@ -1,0 +1,19 @@
+{{- if .Values.config.api.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "greenkube.fullname" . }}-api
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.config.api.port }}
+      targetPort: http-api
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "greenkube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+{{- end }}
