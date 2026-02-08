@@ -28,6 +28,20 @@ class OpenCostCollector(BaseCollector):
     def __init__(self):
         # Store the resolved URL in an instance variable to avoid modifying global config
         self._resolved_url: Optional[str] = None
+        # Reusable HTTP client (lazily initialized)
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self, verify: bool = True) -> httpx.AsyncClient:
+        """Return the reusable HTTP client, creating it lazily if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_http_client(verify=verify)
+        return self._client
+
+    async def close(self):
+        """Close the reusable HTTP client to release connection pool resources."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def collect(self, window: str = "1d", timestamp: Optional[datetime] = None) -> List[CostMetric]:
         """
@@ -41,49 +55,49 @@ class OpenCostCollector(BaseCollector):
         params = {"window": window, "aggregate": "pod"}
         verify_certs = config.OPENCOST_VERIFY_CERTS
 
-        async with get_async_http_client(verify=verify_certs) as client:
-            # Resolve URL (Config -> Discovery -> Local -> In-Cluster)
-            url = await self._resolve_url(client)
+        client = await self._get_client(verify=verify_certs)
+        # Resolve URL (Config -> Discovery -> Local -> In-Cluster)
+        url = await self._resolve_url(client)
 
-            if not url:
-                logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
-                return []
+        if not url:
+            logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
+            return []
 
-            async def _fetch(u: str):
-                try:
-                    resp = await client.get(u, params=params)
-                    resp.raise_for_status()
-                except httpx.HTTPError as exc:
-                    logger.debug("Request to %s failed: %s", u, exc)
-                    return None
+        async def _fetch(u: str):
+            try:
+                resp = await client.get(u, params=params)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.debug("Request to %s failed: %s", u, exc)
+                return None
 
-                try:
-                    return resp.json().get("data")
-                except Exception:
-                    # httpx doesn't separate json decode easily, usually ValueError? No, json.JSONDecodeError
-                    logger.error("Failed to decode JSON from %s. Server sent non-JSON response.", u)
-                    logger.debug("Raw response content from %s: %s", u, resp.text[:500])
-                    return None
+            try:
+                return resp.json().get("data")
+            except Exception:
+                # httpx doesn't separate json decode easily, usually ValueError? No, json.JSONDecodeError
+                logger.error("Failed to decode JSON from %s. Server sent non-JSON response.", u)
+                logger.debug("Raw response content from %s: %s", u, resp.text[:500])
+                return None
 
-            response_data = await _fetch(url)
+        response_data = await _fetch(url)
 
-            # If the base url returned no usable data, try appending the well-known
-            # allocation path used by some OpenCost deployments.
-            if not response_data:
-                alt_path = url.rstrip("/") + "/allocation/compute"
-                logger.debug("Trying alternative OpenCost path: %s", alt_path)
-                response_data = await _fetch(alt_path)
-                if response_data:
-                    # Prefer the alt path for future calls (stored in instance, not global config)
-                    self._resolved_url = alt_path
+        # If the base url returned no usable data, try appending the well-known
+        # allocation path used by some OpenCost deployments.
+        if not response_data:
+            alt_path = url.rstrip("/") + "/allocation/compute"
+            logger.debug("Trying alternative OpenCost path: %s", alt_path)
+            response_data = await _fetch(alt_path)
+            if response_data:
+                # Prefer the alt path for future calls (stored in instance, not global config)
+                self._resolved_url = alt_path
 
-            if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
-                logger.warning(
-                    "OpenCost API returned no data. This can happen if the cluster is new or the endpoint is different."
-                )
-                return []
+        if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
+            logger.warning(
+                "OpenCost API returned no data. This can happen if the cluster is new or the endpoint is different."
+            )
+            return []
 
-            cost_data = response_data[0]
+        cost_data = response_data[0]
 
         collected_metrics = []
         now = timestamp if timestamp else datetime.now(timezone.utc)
@@ -126,47 +140,47 @@ class OpenCostCollector(BaseCollector):
         2xx response. Returns True when reachable, False otherwise.
         """
         verify_certs = config.OPENCOST_VERIFY_CERTS
-        async with get_async_http_client(verify=verify_certs) as client:
-            # First check if we already have a resolved URL from a previous call
-            url = self._resolved_url or getattr(config, "OPENCOST_API_URL", None)
+        client = await self._get_client(verify=verify_certs)
+        # First check if we already have a resolved URL from a previous call
+        url = self._resolved_url or getattr(config, "OPENCOST_API_URL", None)
 
-            # If not configured, try discovery first
-            if not url:
-                try:
-                    od = OpenCostDiscovery()
-                    discovered = await od.discover()
-                    if discovered:
-                        self._resolved_url = discovered
-                        url = discovered
-                except Exception:
-                    logger.debug("OpenCost discovery attempt failed or returned no candidate")
-
-            if url and await self._probe(client, url):
-                logger.debug("OpenCost API is available at %s", url)
-                self._resolved_url = url
-                return True
-
-            # If configured URL didn't respond, try the well-known allocation path
-            if url:
-                alt = url.rstrip("/") + "/allocation/compute"
-                if await self._probe(client, alt):
-                    logger.debug("OpenCost API is available at alternative path %s", alt)
-                    self._resolved_url = alt
-                    return True
-
-            # try discovery as a fallback
+        # If not configured, try discovery first
+        if not url:
             try:
                 od = OpenCostDiscovery()
                 discovered = await od.discover()
-                if discovered and await self._probe(client, discovered):
-                    # Store in instance variable so subsequent calls use discovered URL
+                if discovered:
                     self._resolved_url = discovered
-                    return True
+                    url = discovered
             except Exception:
-                logger.debug("OpenCost discovery/probe failed")
+                logger.debug("OpenCost discovery attempt failed or returned no candidate")
 
-            logger.debug("OpenCost API is not available")
-            return False
+        if url and await self._probe(client, url):
+            logger.debug("OpenCost API is available at %s", url)
+            self._resolved_url = url
+            return True
+
+        # If configured URL didn't respond, try the well-known allocation path
+        if url:
+            alt = url.rstrip("/") + "/allocation/compute"
+            if await self._probe(client, alt):
+                logger.debug("OpenCost API is available at alternative path %s", alt)
+                self._resolved_url = alt
+                return True
+
+        # try discovery as a fallback
+        try:
+            od = OpenCostDiscovery()
+            discovered = await od.discover()
+            if discovered and await self._probe(client, discovered):
+                # Store in instance variable so subsequent calls use discovered URL
+                self._resolved_url = discovered
+                return True
+        except Exception:
+            logger.debug("OpenCost discovery/probe failed")
+
+        logger.debug("OpenCost API is not available")
+        return False
 
     async def _resolve_url(self, client: httpx.AsyncClient) -> Optional[str]:
         """

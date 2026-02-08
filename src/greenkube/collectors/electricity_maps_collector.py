@@ -31,6 +31,21 @@ class ElectricityMapsCollector(BaseCollector):
             self.api_token = config.ELECTRICITY_MAPS_TOKEN
             self.headers = {"auth-token": self.api_token}
 
+        # Reusable HTTP client (lazily initialized)
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the reusable HTTP client, creating it lazily if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_http_client()
+        return self._client
+
+    async def close(self):
+        """Close the reusable HTTP client to release connection pool resources."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
     async def collect(self, zone: str, target_datetime: datetime = None) -> list:
         """
         Retrieves historical data for a specific zone and returns it.
@@ -40,17 +55,17 @@ class ElectricityMapsCollector(BaseCollector):
             history_url = f"{API_BASE_URL}/carbon-intensity/history?zone={zone}"
             logger.info(f"Fetching carbon intensity history for zone: {zone}...")
 
-            async with get_async_http_client() as client:
-                try:
-                    response = await client.get(history_url, headers=self.headers)
-                    response.raise_for_status()
-                    data = response.json()
-                    return data.get("history", [])
-                except httpx.HTTPError as e:
-                    logger.error(f"Error fetching data from Electricity Maps API: {e}")
-                    # Fallback to default values below
-                except Exception as e:
-                    logger.error(f"Unexpected error fetching data from Electricity Maps API: {e}")
+            client = await self._get_client()
+            try:
+                response = await client.get(history_url, headers=self.headers)
+                response.raise_for_status()
+                data = response.json()
+                return data.get("history", [])
+            except httpx.HTTPError as e:
+                logger.error(f"Error fetching data from Electricity Maps API: {e}")
+                # Fallback to default values below
+            except Exception as e:
+                logger.error(f"Unexpected error fetching data from Electricity Maps API: {e}")
 
         # Fallback to default values
         logger.info(f"Using default grid intensity for zone: {zone}")

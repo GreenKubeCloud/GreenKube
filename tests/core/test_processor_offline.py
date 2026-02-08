@@ -45,7 +45,9 @@ def mock_node_repository():
 
 @pytest.fixture
 def mock_calculator():
-    return MagicMock()
+    m = MagicMock()
+    m.clear_cache = AsyncMock()
+    return m
 
 
 @pytest.fixture

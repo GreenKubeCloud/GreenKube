@@ -1,6 +1,6 @@
 # tests/core/test_processor.py
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -207,6 +207,7 @@ def mock_calculator():
     mock.calculate_emissions.side_effect = calculate_side_effect
     mock.pue = config.DEFAULT_PUE  # Set the pue attribute as the processor reads it
     mock._intensity_cache = {}  # Initialize the cache
+    mock.clear_cache = AsyncMock()
     return mock
 
 
