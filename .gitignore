@@ -11,7 +11,8 @@ current_task.md
 
 # Data files
 *.csv
-*.json
+data/*.json
+api.boavizta.org-openapi.json
 
 # Distribution / packaging
 .Python
@@ -21,7 +22,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
