@@ -111,18 +111,28 @@ spec:
             - name: http-api
               containerPort: {{ .Values.config.api.port }}
               protocol: TCP
+          {{- if .Values.config.api.livenessProbe.enabled }}
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: {{ .Values.config.api.livenessProbe.path }}
               port: http-api
-            initialDelaySeconds: 5
-            periodSeconds: 30
+            initialDelaySeconds: {{ .Values.config.api.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.config.api.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.config.api.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.config.api.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.config.api.livenessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.config.api.readinessProbe.enabled }}
           readinessProbe:
             httpGet:
-              path: /api/v1/health
+              path: {{ .Values.config.api.readinessProbe.path }}
               port: http-api
-            initialDelaySeconds: 3
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.config.api.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.config.api.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.config.api.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.config.api.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.config.api.readinessProbe.successThreshold }}
+          {{- end }}
           resources:
             requests:
               cpu: 50m
