@@ -22,11 +22,12 @@ class OpenCostCollector(BaseCollector):
     """
     Collects cost allocation data from an OpenCost service via an Ingress.
     The endpoint URL is read from application configuration (`config.OPENCOST_API_URL`).
+    If not configured, the collector will attempt to discover the endpoint automatically.
     """
 
     def __init__(self):
-        # session is no longer maintained as persistent member
-        pass
+        # Store the resolved URL in an instance variable to avoid modifying global config
+        self._resolved_url: Optional[str] = None
 
     async def collect(self, window: str = "1d", timestamp: Optional[datetime] = None) -> List[CostMetric]:
         """
@@ -73,8 +74,8 @@ class OpenCostCollector(BaseCollector):
                 logger.debug("Trying alternative OpenCost path: %s", alt_path)
                 response_data = await _fetch(alt_path)
                 if response_data:
-                    # Prefer the alt path for future calls
-                    setattr(config, "OPENCOST_API_URL", alt_path)
+                    # Prefer the alt path for future calls (stored in instance, not global config)
+                    self._resolved_url = alt_path
 
             if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
                 logger.warning(
@@ -126,20 +127,23 @@ class OpenCostCollector(BaseCollector):
         """
         verify_certs = config.OPENCOST_VERIFY_CERTS
         async with get_async_http_client(verify=verify_certs) as client:
-            url = getattr(config, "OPENCOST_API_URL", None)
+            # First check if we already have a resolved URL from a previous call
+            url = self._resolved_url or getattr(config, "OPENCOST_API_URL", None)
+
             # If not configured, try discovery first
             if not url:
                 try:
                     od = OpenCostDiscovery()
                     discovered = await od.discover()
                     if discovered:
-                        setattr(config, "OPENCOST_API_URL", discovered)
+                        self._resolved_url = discovered
                         url = discovered
                 except Exception:
                     logger.debug("OpenCost discovery attempt failed or returned no candidate")
 
             if url and await self._probe(client, url):
                 logger.debug("OpenCost API is available at %s", url)
+                self._resolved_url = url
                 return True
 
             # If configured URL didn't respond, try the well-known allocation path
@@ -147,7 +151,7 @@ class OpenCostCollector(BaseCollector):
                 alt = url.rstrip("/") + "/allocation/compute"
                 if await self._probe(client, alt):
                     logger.debug("OpenCost API is available at alternative path %s", alt)
-                    setattr(config, "OPENCOST_API_URL", alt)
+                    self._resolved_url = alt
                     return True
 
             # try discovery as a fallback
@@ -155,8 +159,8 @@ class OpenCostCollector(BaseCollector):
                 od = OpenCostDiscovery()
                 discovered = await od.discover()
                 if discovered and await self._probe(client, discovered):
-                    # update the config so subsequent calls use discovered URL
-                    setattr(config, "OPENCOST_API_URL", discovered)
+                    # Store in instance variable so subsequent calls use discovered URL
+                    self._resolved_url = discovered
                     return True
             except Exception:
                 logger.debug("OpenCost discovery/probe failed")
@@ -166,11 +170,17 @@ class OpenCostCollector(BaseCollector):
 
     async def _resolve_url(self, client: httpx.AsyncClient) -> Optional[str]:
         """
-        Resolves the OpenCost API URL by checking config, discovery, and fallback candidates.
+        Resolves the OpenCost API URL by checking instance cache, config, discovery, and fallback candidates.
+        The resolved URL is stored in self._resolved_url for future calls.
         """
+        # 0. Return cached URL if already resolved
+        if self._resolved_url:
+            return self._resolved_url
+
         # 1. Configured URL
         url = getattr(config, "OPENCOST_API_URL", None)
         if url:
+            self._resolved_url = url
             return url
 
         # 2. Discovery
@@ -178,7 +188,7 @@ class OpenCostCollector(BaseCollector):
             od = OpenCostDiscovery()
             discovered = await od.discover()
             if discovered:
-                setattr(config, "OPENCOST_API_URL", discovered)
+                self._resolved_url = discovered
                 return discovered
         except Exception:
             logger.debug("OpenCost discovery failed")
@@ -191,7 +201,7 @@ class OpenCostCollector(BaseCollector):
         ]
         for candidate in candidates:
             if await self._probe(client, candidate):
-                setattr(config, "OPENCOST_API_URL", candidate)
+                self._resolved_url = candidate
                 return candidate
 
         # 4. In-cluster candidates
@@ -204,7 +214,7 @@ class OpenCostCollector(BaseCollector):
             ]
             for candidate in cluster_candidates:
                 if await self._probe(client, candidate):
-                    setattr(config, "OPENCOST_API_URL", candidate)
+                    self._resolved_url = candidate
                     return candidate
 
         return None
