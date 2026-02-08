@@ -42,7 +42,9 @@ dependencies = [
     "anyio>=4.0.0", # High level async library
     "elasticsearch>=8.10.0", # Elasticsearch client
     "elasticsearch-dsl>=8.10.0",
-    "aiofiles>=23.2.0" # Async file I/O
+    "aiofiles>=23.2.0", # Async file I/O
+    "fastapi>=0.109.0", # Web API framework
+    "uvicorn[standard]>=0.25.0", # ASGI server for FastAPI
 ]
 
 [project.optional-dependencies]
@@ -65,6 +67,7 @@ dev = [
 # This creates the `greenkube` command in the user's terminal
 [project.scripts]
 greenkube = "greenkube.cli.main:app"
+greenkube-api = "greenkube.api.app:main"
 
 # Development tool configuration (optional but recommended)
 [tool.pytest.ini_options]
