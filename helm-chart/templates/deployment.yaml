@@ -66,7 +66,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "greenkube.fullname" . }}
-                  key: dbConnectionString
+                  key: DB_CONNECTION_STRING
               {{- end }}
             {{- end }}
                 

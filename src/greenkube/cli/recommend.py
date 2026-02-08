@@ -84,6 +84,10 @@ def recommend(
         finally:
             if "processor" in locals():
                 await processor.close()
+            # Close the database connection to allow clean exit
+            from ..core.db import db_manager
+
+            await db_manager.close()
 
     try:
         asyncio.run(_recommend_async())

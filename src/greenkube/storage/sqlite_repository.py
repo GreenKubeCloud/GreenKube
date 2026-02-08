@@ -165,8 +165,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                  (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                                   cpu_request, memory_request, period, "timestamp", duration_seconds,
                                   grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
-                                  is_estimated, estimation_reasons)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  is_estimated, estimation_reasons, embodied_co2e_grams)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                         """,
                             (
@@ -188,6 +188,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 metric.emaps_zone,
                                 metric.is_estimated,
                                 json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
+                                metric.embodied_co2e_grams,
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -212,8 +213,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 async with conn.execute(
                     """
                     SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                           cpu_request, memory_request, period, "timestamp", duration_seconds, grid_intensity_timestamp,
-                           node_instance_type, node_zone, emaps_zone, is_estimated, estimation_reasons
+                           cpu_request, memory_request, period, "timestamp", duration_seconds,
+                           grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
+                           is_estimated, estimation_reasons, embodied_co2e_grams
                     FROM combined_metrics
                     WHERE "timestamp" BETWEEN ? AND ?
                 """,
@@ -251,6 +253,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 emaps_zone=row["emaps_zone"],
                                 is_estimated=bool(row["is_estimated"]),
                                 estimation_reasons=estimation_reasons,
+                                embodied_co2e_grams=row["embodied_co2e_grams"],
                             )
                         )
                     return metrics

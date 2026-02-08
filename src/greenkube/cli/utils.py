@@ -54,7 +54,7 @@ def get_report_time_range(last: Optional[str] = None) -> tuple[datetime, datetim
     return start, end
 
 
-def get_normalized_window() -> (datetime, datetime):
+def get_normalized_window() -> tuple[datetime, datetime]:
     """
     Calculates a consistent, non-overlapping query window based on the configured step.
     The window is aligned to UTC midnight.

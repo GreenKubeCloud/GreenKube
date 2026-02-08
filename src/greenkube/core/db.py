@@ -185,6 +185,7 @@ class DatabaseManager:
                     emaps_zone TEXT,
                     is_estimated BOOLEAN,
                     estimation_reasons TEXT,
+                    embodied_co2e_grams REAL,
                     UNIQUE(pod_name, namespace, "timestamp")
                 );
             """)
@@ -242,6 +243,10 @@ class DatabaseManager:
                 pass
             try:
                 await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN estimation_reasons TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN embodied_co2e_grams REAL")
             except sqlite3.OperationalError:
                 pass
             try:

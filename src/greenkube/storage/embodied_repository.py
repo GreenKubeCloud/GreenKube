@@ -59,21 +59,17 @@ class EmbodiedRepository:
         if self.db_manager.db_type == "elasticsearch":
             return await self._get_profile_es(provider, instance_type)
 
+        if self.db_manager.db_type == "postgres":
+            return await self._get_profile_postgres(provider, instance_type)
+
         query = """
             SELECT gwp_manufacture, lifespan_hours, source, last_updated
             FROM instance_carbon_profiles
             WHERE provider = ? AND instance_type = ?
         """
-        if self.db_manager.db_type == "postgres":
-            query = """
-                SELECT gwp_manufacture, lifespan_hours, source, last_updated
-                FROM instance_carbon_profiles
-                WHERE provider = $1 AND instance_type = $2
-            """
 
         try:
             async with self.db_manager.connection_scope() as conn:
-                # Handle param style difference
                 params = (provider, instance_type)
 
                 async with conn.execute(query, params) as cursor:
@@ -86,6 +82,28 @@ class EmbodiedRepository:
                             "last_updated": row["last_updated"],
                         }
                     return None
+        except Exception as e:
+            logger.error(f"Error fetching embodied profile for {provider}/{instance_type}: {e}")
+            raise QueryError(f"Database error in get_profile: {e}") from e
+
+    async def _get_profile_postgres(self, provider: str, instance_type: str) -> Optional[dict]:
+        """Retrieve embodied carbon profile from PostgreSQL."""
+        query = """
+            SELECT gwp_manufacture, lifespan_hours, source, last_updated
+            FROM instance_carbon_profiles
+            WHERE provider = $1 AND instance_type = $2
+        """
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                row = await conn.fetchrow(query, provider, instance_type)
+                if row:
+                    return {
+                        "gwp_manufacture": row["gwp_manufacture"],
+                        "lifespan_hours": row["lifespan_hours"],
+                        "source": row["source"],
+                        "last_updated": row["last_updated"],
+                    }
+                return None
         except Exception as e:
             logger.error(f"Error fetching embodied profile for {provider}/{instance_type}: {e}")
             raise QueryError(f"Database error in get_profile: {e}") from e
@@ -132,25 +150,31 @@ class EmbodiedRepository:
                     source = EXCLUDED.source,
                     last_updated = EXCLUDED.last_updated
             """
-        else:
-            query = """
-                INSERT INTO instance_carbon_profiles (
-                    provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, instance_type)
-                DO UPDATE SET
-                    gwp_manufacture = excluded.gwp_manufacture,
-                    lifespan_hours = excluded.lifespan_hours,
-                    source = excluded.source,
-                    last_updated = excluded.last_updated
-            """
+            try:
+                async with self.db_manager.connection_scope() as conn:
+                    await conn.execute(query, provider, instance_type, gwp, lifespan, source, now_iso)
+            except Exception as e:
+                logger.error(f"Error saving embodied profile for {provider}/{instance_type}: {e}")
+                raise QueryError(f"Database error in save_profile: {e}") from e
+            return
+
+        query = """
+            INSERT INTO instance_carbon_profiles (
+                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider, instance_type)
+            DO UPDATE SET
+                gwp_manufacture = excluded.gwp_manufacture,
+                lifespan_hours = excluded.lifespan_hours,
+                source = excluded.source,
+                last_updated = excluded.last_updated
+        """
 
         try:
             async with self.db_manager.connection_scope() as conn:
                 await conn.execute(query, (provider, instance_type, gwp, lifespan, source, now_iso))
-                if self.db_manager.db_type == "sqlite":
-                    await conn.commit()
+                await conn.commit()
         except Exception as e:
             logger.error(f"Error saving embodied profile for {provider}/{instance_type}: {e}")
             raise QueryError(f"Database error in save_profile: {e}") from e
