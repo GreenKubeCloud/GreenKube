@@ -41,7 +41,7 @@ def mock_components():
 
     calc = AsyncMock()
     calc.calculate_emissions = AsyncMock()
-    calc.clear_cache = MagicMock()  # sync method
+    calc.clear_cache = AsyncMock()  # async method
 
     return {
         "prom": prom,

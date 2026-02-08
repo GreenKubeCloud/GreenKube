@@ -1,7 +1,7 @@
 # src/greenkube/core/calculator.py
 
+import asyncio
 import logging
-import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -10,6 +10,8 @@ from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
+
+logger = logging.getLogger(__name__)
 
 
 def _to_datetime(ts) -> datetime:
@@ -50,11 +52,11 @@ class CarbonCalculator:
         # Simple per-run cache: key = (zone, timestamp) -> intensity value
         # (float or None)
         self._intensity_cache = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def clear_cache(self):
+    async def clear_cache(self):
         """Clears the internal intensity cache."""
-        with self._lock:
+        async with self._lock:
             self._intensity_cache.clear()
 
     async def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
@@ -73,45 +75,29 @@ class CarbonCalculator:
             normalized_dt = dt
         normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
-        grid_intensity_data = None
-        cache_hit = False
 
-        with self._lock:
+        # Use a single async lock acquisition to check cache and fetch if needed.
+        # This prevents concurrent coroutines from all fetching the same key.
+        async with self._lock:
             if cache_key in self._intensity_cache:
-                cached_value = self._intensity_cache[cache_key]
-                cache_hit = True
-                # Cache stores either: actual intensity value, or None if already warned
-                if cached_value is not None:
-                    grid_intensity_data = cached_value
-
-        # If not in cache, fetch it (outside lock to avoid holding it during I/O)
-        if not cache_hit:
-            grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
-            with self._lock:
-                # Store the fetched value (may be None if not found)
+                grid_intensity_data = self._intensity_cache[cache_key]
+            else:
+                grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
                 self._intensity_cache[cache_key] = grid_intensity_data
 
         grid_intensity_value = grid_intensity_data
 
         # Use default if intensity data is missing
         if grid_intensity_value is None:
-            # Only warn once per cache key by checking if we've already cached None
-            should_warn = False
-            with self._lock:
+            async with self._lock:
                 if cache_key not in self._intensity_cache or self._intensity_cache[cache_key] is None:
-                    if not cache_hit:
-                        should_warn = True
-                    # Mark as cached (None means we've handled this missing case)
                     self._intensity_cache[cache_key] = None
-
-            if should_warn:
-                logger = logging.getLogger(__name__)
-                logger.warning(
-                    "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
-                    zone,
-                    normalized_dt.isoformat(),
-                    config.DEFAULT_INTENSITY,
-                )
+                    logger.warning(
+                        "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
+                        zone,
+                        normalized_dt.isoformat(),
+                        config.DEFAULT_INTENSITY,
+                    )
             grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:

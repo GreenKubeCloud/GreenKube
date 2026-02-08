@@ -618,7 +618,7 @@ class DataProcessor:
                 )
 
         logger.info("Processing complete. Found %d combined metrics.", len(combined_metrics))
-        self.calculator.clear_cache()
+        await self.calculator.clear_cache()
         return combined_metrics
 
     async def close(self):
@@ -1037,5 +1037,5 @@ class DataProcessor:
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
 
-        self.calculator.clear_cache()
+        await self.calculator.clear_cache()
         return combined

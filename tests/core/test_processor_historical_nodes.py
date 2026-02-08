@@ -68,6 +68,7 @@ async def test_run_range_uses_old_snapshot():
     )
     mock_calculator.pue = 1.2
     mock_calculator._intensity_cache = {}
+    mock_calculator.clear_cache = AsyncMock()
 
     mock_node_collector = MagicMock()
     mock_node_collector.collect = AsyncMock(return_value={})
