@@ -191,6 +191,10 @@ class Config:
     NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
     NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
+    # --- API variables ---
+    API_HOST = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT = int(os.getenv("API_PORT", "8000"))
+
     @property
     def DATACENTER_PUE_PROFILES(self):
         return DATACENTER_PUE_PROFILES
