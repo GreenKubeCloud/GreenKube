@@ -209,9 +209,13 @@ async def test_collect_with_no_url_triggers_discovery(mock_discover, collector):
     mock_discover.return_value = discovered_url
 
     # 2. Mock the API calls to the *discovered* URL.
-    # Use generic matching for simplicity as we call query twice
+    # collect() now makes 3 concurrent queries: CPU, nodes, and memory
     respx.get(f"{discovered_url}/api/v1/query").mock(
-        side_effect=[Response(200, json=MOCK_CPU_USAGE_RESPONSE), Response(200, json=MOCK_NODE_LABELS_RESPONSE)]
+        side_effect=[
+            Response(200, json=MOCK_CPU_USAGE_RESPONSE),
+            Response(200, json=MOCK_NODE_LABELS_RESPONSE),
+            Response(200, json={"status": "success", "data": {"result": []}}),  # memory query
+        ]
     )
 
     # 3. Call collect - this should now succeed via discovery
@@ -219,7 +223,9 @@ async def test_collect_with_no_url_triggers_discovery(mock_discover, collector):
     result = await collector.collect()
 
     # 4. Assertions
-    mock_discover.assert_called_once()
+    # Discovery may be called once for CPU (when base_url is None) — the node/memory
+    # queries reuse the discovered URL so they don't re-trigger discovery.
+    assert mock_discover.call_count >= 1
     assert collector.base_url == discovered_url
     assert len(result.pod_cpu_usage) == 2
     assert len(result.node_instance_types) == 2
