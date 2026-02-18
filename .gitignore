@@ -222,4 +222,5 @@ __marimo__/
 !instance_power_profiles.csv
 !provider_power_estimates.csv
 !cloud_region_electricity_maps_mapping.csv
-.github/instructions/ai_instructions.instructions.md
+.github/instructions/
+current_task.md
