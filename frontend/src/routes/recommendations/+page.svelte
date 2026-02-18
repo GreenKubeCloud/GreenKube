@@ -39,7 +39,12 @@
 		ZOMBIE_POD: { icon: '💀', label: 'Zombie Pod', color: 'red', desc: 'Pod with no meaningful activity' },
 		RIGHTSIZING_CPU: { icon: '📐', label: 'CPU Rightsizing', color: 'yellow', desc: 'CPU request can be optimized' },
 		RIGHTSIZING_MEMORY: { icon: '📐', label: 'Memory Rightsizing', color: 'yellow', desc: 'Memory request can be optimized' },
+		AUTOSCALING_CANDIDATE: { icon: '📈', label: 'Autoscaling', color: 'orange', desc: 'Workload with spiky usage — consider HPA' },
+		OFF_PEAK_SCALING: { icon: '🌙', label: 'Off-Peak Scaling', color: 'indigo', desc: 'Idle during off-peak hours — scale down with cron' },
 		IDLE_NAMESPACE: { icon: '💤', label: 'Idle Namespace', color: 'purple', desc: 'Namespace with minimal activity' },
+		CARBON_AWARE_SCHEDULING: { icon: '🌍', label: 'Carbon-Aware', color: 'green', desc: 'Could run in a lower-carbon zone' },
+		OVERPROVISIONED_NODE: { icon: '🖥️', label: 'Overprovisioned Node', color: 'blue', desc: 'Node with very low utilization' },
+		UNDERUTILIZED_NODE: { icon: '🔻', label: 'Underutilized Node', color: 'blue', desc: 'Node with few pods — consider draining' },
 	};
 
 	function getTypeConfig(type) {
@@ -176,6 +181,34 @@
 											{/if}
 										</div>
 									{/if}
+								</div>
+							{/if}
+
+							<!-- Cron schedule (off-peak) -->
+							{#if rec.cron_schedule}
+								<div class="mt-2 flex items-center gap-2">
+									<span class="text-[10px] uppercase text-dark-600">Cron Schedule</span>
+									<code class="text-xs text-indigo-400 bg-dark-800 px-2 py-0.5 rounded font-mono">{rec.cron_schedule}</code>
+								</div>
+							{/if}
+
+							<!-- Target node -->
+							{#if rec.target_node}
+								<div class="mt-2 flex items-center gap-2">
+									<span class="text-[10px] uppercase text-dark-600">Node</span>
+									<span class="text-xs text-dark-300 font-mono">{rec.target_node}</span>
+								</div>
+							{/if}
+
+							<!-- Priority badge -->
+							{#if rec.priority}
+								<div class="mt-2">
+									<span class="text-[10px] uppercase px-2 py-0.5 rounded
+										{rec.priority === 'high' ? 'bg-red-600/20 text-red-400' :
+										 rec.priority === 'medium' ? 'bg-yellow-600/20 text-yellow-400' :
+										 'bg-dark-700 text-dark-400'}">
+										{rec.priority} priority
+									</span>
 								</div>
 							{/if}
 						</div>
