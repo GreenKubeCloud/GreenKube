@@ -22,6 +22,19 @@ class PodCPUUsage(BaseModel):
     cpu_usage_cores: float = Field(..., description="Average CPU usage in cores")
 
 
+class PodMemoryUsage(BaseModel):
+    """
+    Represents the memory working set for a single container/pod.
+    """
+
+    model_config = ConfigDict()
+
+    namespace: str
+    pod: str
+    node: str = Field(..., description="The node on which the pod is running")
+    memory_usage_bytes: float = Field(..., description="Memory working set in bytes")
+
+
 class NodeInstanceType(BaseModel):
     """
     Maps a Kubernetes node name to its cloud instance type.
@@ -42,4 +55,5 @@ class PrometheusMetric(BaseModel):
     model_config = ConfigDict()
 
     pod_cpu_usage: List[PodCPUUsage] = Field(default_factory=list)
+    pod_memory_usage: List[PodMemoryUsage] = Field(default_factory=list)
     node_instance_types: List[NodeInstanceType] = Field(default_factory=list)
