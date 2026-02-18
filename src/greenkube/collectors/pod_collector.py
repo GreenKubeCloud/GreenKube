@@ -60,6 +60,25 @@ class PodCollector(BaseCollector):
                 if not pod.spec or not pod.spec.containers:
                     continue
 
+                # Extract owner reference (Deployment, StatefulSet, etc.)
+                owner_kind = None
+                owner_name = None
+                if pod.metadata.owner_references:
+                    # Pick the first controller owner reference (usually ReplicaSet)
+                    for ref in pod.metadata.owner_references:
+                        if ref.controller:
+                            owner_kind = ref.kind
+                            owner_name = ref.name
+                            break
+                    # If we have a ReplicaSet owner, try to get its parent Deployment name
+                    # by stripping the ReplicaSet hash suffix (e.g., "nginx-abc123" -> "nginx")
+                    if owner_kind == "ReplicaSet" and owner_name:
+                        # ReplicaSet names follow the pattern <deployment-name>-<hash>
+                        parts = owner_name.rsplit("-", 1)
+                        if len(parts) == 2:
+                            owner_kind = "Deployment"
+                            owner_name = parts[0]
+
                 for container in pod.spec.containers:
                     container_name = container.name
                     requests = container.resources.requests or {}
@@ -77,6 +96,8 @@ class PodCollector(BaseCollector):
                             container_name=container_name,
                             cpu_request=cpu_request,
                             memory_request=memory_request,
+                            owner_kind=owner_kind,
+                            owner_name=owner_name,
                         )
                     )
         except Exception as e:

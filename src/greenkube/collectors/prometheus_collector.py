@@ -19,6 +19,7 @@ from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
     NodeInstanceType,
     PodCPUUsage,
+    PodMemoryUsage,
     PrometheusMetric,
 )
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
@@ -59,6 +60,9 @@ class PrometheusCollector(BaseCollector):
             "by (namespace, pod, container, node)"
         )
 
+        # Query for memory working set bytes (actual memory usage).
+        self.memory_usage_query = "sum(container_memory_working_set_bytes{container!=''}) by (namespace, pod, node)"
+
         # Prometheus label key used to map node -> instance type may vary across setups.
         self.node_instance_label_key = getattr(
             settings,
@@ -93,9 +97,10 @@ class PrometheusCollector(BaseCollector):
         # Launch queries concurrently to reduce latency
         cpu_future = self._query_prometheus(client, self.cpu_usage_query)
         node_future = self._query_prometheus(client, self.node_labels_query)
+        memory_future = self._query_prometheus(client, self.memory_usage_query)
 
-        # Wait for both primary queries
-        cpu_results, node_results = await asyncio.gather(cpu_future, node_future)
+        # Wait for all primary queries
+        cpu_results, node_results, memory_results = await asyncio.gather(cpu_future, node_future, memory_future)
 
         # If the standard grouped query returned no results, try fallback
         if not cpu_results:
@@ -166,8 +171,22 @@ class PrometheusCollector(BaseCollector):
                 malformed_node_examples,
             )
 
+        # Parse memory usage results
+        parsed_memory_usage = []
+        for item in memory_results:
+            metric = item.get("metric", {})
+            if not metric or "namespace" not in metric or "pod" not in metric:
+                continue
+            parsed_mem = self._parse_memory_data(item)
+            if parsed_mem:
+                parsed_memory_usage.append(parsed_mem)
+
+        if parsed_memory_usage:
+            logger.info("Parsed %d memory usage metrics from Prometheus.", len(parsed_memory_usage))
+
         return PrometheusMetric(
             pod_cpu_usage=parsed_cpu_usage,
+            pod_memory_usage=parsed_memory_usage,
             node_instance_types=parsed_node_types,
         )
 
@@ -438,4 +457,23 @@ class PrometheusCollector(BaseCollector):
         try:
             return NodeInstanceType(node=metric["node"], instance_type=metric[label_key])
         except ValidationError:
+            return None
+
+    def _parse_memory_data(self, item: Dict[str, Any]) -> Optional[PodMemoryUsage]:
+        """Parses a memory working set metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, node)):
+            return None
+
+        try:
+            return PodMemoryUsage(namespace=namespace, pod=pod, node=node, memory_usage_bytes=float(value_str))
+        except (TypeError, ValueError, ValidationError):
             return None
