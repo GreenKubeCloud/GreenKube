@@ -176,6 +176,10 @@ class DatabaseManager:
                     joules REAL,
                     cpu_request INTEGER,
                     memory_request INTEGER,
+                    cpu_usage_millicores INTEGER,
+                    memory_usage_bytes INTEGER,
+                    owner_kind TEXT,
+                    owner_name TEXT,
                     period TEXT,
                     "timestamp" TEXT,
                     duration_seconds INTEGER,
@@ -247,6 +251,22 @@ class DatabaseManager:
                 pass
             try:
                 await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN embodied_co2e_grams REAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN cpu_usage_millicores INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN memory_usage_bytes INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN owner_kind TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN owner_name TEXT")
             except sqlite3.OperationalError:
                 pass
             try:
@@ -324,6 +344,10 @@ class DatabaseManager:
                     joules REAL,
                     cpu_request INTEGER,
                     memory_request BIGINT,
+                    cpu_usage_millicores INTEGER,
+                    memory_usage_bytes BIGINT,
+                    owner_kind TEXT,
+                    owner_name TEXT,
                     period TEXT,
                     timestamp TIMESTAMP WITH TIME ZONE,
                     duration_seconds INTEGER,
@@ -387,6 +411,12 @@ class DatabaseManager:
                 await conn.execute(
                     "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS embodied_co2e_grams REAL DEFAULT 0.0;"
                 )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS cpu_usage_millicores INTEGER;"
+                )
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS memory_usage_bytes BIGINT;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS owner_kind TEXT;")
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS owner_name TEXT;")
 
                 # Fix any existing NULLs for non-nullable fields or fields where we expect a default
                 await conn.execute(
