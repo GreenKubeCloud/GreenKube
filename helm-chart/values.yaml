@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.1.8
+  tag: 0.2.0
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -116,6 +116,22 @@ config:
       vcores: 1
       minWatts: 1.0
       maxWatts: 10.0
+
+  # Recommendation engine configuration
+  recommendations:
+    lookbackDays: 7
+    rightsizingCpuThreshold: 0.3
+    rightsizingMemoryThreshold: 0.3
+    rightsizingHeadroom: 1.2
+    zombieCostThreshold: 0.01
+    zombieEnergyThreshold: 1000
+    autoscalingCvThreshold: 0.7
+    autoscalingSpikeRatio: 3.0
+    offPeakIdleThreshold: 0.05
+    offPeakMinIdleHours: 4
+    idleNamespaceEnergyThreshold: 1000
+    carbonAwareThreshold: 1.5
+    nodeUtilizationThreshold: 0.2
 
 # Configuration for Elasticsearch (if db.type is "elasticsearch")
 elasticsearch:

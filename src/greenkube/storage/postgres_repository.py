@@ -105,7 +105,9 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     INSERT INTO combined_metrics (
                         pod_name, namespace, total_cost, co2e_grams,
                         pue, grid_intensity, joules, cpu_request,
-                        memory_request, period, timestamp,
+                        memory_request, cpu_usage_millicores, memory_usage_bytes,
+                        owner_kind, owner_name,
+                        period, timestamp,
                         duration_seconds, grid_intensity_timestamp,
                         node_instance_type, node_zone,
                         emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams
@@ -115,7 +117,9 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         $9, $10, $11,
                         $12, $13,
                         $14, $15,
-                        $16, $17::jsonb, $18, $19
+                        $16, $17,
+                        $18, $19,
+                        $20, $21::jsonb, $22, $23
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -125,6 +129,10 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         joules = EXCLUDED.joules,
                         cpu_request = EXCLUDED.cpu_request,
                         memory_request = EXCLUDED.memory_request,
+                        cpu_usage_millicores = EXCLUDED.cpu_usage_millicores,
+                        memory_usage_bytes = EXCLUDED.memory_usage_bytes,
+                        owner_kind = EXCLUDED.owner_kind,
+                        owner_name = EXCLUDED.owner_name,
                         period = EXCLUDED.period,
                         duration_seconds = EXCLUDED.duration_seconds,
                         grid_intensity_timestamp = EXCLUDED.grid_intensity_timestamp,
@@ -152,6 +160,10 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                             metric.joules,
                             metric.cpu_request,
                             metric.memory_request,
+                            metric.cpu_usage_millicores,
+                            metric.memory_usage_bytes,
+                            metric.owner_kind,
+                            metric.owner_name,
                             metric.period,
                             metric.timestamp,
                             metric.duration_seconds,

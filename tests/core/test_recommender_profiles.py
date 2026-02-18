@@ -59,7 +59,7 @@ class TestRecommenderProfiles(unittest.TestCase):
 
         # I'll just write the test logic.
 
-        usage = recommender._estimate_cpu_usage_percent(metric, [metric])
+        usage = recommender._estimate_cpu_usage_percent_legacy(metric, mock_profiles)
 
         # With defaults (assuming they are not 10/100/4), this should fail if the code doesn't use the profile.
         # Let's assume defaults are small.
@@ -83,7 +83,7 @@ class TestRecommenderProfiles(unittest.TestCase):
         metric.joules = 12.0
 
         with patch("greenkube.core.recommender.INSTANCE_PROFILES", mock_profiles, create=True):
-            usage = recommender._estimate_cpu_usage_percent(metric, [metric])
+            usage = recommender._estimate_cpu_usage_percent_legacy(metric, mock_profiles)
 
         # I expect usage to be around 0.088 / 2.0 = 0.044 (4.4%)
         # If it uses defaults, it will be 1.63 / 2.0 = 0.815 (81.5%)

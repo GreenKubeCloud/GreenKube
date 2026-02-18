@@ -54,3 +54,20 @@ data:
   DEFAULT_INSTANCE_MIN_WATTS: {{ .minWatts | quote }}
   DEFAULT_INSTANCE_MAX_WATTS: {{ .maxWatts | quote }}
   {{- end }}
+
+  # --- Recommendation Engine Config ---
+  {{- with .Values.config.recommendations }}
+  RECOMMENDATION_LOOKBACK_DAYS: {{ .lookbackDays | quote }}
+  RIGHTSIZING_CPU_THRESHOLD: {{ .rightsizingCpuThreshold | quote }}
+  RIGHTSIZING_MEMORY_THRESHOLD: {{ .rightsizingMemoryThreshold | quote }}
+  RIGHTSIZING_HEADROOM: {{ .rightsizingHeadroom | quote }}
+  ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}
+  ZOMBIE_ENERGY_THRESHOLD: {{ .zombieEnergyThreshold | quote }}
+  AUTOSCALING_CV_THRESHOLD: {{ .autoscalingCvThreshold | quote }}
+  AUTOSCALING_SPIKE_RATIO: {{ .autoscalingSpikeRatio | quote }}
+  OFF_PEAK_IDLE_THRESHOLD: {{ .offPeakIdleThreshold | quote }}
+  OFF_PEAK_MIN_IDLE_HOURS: {{ .offPeakMinIdleHours | quote }}
+  IDLE_NAMESPACE_ENERGY_THRESHOLD: {{ .idleNamespaceEnergyThreshold | quote }}
+  CARBON_AWARE_THRESHOLD: {{ .carbonAwareThreshold | quote }}
+  NODE_UTILIZATION_THRESHOLD: {{ .nodeUtilizationThreshold | quote }}
+  {{- end }}

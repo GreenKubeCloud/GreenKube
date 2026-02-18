@@ -219,11 +219,15 @@ class DataProcessor:
                 # And aggregate requests for CombinedMetric
                 req_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
 
-                agg_map = defaultdict(lambda: {"cpu": 0, "memory": 0})
+                agg_map = defaultdict(lambda: {"cpu": 0, "memory": 0, "owner_kind": None, "owner_name": None})
                 for pm in pod_metrics:
                     key = (pm.namespace, pm.pod_name)
                     agg_map[key]["cpu"] += pm.cpu_request
                     agg_map[key]["memory"] += pm.memory_request
+                    # Set owner from first container metric that has it
+                    if pm.owner_kind and not agg_map[key]["owner_kind"]:
+                        agg_map[key]["owner_kind"] = pm.owner_kind
+                        agg_map[key]["owner_name"] = pm.owner_name
 
                 return pod_metrics, req_map, agg_map
             except Exception as e:
@@ -296,6 +300,24 @@ class DataProcessor:
                 energy_metrics = []
         else:
             energy_metrics = []
+
+        # Build per-pod CPU usage map from Prometheus data (cores → millicores)
+        pod_cpu_usage_map: Dict[tuple, int] = {}
+        if prom_metrics:
+            _cpu_agg: Dict[tuple, float] = defaultdict(float)
+            for item in prom_metrics.pod_cpu_usage:
+                _cpu_agg[(item.namespace, item.pod)] += item.cpu_usage_cores
+            for key, cores in _cpu_agg.items():
+                pod_cpu_usage_map[key] = int(round(cores * 1000))
+
+        # Build per-pod memory usage map from Prometheus data
+        pod_memory_usage_map: Dict[tuple, int] = {}
+        if prom_metrics and getattr(prom_metrics, "pod_memory_usage", None):
+            _mem_agg: Dict[tuple, float] = defaultdict(float)
+            for item in prom_metrics.pod_memory_usage:
+                _mem_agg[(item.namespace, item.pod)] += item.memory_usage_bytes
+            for key, mem_bytes in _mem_agg.items():
+                pod_memory_usage_map[key] = int(round(mem_bytes))
 
         # 2. Emaps Context
         node_contexts = await self._get_node_emaps_map(nodes_info)
@@ -596,6 +618,10 @@ class DataProcessor:
                     joules=energy_metric.joules,
                     cpu_request=pod_requests["cpu"],
                     memory_request=pod_requests["memory"],
+                    cpu_usage_millicores=pod_cpu_usage_map.get(pod_key),
+                    memory_usage_bytes=pod_memory_usage_map.get(pod_key),
+                    owner_kind=pod_requests.get("owner_kind"),
+                    owner_name=pod_requests.get("owner_name"),
                     timestamp=energy_metric.timestamp,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                     node=node_name,
