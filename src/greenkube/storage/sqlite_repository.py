@@ -163,10 +163,12 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                             """
                             INSERT INTO combined_metrics
                                  (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                                  cpu_request, memory_request, period, "timestamp", duration_seconds,
+                                  cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                                  owner_kind, owner_name,
+                                  period, "timestamp", duration_seconds,
                                   grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
                                   is_estimated, estimation_reasons, embodied_co2e_grams)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                         """,
                             (
@@ -179,6 +181,10 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 metric.joules,
                                 metric.cpu_request,
                                 metric.memory_request,
+                                metric.cpu_usage_millicores,
+                                metric.memory_usage_bytes,
+                                metric.owner_kind,
+                                metric.owner_name,
                                 metric.period,
                                 timestamp_iso,
                                 metric.duration_seconds,
@@ -213,7 +219,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 async with conn.execute(
                     """
                     SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                           cpu_request, memory_request, period, "timestamp", duration_seconds,
+                           cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                           owner_kind, owner_name,
+                           period, "timestamp", duration_seconds,
                            grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
                            is_estimated, estimation_reasons, embodied_co2e_grams
                     FROM combined_metrics
@@ -242,6 +250,10 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 joules=row["joules"],
                                 cpu_request=row["cpu_request"],
                                 memory_request=row["memory_request"],
+                                cpu_usage_millicores=row["cpu_usage_millicores"],
+                                memory_usage_bytes=row["memory_usage_bytes"],
+                                owner_kind=row["owner_kind"],
+                                owner_name=row["owner_name"],
                                 period=row["period"],
                                 timestamp=datetime.fromisoformat(row["timestamp"]) if row["timestamp"] else None,
                                 duration_seconds=row["duration_seconds"],
