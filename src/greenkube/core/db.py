@@ -178,6 +178,16 @@ class DatabaseManager:
                     memory_request INTEGER,
                     cpu_usage_millicores INTEGER,
                     memory_usage_bytes INTEGER,
+                    network_receive_bytes REAL,
+                    network_transmit_bytes REAL,
+                    disk_read_bytes REAL,
+                    disk_write_bytes REAL,
+                    storage_request_bytes INTEGER,
+                    storage_usage_bytes INTEGER,
+                    ephemeral_storage_request_bytes INTEGER,
+                    ephemeral_storage_usage_bytes INTEGER,
+                    gpu_usage_millicores INTEGER,
+                    restart_count INTEGER,
                     owner_kind TEXT,
                     owner_name TEXT,
                     period TEXT,
@@ -273,6 +283,23 @@ class DatabaseManager:
                 await self.connection.execute("ALTER TABLE node_snapshots ADD COLUMN embodied_emissions_kg REAL")
             except sqlite3.OperationalError:
                 pass
+            # Extended resource metrics columns
+            for col_name, col_type in [
+                ("network_receive_bytes", "REAL"),
+                ("network_transmit_bytes", "REAL"),
+                ("disk_read_bytes", "REAL"),
+                ("disk_write_bytes", "REAL"),
+                ("storage_request_bytes", "INTEGER"),
+                ("storage_usage_bytes", "INTEGER"),
+                ("ephemeral_storage_request_bytes", "INTEGER"),
+                ("ephemeral_storage_usage_bytes", "INTEGER"),
+                ("gpu_usage_millicores", "INTEGER"),
+                ("restart_count", "INTEGER"),
+            ]:
+                try:
+                    await self.connection.execute(f"ALTER TABLE combined_metrics ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
 
             await self.connection.commit()
             logger.info("SQLite schema is up to date.")
@@ -346,6 +373,16 @@ class DatabaseManager:
                     memory_request BIGINT,
                     cpu_usage_millicores INTEGER,
                     memory_usage_bytes BIGINT,
+                    network_receive_bytes DOUBLE PRECISION,
+                    network_transmit_bytes DOUBLE PRECISION,
+                    disk_read_bytes DOUBLE PRECISION,
+                    disk_write_bytes DOUBLE PRECISION,
+                    storage_request_bytes BIGINT,
+                    storage_usage_bytes BIGINT,
+                    ephemeral_storage_request_bytes BIGINT,
+                    ephemeral_storage_usage_bytes BIGINT,
+                    gpu_usage_millicores INTEGER,
+                    restart_count INTEGER,
                     owner_kind TEXT,
                     owner_name TEXT,
                     period TEXT,
@@ -424,6 +461,34 @@ class DatabaseManager:
                 )
 
                 await conn.execute("ALTER TABLE node_snapshots ADD COLUMN IF NOT EXISTS embodied_emissions_kg REAL;")
+
+                # Extended resource metrics columns
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS network_receive_bytes DOUBLE PRECISION;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS network_transmit_bytes DOUBLE PRECISION;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS disk_read_bytes DOUBLE PRECISION;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS disk_write_bytes DOUBLE PRECISION;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS storage_request_bytes BIGINT;"
+                )
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS storage_usage_bytes BIGINT;")
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS ephemeral_storage_request_bytes BIGINT;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS ephemeral_storage_usage_bytes BIGINT;"
+                )
+                await conn.execute(
+                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS gpu_usage_millicores INTEGER;"
+                )
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS restart_count INTEGER;")
             except Exception as e:
                 logger.warning(f"Migration warning (non-critical): {e}")
 
