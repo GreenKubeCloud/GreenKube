@@ -74,6 +74,7 @@ class PodMetric(BaseModel):
     container_name: str = Field(..., description="The name of the container within the pod.")
     cpu_request: int = Field(..., description="CPU request in millicores.")
     memory_request: int = Field(..., description="Memory request in bytes.")
+    ephemeral_storage_request: int = Field(0, description="Ephemeral storage request in bytes.")
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
 
@@ -152,6 +153,21 @@ class CombinedMetric(BaseModel):
     # Actual usage metrics (from Prometheus)
     cpu_usage_millicores: Optional[int] = Field(None, description="Actual CPU usage in millicores.")
     memory_usage_bytes: Optional[int] = Field(None, description="Actual memory working set in bytes.")
+    # Network I/O metrics (from Prometheus)
+    network_receive_bytes: Optional[float] = Field(None, description="Network bytes received per second (rate).")
+    network_transmit_bytes: Optional[float] = Field(None, description="Network bytes transmitted per second (rate).")
+    # Disk I/O metrics (from Prometheus)
+    disk_read_bytes: Optional[float] = Field(None, description="Disk bytes read per second (rate).")
+    disk_write_bytes: Optional[float] = Field(None, description="Disk bytes written per second (rate).")
+    # Storage metrics
+    storage_request_bytes: Optional[int] = Field(None, description="PVC storage requested in bytes.")
+    storage_usage_bytes: Optional[int] = Field(None, description="Actual PVC storage usage in bytes.")
+    ephemeral_storage_request_bytes: Optional[int] = Field(None, description="Ephemeral storage requested in bytes.")
+    ephemeral_storage_usage_bytes: Optional[int] = Field(None, description="Actual ephemeral storage usage in bytes.")
+    # GPU metrics
+    gpu_usage_millicores: Optional[int] = Field(None, description="GPU usage in millicores (from DCGM/nvidia-smi).")
+    # Stability metrics
+    restart_count: Optional[int] = Field(None, description="Total container restart count for the pod.")
     # Ownership metadata
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")

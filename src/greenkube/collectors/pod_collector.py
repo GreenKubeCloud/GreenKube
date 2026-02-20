@@ -11,7 +11,7 @@ from greenkube.collectors.base_collector import BaseCollector
 from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
 
-from ..utils.k8s_utils import parse_cpu_request, parse_memory_request
+from ..utils.k8s_utils import parse_cpu_request, parse_memory_request, parse_storage_request
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +85,11 @@ class PodCollector(BaseCollector):
 
                     cpu_request_str = requests.get("cpu")
                     memory_request_str = requests.get("memory")
+                    ephemeral_storage_str = requests.get("ephemeral-storage")
 
                     cpu_request = parse_cpu_request(cpu_request_str)
                     memory_request = parse_memory_request(memory_request_str)
+                    ephemeral_storage_request = parse_storage_request(ephemeral_storage_str)
 
                     pod_metrics.append(
                         PodMetric(
@@ -96,6 +98,7 @@ class PodCollector(BaseCollector):
                             container_name=container_name,
                             cpu_request=cpu_request,
                             memory_request=memory_request,
+                            ephemeral_storage_request=ephemeral_storage_request,
                             owner_kind=owner_kind,
                             owner_name=owner_name,
                         )

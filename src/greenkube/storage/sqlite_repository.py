@@ -164,11 +164,20 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                             INSERT INTO combined_metrics
                                  (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                                   cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                                  network_receive_bytes, network_transmit_bytes,
+                                  disk_read_bytes, disk_write_bytes,
+                                  storage_request_bytes, storage_usage_bytes,
+                                  ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                                  gpu_usage_millicores, restart_count,
                                   owner_kind, owner_name,
                                   period, "timestamp", duration_seconds,
                                   grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
                                   is_estimated, estimation_reasons, embodied_co2e_grams)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
                         """,
                             (
@@ -183,6 +192,16 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 metric.memory_request,
                                 metric.cpu_usage_millicores,
                                 metric.memory_usage_bytes,
+                                metric.network_receive_bytes,
+                                metric.network_transmit_bytes,
+                                metric.disk_read_bytes,
+                                metric.disk_write_bytes,
+                                metric.storage_request_bytes,
+                                metric.storage_usage_bytes,
+                                metric.ephemeral_storage_request_bytes,
+                                metric.ephemeral_storage_usage_bytes,
+                                metric.gpu_usage_millicores,
+                                metric.restart_count,
                                 metric.owner_kind,
                                 metric.owner_name,
                                 metric.period,
@@ -220,6 +239,11 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     """
                     SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
                            cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                           network_receive_bytes, network_transmit_bytes,
+                           disk_read_bytes, disk_write_bytes,
+                           storage_request_bytes, storage_usage_bytes,
+                           ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                           gpu_usage_millicores, restart_count,
                            owner_kind, owner_name,
                            period, "timestamp", duration_seconds,
                            grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
@@ -252,6 +276,16 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 memory_request=row["memory_request"],
                                 cpu_usage_millicores=row["cpu_usage_millicores"],
                                 memory_usage_bytes=row["memory_usage_bytes"],
+                                network_receive_bytes=row["network_receive_bytes"],
+                                network_transmit_bytes=row["network_transmit_bytes"],
+                                disk_read_bytes=row["disk_read_bytes"],
+                                disk_write_bytes=row["disk_write_bytes"],
+                                storage_request_bytes=row["storage_request_bytes"],
+                                storage_usage_bytes=row["storage_usage_bytes"],
+                                ephemeral_storage_request_bytes=row["ephemeral_storage_request_bytes"],
+                                ephemeral_storage_usage_bytes=row["ephemeral_storage_usage_bytes"],
+                                gpu_usage_millicores=row["gpu_usage_millicores"],
+                                restart_count=row["restart_count"],
                                 owner_kind=row["owner_kind"],
                                 owner_name=row["owner_name"],
                                 period=row["period"],
