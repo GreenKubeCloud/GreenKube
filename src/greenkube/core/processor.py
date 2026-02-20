@@ -219,11 +219,20 @@ class DataProcessor:
                 # And aggregate requests for CombinedMetric
                 req_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
 
-                agg_map = defaultdict(lambda: {"cpu": 0, "memory": 0, "owner_kind": None, "owner_name": None})
+                agg_map = defaultdict(
+                    lambda: {
+                        "cpu": 0,
+                        "memory": 0,
+                        "ephemeral_storage": 0,
+                        "owner_kind": None,
+                        "owner_name": None,
+                    }
+                )
                 for pm in pod_metrics:
                     key = (pm.namespace, pm.pod_name)
                     agg_map[key]["cpu"] += pm.cpu_request
                     agg_map[key]["memory"] += pm.memory_request
+                    agg_map[key]["ephemeral_storage"] += pm.ephemeral_storage_request
                     # Set owner from first container metric that has it
                     if pm.owner_kind and not agg_map[key]["owner_kind"]:
                         agg_map[key]["owner_kind"] = pm.owner_kind
@@ -318,6 +327,31 @@ class DataProcessor:
                 _mem_agg[(item.namespace, item.pod)] += item.memory_usage_bytes
             for key, mem_bytes in _mem_agg.items():
                 pod_memory_usage_map[key] = int(round(mem_bytes))
+
+        # Build per-pod network I/O map from Prometheus data
+        pod_network_rx_map: Dict[tuple, float] = {}
+        pod_network_tx_map: Dict[tuple, float] = {}
+        if prom_metrics and getattr(prom_metrics, "pod_network_io", None):
+            for item in prom_metrics.pod_network_io:
+                key = (item.namespace, item.pod)
+                pod_network_rx_map[key] = pod_network_rx_map.get(key, 0.0) + item.network_receive_bytes
+                pod_network_tx_map[key] = pod_network_tx_map.get(key, 0.0) + item.network_transmit_bytes
+
+        # Build per-pod disk I/O map from Prometheus data
+        pod_disk_read_map: Dict[tuple, float] = {}
+        pod_disk_write_map: Dict[tuple, float] = {}
+        if prom_metrics and getattr(prom_metrics, "pod_disk_io", None):
+            for item in prom_metrics.pod_disk_io:
+                key = (item.namespace, item.pod)
+                pod_disk_read_map[key] = pod_disk_read_map.get(key, 0.0) + item.disk_read_bytes
+                pod_disk_write_map[key] = pod_disk_write_map.get(key, 0.0) + item.disk_write_bytes
+
+        # Build per-pod restart count map from Prometheus data
+        pod_restart_map: Dict[tuple, int] = {}
+        if prom_metrics and getattr(prom_metrics, "pod_restart_counts", None):
+            for item in prom_metrics.pod_restart_counts:
+                key = (item.namespace, item.pod)
+                pod_restart_map[key] = pod_restart_map.get(key, 0) + item.restart_count
 
         # 2. Emaps Context
         node_contexts = await self._get_node_emaps_map(nodes_info)
@@ -620,6 +654,12 @@ class DataProcessor:
                     memory_request=pod_requests["memory"],
                     cpu_usage_millicores=pod_cpu_usage_map.get(pod_key),
                     memory_usage_bytes=pod_memory_usage_map.get(pod_key),
+                    network_receive_bytes=pod_network_rx_map.get(pod_key),
+                    network_transmit_bytes=pod_network_tx_map.get(pod_key),
+                    disk_read_bytes=pod_disk_read_map.get(pod_key),
+                    disk_write_bytes=pod_disk_write_map.get(pod_key),
+                    ephemeral_storage_request_bytes=pod_requests.get("ephemeral_storage"),
+                    restart_count=pod_restart_map.get(pod_key),
                     owner_kind=pod_requests.get("owner_kind"),
                     owner_name=pod_requests.get("owner_name"),
                     timestamp=energy_metric.timestamp,
@@ -802,15 +842,19 @@ class DataProcessor:
             pod_metrics_list = await pod_collector.collect()
             pod_request_map_agg = defaultdict(int)
             pod_mem_map_agg = defaultdict(int)
+            pod_ephemeral_storage_map_agg = defaultdict(int)
             for p in pod_metrics_list:
                 key = (p.namespace, p.pod_name)
                 pod_request_map_agg[key] += p.cpu_request
                 pod_mem_map_agg[key] += p.memory_request
+                pod_ephemeral_storage_map_agg[key] += p.ephemeral_storage_request
             pod_request_map = pod_request_map_agg
             pod_mem_map = pod_mem_map_agg
+            pod_ephemeral_storage_map = pod_ephemeral_storage_map_agg
         except Exception:
             pod_request_map = {}
             pod_mem_map = {}
+            pod_ephemeral_storage_map = {}
 
         # Node contexts for zone mapping (reused across chunks)
         node_contexts = await self._get_node_emaps_map()
@@ -862,6 +906,71 @@ class DataProcessor:
                     )
                 except Exception:
                     results = []
+
+            # Fetch additional resource metrics for this chunk (best-effort)
+            net_rx_query = f"sum(rate(container_network_receive_bytes_total[{rate_window}])) by (namespace,pod,node)"
+            net_tx_query = f"sum(rate(container_network_transmit_bytes_total[{rate_window}])) by (namespace,pod,node)"
+            disk_read_query = f"sum(rate(container_fs_reads_bytes_total[{rate_window}])) by (namespace,pod,node)"
+            disk_write_query = f"sum(rate(container_fs_writes_bytes_total[{rate_window}])) by (namespace,pod,node)"
+            restart_query = "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
+
+            try:
+                (
+                    net_rx_results,
+                    net_tx_results,
+                    disk_read_results,
+                    disk_write_results,
+                    restart_results,
+                ) = await asyncio.gather(
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=net_rx_query
+                    ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=net_tx_query
+                    ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=disk_read_query
+                    ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=disk_write_query
+                    ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=restart_query
+                    ),
+                )
+            except Exception:
+                net_rx_results = []
+                net_tx_results = []
+                disk_read_results = []
+                disk_write_results = []
+                restart_results = []
+
+            # Build per-pod resource maps from range results
+            def _build_pod_map_from_range(range_results):
+                """Return {(namespace, pod): latest_value} from range query results."""
+                pod_map = {}
+                for series in range_results:
+                    m = series.get("metric", {}) or {}
+                    ns = m.get("namespace") or m.get("kubernetes_namespace") or ""
+                    p = m.get("pod") or m.get("pod_name") or ""
+                    if not ns or not p:
+                        continue
+                    values = series.get("values", [])
+                    if values:
+                        # Use the last (most recent) value
+                        try:
+                            pod_map[(ns, p)] = float(values[-1][1])
+                        except (ValueError, IndexError):
+                            pass
+                return pod_map
+
+            range_net_rx_map = _build_pod_map_from_range(net_rx_results)
+            range_net_tx_map = _build_pod_map_from_range(net_tx_results)
+            range_disk_read_map = _build_pod_map_from_range(disk_read_results)
+            range_disk_write_map = _build_pod_map_from_range(disk_write_results)
+            range_restart_map = _build_pod_map_from_range(restart_results)
+
+            del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
 
             # Parse results into samples for this chunk
             samples = defaultdict(lambda: defaultdict(float))
@@ -1003,6 +1112,7 @@ class DataProcessor:
 
                 cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
                 mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
+                pod_key = (em_namespace, pod_name)
                 if carbon_result:
                     combined.append(
                         CombinedMetric(
@@ -1031,11 +1141,18 @@ class DataProcessor:
                             emaps_zone=zone,
                             is_estimated=is_estimated,
                             estimation_reasons=estimation_reasons,
+                            network_receive_bytes=range_net_rx_map.get(pod_key),
+                            network_transmit_bytes=range_net_tx_map.get(pod_key),
+                            disk_read_bytes=range_disk_read_map.get(pod_key),
+                            disk_write_bytes=range_disk_write_map.get(pod_key),
+                            ephemeral_storage_request_bytes=pod_ephemeral_storage_map.get(pod_key) or None,
+                            restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
                         )
                     )
 
-            # Release chunk energy metrics before next iteration
+            # Release chunk energy metrics and resource maps before next iteration
             del chunk_energy_metrics
+            del range_net_rx_map, range_net_tx_map, range_disk_read_map, range_disk_write_map, range_restart_map
 
             # Advance to next chunk
             chunk_start = chunk_end
