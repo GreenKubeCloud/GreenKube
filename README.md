@@ -17,18 +17,38 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.1.7)
+## ✨ Features (Version 0.2.0)
 
-* **Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
-* **REST API:** Full-featured FastAPI backend with endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included.
-* **Prometheus-Based Energy Estimation:** Calculates pod-level energy consumption (Joules) using CPU usage data from Prometheus and a built-in library of instance power profiles.
-* **Optimization Recommendations:** Identifies "zombie" pods (idle but costly) and "oversized" pods (underutilized CPU) to help you rightsize and reduce waste.
-* **Pod & Namespace Reporting:** Generates detailed reports of CO₂e emissions, energy usage, and (optional) costs per pod and namespace.
-* **Flexible Data Backends:** Supports PostgreSQL (default), SQLite, and Elasticsearch for storing and querying historical carbon intensity data.
-* **Historical Analysis:** Report on energy and carbon usage over any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, etc.).
-* **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (can be manually overridden).
-* **Helm Chart Deployment:** Easily deploy and configure GreenKube in any Kubernetes cluster via a public Helm repository.
-* **Data Export:** Export reports to CSV or JSON for integration with other tools.
+### 📊 Dashboard & Visualization
+* **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
+* **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included at `/api/v1/docs`.
+
+### 📈 Comprehensive Resource Monitoring
+* **Multi-Resource Metrics Collection:** Beyond CPU, GreenKube now tracks:
+  - **CPU usage** (actual utilization in millicores)
+  - **Memory usage** (bytes consumed)
+  - **Network I/O** (bytes received/transmitted)
+  - **Disk I/O** (bytes read/written)
+  - **Storage** (ephemeral storage requests and usage)
+  - **Pod restarts** (restart count per container)
+  - **GPU usage** (millicores, when available)
+* **Energy Estimation:** Calculates pod-level energy consumption (Joules) using Prometheus metrics and a built-in library of cloud instance power profiles.
+* **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data.
+
+### 🎯 Optimization & Reporting
+* **Smart Recommendations:** Identifies optimization opportunities:
+  - **Zombie pods** (idle but costly workloads)
+  - **Oversized pods** (underutilized CPU/memory)
+  - **Rightsizing suggestions** with potential cost and emission savings
+* **Pod & Namespace Reporting:** Detailed reports of CO₂e emissions, energy usage, and costs per pod and namespace.
+* **Historical Analysis:** Report on any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, `--yearly`).
+* **Data Export:** Export reports to CSV or JSON for integration with other tools and BI systems.
+
+### 🔧 Infrastructure & Deployment
+* **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
+* **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
+* **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
+* **Cloud Provider Support:** Built-in profiles for AWS, GCP, Azure, OVH, and Scaleway with automatic region-to-carbon-zone mapping.
 
 
 ## 📦 Dependencies
@@ -97,11 +117,18 @@ kubectl port-forward svc/greenkube-api 8000:8000 -n greenkube
 Then open [http://localhost:8000](http://localhost:8000) in your browser.
 
 The dashboard includes:
-- **Dashboard** — KPI cards (CO₂, cost, energy, pods), time-series charts, namespace breakdown, top pods
-- **Metrics** — Sortable and searchable per-pod metrics table with energy and cost charts
-- **Nodes** — Cluster node inventory with CPU/memory capacity bars and hardware profiles
-- **Recommendations** — Actionable suggestions (zombie pods, CPU rightsizing) with potential savings
-- **Settings** — Current configuration, API health status, and version info
+- **Dashboard** — KPI cards (CO₂, cost, energy, pods), time-series charts (ECharts), namespace breakdown pie chart, and top pods by emissions/cost
+- **Metrics** — Interactive table with sortable and searchable per-pod metrics including energy, cost, and all resource consumption data (CPU, memory, network, disk, storage)
+- **Nodes** — Cluster node inventory with CPU/memory capacity bars, hardware profiles, cloud provider info, and carbon zones
+- **Recommendations** — Actionable optimization suggestions (zombie pods, rightsizing opportunities) with estimated savings in cost and CO₂e
+- **Settings** — Current configuration, API health status, version info, and database connection details
+
+### 🎨 Dashboard Features
+- **Real-time updates** with WebSocket support (when available)
+- **Responsive design** works on desktop and mobile
+- **Dark/light theme** support
+- **Export capabilities** for charts and data tables
+- **Advanced filtering** by namespace, time range, and resource type
 
 ## 🔌 API Reference
 
@@ -155,18 +182,96 @@ greenkube recommend
 
 ## 🏗️ Architecture Summary
 
-GreenKube is composed of:
-- **Collectors:** PrometheusCollector, NodeCollector, PodCollector, and OpenCostCollector gather metrics from various cluster services.
-- **Estimator:** Converts Prometheus CPU metrics into EnergyMetric objects (Joules) using instance power profiles.
-- **Processor:** Orchestrates the pipeline. It groups metrics by Electricity Maps zone, prefetches grid intensity data once per zone per run, and combines all data sources.
-- **Calculator:** Converts Joules → kWh → CO2e and uses a per-run cache to avoid redundant intensity lookups.
-- **Recommender:** Analyzes the final CombinedMetric data to find "zombie" and "oversized" pods.
-- **Repositories:** SQLiteRepository and ElasticsearchRepository provide a stable interface for storing and retrieving carbon intensity data.
+GreenKube follows a clean, hexagonal architecture with strict separation between core business logic and infrastructure adapters.
 
-Key design goals:
-- Be resilient to diverse Prometheus and OpenCost deployments via auto-discovery.
-- Use conservative defaults (e.g., default instance power profile) when cluster information is missing, allowing the pipeline to continue.
-- Reduce external API calls by caching and prefetching grid intensity data.
+### Core Components
+
+**Collectors** (Input Adapters):
+- **PrometheusCollector:** Fetches CPU, memory, network I/O, disk I/O, and restart count metrics via PromQL queries
+- **NodeCollector:** Gathers node metadata (zones, instance types, capacity) from Kubernetes API
+- **PodCollector:** Collects resource requests (CPU, memory, ephemeral storage) from pod specs
+- **OpenCostCollector:** Retrieves cost allocation data for financial reporting
+- **ElectricityMapsCollector:** Fetches real-time carbon intensity data by geographic zone
+
+**Processing Pipeline:**
+- **Estimator:** Converts Prometheus CPU metrics into EnergyMetric objects (Joules) using cloud instance power profiles
+- **Processor:** Orchestrates the entire data collection and processing pipeline:
+  - Runs all collectors concurrently via `asyncio.gather`
+  - Reconstructs historical node states from database snapshots
+  - Groups metrics by carbon zone for efficient intensity lookups
+  - Aggregates estimation flags and reasons for transparency
+  - Manages per-pod resource maps (CPU, memory, network, disk, storage, restarts)
+- **Calculator:** Converts energy (Joules → kWh) to carbon emissions (CO₂e) using grid intensity and PUE
+  - Maintains per-run cache of (zone, timestamp) → intensity mappings
+  - Supports normalization (hourly/daily/none) for efficient lookups
+
+**Business Logic:**
+- **Recommender:** Analyzes CombinedMetric data to identify optimization opportunities:
+  - Zombie detection (idle pods consuming resources)
+  - Rightsizing analysis (over-provisioned CPU/memory)
+  - Autoscaling recommendations based on variability
+  - Carbon-aware scheduling opportunities
+
+**Storage** (Output Adapters):
+- **Repositories:** Abstract interfaces implemented for multiple backends:
+  - **PostgresRepository:** Production-grade persistent storage (asyncpg driver)
+  - **SQLiteRepository:** Local development and testing (aiosqlite driver)
+  - **ElasticsearchRepository:** High-scale time-series storage and analytics
+- **NodeRepository:** Historical node state snapshots for accurate time-range reporting
+- **EmbodiedRepository:** Boavizta API integration for hardware embodied emissions
+
+**API & Presentation:**
+- **FastAPI Server:** REST API with OpenAPI documentation, CORS support, health checks
+- **SvelteKit Dashboard:** Modern SPA with:
+  - Server-side rendering (SSR) for fast initial load
+  - Client-side navigation for smooth UX
+  - Chart.js/ECharts for interactive visualizations
+  - Tailwind CSS for responsive design
+
+### Data Flow
+
+1. **Collection Phase** (async/concurrent):
+   ```
+   Prometheus → CPU, memory, network, disk metrics
+   Kubernetes → Node metadata, pod resource requests
+   OpenCost → Cost allocation data
+   ```
+
+2. **Processing Phase**:
+   ```
+   Raw metrics → Energy estimation (Joules per pod)
+   Node metadata → Cloud zone mapping
+   Historical data → Node state reconstruction
+   ```
+
+3. **Calculation Phase**:
+   ```
+   Energy + Grid intensity + PUE → CO₂e emissions
+   Metrics + Cost data → Combined metrics
+   ```
+
+4. **Analysis Phase**:
+   ```
+   Combined metrics → Recommendations engine
+   Time-series data → Trend analysis
+   ```
+
+5. **Storage & Presentation**:
+   ```
+   Combined metrics → Database (Postgres/SQLite/ES)
+   Database → API → Web Dashboard
+   API → CLI reports/exports
+   ```
+
+### Key Design Principles
+
+- **Async-First:** Fully leverages Python `asyncio` for non-blocking I/O operations
+- **Database Agnostic:** Repository pattern abstracts storage implementation
+- **Cloud Agnostic:** Supports AWS, GCP, Azure, OVH, Scaleway with extensible mapping
+- **Resilient:** Graceful degradation when data sources are unavailable
+- **Transparent:** Clear flagging of estimated vs. measured values with reasoning
+- **Modular:** Each component is independently testable and replaceable
+- **Observable:** Comprehensive logging at all pipeline stages
 
 
 ## 🤝 Contributing
