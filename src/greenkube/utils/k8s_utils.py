@@ -125,3 +125,14 @@ def parse_memory_request(memory: Optional[str]) -> int:
         return bytes_val
     except Exception:
         return 0
+
+
+def parse_storage_request(storage: Optional[str]) -> int:
+    """Converts K8s storage string (e.g., ephemeral-storage) to bytes (int)."""
+    if not storage:
+        return 0
+    try:
+        bytes_val = int(parse_quantity(storage))
+        return bytes_val
+    except Exception:
+        return 0

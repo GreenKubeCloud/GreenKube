@@ -19,7 +19,10 @@ from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
     NodeInstanceType,
     PodCPUUsage,
+    PodDiskIO,
     PodMemoryUsage,
+    PodNetworkIO,
+    PodRestartCount,
     PrometheusMetric,
 )
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
@@ -63,6 +66,27 @@ class PrometheusCollector(BaseCollector):
         # Query for memory working set bytes (actual memory usage).
         self.memory_usage_query = "sum(container_memory_working_set_bytes{container!=''}) by (namespace, pod, node)"
 
+        # Query for network I/O rates (bytes/sec received and transmitted).
+        self.network_receive_query = (
+            f"sum(rate(container_network_receive_bytes_total[{self.query_range_step}])) by (namespace, pod, node)"
+        )
+        self.network_transmit_query = (
+            f"sum(rate(container_network_transmit_bytes_total[{self.query_range_step}])) by (namespace, pod, node)"
+        )
+
+        # Query for disk I/O rates (bytes/sec read and written).
+        self.disk_read_query = (
+            f"sum(rate(container_fs_reads_bytes_total{{container!=''}}[{self.query_range_step}])) "
+            "by (namespace, pod, node)"
+        )
+        self.disk_write_query = (
+            f"sum(rate(container_fs_writes_bytes_total{{container!=''}}[{self.query_range_step}])) "
+            "by (namespace, pod, node)"
+        )
+
+        # Query for container restart counts.
+        self.restart_count_query = "sum(kube_pod_container_status_restarts_total) by (namespace, pod, container)"
+
         # Prometheus label key used to map node -> instance type may vary across setups.
         self.node_instance_label_key = getattr(
             settings,
@@ -98,9 +122,32 @@ class PrometheusCollector(BaseCollector):
         cpu_future = self._query_prometheus(client, self.cpu_usage_query)
         node_future = self._query_prometheus(client, self.node_labels_query)
         memory_future = self._query_prometheus(client, self.memory_usage_query)
+        net_rx_future = self._query_prometheus(client, self.network_receive_query)
+        net_tx_future = self._query_prometheus(client, self.network_transmit_query)
+        disk_read_future = self._query_prometheus(client, self.disk_read_query)
+        disk_write_future = self._query_prometheus(client, self.disk_write_query)
+        restart_future = self._query_prometheus(client, self.restart_count_query)
 
         # Wait for all primary queries
-        cpu_results, node_results, memory_results = await asyncio.gather(cpu_future, node_future, memory_future)
+        (
+            cpu_results,
+            node_results,
+            memory_results,
+            net_rx_results,
+            net_tx_results,
+            disk_read_results,
+            disk_write_results,
+            restart_results,
+        ) = await asyncio.gather(
+            cpu_future,
+            node_future,
+            memory_future,
+            net_rx_future,
+            net_tx_future,
+            disk_read_future,
+            disk_write_future,
+            restart_future,
+        )
 
         # If the standard grouped query returned no results, try fallback
         if not cpu_results:
@@ -184,10 +231,32 @@ class PrometheusCollector(BaseCollector):
         if parsed_memory_usage:
             logger.info("Parsed %d memory usage metrics from Prometheus.", len(parsed_memory_usage))
 
+        # Parse network I/O results
+        parsed_network_io = self._parse_network_io(net_rx_results, net_tx_results)
+        if parsed_network_io:
+            logger.info("Parsed %d network I/O metrics from Prometheus.", len(parsed_network_io))
+
+        # Parse disk I/O results
+        parsed_disk_io = self._parse_disk_io(disk_read_results, disk_write_results)
+        if parsed_disk_io:
+            logger.info("Parsed %d disk I/O metrics from Prometheus.", len(parsed_disk_io))
+
+        # Parse restart count results
+        parsed_restart_counts = []
+        for item in restart_results:
+            parsed_restart = self._parse_restart_count_data(item)
+            if parsed_restart:
+                parsed_restart_counts.append(parsed_restart)
+        if parsed_restart_counts:
+            logger.info("Parsed %d restart count metrics from Prometheus.", len(parsed_restart_counts))
+
         return PrometheusMetric(
             pod_cpu_usage=parsed_cpu_usage,
             pod_memory_usage=parsed_memory_usage,
             node_instance_types=parsed_node_types,
+            pod_network_io=parsed_network_io,
+            pod_disk_io=parsed_disk_io,
+            pod_restart_counts=parsed_restart_counts,
         )
 
     async def _query_prometheus(self, client: httpx.AsyncClient, query: str) -> List[Dict[str, Any]]:
@@ -475,5 +544,195 @@ class PrometheusCollector(BaseCollector):
 
         try:
             return PodMemoryUsage(namespace=namespace, pod=pod, node=node, memory_usage_bytes=float(value_str))
+        except (TypeError, ValueError, ValidationError):
+            return None
+
+    def _parse_network_receive_data(self, item: Dict[str, Any]) -> Optional[PodNetworkIO]:
+        """Parses a network receive rate metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, node)):
+            return None
+
+        try:
+            return PodNetworkIO(
+                namespace=namespace,
+                pod=pod,
+                node=node,
+                network_receive_bytes=float(value_str),
+                network_transmit_bytes=0.0,
+            )
+        except (TypeError, ValueError, ValidationError):
+            return None
+
+    def _parse_network_transmit_data(self, item: Dict[str, Any]) -> Optional[PodNetworkIO]:
+        """Parses a network transmit rate metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, node)):
+            return None
+
+        try:
+            return PodNetworkIO(
+                namespace=namespace,
+                pod=pod,
+                node=node,
+                network_receive_bytes=0.0,
+                network_transmit_bytes=float(value_str),
+            )
+        except (TypeError, ValueError, ValidationError):
+            return None
+
+    def _parse_network_io(
+        self, rx_results: List[Dict[str, Any]], tx_results: List[Dict[str, Any]]
+    ) -> List[PodNetworkIO]:
+        """Combines network receive and transmit results into PodNetworkIO objects."""
+        rx_map: Dict[tuple, float] = {}
+        tx_map: Dict[tuple, float] = {}
+
+        for item in rx_results:
+            parsed = self._parse_network_receive_data(item)
+            if parsed:
+                key = (parsed.namespace, parsed.pod, parsed.node)
+                rx_map[key] = rx_map.get(key, 0.0) + parsed.network_receive_bytes
+
+        for item in tx_results:
+            parsed = self._parse_network_transmit_data(item)
+            if parsed:
+                key = (parsed.namespace, parsed.pod, parsed.node)
+                tx_map[key] = tx_map.get(key, 0.0) + parsed.network_transmit_bytes
+
+        all_keys = set(rx_map.keys()) | set(tx_map.keys())
+        results = []
+        for ns, pod, node in all_keys:
+            results.append(
+                PodNetworkIO(
+                    namespace=ns,
+                    pod=pod,
+                    node=node,
+                    network_receive_bytes=rx_map.get((ns, pod, node), 0.0),
+                    network_transmit_bytes=tx_map.get((ns, pod, node), 0.0),
+                )
+            )
+        return results
+
+    def _parse_disk_read_data(self, item: Dict[str, Any]) -> Optional[PodDiskIO]:
+        """Parses a disk read rate metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, node)):
+            return None
+
+        try:
+            return PodDiskIO(
+                namespace=namespace,
+                pod=pod,
+                node=node,
+                disk_read_bytes=float(value_str),
+                disk_write_bytes=0.0,
+            )
+        except (TypeError, ValueError, ValidationError):
+            return None
+
+    def _parse_disk_write_data(self, item: Dict[str, Any]) -> Optional[PodDiskIO]:
+        """Parses a disk write rate metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        node = metric.get("node") or metric.get("kubernetes_node")
+
+        if not all((namespace, pod, node)):
+            return None
+
+        try:
+            return PodDiskIO(
+                namespace=namespace,
+                pod=pod,
+                node=node,
+                disk_read_bytes=0.0,
+                disk_write_bytes=float(value_str),
+            )
+        except (TypeError, ValueError, ValidationError):
+            return None
+
+    def _parse_disk_io(
+        self, read_results: List[Dict[str, Any]], write_results: List[Dict[str, Any]]
+    ) -> List[PodDiskIO]:
+        """Combines disk read and write results into PodDiskIO objects."""
+        read_map: Dict[tuple, float] = {}
+        write_map: Dict[tuple, float] = {}
+
+        for item in read_results:
+            parsed = self._parse_disk_read_data(item)
+            if parsed:
+                key = (parsed.namespace, parsed.pod, parsed.node)
+                read_map[key] = read_map.get(key, 0.0) + parsed.disk_read_bytes
+
+        for item in write_results:
+            parsed = self._parse_disk_write_data(item)
+            if parsed:
+                key = (parsed.namespace, parsed.pod, parsed.node)
+                write_map[key] = write_map.get(key, 0.0) + parsed.disk_write_bytes
+
+        all_keys = set(read_map.keys()) | set(write_map.keys())
+        results = []
+        for ns, pod, node in all_keys:
+            results.append(
+                PodDiskIO(
+                    namespace=ns,
+                    pod=pod,
+                    node=node,
+                    disk_read_bytes=read_map.get((ns, pod, node), 0.0),
+                    disk_write_bytes=write_map.get((ns, pod, node), 0.0),
+                )
+            )
+        return results
+
+    def _parse_restart_count_data(self, item: Dict[str, Any]) -> Optional[PodRestartCount]:
+        """Parses a restart count metric item from Prometheus."""
+        metric = item.get("metric", {})
+        value_str = item.get("value", [None, None])[1]
+        if value_str is None or value_str == "NaN":
+            return None
+
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        container = metric.get("container") or metric.get("container_name") or ""
+
+        if not all((namespace, pod)):
+            return None
+
+        try:
+            return PodRestartCount(
+                namespace=namespace,
+                pod=pod,
+                container=container,
+                restart_count=int(float(value_str)),
+            )
         except (TypeError, ValueError, ValidationError):
             return None
