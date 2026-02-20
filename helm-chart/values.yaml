@@ -132,6 +132,8 @@ config:
     idleNamespaceEnergyThreshold: 1000
     carbonAwareThreshold: 1.5
     nodeUtilizationThreshold: 0.2
+  # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
+  recommendSystemNamespaces: false
 
 # Configuration for Elasticsearch (if db.type is "elasticsearch")
 elasticsearch:
