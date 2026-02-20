@@ -70,4 +70,5 @@ data:
   IDLE_NAMESPACE_ENERGY_THRESHOLD: {{ .idleNamespaceEnergyThreshold | quote }}
   CARBON_AWARE_THRESHOLD: {{ .carbonAwareThreshold | quote }}
   NODE_UTILIZATION_THRESHOLD: {{ .nodeUtilizationThreshold | quote }}
+  RECOMMEND_SYSTEM_NAMESPACES: {{ .recommendSystemNamespaces | quote }}
   {{- end }}

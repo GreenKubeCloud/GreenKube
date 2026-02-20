@@ -37,6 +37,7 @@ class Recommender:
         self.idle_namespace_energy_threshold = config.IDLE_NAMESPACE_ENERGY_THRESHOLD
         self.carbon_aware_threshold = config.CARBON_AWARE_THRESHOLD
         self.node_utilization_threshold = config.NODE_UTILIZATION_THRESHOLD
+        self.recommend_system_namespaces = config.RECOMMEND_SYSTEM_NAMESPACES
 
     def generate_recommendations(
         self,
@@ -451,12 +452,24 @@ class Recommender:
         recs = []
         ns_agg: Dict[str, Dict] = defaultdict(lambda: {"joules": 0.0, "cost": 0.0, "co2e": 0.0})
 
+        # Common system namespaces to exclude if option is set
+        system_namespaces = {
+            "kube-system",
+            "kube-public",
+            "kube-node-lease",
+            "coredns",
+            "istio-system",
+            "kubernetes-dashboard",
+        }
+
         for m in metrics:
             ns_agg[m.namespace]["joules"] += m.joules
             ns_agg[m.namespace]["cost"] += m.total_cost
             ns_agg[m.namespace]["co2e"] += m.co2e_grams
 
         for ns, agg in ns_agg.items():
+            if not self.recommend_system_namespaces and ns in system_namespaces:
+                continue
             if agg["joules"] < self.idle_namespace_energy_threshold and agg["cost"] > 0:
                 recs.append(
                     Recommendation(

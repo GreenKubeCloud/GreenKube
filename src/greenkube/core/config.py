@@ -24,6 +24,16 @@ class Config:
         # --- Database variables ---
         self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
 
+        # --- Recommendation engine options ---
+        # If false, recommendations for system namespaces (e.g., kube-system, coredns) are not generated
+        self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        )
+
         # --- Boavizta variables ---
         self.BOAVIZTA_API_URL = os.getenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
         self.BOAVIZTA_TOKEN = self._get_secret("BOAVIZTA_TOKEN")
