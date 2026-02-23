@@ -116,6 +116,65 @@ class Recommendation(BaseModel):
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
 
 
+class RecommendationRecord(BaseModel):
+    """A persisted recommendation snapshot for historical tracking."""
+
+    id: Optional[int] = Field(None, description="Auto-generated database ID.")
+    pod_name: str = Field(..., description="The name of the target pod.")
+    namespace: str = Field(..., description="The namespace of the target pod.")
+    type: RecommendationType = Field(..., description="The category of the recommendation.")
+    description: str = Field(..., description="A human-readable description of the recommendation.")
+    reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
+    priority: str = Field("medium", description="Priority level: high, medium, or low.")
+    potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
+    potential_savings_co2e_grams: Optional[float] = Field(
+        None, description="Estimated CO2e savings in grams if implemented."
+    )
+    current_cpu_request_millicores: Optional[int] = Field(None, description="Current CPU request in millicores.")
+    recommended_cpu_request_millicores: Optional[int] = Field(
+        None, description="Recommended CPU request in millicores."
+    )
+    current_memory_request_bytes: Optional[int] = Field(None, description="Current memory request in bytes.")
+    recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
+    cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
+    target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When the recommendation was generated.",
+    )
+
+    @classmethod
+    def from_recommendation(
+        cls, rec: "Recommendation", created_at: Optional[datetime] = None
+    ) -> "RecommendationRecord":
+        """Creates a RecommendationRecord from a Recommendation.
+
+        Args:
+            rec: The source Recommendation object.
+            created_at: Optional timestamp override; defaults to now (UTC).
+
+        Returns:
+            A new RecommendationRecord instance.
+        """
+        return cls(
+            pod_name=rec.pod_name,
+            namespace=rec.namespace,
+            type=rec.type,
+            description=rec.description,
+            reason=rec.reason,
+            priority=rec.priority,
+            potential_savings_cost=rec.potential_savings_cost,
+            potential_savings_co2e_grams=rec.potential_savings_co2e_grams,
+            current_cpu_request_millicores=rec.current_cpu_request_millicores,
+            recommended_cpu_request_millicores=rec.recommended_cpu_request_millicores,
+            current_memory_request_bytes=rec.current_memory_request_bytes,
+            recommended_memory_request_bytes=rec.recommended_memory_request_bytes,
+            cron_schedule=rec.cron_schedule,
+            target_node=rec.target_node,
+            created_at=created_at or datetime.now(timezone.utc),
+        )
+
+
 class EnvironmentalMetric(BaseModel):
     """
     Holds environmental factors for a specific location (e.g., a cloud region).

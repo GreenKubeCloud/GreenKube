@@ -237,6 +237,28 @@ class DatabaseManager:
                 );
             """)
 
+            # --- Table for recommendation_history ---
+            await self.connection.execute("""
+                CREATE TABLE IF NOT EXISTS recommendation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pod_name TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    reason TEXT,
+                    priority TEXT,
+                    potential_savings_cost REAL,
+                    potential_savings_co2e_grams REAL,
+                    current_cpu_request_millicores INTEGER,
+                    recommended_cpu_request_millicores INTEGER,
+                    current_memory_request_bytes INTEGER,
+                    recommended_memory_request_bytes INTEGER,
+                    cron_schedule TEXT,
+                    target_node TEXT,
+                    created_at TEXT NOT NULL
+                );
+            """)
+
             # Migrations for existing tables
             # aiosqlite executes raise sqlite3.OperationalError
             try:
@@ -435,6 +457,32 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_instance_profiles_type ON instance_carbon_profiles(
                     provider, instance_type
                 );
+            """)
+
+            # --- Table for recommendation_history ---
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS recommendation_history (
+                    id SERIAL PRIMARY KEY,
+                    pod_name TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    reason TEXT,
+                    priority TEXT,
+                    potential_savings_cost REAL,
+                    potential_savings_co2e_grams REAL,
+                    current_cpu_request_millicores INTEGER,
+                    recommended_cpu_request_millicores INTEGER,
+                    current_memory_request_bytes BIGINT,
+                    recommended_memory_request_bytes BIGINT,
+                    cron_schedule TEXT,
+                    target_node TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reco_history_created_at
+                    ON recommendation_history(created_at);
+                CREATE INDEX IF NOT EXISTS idx_reco_history_type
+                    ON recommendation_history(type);
             """)
 
             # --- Migrations ---

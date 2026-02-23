@@ -1,9 +1,9 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
-from ..models.metrics import CombinedMetric
+from ..models.metrics import CombinedMetric, RecommendationRecord
 from ..models.node import NodeInfo
 
 
@@ -99,5 +99,47 @@ class CarbonIntensityRepository(ABC):
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
         Reads CombinedMetric objects from the repository within a given time range.
+        """
+        pass
+
+
+class RecommendationRepository(ABC):
+    """
+    Abstract base class for recommendation history repositories.
+    Defines the contract for saving and retrieving recommendation snapshots.
+    """
+
+    @abstractmethod
+    async def save_recommendations(self, records: List[RecommendationRecord]) -> int:
+        """
+        Saves recommendation records to the repository.
+
+        Args:
+            records: A list of RecommendationRecord objects to persist.
+
+        Returns:
+            The number of records saved.
+        """
+        pass
+
+    @abstractmethod
+    async def get_recommendations(
+        self,
+        start: datetime,
+        end: datetime,
+        rec_type: Optional[str] = None,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """
+        Retrieves recommendation records within a time range.
+
+        Args:
+            start: Start datetime (inclusive).
+            end: End datetime (inclusive).
+            rec_type: Optional filter by recommendation type.
+            namespace: Optional filter by namespace.
+
+        Returns:
+            A list of RecommendationRecord objects.
         """
         pass

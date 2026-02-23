@@ -5,7 +5,7 @@ Uses FastAPI's TestClient with dependency overrides to inject mock repositories.
 """
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,9 +14,20 @@ from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_carbon_repository,
     get_node_repository,
+    get_recommendation_repository,
 )
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.node import NodeInfo
+
+
+@pytest.fixture(autouse=True)
+def mock_hpa_collector():
+    """Mock HPA collector to avoid K8s API calls in tests."""
+    with patch("greenkube.api.routers.recommendations.HPACollector") as mock_cls:
+        instance = AsyncMock()
+        instance.collect = AsyncMock(return_value=set())
+        mock_cls.return_value = instance
+        yield mock_cls
 
 
 @pytest.fixture
@@ -38,11 +49,21 @@ def mock_node_repo():
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_node_repo):
+def mock_reco_repo():
+    """Returns a mock RecommendationRepository."""
+    repo = AsyncMock()
+    repo.save_recommendations = AsyncMock(return_value=0)
+    repo.get_recommendations = AsyncMock(return_value=[])
+    return repo
+
+
+@pytest.fixture
+def client(mock_carbon_repo, mock_node_repo, mock_reco_repo):
     """Creates a TestClient with dependency overrides for all repositories."""
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
+    app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

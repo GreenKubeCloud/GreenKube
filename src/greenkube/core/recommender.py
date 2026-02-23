@@ -12,7 +12,7 @@ and node-level optimizations.
 import logging
 import math
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from greenkube.core.config import config
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
@@ -43,12 +43,16 @@ class Recommender:
         self,
         metrics: List[CombinedMetric],
         node_infos: Optional[List] = None,
+        hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
     ) -> List[Recommendation]:
         """Generates all recommendation types from metrics.
 
         Args:
             metrics: List of CombinedMetric objects to analyze.
             node_infos: Optional list of NodeInfo objects for node-level analysis.
+            hpa_targets: Optional set of (namespace, kind, name) tuples for workloads
+                         already governed by an HPA. Autoscaling recommendations are
+                         skipped for these workloads.
 
         Returns:
             A deduplicated list of Recommendation objects.
@@ -62,7 +66,7 @@ class Recommender:
         recs.extend(self._analyze_zombies(metrics))
         recs.extend(self._analyze_cpu_rightsizing(pod_series))
         recs.extend(self._analyze_memory_rightsizing(pod_series))
-        recs.extend(self._analyze_autoscaling(pod_series))
+        recs.extend(self._analyze_autoscaling(pod_series, hpa_targets=hpa_targets))
         recs.extend(self._analyze_off_peak(pod_series))
         recs.extend(self._analyze_idle_namespaces(metrics))
         recs.extend(self._analyze_carbon_aware(metrics))
@@ -318,8 +322,16 @@ class Recommender:
     # AUTOSCALING_CANDIDATE
     # ------------------------------------------------------------------
 
-    def _analyze_autoscaling(self, pod_series: Dict[Tuple[str, str], List[CombinedMetric]]) -> List[Recommendation]:
-        """Identifies pods with spiky load patterns that would benefit from HPA."""
+    def _analyze_autoscaling(
+        self,
+        pod_series: Dict[Tuple[str, str], List[CombinedMetric]],
+        hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
+    ) -> List[Recommendation]:
+        """Identifies pods with spiky load patterns that would benefit from HPA.
+
+        Skips pods whose owner (Deployment/StatefulSet) is already managed by
+        an existing HorizontalPodAutoscaler.
+        """
         recs = []
 
         for (ns, pod), series in pod_series.items():
@@ -342,6 +354,23 @@ class Recommender:
             spike_ratio = max_usage / mean_usage
 
             if cv > self.autoscaling_cv_threshold and spike_ratio > self.autoscaling_spike_ratio:
+                # Check if the pod's owner already has an HPA
+                if hpa_targets:
+                    owner_kinds = {m.owner_kind for m in series if m.owner_kind}
+                    owner_names = {m.owner_name for m in series if m.owner_name}
+                    if owner_kinds and owner_names:
+                        owner_kind = next(iter(owner_kinds))
+                        owner_name = next(iter(owner_names))
+                        if (ns, owner_kind, owner_name) in hpa_targets:
+                            LOG.debug(
+                                "Skipping autoscaling recommendation for %s/%s: HPA already exists for %s/%s",
+                                ns,
+                                pod,
+                                owner_kind,
+                                owner_name,
+                            )
+                            continue
+
                 recs.append(
                     Recommendation(
                         pod_name=pod,
