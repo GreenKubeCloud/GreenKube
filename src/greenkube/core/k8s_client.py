@@ -65,3 +65,13 @@ async def get_core_v1_api() -> typing.Optional[client.CoreV1Api]:
     if await ensure_k8s_config():
         return client.CoreV1Api()
     return None
+
+
+async def get_autoscaling_v2_api() -> typing.Optional[client.AutoscalingV2Api]:
+    """
+    Returns a configured AutoscalingV2Api instance for HPA operations.
+    Safe to call concurrently.
+    """
+    if await ensure_k8s_config():
+        return client.AutoscalingV2Api()
+    return None
