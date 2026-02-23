@@ -15,10 +15,11 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from greenkube import __version__
+from greenkube.api.metrics_endpoint import get_metrics_output
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations
 from greenkube.core.config import config
@@ -75,6 +76,15 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
+
+    # Prometheus metrics endpoint for Grafana dashboards
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus_metrics():
+        """Expose Prometheus-compatible metrics for scraping."""
+        return Response(
+            content=get_metrics_output(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     # Serve the SPA frontend if the build directory exists
     _mount_frontend(app)
