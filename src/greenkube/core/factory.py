@@ -26,7 +26,7 @@ from ..core.processor import DataProcessor
 from ..energy.estimator import BasicEstimator
 
 # --- GreenKube Storage Imports ---
-from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
+from ..storage.base_repository import CarbonIntensityRepository, NodeRepository, RecommendationRepository
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
 )
@@ -103,6 +103,35 @@ def get_embodied_repository() -> EmbodiedRepository:
     from ..core.db import db_manager
 
     return EmbodiedRepository(db_manager)
+
+
+@lru_cache(maxsize=1)
+def get_recommendation_repository() -> RecommendationRepository:
+    """
+    Factory function to get the recommendation history repository.
+    Uses lru_cache to act as a singleton.
+    """
+    db_type = os.getenv("DB_TYPE", config.DB_TYPE)
+
+    if db_type == "sqlite":
+        from ..core.db import db_manager
+        from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
+
+        return SQLiteRecommendationRepository(db_manager)
+    elif db_type == "postgres":
+        from ..core.db import db_manager
+        from ..storage.postgres_recommendation_repository import PostgresRecommendationRepository
+
+        return PostgresRecommendationRepository(db_manager)
+    else:
+        logger.warning(
+            "RecommendationRepository not implemented for DB_TYPE '%s'. Using SQLite fallback.",
+            db_type,
+        )
+        from ..core.db import db_manager
+        from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
+
+        return SQLiteRecommendationRepository(db_manager)
 
 
 @lru_cache(maxsize=1)
