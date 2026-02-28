@@ -1,7 +1,7 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List
 
 import aiosqlite
@@ -33,7 +33,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     async def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
-        Only considers data from the last 48 hours to avoid using stale values.
+        Consistent with the PostgreSQL implementation (no arbitrary lookback window).
         """
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -44,31 +44,16 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     dt = ensure_utc(timestamp)
                     normalized_ts = to_iso_z(dt)
                 except ValueError:
-                    # If parsing fails, fallback to using the timestamp as-is (though it likely won't match)
-                    dt = None
                     normalized_ts = timestamp
 
-                # Define lookback window (48 hours)
-                if dt:
-                    lookback_limit = to_iso_z(dt - timedelta(hours=48))
-                    query = """
-                        SELECT carbon_intensity
-                        FROM carbon_intensity_history
-                        WHERE zone = ? AND datetime <= ? AND datetime >= ?
-                        ORDER BY datetime DESC
-                        LIMIT 1
-                    """
-                    params = (zone, normalized_ts, lookback_limit)
-                else:
-                    # Fallback: use original query without time bound if timestamp parsing fails
-                    query = """
-                        SELECT carbon_intensity
-                        FROM carbon_intensity_history
-                        WHERE zone = ? AND datetime <= ?
-                        ORDER BY datetime DESC
-                        LIMIT 1
-                    """
-                    params = (zone, normalized_ts)
+                query = """
+                    SELECT carbon_intensity
+                    FROM carbon_intensity_history
+                    WHERE zone = ? AND datetime <= ?
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                """
+                params = (zone, normalized_ts)
 
                 async with conn.execute(query, params) as cursor:
                     result = await cursor.fetchone()
