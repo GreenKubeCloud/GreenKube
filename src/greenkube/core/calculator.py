@@ -60,6 +60,28 @@ class CarbonCalculator:
         async with self._lock:
             self._intensity_cache.clear()
 
+    async def prefetch_intensity(self, zone: str, timestamp: str, intensity: float):
+        """Pre-populate the cache with a known intensity value.
+
+        The timestamp is normalized using the same logic as ``calculate_emissions``
+        so that a subsequent calculation for the same (zone, normalized-time) will
+        hit the cache instead of querying the repository/API again.
+        """
+        dt = _to_datetime(timestamp)
+        gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+        if gran == "hour":
+            normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
+        elif gran == "day":
+            normalized_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            normalized_dt = dt
+        normalized = _iso_z(normalized_dt)
+        cache_key = (zone, normalized)
+
+        async with self._lock:
+            if cache_key not in self._intensity_cache:
+                self._intensity_cache[cache_key] = intensity
+
     async def calculate_emissions(
         self, joules: float, zone: str, timestamp: str, pue: Optional[float] = None
     ) -> Optional[CarbonCalculationResult]:

@@ -9,6 +9,7 @@ from greenkube.collectors.boavizta_collector import BoaviztaCollector
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 from greenkube.utils.date_utils import parse_iso_date
 
+from .. import __version__
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -431,35 +432,18 @@ class DataProcessor:
                 )
 
             # Populate cache entries for each metric timestamp so later lookups
-            # in CarbonCalculator.find in-cache by exact (zone,timestamp) succeed
-            for m in metrics:
-                # Normalize metric timestamp to match calculator cache keys
-                ts = m.timestamp
-                if isinstance(ts, str):
-                    dt = parse_iso_date(ts)
-                    if not dt:
-                        dt = rep_dt
-                else:
-                    dt = ts
-                if gran == "hour":
-                    key_dt = dt.replace(minute=0, second=0, microsecond=0)
-                elif gran == "day":
-                    key_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-                else:
-                    key_dt = dt
-                # Create both 'Z' and '+00:00' ISO formats to be tolerant of
-                # callers/tests that expect either representation.
-                key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
-                key_ts_z = key_dt_utc.isoformat().replace("+00:00", "Z")
-                key_ts_plus = key_dt_utc.isoformat()
-
-                cache_key_z = (zone, key_ts_z)
-                cache_key_plus = (zone, key_ts_plus)
-
-                if cache_key_z not in self.calculator._intensity_cache:
-                    self.calculator._intensity_cache[cache_key_z] = intensity
-                if cache_key_plus not in self.calculator._intensity_cache:
-                    self.calculator._intensity_cache[cache_key_plus] = intensity
+            # in CarbonCalculator succeed via the public prefetch API.
+            if intensity is not None:
+                for m in metrics:
+                    ts = m.timestamp
+                    if isinstance(ts, str):
+                        dt = parse_iso_date(ts)
+                        if not dt:
+                            dt = rep_dt
+                    else:
+                        dt = ts
+                    ts_str = ts if isinstance(ts, str) else dt.isoformat()
+                    await self.calculator.prefetch_intensity(zone, ts_str, intensity)
 
         if zone_to_metrics:
             logger.info("Prefetching intensity for %d zones in parallel...", len(zone_to_metrics))
@@ -697,6 +681,7 @@ class DataProcessor:
                     is_estimated=is_estimated,
                     estimation_reasons=estimation_reasons,
                     embodied_co2e_grams=embodied_emissions_grams,
+                    calculation_version=__version__,
                 )
                 combined_metrics.append(combined)
             else:
@@ -1067,19 +1052,12 @@ class DataProcessor:
                 context = node_contexts.get(node_name)
                 zone = context.emaps_zone if context else config.DEFAULT_ZONE
                 ts = em.timestamp
-                key_dt = ts.replace(minute=0, second=0, microsecond=0)
-                key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
-                key_plus = key_dt_utc.isoformat()
-                key_z = key_plus.replace("+00:00", "Z")
-                cache_key_plus = (zone, key_plus)
-                cache_key_z = (zone, key_z)
-                if cache_key_plus not in calculator._intensity_cache and cache_key_z not in calculator._intensity_cache:
-                    try:
-                        intensity = await repository.get_for_zone_at_time(zone, key_plus)
-                    except Exception:
-                        intensity = None
-                    calculator._intensity_cache[cache_key_plus] = intensity
-                    calculator._intensity_cache[cache_key_z] = intensity
+                try:
+                    intensity = await repository.get_for_zone_at_time(zone, ts.isoformat())
+                except Exception:
+                    intensity = None
+                if intensity is not None:
+                    await calculator.prefetch_intensity(zone, ts.isoformat(), intensity)
 
             # Build CombinedMetric objects for this chunk
             for em in chunk_energy_metrics:
@@ -1171,6 +1149,7 @@ class DataProcessor:
                             disk_write_bytes=range_disk_write_map.get(pod_key),
                             ephemeral_storage_request_bytes=pod_ephemeral_storage_map.get(pod_key) or None,
                             restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
+                            calculation_version=__version__,
                         )
                     )
 
