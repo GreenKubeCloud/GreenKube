@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Helm `recommendSystemNamespaces` moved inside `recommendations` scope in `values.yaml`
 - PostgreSQL credentials no longer shipped as plain text in Helm defaults
 - DB connection string sourced from Secret instead of inline env var in deployment
+- `collect_detailed_info()` now delegates to `collect()` to avoid inconsistent results
+- Expanded test fixture env patching to prevent production defaults leaking into tests
 
 ### Added
 - Namespace input validation on all API endpoints (Kubernetes naming rules)
@@ -24,10 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - This changelog
 - Architecture diagram in `docs/architecture.md`
 - API curl examples in README
+- **API security:** Optional bearer-token authentication (`GREENKUBE_API_KEY`), configurable CORS origins, rate limiting via slowapi
+- **Pagination:** `GET /api/v1/metrics` now supports `offset` and `limit` query parameters
+- **Docker healthcheck:** Built-in `HEALTHCHECK` instruction for standalone usage
+- **Helm chart tests:** `helm test` connectivity validation via `test-connection.yaml`
+- **Graceful shutdown:** `preStop` lifecycle hook on the API container
+- **Integration tests:** End-to-end API tests with real SQLite backend and migration tests
+- **Methodology section** in README explaining how energy and CO₂e are estimated
+- Shared `parse_duration()` utility used by both CLI and API
+- `Config.reload()` for clean test isolation
 
 ### Changed
 - Minimum Python version raised from 3.9 to 3.10 (3.9 reached EOL October 2025)
 - Helm chart generates a random PostgreSQL password when none is provided
+- Replaced f-string logging with lazy `%`-formatting throughout the codebase
+- `Recommendation` model uses typed `scope` field instead of sentinel `pod_name="*"`
 
 ## [0.2.2] — 2026-02-15
 

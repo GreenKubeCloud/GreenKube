@@ -6,7 +6,7 @@ GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams 
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Stars](https://img.shields.io/github/stars/GreenKubeCloud/greenkube?style=social)](https://github.com/GreenKubeCloud/greenkube/stargazers)
-[![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](https://github.com/GreenKubeCloud/greenkube)
+[![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 
 ## 🎯 Mission
@@ -293,6 +293,25 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **Transparent:** Clear flagging of estimated vs. measured values with reasoning
 - **Modular:** Each component is independently testable and replaceable
 - **Observable:** Comprehensive logging at all pipeline stages
+
+
+## 🔬 How Energy & CO₂e Estimation Works
+
+GreenKube's estimation pipeline converts raw Kubernetes metrics into actionable carbon data in four steps:
+
+1. **Collect CPU usage** — Prometheus provides per-pod CPU utilisation in millicores over each collection interval.
+2. **Map to power** — Each node's instance type is matched to a power profile (min/max watts per vCPU) derived from [SPECpower](https://www.spec.org/power_ssj2008/) benchmarks and the [Cloud Carbon Footprint](https://www.cloudcarbonfootprint.org/) coefficient database. The power draw is linearly interpolated between min watts (idle) and max watts (100 % utilisation).
+3. **Apply PUE** — The estimated power is multiplied by the Power Usage Effectiveness factor for the cloud provider's data centre (e.g. 1.135 for AWS, 1.10 for GCP).
+4. **Convert to CO₂e** — Energy (kWh) is multiplied by the grid carbon intensity of the node's geographic zone. When available, real-time intensity is fetched from the [Electricity Maps API](https://www.electricitymaps.com/); otherwise a configurable default is used.
+
+> **Embodied emissions** are estimated separately via the [Boavizta API](https://doc.api.boavizta.org/), which models the manufacturing footprint of cloud instances amortised over their expected lifespan.
+
+For provider-specific coefficients and the full derivation, see [`docs/power_estimation_methodology.md`](docs/power_estimation_methodology.md).
+
+
+## 📋 Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for a full version history and the [GitHub Releases](https://github.com/GreenKubeCloud/GreenKube/releases) page for published releases.
 
 
 ## 🤝 Contributing
