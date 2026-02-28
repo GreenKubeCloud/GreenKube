@@ -59,7 +59,9 @@ test = [
 ]
 dev = [
     "pre-commit", 
-    "ruff" 
+    "ruff",
+    "toml",
+    "ruamel.yaml",
 ]
 
 [project.urls]
