@@ -53,6 +53,10 @@ class ElectricityMapsCollector(BaseCollector):
         """
         if self.api_token:
             history_url = f"{API_BASE_URL}/carbon-intensity/history?zone={zone}"
+            if target_datetime:
+                if target_datetime.tzinfo is None:
+                    target_datetime = target_datetime.replace(tzinfo=timezone.utc)
+                history_url += f"&datetime={target_datetime.isoformat()}"
             logger.info(f"Fetching carbon intensity history for zone: {zone}...")
 
             client = await self._get_client()
