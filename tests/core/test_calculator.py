@@ -8,6 +8,7 @@ from greenkube.core.calculator import CarbonCalculator
 
 # --- Import the config object ---
 from greenkube.core.config import config
+from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 
 # --------------------------------
 
@@ -54,32 +55,44 @@ async def test_calculate_emissions_success(mock_repository):
 
 
 @pytest.mark.asyncio
-async def test_calculate_emissions_no_intensity_data(mock_repository):
+async def test_calculate_emissions_no_intensity_data_zone_default(mock_repository):
     """
-    Verifies that the calculation applies the formula using the configured
-    DEFAULT_INTENSITY when carbon intensity data is unavailable.
+    Verifies that when repository returns None for a known zone (FR),
+    the calculator uses the zone-specific default from the CSV table.
     """
     # Arrange
-    mock_repository.get_for_zone_at_time.return_value = None  # Simulate missing data
-    # --- Use config.DEFAULT_PUE for initialization ---
+    mock_repository.get_for_zone_at_time.return_value = None
     calculator = CarbonCalculator(repository=mock_repository, pue=config.DEFAULT_PUE)
-    # -----------------------------------------------
-    # --- Removed the hardcoded effective_default_intensity variable ---
+    zone_default_intensity = float(DEFAULT_GRID_INTENSITY_BY_ZONE["FR"])
 
     # Act
     result = await calculator.calculate_emissions(joules=TEST_JOULES, zone=TEST_ZONE, timestamp=TEST_TIMESTAMP)
 
     # Assert
-    # 1. Verify repository call
     mock_repository.get_for_zone_at_time.assert_called_once_with(TEST_ZONE, TEST_TIMESTAMP)
+    expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * zone_default_intensity
+    assert result.co2e_grams == pytest.approx(expected_co2e)
+    assert result.grid_intensity == zone_default_intensity
 
-    # 2. Verify calculation using config.DEFAULT_INTENSITY
-    # --- Use config.DEFAULT_INTENSITY in the expected calculation ---
-    expected_co2e_with_default = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * config.DEFAULT_INTENSITY
-    assert result.co2e_grams == pytest.approx(expected_co2e_with_default)
-    # --- Check against config.DEFAULT_INTENSITY ---
+
+@pytest.mark.asyncio
+async def test_calculate_emissions_no_intensity_data_global_fallback(mock_repository):
+    """
+    Verifies that when repository returns None for an unknown zone (not in
+    the default CSV), the calculator falls back to config.DEFAULT_INTENSITY.
+    """
+    # Arrange
+    mock_repository.get_for_zone_at_time.return_value = None
+    calculator = CarbonCalculator(repository=mock_repository, pue=config.DEFAULT_PUE)
+    unknown_zone = "XX-UNKNOWN"
+
+    # Act
+    result = await calculator.calculate_emissions(joules=TEST_JOULES, zone=unknown_zone, timestamp=TEST_TIMESTAMP)
+
+    # Assert
+    expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * config.DEFAULT_INTENSITY
+    assert result.co2e_grams == pytest.approx(expected_co2e)
     assert result.grid_intensity == config.DEFAULT_INTENSITY
-    # -------------------------------------------
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from typing import Optional
 
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
+from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
 
@@ -96,16 +97,31 @@ class CarbonCalculator:
 
         # Use default if intensity data is missing
         if grid_intensity_value is None:
-            async with self._lock:
-                if cache_key not in self._intensity_cache or self._intensity_cache[cache_key] is None:
+            # Prefer zone-specific default from the Electricity Maps CSV over the
+            # global hardcoded fallback (500 gCO2/kWh) which is far too high for
+            # low-carbon grids like France (26) or Sweden (20).
+            zone_default = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
+            if zone_default is not None:
+                grid_intensity_value = float(zone_default)
+                async with self._lock:
+                    self._intensity_cache[cache_key] = grid_intensity_value
+                    logger.info(
+                        "Carbon intensity missing for zone '%s' at %s; using zone default %s gCO2e/kWh",
+                        zone,
+                        normalized_dt.isoformat(),
+                        grid_intensity_value,
+                    )
+            else:
+                grid_intensity_value = config.DEFAULT_INTENSITY
+                async with self._lock:
                     self._intensity_cache[cache_key] = None
                     logger.warning(
-                        "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
+                        "Carbon intensity missing for zone '%s' at %s and no zone default available; "
+                        "using global fallback %s gCO2e/kWh",
                         zone,
                         normalized_dt.isoformat(),
                         config.DEFAULT_INTENSITY,
                     )
-            grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:
             return CarbonCalculationResult(
