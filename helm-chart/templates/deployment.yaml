@@ -111,6 +111,14 @@ spec:
             - name: http-api
               containerPort: {{ .Values.config.api.port }}
               protocol: TCP
+          volumeMounts:
+            - name: secrets
+              mountPath: /etc/greenkube/secrets
+              readOnly: true
+            {{- if eq .Values.config.db.type "sqlite" }}
+            - name: data
+              mountPath: /data
+            {{- end }}
           {{- if .Values.config.api.livenessProbe.enabled }}
           livenessProbe:
             httpGet:
