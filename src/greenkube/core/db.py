@@ -201,6 +201,7 @@ class DatabaseManager:
                     is_estimated BOOLEAN,
                     estimation_reasons TEXT,
                     embodied_co2e_grams REAL,
+                    calculation_version TEXT,
                     UNIQUE(pod_name, namespace, "timestamp")
                 );
             """)
@@ -330,6 +331,12 @@ class DatabaseManager:
             except sqlite3.OperationalError:
                 pass
 
+            # Migration: add calculation_version column
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN calculation_version TEXT")
+            except sqlite3.OperationalError:
+                pass
+
             # Add indexes for common query patterns
             await self.connection.execute('CREATE INDEX IF NOT EXISTS idx_combined_ts ON combined_metrics("timestamp")')
             await self.connection.execute(
@@ -431,6 +438,7 @@ class DatabaseManager:
                     is_estimated BOOLEAN,
                     estimation_reasons TEXT,
                     embodied_co2e_grams REAL,
+                    calculation_version TEXT,
                     UNIQUE(pod_name, namespace, timestamp)
                 );
                 CREATE INDEX IF NOT EXISTS idx_combined_metrics_timestamp ON combined_metrics(timestamp);
@@ -559,6 +567,9 @@ class DatabaseManager:
 
                 # Migration: add node column to combined_metrics
                 await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node TEXT;")
+
+                # Migration: add calculation_version column
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS calculation_version TEXT;")
             except Exception as e:
                 logger.warning(f"Migration warning (non-critical): {e}")
 

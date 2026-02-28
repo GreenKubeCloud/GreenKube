@@ -115,7 +115,8 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         period, timestamp,
                         duration_seconds, grid_intensity_timestamp,
                         node, node_instance_type, node_zone,
-                        emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams
+                        emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams,
+                        calculation_version
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -129,7 +130,8 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         $24, $25,
                         $26, $27,
                         $28, $29, $30,
-                        $31, $32, $33, $34
+                        $31, $32, $33, $34,
+                        $35
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -162,7 +164,8 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         emaps_zone = EXCLUDED.emaps_zone,
                         estimation_reasons = EXCLUDED.estimation_reasons,
                         is_estimated = EXCLUDED.is_estimated,
-                        embodied_co2e_grams = EXCLUDED.embodied_co2e_grams;
+                        embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
+                        calculation_version = EXCLUDED.calculation_version;
                 """
 
                 metrics_data = []
@@ -206,6 +209,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                             reasons_json,
                             metric.is_estimated,
                             metric.embodied_co2e_grams,
+                            metric.calculation_version,
                         )
                     )
 

@@ -91,6 +91,7 @@ class CombinedMetricDoc(Document):
     emaps_zone = Keyword()
     is_estimated = Keyword()
     estimation_reasons = Text()
+    calculation_version = Keyword()
 
     class Index:
         name = "greenkube_combined_metrics"

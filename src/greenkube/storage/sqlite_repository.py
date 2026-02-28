@@ -157,11 +157,13 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                   owner_kind, owner_name,
                                   period, "timestamp", duration_seconds,
                                   grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
-                                  is_estimated, estimation_reasons, embodied_co2e_grams)
+                                  is_estimated, estimation_reasons, embodied_co2e_grams,
+                                  calculation_version)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?
                             )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                                 total_cost = excluded.total_cost,
@@ -194,7 +196,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 emaps_zone = excluded.emaps_zone,
                                 is_estimated = excluded.is_estimated,
                                 estimation_reasons = excluded.estimation_reasons,
-                                embodied_co2e_grams = excluded.embodied_co2e_grams;
+                                embodied_co2e_grams = excluded.embodied_co2e_grams,
+                                calculation_version = excluded.calculation_version;
                         """,
                             (
                                 metric.pod_name,
@@ -231,6 +234,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 metric.is_estimated,
                                 json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                                 metric.embodied_co2e_grams,
+                                metric.calculation_version,
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -264,7 +268,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                            owner_kind, owner_name,
                            period, "timestamp", duration_seconds,
                            grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
-                           is_estimated, estimation_reasons, embodied_co2e_grams
+                           is_estimated, estimation_reasons, embodied_co2e_grams,
+                           calculation_version
                     FROM combined_metrics
                     WHERE "timestamp" BETWEEN ? AND ?
                 """,
@@ -318,6 +323,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 is_estimated=bool(row["is_estimated"]),
                                 estimation_reasons=estimation_reasons,
                                 embodied_co2e_grams=row["embodied_co2e_grams"],
+                                calculation_version=row["calculation_version"],
                             )
                         )
                     return metrics
