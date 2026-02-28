@@ -114,7 +114,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         owner_kind, owner_name,
                         period, timestamp,
                         duration_seconds, grid_intensity_timestamp,
-                        node_instance_type, node_zone,
+                        node, node_instance_type, node_zone,
                         emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams
                     ) VALUES (
                         $1, $2, $3, $4,
@@ -128,8 +128,8 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         $22, $23,
                         $24, $25,
                         $26, $27,
-                        $28, $29,
-                        $30, $31::jsonb, $32, $33
+                        $28, $29, $30,
+                        $31, $32, $33, $34
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -156,6 +156,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                         period = EXCLUDED.period,
                         duration_seconds = EXCLUDED.duration_seconds,
                         grid_intensity_timestamp = EXCLUDED.grid_intensity_timestamp,
+                        node = EXCLUDED.node,
                         node_instance_type = EXCLUDED.node_instance_type,
                         node_zone = EXCLUDED.node_zone,
                         emaps_zone = EXCLUDED.emaps_zone,
@@ -198,6 +199,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                             metric.timestamp,
                             metric.duration_seconds,
                             metric.grid_intensity_timestamp,
+                            metric.node,
                             metric.node_instance_type,
                             metric.node_zone,
                             metric.emaps_zone,
@@ -230,6 +232,9 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                 metrics = []
                 for row in results:
                     metric_data = dict(row)
+
+                    # Remove database-only columns not in CombinedMetric model
+                    metric_data.pop("id", None)
 
                     # Deserialize estimation_reasons from JSON string
                     if "estimation_reasons" in metric_data and isinstance(metric_data["estimation_reasons"], str):
