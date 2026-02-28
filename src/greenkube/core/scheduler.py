@@ -1,9 +1,13 @@
 import asyncio
 import logging
+import random
 import re
 from typing import Callable, Coroutine, List
 
 logger = logging.getLogger(__name__)
+
+# Maximum consecutive failures before capping the backoff delay
+_MAX_BACKOFF_MULTIPLIER = 8
 
 
 class Scheduler:
@@ -16,15 +20,33 @@ class Scheduler:
         logger.info("AsyncScheduler initialized.")
 
     async def _run_periodically(self, interval_seconds: int, job_func: Callable[[], Coroutine]):
-        """Internal loop to run a job periodically."""
+        """Internal loop to run a job periodically with jitter and exponential backoff."""
+        consecutive_failures = 0
         try:
             while True:
+                start = asyncio.get_event_loop().time()
                 try:
                     await job_func()
+                    consecutive_failures = 0
                 except Exception as e:
+                    consecutive_failures += 1
                     logger.error(f"Error in scheduled job '{job_func.__name__}': {e}", exc_info=True)
 
-                await asyncio.sleep(interval_seconds)
+                # Calculate how long to sleep.
+                # On success: sleep until next_run = start + interval (± jitter).
+                # On failure: apply exponential backoff capped at _MAX_BACKOFF_MULTIPLIER × interval.
+                elapsed = asyncio.get_event_loop().time() - start
+                base_sleep = max(interval_seconds - elapsed, 0)
+
+                if consecutive_failures > 0:
+                    backoff = min(2**consecutive_failures, _MAX_BACKOFF_MULTIPLIER)
+                    base_sleep = min(base_sleep * backoff, interval_seconds * _MAX_BACKOFF_MULTIPLIER)
+
+                # Add ±10% jitter to spread load across replicas
+                jitter = base_sleep * 0.1 * (2 * random.random() - 1)
+                sleep_time = max(base_sleep + jitter, 1.0)
+
+                await asyncio.sleep(sleep_time)
         except asyncio.CancelledError:
             logger.info(f"Job '{job_func.__name__}' cancelled.")
             raise
