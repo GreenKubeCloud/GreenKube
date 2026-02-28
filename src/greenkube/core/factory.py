@@ -5,7 +5,6 @@ and the correct CarbonIntensityRepository.
 """
 
 import logging
-import os
 import traceback
 from functools import lru_cache
 
@@ -45,12 +44,10 @@ def get_repository() -> CarbonIntensityRepository:
     Factory function to get the appropriate repository based on config.
     Uses lru_cache to act as a singleton.
     """
-    # Allow tests to override DB_TYPE via environment variables (monkeypatch).
-    db_type = os.getenv("DB_TYPE", config.DB_TYPE)
+    db_type = config.DB_TYPE
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch repository.")
-        # Connection setup should be handled by the application entry point
         return ElasticsearchCarbonIntensityRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite repository.")
@@ -63,7 +60,7 @@ def get_repository() -> CarbonIntensityRepository:
 
         return PostgresCarbonIntensityRepository(db_manager)
     else:
-        raise NotImplementedError(f"Repository for DB_TYPE '{config.DB_TYPE}' not implemented.")
+        raise NotImplementedError(f"Repository for DB_TYPE '{db_type}' not implemented.")
 
 
 @lru_cache(maxsize=1)
@@ -111,7 +108,7 @@ def get_recommendation_repository() -> RecommendationRepository:
     Factory function to get the recommendation history repository.
     Uses lru_cache to act as a singleton.
     """
-    db_type = os.getenv("DB_TYPE", config.DB_TYPE)
+    db_type = config.DB_TYPE
 
     if db_type == "sqlite":
         from ..core.db import db_manager
@@ -177,3 +174,17 @@ def get_processor() -> DataProcessor:
         logger.error(f"An error occurred during processor initialization: {e}")
         logger.error("Processor initialization failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)
+
+
+def clear_caches():
+    """Clear all factory function caches.
+
+    This is primarily useful in tests to ensure a fresh set of components
+    after configuration changes. It can also be used at runtime if the
+    application needs to re-initialise its components after a config reload.
+    """
+    get_repository.cache_clear()
+    get_node_repository.cache_clear()
+    get_embodied_repository.cache_clear()
+    get_recommendation_repository.cache_clear()
+    get_processor.cache_clear()
