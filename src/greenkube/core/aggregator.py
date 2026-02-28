@@ -43,22 +43,26 @@ def aggregate_metrics(
     """
     # First, assign the correct period string to each metric based on its
     # timestamp and the requested grouping.
+    # We work on copies to avoid mutating the caller's input objects.
+    metrics_list = []
     for m in metrics:
-        if m.timestamp:
-            ts = m.timestamp
+        mc = m.model_copy()
+        if mc.timestamp:
+            ts = mc.timestamp
             if hourly:
-                m.period = ts.strftime("%Y-%m-%dT%H:00")
+                mc.period = ts.strftime("%Y-%m-%dT%H:00")
             elif daily:
-                m.period = ts.strftime("%Y-%m-%d")
+                mc.period = ts.strftime("%Y-%m-%d")
             elif weekly:
-                m.period = ts.strftime("%Y-W%V")  # ISO 8601 week number
+                mc.period = ts.strftime("%Y-W%V")  # ISO 8601 week number
             elif monthly:
-                m.period = ts.strftime("%Y-%m")
+                mc.period = ts.strftime("%Y-%m")
             elif yearly:
-                m.period = ts.strftime("%Y")
+                mc.period = ts.strftime("%Y")
+        metrics_list.append(mc)
 
     groups = defaultdict(list)
-    for m in metrics:
+    for m in metrics_list:
         groups[_key_for_metric(m)].append(m)
 
     result: List[CombinedMetric] = []
