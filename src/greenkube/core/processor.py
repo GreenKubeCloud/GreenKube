@@ -267,6 +267,8 @@ class DataProcessor:
         # --- Post-Processing / Dependency Logic ---
 
         # 1. Adjust Node Utilization based on Pod Requests (if Prom CPU is low)
+        # Track which nodes were adjusted so we can flag metrics as estimated.
+        cpu_adjusted_nodes = set()
         if prom_metrics:
             try:
                 # Compute node totals from prom_metrics
@@ -290,6 +292,13 @@ class DataProcessor:
                                 total_reqs += pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
 
                             if total_reqs > 0:
+                                cpu_adjusted_nodes.add(node)
+                                logger.info(
+                                    "Node '%s' CPU %.4f below threshold; substituting pod requests (%.4f)",
+                                    node,
+                                    total_cpu,
+                                    total_reqs,
+                                )
                                 for itm in node_to_items.get(node, []):
                                     req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
                                     if req:
@@ -531,15 +540,19 @@ class DataProcessor:
                 logger.warning("Failed to save node snapshots: %s", e)
 
         # 5. Combine and Calculate
+        # OpenCost collect(window="1d") returns daily totals.  Divide by the
+        # number of steps in a day so each CombinedMetric carries the per-step cost.
+        steps_per_day = 86400 / self.estimator.query_range_step_sec
+
         for energy_metric in energy_metrics:
             pod_name = energy_metric.pod_name
             namespace = energy_metric.namespace
             pod_key = (namespace, pod_name)
 
-            # Find corresponding cost metric
+            # Find corresponding cost metric (daily total → per-step)
             cost_metric = cost_map.get(pod_name)
             if cost_metric:
-                total_cost = cost_metric.total_cost
+                total_cost = cost_metric.total_cost / steps_per_day
             else:
                 total_cost = config.DEFAULT_COST
 
@@ -592,7 +605,14 @@ class DataProcessor:
                 is_estimated = True
                 estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
 
-            # 5. Embodied Emissions (Boavizta)
+            # 5. From CPU Adjustment
+            if node_name in cpu_adjusted_nodes:
+                is_estimated = True
+                estimation_reasons.append(
+                    f"CPU usage on node '{node_name}' was below threshold; substituted pod requests"
+                )
+
+            # 6. Embodied Emissions (Boavizta)
             embodied_emissions_grams = 0.0
             node_info = nodes_info.get(node_name)
             if node_info and node_info.cloud_provider and node_info.instance_type:
