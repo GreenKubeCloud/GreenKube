@@ -21,6 +21,22 @@ class BoaviztaCollector(BaseCollector):
         self.headers = {}
         if self.api_token:
             self.headers["Authorization"] = f"Bearer {self.api_token}"
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the reusable HTTP client, creating it lazily if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                headers=self.headers,
+                timeout=config.DEFAULT_TIMEOUT_CONNECT,
+            )
+        return self._client
+
+    async def close(self):
+        """Close the reusable HTTP client to release connection pool resources."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def collect(self) -> List[Any]:
         """
@@ -61,18 +77,17 @@ class BoaviztaCollector(BaseCollector):
 
         logger.info(f"Fetching Boavizta impact for cloud instance: {provider} {instance_type}")
 
-        async with httpx.AsyncClient(headers=self.headers, timeout=config.DEFAULT_TIMEOUT_CONNECT) as client:
-            try:
-                response = await client.get(url, params=params)
-
-                response.raise_for_status()
-                return BoaviztaResponse(**response.json())
-            except httpx.HTTPError as e:
-                logger.error(f"Boavizta API error for cloud instance {provider}/{instance_type}: {e}")
-                return None
-            except Exception as e:
-                logger.error(f"Unexpected error calling Boavizta for {provider}/{instance_type}: {e}")
-                return None
+        client = await self._get_client()
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return BoaviztaResponse(**response.json())
+        except httpx.HTTPError as e:
+            logger.error(f"Boavizta API error for cloud instance {provider}/{instance_type}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error calling Boavizta for {provider}/{instance_type}: {e}")
+            return None
 
     async def _get_server_archetype_impact(
         self, archetype: str, verbose: bool, criteria: str
@@ -82,14 +97,14 @@ class BoaviztaCollector(BaseCollector):
 
         logger.info(f"Fetching Boavizta impact for server archetype: {archetype}")
 
-        async with httpx.AsyncClient(headers=self.headers, timeout=config.DEFAULT_TIMEOUT_CONNECT) as client:
-            try:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                return BoaviztaResponse(**response.json())
-            except httpx.HTTPError as e:
-                logger.error(f"Boavizta API error for archetype {archetype}: {e}")
-                return None
-            except Exception as e:
-                logger.error(f"Unexpected error calling Boavizta for archetype {archetype}: {e}")
-                return None
+        client = await self._get_client()
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return BoaviztaResponse(**response.json())
+        except httpx.HTTPError as e:
+            logger.error(f"Boavizta API error for archetype {archetype}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error calling Boavizta for archetype {archetype}: {e}")
+            return None
