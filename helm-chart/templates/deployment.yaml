@@ -61,14 +61,10 @@ spec:
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
             - name: DB_CONNECTION_STRING
-              {{- if .Values.postgres.enabled }}
-              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
-              {{- else }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "greenkube.fullname" . }}
                   key: DB_CONNECTION_STRING
-              {{- end }}
             {{- end }}
                 
           resources:
@@ -98,14 +94,10 @@ spec:
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
             - name: DB_CONNECTION_STRING
-              {{- if .Values.postgres.enabled }}
-              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
-              {{- else }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "greenkube.fullname" . }}
                   key: DB_CONNECTION_STRING
-              {{- end }}
             {{- end }}
           ports:
             - name: http-api

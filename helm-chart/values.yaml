@@ -132,8 +132,8 @@ config:
     idleNamespaceEnergyThreshold: 1000
     carbonAwareThreshold: 1.5
     nodeUtilizationThreshold: 0.2
-  # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
-  recommendSystemNamespaces: false
+    # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
+    recommendSystemNamespaces: false
 
 # Configuration for Elasticsearch (if db.type is "elasticsearch")
 elasticsearch:
@@ -146,7 +146,7 @@ secrets:
   # Electricity Maps API Token (Optional)
   # Without it, GreenKube uses the default carbon intensity value (config.defaultIntensity).
   # Get yours at: https://www.electricitymaps.com/
-  electricityMapsToken: dummy_token
+  electricityMapsToken: ""
 
   # Boavizta API Token (Optional)
   boaviztaToken: ''
@@ -184,7 +184,9 @@ postgres:
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    password: greenkube_password
+    # IMPORTANT: Override this value with --set postgres.auth.password=YOUR_PASSWORD
+    # A random password will be generated if left empty.
+    password: ""
     database: greenkube
   persistence:
     enabled: true
