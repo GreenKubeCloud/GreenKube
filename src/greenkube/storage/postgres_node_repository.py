@@ -55,10 +55,10 @@ class PostgresNodeRepository(NodeRepository):
                     )
 
                 await conn.executemany(query, nodes_data)
-                logger.info(f"Saved snapshot of {len(nodes)} nodes to Postgres.")
+                logger.info("Saved snapshot of %s nodes to Postgres.", len(nodes))
                 return len(nodes)
         except Exception as e:
-            logger.error(f"Error saving node snapshot to Postgres: {e}")
+            logger.error("Error saving node snapshot to Postgres: %s", e)
             raise QueryError(f"Error saving node snapshot: {e}") from e
 
     async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
@@ -91,7 +91,7 @@ class PostgresNodeRepository(NodeRepository):
 
                 return snapshots
         except Exception as e:
-            logger.error(f"Error getting snapshots from Postgres: {e}")
+            logger.error("Error getting snapshots from Postgres: %s", e)
             raise QueryError(f"Error getting snapshots: {e}") from e
 
     async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
@@ -120,5 +120,5 @@ class PostgresNodeRepository(NodeRepository):
 
                 return nodes
         except Exception as e:
-            logger.error(f"Error getting latest snapshots from Postgres: {e}")
+            logger.error("Error getting latest snapshots from Postgres: %s", e)
             raise QueryError(f"Error getting latest snapshots: {e}") from e

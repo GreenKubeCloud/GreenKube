@@ -82,6 +82,13 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
+  # Comma-separated list of allowed CORS origins.
+  # Use "*" to allow all origins (default).
+  corsOrigins: "*"
+
+  # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
+  apiRateLimit: "60/minute"
+
   # API server configuration
   api:
     enabled: true
@@ -132,8 +139,8 @@ config:
     idleNamespaceEnergyThreshold: 1000
     carbonAwareThreshold: 1.5
     nodeUtilizationThreshold: 0.2
-  # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
-  recommendSystemNamespaces: false
+    # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
+    recommendSystemNamespaces: false
 
 # Configuration for Elasticsearch (if db.type is "elasticsearch")
 elasticsearch:
@@ -146,10 +153,14 @@ secrets:
   # Electricity Maps API Token (Optional)
   # Without it, GreenKube uses the default carbon intensity value (config.defaultIntensity).
   # Get yours at: https://www.electricitymaps.com/
-  electricityMapsToken: dummy_token
+  electricityMapsToken: ""
 
   # Boavizta API Token (Optional)
   boaviztaToken: ''
+
+  # API Key for GreenKube API authentication (Optional).
+  # If empty, no authentication is required.
+  apiKey: ''
 
   # Connection string for PostgreSQL (only used if db.type is "postgres")
   # Example: "postgresql://user:password@host:port/dbname"
@@ -184,7 +195,9 @@ postgres:
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    password: greenkube_password
+    # IMPORTANT: Override this value with --set postgres.auth.password=YOUR_PASSWORD
+    # A random password will be generated if left empty.
+    password: ""
     database: greenkube
   persistence:
     enabled: true

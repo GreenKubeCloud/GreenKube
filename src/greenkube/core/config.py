@@ -46,7 +46,7 @@ class Config:
 
         # --- Network variables ---
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-        self.USER_AGENT = os.getenv("USER_AGENT", "GreenKube/1.0.0 (+https://github.com/greenkube)")
+        self.USER_AGENT = os.getenv("USER_AGENT", f"GreenKube/{self._get_version()} (+https://github.com/greenkube)")
         self.DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
         self.DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
 
@@ -116,6 +116,9 @@ class Config:
         # --- API variables ---
         self.API_HOST = os.getenv("API_HOST", "0.0.0.0")
         self.API_PORT = int(os.getenv("API_PORT", "8000"))
+        self.CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
+        self.API_KEY = os.getenv("GREENKUBE_API_KEY", "")
+        self.API_RATE_LIMIT = os.getenv("API_RATE_LIMIT", "60/minute")
 
         # --- Recommendation Engine variables ---
         self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (
@@ -140,6 +143,16 @@ class Config:
         self.NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
 
     @staticmethod
+    def _get_version() -> str:
+        """Return the package version string."""
+        try:
+            from greenkube import __version__
+
+            return __version__
+        except Exception:
+            return "0.0.0"
+
+    @staticmethod
     def _get_secret(key: str, default: str = None) -> str:
         """
         Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
@@ -154,7 +167,7 @@ class Config:
             try:
                 with open(secret_file, "r") as f:
                     value = f.read().strip()
-                    logging.getLogger(__name__).debug(f"Loaded secret '{key}' from {secret_file}")
+                    logging.getLogger(__name__).debug("Loaded secret '%s' from %s", key, secret_file)
                     return value
             except PermissionError as e:
                 # Fail fast with clear error message for permission issues
@@ -170,9 +183,6 @@ class Config:
                 ) from e
         # Fallback to environment variable
         return os.getenv(key, default)
-
-    # --- Default variables ---
-    DEFAULT_COST = 0.0
 
     # CLOUD_PROVIDER and DEFAULT_PUE are provided as properties so their
     # values are resolved at access time (reading environment variables and
@@ -238,9 +248,19 @@ class Config:
 
         if not os.getenv("DEFAULT_ZONE"):
             logging.warning(
-                f"DEFAULT_ZONE is not set. Using hardcoded default '{self.DEFAULT_ZONE}'. "
-                "This may result in inaccurate carbon intensity data if your cluster is not in France."
+                "DEFAULT_ZONE is not set. Using hardcoded default '%s'. "
+                "This may result in inaccurate carbon intensity data if your cluster is not in France.",
+                self.DEFAULT_ZONE,
             )
+
+    def reload(self) -> None:
+        """Re-read all configuration from the current environment variables.
+
+        Useful in tests where ``monkeypatch.setenv`` has been called after the
+        singleton was first created.  Call ``config.reload()`` instead of
+        manually patching individual attributes.
+        """
+        self.__init__()  # type: ignore[misc]
 
 
 # Instantiate the config to be imported by other modules

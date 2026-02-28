@@ -75,7 +75,7 @@ class BoaviztaCollector(BaseCollector):
         url = f"{self.api_url}/v1/cloud/instance"
         params = {"provider": provider, "instance_type": instance_type, "verbose": verbose, "criteria": criteria}
 
-        logger.info(f"Fetching Boavizta impact for cloud instance: {provider} {instance_type}")
+        logger.info("Fetching Boavizta impact for cloud instance: %s %s", provider, instance_type)
 
         client = await self._get_client()
         try:
@@ -83,10 +83,10 @@ class BoaviztaCollector(BaseCollector):
             response.raise_for_status()
             return BoaviztaResponse(**response.json())
         except httpx.HTTPError as e:
-            logger.error(f"Boavizta API error for cloud instance {provider}/{instance_type}: {e}")
+            logger.error("Boavizta API error for cloud instance %s/%s: %s", provider, instance_type, e)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error calling Boavizta for {provider}/{instance_type}: {e}")
+            logger.error("Unexpected error calling Boavizta for %s/%s: %s", provider, instance_type, e)
             return None
 
     async def _get_server_archetype_impact(
@@ -95,7 +95,7 @@ class BoaviztaCollector(BaseCollector):
         url = f"{self.api_url}/v1/server/"
         params = {"archetype": archetype, "verbose": verbose, "criteria": criteria}
 
-        logger.info(f"Fetching Boavizta impact for server archetype: {archetype}")
+        logger.info("Fetching Boavizta impact for server archetype: %s", archetype)
 
         client = await self._get_client()
         try:
@@ -103,8 +103,8 @@ class BoaviztaCollector(BaseCollector):
             response.raise_for_status()
             return BoaviztaResponse(**response.json())
         except httpx.HTTPError as e:
-            logger.error(f"Boavizta API error for archetype {archetype}: {e}")
+            logger.error("Boavizta API error for archetype %s: %s", archetype, e)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error calling Boavizta for archetype {archetype}: {e}")
+            logger.error("Unexpected error calling Boavizta for archetype %s: %s", archetype, e)
             return None

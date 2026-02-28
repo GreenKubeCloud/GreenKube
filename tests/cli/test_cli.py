@@ -129,17 +129,22 @@ def test_export_placeholder(mocker):
 
 def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sample_combined_metrics):
     """Ensure `greenkube recommend` generates recommendations and calls reporter.report with recommendations."""
-    # Patch the processor used by the recommend submodule
-    mock_proc = mocker.patch("greenkube.cli.recommend.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run = AsyncMock(return_value=sample_combined_metrics)
-    proc_inst.close = AsyncMock()
-    mock_proc.return_value = proc_inst
+    # Patch the repository used by the recommend submodule (reads from DB by default)
+    mock_repo = mocker.patch("greenkube.cli.recommend.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_repo.return_value = repo_inst
 
-    # Patch Recommender to return a sample recommendation list (used in recommend submodule)
+    # Patch node repository for node-level recommendations
+    mock_node_repo = mocker.patch("greenkube.cli.recommend.get_node_repository")
+    node_repo_inst = MagicMock()
+    node_repo_inst.get_latest_snapshots_before = AsyncMock(return_value=[])
+    mock_node_repo.return_value = node_repo_inst
+
+    # Patch Recommender to return a sample recommendation list
     sample_rec = mocker.patch("greenkube.cli.recommend.Recommender")
     rec_instance = sample_rec.return_value
-    rec_instance.generate_zombie_recommendations.return_value = [
+    rec_instance.generate_recommendations.return_value = [
         mocker.MagicMock(
             pod_name="pod-y",
             namespace="monitoring",
@@ -147,7 +152,6 @@ def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sa
             description="idle",
         )
     ]
-    rec_instance.generate_rightsizing_recommendations.return_value = []
 
     # Patch recommend module's ConsoleReporter so the submodule uses the mock
     mock_console = mocker.patch("greenkube.cli.recommend.ConsoleReporter")
@@ -164,11 +168,16 @@ def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sa
 
 def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_combined_metrics):
     """When namespace filter yields no data, recommend exits cleanly."""
-    mock_proc = mocker.patch("greenkube.cli.recommend.get_processor")
-    proc_inst = MagicMock()
-    proc_inst.run = AsyncMock(return_value=sample_combined_metrics)
-    proc_inst.close = AsyncMock()
-    mock_proc.return_value = proc_inst
+    mock_repo = mocker.patch("greenkube.cli.recommend.get_repository")
+    repo_inst = MagicMock()
+    repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_repo.return_value = repo_inst
+
+    # Patch node repository
+    mock_node_repo = mocker.patch("greenkube.cli.recommend.get_node_repository")
+    node_repo_inst = MagicMock()
+    node_repo_inst.get_latest_snapshots_before = AsyncMock(return_value=[])
+    mock_node_repo.return_value = node_repo_inst
 
     result = runner.invoke(app, ["recommend", "--namespace", "non-existent-ns"])
     assert result.exit_code == 0

@@ -9,7 +9,12 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from greenkube.api.dependencies import get_carbon_repository, get_node_repository, get_recommendation_repository
+from greenkube.api.dependencies import (
+    get_carbon_repository,
+    get_node_repository,
+    get_recommendation_repository,
+    validate_namespace,
+)
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
 from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.core.config import config
@@ -24,7 +29,7 @@ router = APIRouter()
 
 @router.get("/recommendations", response_model=List[Recommendation])
 async def list_recommendations(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
@@ -81,7 +86,7 @@ async def list_recommendation_history(
     start: str = Query(..., description="Start datetime (ISO 8601)."),
     end: str = Query(..., description="End datetime (ISO 8601)."),
     type: Optional[str] = Query(None, description="Filter by recommendation type."),
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
     """Retrieve historical recommendation records."""

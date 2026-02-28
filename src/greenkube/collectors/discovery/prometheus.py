@@ -49,7 +49,7 @@ class PrometheusDiscovery(BaseDiscovery):
         result = await self.probe_candidates(candidates, self._probe_prometheus_endpoint)
 
         if result:
-            logger.info(f"Prometheus discovery: Successfully verified endpoint {result}")
+            logger.info("Prometheus discovery: Successfully verified endpoint %s", result)
             return result
 
         logger.warning("Prometheus discovery: Probed top candidates, but none responded with a valid Prometheus API.")

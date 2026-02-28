@@ -6,7 +6,7 @@ GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams 
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Stars](https://img.shields.io/github/stars/GreenKubeCloud/greenkube?style=social)](https://github.com/GreenKubeCloud/greenkube/stargazers)
-[![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](https://github.com/GreenKubeCloud/greenkube)
+[![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 
 ## 🎯 Mission
@@ -124,7 +124,7 @@ The dashboard includes:
 - **Settings** — Current configuration, API health status, version info, and database connection details
 
 ### 🎨 Dashboard Features
-- **Real-time updates** with WebSocket support (when available)
+- **Auto-refresh** with configurable polling interval
 - **Responsive design** works on desktop and mobile
 - **Dark/light theme** support
 - **Export capabilities** for charts and data tables
@@ -147,6 +147,27 @@ The API is available at `/api/v1` and serves both JSON endpoints and the web das
 | `GET /api/v1/recommendations?namespace=` | Optimization recommendations |
 
 Interactive API docs are available at `/api/v1/docs` (Swagger UI).
+
+### API Examples
+
+```bash
+# Get a health check
+curl http://localhost:8000/api/v1/health
+# {"status":"ok","version":"0.2.2"}
+
+# Get metrics for the last 24 hours
+curl "http://localhost:8000/api/v1/metrics?last=24h"
+
+# Get metrics summary for a specific namespace
+curl "http://localhost:8000/api/v1/metrics/summary?namespace=default&last=7d"
+# {"total_co2e_grams":142.5,"total_embodied_co2e_grams":12.3,"total_cost":0.87,...}
+
+# Get hourly timeseries data for the last 7 days
+curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
+
+# Get optimization recommendations
+curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+```
 
 ## 📈 Running Reports & Getting Recommendations
 
@@ -274,14 +295,54 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **Observable:** Comprehensive logging at all pipeline stages
 
 
+## 🔬 How Energy & CO₂e Estimation Works
+
+GreenKube's estimation pipeline converts raw Kubernetes metrics into actionable carbon data in four steps:
+
+1. **Collect CPU usage** — Prometheus provides per-pod CPU utilisation in millicores over each collection interval.
+2. **Map to power** — Each node's instance type is matched to a power profile (min/max watts per vCPU) derived from [SPECpower](https://www.spec.org/power_ssj2008/) benchmarks and the [Cloud Carbon Footprint](https://www.cloudcarbonfootprint.org/) coefficient database. The power draw is linearly interpolated between min watts (idle) and max watts (100 % utilisation).
+3. **Apply PUE** — The estimated power is multiplied by the Power Usage Effectiveness factor for the cloud provider's data centre (e.g. 1.135 for AWS, 1.10 for GCP).
+4. **Convert to CO₂e** — Energy (kWh) is multiplied by the grid carbon intensity of the node's geographic zone. When available, real-time intensity is fetched from the [Electricity Maps API](https://www.electricitymaps.com/); otherwise a configurable default is used.
+
+> **Embodied emissions** are estimated separately via the [Boavizta API](https://doc.api.boavizta.org/), which models the manufacturing footprint of cloud instances amortised over their expected lifespan.
+
+For provider-specific coefficients and the full derivation, see [`docs/power_estimation_methodology.md`](docs/power_estimation_methodology.md).
+
+
+## 📋 Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for a full version history and the [GitHub Releases](https://github.com/GreenKubeCloud/GreenKube/releases) page for published releases.
+
+
 ## 🤝 Contributing
-GreenKube is a community-driven project, and we welcome all contributions! Check out our upcoming `CONTRIBUTING.md` file to learn how to get involved.
+GreenKube is a community-driven project, and we welcome all contributions! Check out our [CONTRIBUTING.md](CONTRIBUTING.md) file to learn how to get involved.
 
-* **Report Bugs**: Open an "Issue" with a detailed description.
+### Development Setup
 
-* **Suggest Features**: Let's discuss them in the GitHub "Discussions".
+```bash
+# Clone and install
+git clone https://github.com/GreenKubeCloud/GreenKube.git
+cd GreenKube
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
 
-* **Submit Code**: Make a "Pull Request"!
+# Run the tests
+pytest
+
+# Start the API locally (uses SQLite by default)
+DB_TYPE=sqlite greenkube-api
+
+# Run the frontend
+cd frontend && npm install && npm run dev
+```
+
+* **Report Bugs**: Open an [Issue](https://github.com/GreenKubeCloud/GreenKube/issues) with a detailed description.
+
+* **Suggest Features**: Let's discuss them in the GitHub [Discussions](https://github.com/GreenKubeCloud/GreenKube/discussions).
+
+* **Submit Code**: Make a Pull Request!
 
 
 ## 📄 Licence

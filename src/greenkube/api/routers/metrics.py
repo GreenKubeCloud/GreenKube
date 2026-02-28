@@ -4,41 +4,20 @@ API routes for carbon/cost/energy metrics.
 """
 
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from greenkube.api.dependencies import get_carbon_repository
-from greenkube.api.schemas import MetricsSummaryResponse, TimeseriesPoint
+from greenkube.api.dependencies import get_carbon_repository, validate_namespace
+from greenkube.api.schemas import MetricsSummaryResponse, PaginatedMetricsResponse, TimeseriesPoint
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CarbonIntensityRepository
+from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _parse_last(last: str) -> timedelta:
-    """Parse a duration string like '10min', '2h', '7d' into a timedelta.
-
-    Raises:
-        ValueError: If the format is invalid.
-    """
-    match = re.match(r"^(\d+)(min|[hdwmy])$", last.lower())
-    if not match:
-        raise ValueError(f"Invalid format for 'last': '{last}'. Use '10min', '2h', '7d', '3w', '1m' (month), '1y'.")
-    value, unit = int(match.group(1)), match.group(2)
-    mapping = {
-        "min": timedelta(minutes=value),
-        "h": timedelta(hours=value),
-        "d": timedelta(days=value),
-        "w": timedelta(weeks=value),
-        "m": timedelta(days=value * 30),
-        "y": timedelta(days=value * 365),
-    }
-    return mapping[unit]
 
 
 def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
@@ -46,7 +25,7 @@ def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
     end = datetime.now(timezone.utc)
     if last:
         try:
-            delta = _parse_last(last)
+            delta = parse_duration(last)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         start = end - delta
@@ -55,10 +34,12 @@ def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
     return start, end
 
 
-@router.get("/metrics", response_model=List[CombinedMetric])
+@router.get("/metrics", response_model=PaginatedMetricsResponse)
 async def list_metrics(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    offset: int = Query(0, ge=0, description="Number of records to skip."),
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum number of records to return."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
 ):
     """List combined metrics for the given time range and optional namespace filter."""
@@ -66,12 +47,14 @@ async def list_metrics(
     metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
     if namespace:
         metrics = [m for m in metrics if m.namespace == namespace]
-    return metrics
+    total = len(metrics)
+    page = metrics[offset : offset + limit]
+    return PaginatedMetricsResponse(total=total, offset=offset, limit=limit, items=page)
 
 
 @router.get("/metrics/summary", response_model=MetricsSummaryResponse)
 async def metrics_summary(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
 ):
@@ -108,7 +91,7 @@ _GRANULARITY_FORMATS = {
 
 @router.get("/metrics/timeseries", response_model=List[TimeseriesPoint])
 async def metrics_timeseries(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     granularity: Optional[str] = Query("hour", description="Grouping: 'hour', 'day', 'week', 'month'."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),

@@ -138,21 +138,21 @@ async def setup_elasticsearch():
         await NodeSnapshotDoc.init()
         await InstanceCarbonProfileDoc.init()
 
-        logging.info(f"Elasticsearch index '{config.ELASTICSEARCH_INDEX_NAME}' is ready.")
-        logging.info(f"Elasticsearch index '{CombinedMetricDoc.Index.name}' is ready.")
-        logging.info(f"Elasticsearch index '{NodeSnapshotDoc.Index.name}' is ready.")
-        logging.info(f"Elasticsearch index '{InstanceCarbonProfileDoc.Index.name}' is ready.")
+        logging.info("Elasticsearch index '%s' is ready.", config.ELASTICSEARCH_INDEX_NAME)
+        logging.info("Elasticsearch index '%s' is ready.", CombinedMetricDoc.Index.name)
+        logging.info("Elasticsearch index '%s' is ready.", NodeSnapshotDoc.Index.name)
+        logging.info("Elasticsearch index '%s' is ready.", InstanceCarbonProfileDoc.Index.name)
 
         return True
 
     except ConnectionError as ce:
-        logging.error(f"Failed to connect to Elasticsearch: {ce}")
+        logging.error("Failed to connect to Elasticsearch: %s", ce)
         raise
     except TransportError as te:
-        logging.error(f"Elasticsearch transport error during connection setup: {te}")
+        logging.error("Elasticsearch transport error during connection setup: %s", te)
         raise ConnectionError(f"Elasticsearch transport error during connection setup: {te}")
     except Exception as e:
-        logging.error(f"Unexpected error during Elasticsearch connection setup: {e}")
+        logging.error("Unexpected error during Elasticsearch connection setup: %s", e)
         raise ConnectionError(f"Unexpected error during Elasticsearch connection setup: {e}")
 
 
@@ -188,11 +188,11 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             if response.hits:
                 return response.hits[0].carbon_intensity
             else:
-                logging.debug(f"No carbon intensity data found for zone {zone} at or before {timestamp}")
+                logging.debug("No carbon intensity data found for zone %s at or before %s", zone, timestamp)
                 return None
         except Exception as e:
             # Broad exception handling to catch async errors or transport errors
-            logging.error(f"Error retrieving data from Elasticsearch for zone {zone}: {e}")
+            logging.error("Error retrieving data from Elasticsearch for zone %s: %s", zone, e)
             return None
 
     async def save_history(self, history_data: list, zone: str) -> int:
@@ -206,7 +206,7 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
         actions = []
         for record in history_data:
             if not isinstance(record, dict):
-                logging.warning(f"Skipping invalid record for zone {zone}: {record}")
+                logging.warning("Skipping invalid record for zone %s: %s", zone, record)
                 continue
             doc_id = f"{zone}-{record.get('datetime')}"
             if not record.get("datetime"):
@@ -246,10 +246,10 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
                 stats_only=False,
                 request_timeout=60,
             )
-            logging.info(f"Successfully saved {success_count} records to Elasticsearch for zone {zone}.")
+            logging.info("Successfully saved %s records to Elasticsearch for zone %s.", success_count, zone)
             return success_count
         except Exception as e:
-            logging.error(f"Failed to bulk save to Elasticsearch for zone {zone}: {e}")
+            logging.error("Failed to bulk save to Elasticsearch for zone %s: %s", zone, e)
             return 0
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
@@ -287,10 +287,10 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
                 stats_only=False,
                 request_timeout=60,
             )
-            logging.info(f"Successfully saved {success_count} combined metrics to Elasticsearch.")
+            logging.info("Successfully saved %s combined metrics to Elasticsearch.", success_count)
             return success_count
         except Exception as e:
-            logging.error(f"Unexpected error during bulk save of combined metrics to Elasticsearch: {e}")
+            logging.error("Unexpected error during bulk save of combined metrics to Elasticsearch: %s", e)
             return 0
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
@@ -304,5 +304,5 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
 
             return metrics
         except Exception as e:
-            logging.error(f"Unexpected error retrieving combined metrics from Elasticsearch: {e}")
+            logging.error("Unexpected error retrieving combined metrics from Elasticsearch: %s", e)
             return []

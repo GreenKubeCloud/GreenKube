@@ -502,9 +502,9 @@ class Recommender:
             if agg["joules"] < self.idle_namespace_energy_threshold and agg["cost"] > 0:
                 recs.append(
                     Recommendation(
-                        pod_name="*",
                         namespace=ns,
                         type=RecommendationType.IDLE_NAMESPACE,
+                        scope="namespace",
                         description=(
                             f"Namespace '{ns}' consumed only {agg['joules']:.0f}J total energy "
                             f"but costs ${agg['cost']:.4f}. Consider decommissioning."
@@ -627,9 +627,8 @@ class Recommender:
             if utilization < self.node_utilization_threshold:
                 recs.append(
                     Recommendation(
-                        pod_name="*",
-                        namespace="*",
                         type=RecommendationType.OVERPROVISIONED_NODE,
+                        scope="node",
                         description=(
                             f"Node '{node_name}' has {utilization:.0%} average CPU utilization "
                             f"({avg_total_usage:.0f}m / {capacity_millicores:.0f}m). "
@@ -648,9 +647,8 @@ class Recommender:
             if unique_pods < 3 and utilization < 0.15:
                 recs.append(
                     Recommendation(
-                        pod_name="*",
-                        namespace="*",
                         type=RecommendationType.UNDERUTILIZED_NODE,
+                        scope="node",
                         description=(
                             f"Node '{node_name}' has only {unique_pods} pod(s) and "
                             f"{utilization:.0%} utilization. Consider draining and removing."

@@ -13,12 +13,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from greenkube import __version__
+from greenkube.api.dependencies import verify_api_key
 from greenkube.api.metrics_endpoint import get_metrics_output
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations
@@ -60,11 +64,30 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         docs_url="/api/v1/docs",
         openapi_url="/api/v1/openapi.json",
         lifespan=lifespan if use_lifespan else None,
+        dependencies=[Depends(verify_api_key)],
     )
 
+    # --- Rate limiting ---
+    # Configurable via API_RATE_LIMIT env var (default "60/minute").
+    rate_limit = getattr(config, "API_RATE_LIMIT", "60/minute") or "60/minute"
+    limiter = Limiter(key_func=get_remote_address, default_limits=[rate_limit])
+    app.state.limiter = limiter
+
+    @app.exception_handler(RateLimitExceeded)
+    async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"Rate limit exceeded: {exc.detail}"},
+        )
+
+    # CORS — configurable via CORS_ORIGINS env var (comma-separated).
+    # Defaults to ["*"] for in-cluster use where the SPA is served from
+    # the same origin. Override when the API is exposed via an ingress.
+    cors_origins_str = config.CORS_ORIGINS if hasattr(config, "CORS_ORIGINS") else "*"
+    cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()] or ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -41,7 +41,7 @@ async def handle_export(
         exporter = JSONExporter()
     else:
         # This should be caught by Typer's Choice, but as a safeguard:
-        logger.error(f"Invalid output format '{output_format}'.")
+        logger.error("Invalid output format '%s'.", output_format)
         raise typer.Exit(code=1)
 
     if not output_path:
@@ -53,24 +53,24 @@ async def handle_export(
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        logger.error(f"Failed to create output directory {output_path.parent}: {e}")
+        logger.error("Failed to create output directory %s: %s", output_path.parent, e)
         raise typer.Exit(code=1)
 
     try:
         rows = [item.model_dump(mode="json") for item in data]
     except Exception as e:
-        logger.error(f"Failed to serialize report data for export: {e}")
+        logger.error("Failed to serialize report data for export: %s", e)
         logger.error(traceback.format_exc())
         # Re-raise as a TyperExit to stop execution gracefully
         raise typer.Exit(code=1)
 
     try:
         written_path = await exporter.export(rows, str(output_path))
-        logger.info(f"Successfully exported report to {written_path}")
+        logger.info("Successfully exported report to %s", written_path)
         print(f"Report exported to: {written_path}", file=sys.stderr)
 
     except Exception as e:
-        logger.error(f"Failed to export report to {output_path}: {e}")
+        logger.error("Failed to export report to %s: %s", output_path, e)
         logger.error(traceback.format_exc())
         raise typer.Exit(code=1)
 
@@ -187,7 +187,7 @@ def report(
         except typer.Exit:
             raise
         except Exception as e:
-            logger.error(f"An error occurred during report generation: {e}")
+            logger.error("An error occurred during report generation: %s", e)
             logger.error("Report generation failed: %s", traceback.format_exc())
             raise typer.Exit(code=1)
         finally:
@@ -201,5 +201,5 @@ def report(
     except typer.Exit:
         raise
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.error("An unexpected error occurred: %s", e)
         raise typer.Exit(code=1)

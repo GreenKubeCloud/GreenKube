@@ -122,74 +122,24 @@ class NodeCollector(BaseCollector):
             self._api = None
 
     async def collect_detailed_info(self) -> dict:
+        """Collect node information as plain dictionaries.
+
+        This is a convenience wrapper around :meth:`collect` that returns
+        dictionaries instead of :class:`NodeInfo` objects, preserving backward
+        compatibility with callers that expect the old dict format.
         """
-        Collect comprehensive node information including cloud provider, instance type,
-        zone, region, and other metadata.
-        """
-        nodes_info = {}
-        api = await self._ensure_client()
-
-        if not api:
-            logger.debug("Kubernetes client not configured; skipping detailed node collection.")
-            return nodes_info
-
-        try:
-            nodes = await api.list_node(watch=False)
-            if not nodes.items:
-                logger.debug("No nodes found when collecting detailed info.")
-                return nodes_info
-
-            for node in nodes.items:
-                node_name = node.metadata.name
-                labels = node.metadata.labels or {}
-
-                # Detect cloud provider
-                cloud_provider = self._detect_cloud_provider(labels)
-
-                # Extract instance type with multiple fallbacks
-                instance_type = self._extract_instance_type(labels, node, cloud_provider)
-
-                # Extract zone
-                zone = labels.get("topology.kubernetes.io/zone") or labels.get("failure-domain.beta.kubernetes.io/zone")
-
-                # Extract region
-                region = labels.get("topology.kubernetes.io/region") or labels.get(
-                    "failure-domain.beta.kubernetes.io/region"
-                )
-
-                # Extract architecture
-                architecture = labels.get("kubernetes.io/arch") or labels.get("beta.kubernetes.io/arch")
-
-                # Extract node pool (cloud-specific)
-                node_pool = self._extract_node_pool(labels, cloud_provider)
-
-                nodes_info[node_name] = {
-                    "instance_type": instance_type,
-                    "zone": zone,
-                    "region": region,
-                    "cloud_provider": cloud_provider,
-                    "architecture": architecture,
-                    "node_pool": node_pool,
-                }
-
-                logger.info(
-                    "Node '%s': provider=%s, instance=%s, zone=%s, region=%s, arch=%s",
-                    node_name,
-                    cloud_provider,
-                    instance_type,
-                    zone,
-                    region,
-                    architecture,
-                )
-
-        except ApiException as e:
-            logger.error("Kubernetes API error while collecting detailed node info: %s", e)
-            return {}
-        except Exception as e:
-            logger.error("Unexpected error while collecting detailed node info: %s", e)
-            return {}
-
-        return nodes_info
+        nodes = await self.collect()
+        return {
+            name: {
+                "instance_type": info.instance_type,
+                "zone": info.zone,
+                "region": info.region,
+                "cloud_provider": info.cloud_provider,
+                "architecture": info.architecture,
+                "node_pool": info.node_pool,
+            }
+            for name, info in nodes.items()
+        }
 
     def _detect_cloud_provider(self, labels: dict) -> str:
         """

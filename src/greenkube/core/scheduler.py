@@ -30,7 +30,7 @@ class Scheduler:
                     consecutive_failures = 0
                 except Exception as e:
                     consecutive_failures += 1
-                    logger.error(f"Error in scheduled job '{job_func.__name__}': {e}", exc_info=True)
+                    logger.exception("Error in scheduled job '%s': %s", job_func.__name__, e)
 
                 # Calculate how long to sleep.
                 # On success: sleep until next_run = start + interval (± jitter).
@@ -48,7 +48,7 @@ class Scheduler:
 
                 await asyncio.sleep(sleep_time)
         except asyncio.CancelledError:
-            logger.info(f"Job '{job_func.__name__}' cancelled.")
+            logger.info("Job '%s' cancelled.", job_func.__name__)
             raise
 
     def add_job(self, job_func: Callable[[], Coroutine], interval_hours: int = 0, interval_minutes: int = 0):
@@ -58,10 +58,10 @@ class Scheduler:
         interval_seconds = 0
         if interval_hours > 0:
             interval_seconds = interval_hours * 3600
-            logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_hours} hour(s).")
+            logger.info("Scheduled job '%s' to run every %s hour(s).", job_func.__name__, interval_hours)
         elif interval_minutes > 0:
             interval_seconds = interval_minutes * 60
-            logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_minutes} minute(s).")
+            logger.info("Scheduled job '%s' to run every %s minute(s).", job_func.__name__, interval_minutes)
 
         if interval_seconds > 0:
             task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
@@ -81,7 +81,7 @@ class Scheduler:
 
         task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
         self.tasks.append(task)
-        logger.info(f"Scheduled job '{job_func.__name__}' to run every {interval_str}.")
+        logger.info("Scheduled job '%s' to run every %s.", job_func.__name__, interval_str)
 
     async def stop(self):
         """Cancels all scheduled tasks."""

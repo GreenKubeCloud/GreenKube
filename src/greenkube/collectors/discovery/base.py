@@ -115,13 +115,13 @@ class BaseDiscovery:
             host = f"{svc_name}.{svc_ns}.svc.cluster.local"
             return f"{scheme}://{host}:{port}"
 
-        logger.info(f"Discovery: Probing top {len(candidates[:5])} candidates.")
+        logger.info("Discovery: Probing top %s candidates.", len(candidates[:5]))
         for score, svc_name, svc_ns, port, scheme in candidates[:5]:
             host = f"{svc_name}.{svc_ns}.svc.cluster.local"
 
             # Skip candidates that aren't resolvable or running in-cluster
             if not (self._is_running_in_cluster() or self._is_resolvable(host)):
-                logger.debug(f"Discovery: Skipping candidate '{host}' (score={score}) - unresolvable.")
+                logger.debug("Discovery: Skipping candidate '%s' (score=%s) - unresolvable.", host, score)
                 continue
 
             base_url = f"{scheme}://{host}:{port}"

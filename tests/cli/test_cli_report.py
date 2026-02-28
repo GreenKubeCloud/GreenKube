@@ -89,8 +89,15 @@ def test_recommend_generates_and_reports(monkeypatch):
         )
     ]
 
-    dummy_proc = make_dummy_processor(return_items=items)
-    monkeypatch.setattr(recommend_mod, "get_processor", lambda: dummy_proc)
+    # The recommend command now reads from the database by default
+    dummy_repo = MagicMock()
+    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
+    monkeypatch.setattr(recommend_mod, "get_repository", lambda: dummy_repo)
+
+    # Dummy node repository
+    dummy_node_repo = MagicMock()
+    dummy_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
+    monkeypatch.setattr(recommend_mod, "get_node_repository", lambda: dummy_node_repo)
 
     # Dummy recommender that returns some recommendations
     class DummyRec:
@@ -101,8 +108,7 @@ def test_recommend_generates_and_reports(monkeypatch):
             self.description = "desc"
 
     dummy_recommender = MagicMock()
-    dummy_recommender.generate_zombie_recommendations = MagicMock(return_value=[DummyRec("p1", "ns1")])
-    dummy_recommender.generate_rightsizing_recommendations = MagicMock(return_value=[])
+    dummy_recommender.generate_recommendations = MagicMock(return_value=[DummyRec("p1", "ns1")])
     monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
 
     reported = []

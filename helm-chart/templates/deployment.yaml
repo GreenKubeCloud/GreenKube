@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
 spec:
+  # NOTE (ARCH-009): The pod runs two containers — the collector/scheduler and
+  # the API server.  Both share the same database via envFrom secrets.  The
+  # collector writes metrics with ON CONFLICT DO UPDATE semantics, so the API
+  # may briefly serve stale or partially-updated data between collection cycles.
+  # This eventual-consistency trade-off is acceptable for a monitoring tool and
+  # avoids the complexity of cross-container coordination.
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -61,14 +67,10 @@ spec:
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
             - name: DB_CONNECTION_STRING
-              {{- if .Values.postgres.enabled }}
-              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
-              {{- else }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "greenkube.fullname" . }}
                   key: DB_CONNECTION_STRING
-              {{- end }}
             {{- end }}
                 
           resources:
@@ -98,19 +100,21 @@ spec:
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
             - name: DB_CONNECTION_STRING
-              {{- if .Values.postgres.enabled }}
-              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "greenkube.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
-              {{- else }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "greenkube.fullname" . }}
                   key: DB_CONNECTION_STRING
-              {{- end }}
             {{- end }}
           ports:
             - name: http-api
               containerPort: {{ .Values.config.api.port }}
               protocol: TCP
+          # Graceful shutdown: give in-flight requests time to complete
+          # before the SIGTERM reaches Uvicorn.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           volumeMounts:
             - name: secrets
               mountPath: /etc/greenkube/secrets

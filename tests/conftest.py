@@ -29,20 +29,39 @@ def mock_settings_env_vars(monkeypatch):
     Pytest fixture to mock environment variables for the config module.
 
     This fixture runs automatically for every test (`autouse=True`). It uses
-    monkeypatch to set environment variables AND updates the singleton config object,
-    ensuring consistency.
+    monkeypatch to set environment variables AND reloads the singleton config
+    object so that *all* attributes are re-derived from the test environment,
+    not just the three explicitly patched before.
+
+    .. seealso:: BUG-003 / TEST-004 in the issue plan.
     """
     from greenkube.core.config import config
+    from greenkube.core.factory import clear_caches
 
-    # Set env vars
+    # --- Core env vars for safe, isolated tests ---
     monkeypatch.setenv("DB_TYPE", "sqlite")
     monkeypatch.setenv("DB_PATH", ":memory:")
     monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "test-token")
+    # Avoid hitting real services
+    monkeypatch.setenv("PROMETHEUS_URL", "")
+    monkeypatch.setenv("OPENCOST_API_URL", "")
+    monkeypatch.setenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
+    monkeypatch.setenv("API_HOST", "127.0.0.1")
+    monkeypatch.setenv("API_PORT", "8000")
+    monkeypatch.setenv("GREENKUBE_API_KEY", "")
+    monkeypatch.setenv("CORS_ORIGINS", "*")
+    monkeypatch.setenv("API_RATE_LIMIT", "1000/minute")
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("CLOUD_PROVIDER", "aws")
+    monkeypatch.setenv("DEFAULT_ZONE", "FR")
 
-    # Patch config singleton attributes because they are loaded at import time
-    monkeypatch.setattr(config, "DB_TYPE", "sqlite")
-    monkeypatch.setattr(config, "DB_PATH", ":memory:")
-    monkeypatch.setattr(config, "ELECTRICITY_MAPS_TOKEN", "test-token")
+    # Reload the singleton so all attributes pick up the patched env vars.
+    config.reload()
+
+    yield
+
+    # Ensure factory caches are invalidated between tests
+    clear_caches()
 
 
 @pytest.fixture(autouse=True)

@@ -64,17 +64,17 @@ class SQLiteNodeRepository(NodeRepository):
                         )
                         saved_count += cursor.rowcount
                     except sqlite3.Error as e:
-                        logging.error(f"Could not save node snapshot for {node.name}: {e}")
+                        logging.error("Could not save node snapshot for %s: %s", node.name, e)
                     except Exception as e:
-                        logging.error(f"Unexpected error processing node {node.name}: {e}")
+                        logging.error("Unexpected error processing node %s: %s", node.name, e)
 
                 await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
-            logging.error(f"Failed to commit transaction for nodes: {e}")
+            logging.error("Failed to commit transaction for nodes: %s", e)
             raise QueryError(f"Failed to commit nodes: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error in save_nodes: {e}")
+            logging.error("Unexpected error in save_nodes: %s", e)
             raise QueryError(f"Unexpected error in save_nodes: {e}") from e
 
     async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
@@ -119,10 +119,10 @@ class SQLiteNodeRepository(NodeRepository):
                     return snapshots
 
         except sqlite3.Error as e:
-            logging.error(f"Could not retrieve snapshots: {e}")
+            logging.error("Could not retrieve snapshots: %s", e)
             raise QueryError(f"Could not retrieve snapshots: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error in get_snapshots: {e}")
+            logging.error("Unexpected error in get_snapshots: %s", e)
             raise QueryError(f"Unexpected error in get_snapshots: {e}") from e
 
     async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
@@ -166,8 +166,8 @@ class SQLiteNodeRepository(NodeRepository):
                         for row in rows
                     ]
         except sqlite3.Error as e:
-            logging.error(f"Could not retrieve latest snapshots: {e}")
+            logging.error("Could not retrieve latest snapshots: %s", e)
             raise QueryError(f"Could not retrieve latest snapshots: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error in get_latest_snapshots_before: {e}")
+            logging.error("Unexpected error in get_latest_snapshots_before: %s", e)
             raise QueryError(f"Unexpected error in get_latest_snapshots_before: {e}") from e

@@ -39,7 +39,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         node_collector = NodeCollector()
         em_collector = ElectricityMapsCollector()
     except Exception as e:
-        logger.error(f"Failed to initialize components for intensity collection: {e}")
+        logger.error("Failed to initialize components for intensity collection: %s", e)
         return
 
     try:
@@ -48,7 +48,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
             logger.warning("No node zones discovered.")
             return
     except Exception as e:
-        logger.error(f"Failed to collect node zones: {e}")
+        logger.error("Failed to collect node zones: %s", e)
         return
 
     unique_zone_providers = {
@@ -60,7 +60,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         if emz and emz != "unknown":
             emaps_zones.add(emz)
         else:
-            logger.warning(f"Could not map cloud zone '{cz}' (provider: {provider}) to an Electricity Maps zone.")
+            logger.warning("Could not map cloud zone '%s' (provider: %s) to an Electricity Maps zone.", cz, provider)
 
     if not emaps_zones:
         logger.warning("No mappable Electricity Maps zones found based on node discovery.")
@@ -72,11 +72,11 @@ async def collect_carbon_intensity_for_all_zones() -> None:
             history_data = await em_collector.collect(zone=zone)
             if history_data:
                 saved_count = await repository.save_history(history_data, zone=zone)
-                logger.info(f"Successfully saved {saved_count} new records for zone: {zone}")
+                logger.info("Successfully saved %s new records for zone: %s", saved_count, zone)
             else:
-                logger.info(f"No new data to save for zone: {zone}")
+                logger.info("No new data to save for zone: %s", zone)
         except Exception as e:
-            logger.error(f"Failed to process data for zone {zone}: {e}")
+            logger.error("Failed to process data for zone %s: %s", zone, e)
 
     await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
 
@@ -96,7 +96,7 @@ async def analyze_nodes() -> None:
         node_collector = NodeCollector()
         node_repo = get_node_repository()
     except Exception as e:
-        logger.error(f"Failed to initialize components for node analysis: {e}")
+        logger.error("Failed to initialize components for node analysis: %s", e)
         return
 
     try:
@@ -106,10 +106,10 @@ async def analyze_nodes() -> None:
             return
 
         saved_count = await node_repo.save_nodes(list(nodes_info.values()))
-        logger.info(f"Successfully updated {saved_count} nodes in the database.")
+        logger.info("Successfully updated %s nodes in the database.", saved_count)
 
     except Exception as e:
-        logger.error(f"Failed to analyze nodes: {e}")
+        logger.error("Failed to analyze nodes: %s", e)
     finally:
         if "node_collector" in locals():
             await node_collector.close()
@@ -193,6 +193,6 @@ def start(
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        logger.error(f"❌ An unexpected error occurred during startup: {e}")
+        logger.error("❌ An unexpected error occurred during startup: %s", e)
         logger.error("Startup failed: %s", traceback.format_exc())
         raise typer.Exit(code=1)

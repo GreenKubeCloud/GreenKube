@@ -30,7 +30,10 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.postgres.auth.username }}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.auth.password }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.fullname" . }}
+                  key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database }}
             - name: PGDATA

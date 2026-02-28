@@ -2,6 +2,75 @@
 
 This document describes the technical architecture of GreenKube. The goal is to create a lightweight, modular, and extensible platform to measure, report, and optimize the carbon footprint and cost of Kubernetes workloads.
 
+## Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph K8s["Kubernetes Cluster"]
+        Prom["Prometheus"]
+        OC["OpenCost"]
+        K8sAPI["K8s API"]
+        EM["Electricity Maps API"]
+        Boavizta["Boavizta API"]
+    end
+
+    subgraph GreenKube["GreenKube"]
+        direction TB
+        subgraph Collectors["Collectors (Input Adapters)"]
+            PC["PrometheusCollector"]
+            OCC["OpenCostCollector"]
+            NC["NodeCollector"]
+            PodC["PodCollector"]
+            EMC["ElectricityMapsCollector"]
+            BC["BoaviztaCollector"]
+        end
+
+        subgraph Core["Core (Business Logic)"]
+            Est["Estimator\n(CPU → Joules)"]
+            Proc["Processor\n(Orchestrator)"]
+            Calc["Calculator\n(Joules → CO₂e)"]
+            Rec["Recommender\n(9 types)"]
+        end
+
+        subgraph Storage["Storage (Output Adapters)"]
+            PG["PostgreSQL"]
+            SQLite["SQLite"]
+            ES["Elasticsearch"]
+        end
+
+        subgraph Presentation["Presentation"]
+            API["FastAPI\nREST API"]
+            CLI["Typer CLI"]
+            Dash["SvelteKit\nDashboard"]
+        end
+    end
+
+    Prom --> PC
+    OC --> OCC
+    K8sAPI --> NC
+    K8sAPI --> PodC
+    EM --> EMC
+    Boavizta --> BC
+
+    PC --> Proc
+    OCC --> Proc
+    NC --> Proc
+    PodC --> Proc
+    EMC --> Proc
+    BC --> Proc
+
+    Proc --> Est
+    Proc --> Calc
+    Proc --> Storage
+
+    Storage --> API
+    Storage --> CLI
+    API --> Dash
+    Storage --> Rec
+    Rec --> API
+    Rec --> CLI
+```
+
 ## Overview
 
 GreenKube operates as an **asynchronous** agent that collects, processes, analyzes, and reports data. It runs as both a scheduled service (continuous monitoring) and an on-demand CLI tool (ad-hoc reporting). 

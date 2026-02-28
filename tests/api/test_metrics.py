@@ -18,24 +18,26 @@ class TestMetricsListEndpoint:
         """Should return an empty list when no metrics exist."""
         response = client.get("/api/v1/metrics")
         data = response.json()
-        assert data == []
+        assert data["items"] == []
+        assert data["total"] == 0
 
     def test_metrics_returns_data(self, client, mock_carbon_repo, sample_combined_metrics):
         """Should return metrics from the repository."""
         mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics")
         data = response.json()
-        assert len(data) == 2
-        assert data[0]["pod_name"] == "nginx-abc123"
-        assert data[1]["pod_name"] == "api-server-xyz"
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
+        assert data["items"][0]["pod_name"] == "nginx-abc123"
+        assert data["items"][1]["pod_name"] == "api-server-xyz"
 
     def test_metrics_filter_by_namespace(self, client, mock_carbon_repo, sample_combined_metrics):
         """Should filter metrics by namespace query param."""
         mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics?namespace=production")
         data = response.json()
-        assert len(data) == 1
-        assert data[0]["namespace"] == "production"
+        assert data["total"] == 1
+        assert data["items"][0]["namespace"] == "production"
 
     def test_metrics_filter_by_last(self, client, mock_carbon_repo, sample_combined_metrics):
         """Should accept --last style time filter."""
@@ -53,7 +55,7 @@ class TestMetricsListEndpoint:
         mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics")
         data = response.json()
-        metric = data[0]
+        metric = data["items"][0]
         expected_fields = [
             "pod_name",
             "namespace",

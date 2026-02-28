@@ -601,8 +601,10 @@ class TestEdgeCases:
         ]
         recs = recommender.generate_recommendations(metrics)
         for rec in recs:
-            assert rec.pod_name
-            assert rec.namespace
+            # pod_name and namespace may be None for node/namespace-level recs
+            if rec.scope == "pod":
+                assert rec.pod_name
+                assert rec.namespace
             assert rec.type
             assert rec.description
             assert rec.priority in ("high", "medium", "low")

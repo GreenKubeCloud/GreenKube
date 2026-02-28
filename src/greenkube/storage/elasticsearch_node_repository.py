@@ -109,11 +109,11 @@ class ElasticsearchNodeRepository(NodeRepository):
                 stats_only=False,
                 request_timeout=60,
             )
-            logging.info(f"Successfully saved {success_count} node snapshots to Elasticsearch.")
+            logging.info("Successfully saved %s node snapshots to Elasticsearch.", success_count)
             return success_count
 
         except Exception as e:
-            logging.error(f"Failed to save node snapshots to Elasticsearch: {e}")
+            logging.error("Failed to save node snapshots to Elasticsearch: %s", e)
             return 0
 
     async def get_snapshots(self, start: datetime, end: datetime) -> List[tuple[str, NodeInfo]]:
@@ -148,7 +148,7 @@ class ElasticsearchNodeRepository(NodeRepository):
             return results
 
         except Exception as e:
-            logging.error(f"Failed to retrieve snapshots from Elasticsearch: {e}")
+            logging.error("Failed to retrieve snapshots from Elasticsearch: %s", e)
             return []
 
     async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
@@ -198,5 +198,5 @@ class ElasticsearchNodeRepository(NodeRepository):
             return results
 
         except Exception as e:
-            logging.error(f"Failed to retrieve latest snapshots from Elasticsearch: {e}")
+            logging.error("Failed to retrieve latest snapshots from Elasticsearch: %s", e)
             return []

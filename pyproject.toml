@@ -14,14 +14,13 @@ authors = [
 description = "Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -49,6 +48,7 @@ dependencies = [
     "fastapi>=0.109.0", # Web API framework
     "uvicorn[standard]>=0.25.0", # ASGI server for FastAPI
     "prometheus_client>=0.19.0", # Prometheus metrics exposition
+    "slowapi>=0.1.9", # Rate limiting for FastAPI
 ]
 
 [project.optional-dependencies]
@@ -60,7 +60,9 @@ test = [
 ]
 dev = [
     "pre-commit", 
-    "ruff" 
+    "ruff",
+    "toml",
+    "ruamel.yaml",
 ]
 
 [project.urls]
@@ -97,4 +99,8 @@ path = "src/greenkube/__init__.py"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"] # Basic rule selection
+select = ["E", "F", "W", "I", "G"] # Basic rules + flake8-logging-format (lazy %-formatting)
+
+[tool.ruff.lint.per-file-ignores]
+# Allow f-string logging in data loaders (one-time startup, not perf-sensitive)
+"src/greenkube/data/*.py" = ["G"]
