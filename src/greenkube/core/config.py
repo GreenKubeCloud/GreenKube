@@ -253,6 +253,15 @@ class Config:
                 self.DEFAULT_ZONE,
             )
 
+    def reload(self) -> None:
+        """Re-read all configuration from the current environment variables.
+
+        Useful in tests where ``monkeypatch.setenv`` has been called after the
+        singleton was first created.  Call ``config.reload()`` instead of
+        manually patching individual attributes.
+        """
+        self.__init__()  # type: ignore[misc]
+
 
 # Instantiate the config to be imported by other modules
 config = Config()
