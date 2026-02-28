@@ -124,7 +124,7 @@ The dashboard includes:
 - **Settings** — Current configuration, API health status, version info, and database connection details
 
 ### 🎨 Dashboard Features
-- **Real-time updates** with WebSocket support (when available)
+- **Auto-refresh** with configurable polling interval
 - **Responsive design** works on desktop and mobile
 - **Dark/light theme** support
 - **Export capabilities** for charts and data tables
@@ -147,6 +147,27 @@ The API is available at `/api/v1` and serves both JSON endpoints and the web das
 | `GET /api/v1/recommendations?namespace=` | Optimization recommendations |
 
 Interactive API docs are available at `/api/v1/docs` (Swagger UI).
+
+### API Examples
+
+```bash
+# Get a health check
+curl http://localhost:8000/api/v1/health
+# {"status":"ok","version":"0.2.2"}
+
+# Get metrics for the last 24 hours
+curl "http://localhost:8000/api/v1/metrics?last=24h"
+
+# Get metrics summary for a specific namespace
+curl "http://localhost:8000/api/v1/metrics/summary?namespace=default&last=7d"
+# {"total_co2e_grams":142.5,"total_embodied_co2e_grams":12.3,"total_cost":0.87,...}
+
+# Get hourly timeseries data for the last 7 days
+curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
+
+# Get optimization recommendations
+curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+```
 
 ## 📈 Running Reports & Getting Recommendations
 
@@ -275,13 +296,34 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 
 
 ## 🤝 Contributing
-GreenKube is a community-driven project, and we welcome all contributions! Check out our upcoming `CONTRIBUTING.md` file to learn how to get involved.
+GreenKube is a community-driven project, and we welcome all contributions! Check out our [CONTRIBUTING.md](CONTRIBUTING.md) file to learn how to get involved.
 
-* **Report Bugs**: Open an "Issue" with a detailed description.
+### Development Setup
 
-* **Suggest Features**: Let's discuss them in the GitHub "Discussions".
+```bash
+# Clone and install
+git clone https://github.com/GreenKubeCloud/GreenKube.git
+cd GreenKube
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
 
-* **Submit Code**: Make a "Pull Request"!
+# Run the tests
+pytest
+
+# Start the API locally (uses SQLite by default)
+DB_TYPE=sqlite greenkube-api
+
+# Run the frontend
+cd frontend && npm install && npm run dev
+```
+
+* **Report Bugs**: Open an [Issue](https://github.com/GreenKubeCloud/GreenKube/issues) with a detailed description.
+
+* **Suggest Features**: Let's discuss them in the GitHub [Discussions](https://github.com/GreenKubeCloud/GreenKube/discussions).
+
+* **Submit Code**: Make a Pull Request!
 
 
 ## 📄 Licence
