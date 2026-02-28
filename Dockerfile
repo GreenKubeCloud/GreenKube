@@ -15,7 +15,7 @@ RUN npm run build && rm -rf node_modules
 
 # --- STAGE 2: Python Builder ---
 # Builds the Python package and installs dependencies
-FROM python:3.11-slim AS builder
+FROM python:3.14.3-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir . --prefix=/install
 
 # --- STAGE 3: Final Image ---
 # This stage creates the final, lean image
-FROM python:3.11-slim-bookworm
+FROM python:3.14.3-slim-bookworm
 
 # Create a non-root user named "greenkube"
 # -m creates the home directory (/home/greenkube)
@@ -44,7 +44,7 @@ RUN useradd -m -s /bin/bash greenkube
 
 # Copy the installed application and its dependencies from the builder stage
 # This copies the 'greenkube' executable to /usr/local/bin
-# and the Python libraries to /usr/local/lib/python3.11/site-packages
+# and the Python libraries to /usr/local/lib/python3.14/site-packages
 COPY --from=builder /install /usr/local
 
 # Copy the SPA frontend build into /app/frontend
