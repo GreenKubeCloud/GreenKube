@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from greenkube.api.dependencies import get_carbon_repository
+from greenkube.api.dependencies import get_carbon_repository, validate_namespace
 from greenkube.api.schemas import MetricsSummaryResponse, TimeseriesPoint
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CarbonIntensityRepository
@@ -57,7 +57,7 @@ def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
 
 @router.get("/metrics", response_model=List[CombinedMetric])
 async def list_metrics(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
 ):
@@ -71,7 +71,7 @@ async def list_metrics(
 
 @router.get("/metrics/summary", response_model=MetricsSummaryResponse)
 async def metrics_summary(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
 ):
@@ -108,7 +108,7 @@ _GRANULARITY_FORMATS = {
 
 @router.get("/metrics/timeseries", response_model=List[TimeseriesPoint])
 async def metrics_timeseries(
-    namespace: Optional[str] = Query(None, description="Filter by Kubernetes namespace."),
+    namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     granularity: Optional[str] = Query("hour", description="Grouping: 'hour', 'day', 'week', 'month'."),
     repo: CarbonIntensityRepository = Depends(get_carbon_repository),
