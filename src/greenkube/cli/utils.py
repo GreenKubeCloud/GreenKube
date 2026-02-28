@@ -122,11 +122,11 @@ async def read_combined_metrics_from_database(
     """
     Reads combined metrics from the database within a given time range and optional namespace.
     """
-    logger.info(f"--- Reading combined metrics from {start} to {end} ---")
+    logger.info("--- Reading combined metrics from %s to %s ---", start, end)
     try:
         repository = get_repository()
-        data = await repository.read_combined_metrics(start=start, end=end)
-        logger.info(f"Found {len(data)} combined metrics records.")
+        data = await repository.read_combined_metrics(start_time=start, end_time=end)
+        logger.info("Found %d combined metrics records.", len(data))
 
         # Filter by namespace if provided
         if namespace:
