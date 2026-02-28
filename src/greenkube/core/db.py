@@ -128,7 +128,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS carbon_intensity_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     zone TEXT NOT NULL,
-                    carbon_intensity INTEGER NOT NULL,
+                    carbon_intensity REAL NOT NULL,
                     datetime TEXT NOT NULL,
                     updated_at TEXT,
                     created_at TEXT,
@@ -194,6 +194,7 @@ class DatabaseManager:
                     "timestamp" TEXT,
                     duration_seconds INTEGER,
                     grid_intensity_timestamp TEXT,
+                    node TEXT,
                     node_instance_type TEXT,
                     node_zone TEXT,
                     emaps_zone TEXT,
@@ -323,6 +324,18 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass
 
+            # Migration: add node column to combined_metrics
+            try:
+                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN node TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+            # Add indexes for common query patterns
+            await self.connection.execute('CREATE INDEX IF NOT EXISTS idx_combined_ts ON combined_metrics("timestamp")')
+            await self.connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_combined_ns_ts ON combined_metrics(namespace, "timestamp")'
+            )
+
             await self.connection.commit()
             logger.info("SQLite schema is up to date.")
         except Exception as e:
@@ -345,7 +358,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS carbon_intensity_history (
                     id SERIAL PRIMARY KEY,
                     zone TEXT NOT NULL,
-                    carbon_intensity INTEGER NOT NULL,
+                    carbon_intensity DOUBLE PRECISION NOT NULL,
                     datetime TIMESTAMP WITH TIME ZONE NOT NULL,
                     updated_at TIMESTAMP WITH TIME ZONE,
                     created_at TIMESTAMP WITH TIME ZONE,
@@ -411,6 +424,7 @@ class DatabaseManager:
                     timestamp TIMESTAMP WITH TIME ZONE,
                     duration_seconds INTEGER,
                     grid_intensity_timestamp TIMESTAMP WITH TIME ZONE,
+                    node TEXT,
                     node_instance_type TEXT,
                     node_zone TEXT,
                     emaps_zone TEXT,
@@ -537,6 +551,14 @@ class DatabaseManager:
                     "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS gpu_usage_millicores INTEGER;"
                 )
                 await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS restart_count INTEGER;")
+
+                # Migration: fix carbon_intensity column type from INTEGER to DOUBLE PRECISION
+                await conn.execute(
+                    "ALTER TABLE carbon_intensity_history ALTER COLUMN carbon_intensity TYPE DOUBLE PRECISION;"
+                )
+
+                # Migration: add node column to combined_metrics
+                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node TEXT;")
             except Exception as e:
                 logger.warning(f"Migration warning (non-critical): {e}")
 
