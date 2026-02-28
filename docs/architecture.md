@@ -531,12 +531,12 @@ Dockerfile (3 stages):
    ├─ npm run build (SvelteKit SSG)
    └─ Output: static files in build/
 
-2. Python Builder (Python 3.11):
+2. Python Builder (Python 3.14):
    ├─ pip install build
    ├─ Build wheel from pyproject.toml
    └─ pip install to /install prefix
 
-3. Final Image (Python 3.11-slim):
+3. Final Image (Python 3.14-slim):
    ├─ Copy Python packages from builder
    ├─ Copy frontend build from frontend-builder
    ├─ Run as non-root user 'greenkube'
