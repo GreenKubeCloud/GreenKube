@@ -15,6 +15,7 @@ def mock_config():
         patch.object(global_config, "DEFAULT_INSTANCE_VCORES", 2),
         patch.object(global_config, "DEFAULT_INSTANCE_MIN_WATTS", 2.0),
         patch.object(global_config, "DEFAULT_INSTANCE_MAX_WATTS", 12.0),
+        patch.object(global_config, "PROMETHEUS_QUERY_RANGE_STEP", "5m"),
     ):
         yield global_config
 
@@ -44,6 +45,7 @@ def test_configurable_defaults_affect_estimate():
         patch.object(global_config, "DEFAULT_INSTANCE_VCORES", 1),
         patch.object(global_config, "DEFAULT_INSTANCE_MIN_WATTS", 1.0),
         patch.object(global_config, "DEFAULT_INSTANCE_MAX_WATTS", 5.0),
+        patch.object(global_config, "PROMETHEUS_QUERY_RANGE_STEP", "5m"),
     ):
         estimator = BasicEstimator(settings=global_config)
         pod = PodCPUUsage(
