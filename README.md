@@ -17,7 +17,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.2.0)
+## ✨ Features (Version 0.2.2)
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
