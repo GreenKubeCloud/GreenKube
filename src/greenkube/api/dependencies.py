@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import HTTPException, Query
+from fastapi import HTTPException, Query, Request
 
 from greenkube.storage.base_repository import CarbonIntensityRepository, NodeRepository, RecommendationRepository
 
@@ -19,6 +19,32 @@ logger = logging.getLogger(__name__)
 
 # Valid Kubernetes namespace pattern: lowercase alphanumeric + hyphens, 1-63 chars.
 _NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+
+def verify_api_key(request: Request) -> None:
+    """Verify the API key if ``GREENKUBE_API_KEY`` is configured.
+
+    When the env var is empty the check is skipped (open access).
+    Public endpoints (``/health``, ``/metrics``, ``/docs``) are always exempt.
+    """
+    from greenkube.core.config import config
+
+    api_key = config.API_KEY
+    if not api_key:
+        return  # no key configured → open access
+
+    # Allow public/operational endpoints without auth
+    path = request.url.path
+    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json", "/metrics")
+    if any(path.startswith(p) for p in exempt):
+        return
+
+    token = request.headers.get("Authorization", "")
+    if token.startswith("Bearer "):
+        token = token[7:]
+
+    if token != api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
 def validate_namespace(

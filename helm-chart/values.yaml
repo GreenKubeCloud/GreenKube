@@ -82,6 +82,13 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
+  # Comma-separated list of allowed CORS origins.
+  # Use "*" to allow all origins (default).
+  corsOrigins: "*"
+
+  # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
+  apiRateLimit: "60/minute"
+
   # API server configuration
   api:
     enabled: true
@@ -150,6 +157,10 @@ secrets:
 
   # Boavizta API Token (Optional)
   boaviztaToken: ''
+
+  # API Key for GreenKube API authentication (Optional).
+  # If empty, no authentication is required.
+  apiKey: ''
 
   # Connection string for PostgreSQL (only used if db.type is "postgres")
   # Example: "postgresql://user:password@host:port/dbname"

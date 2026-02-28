@@ -116,6 +116,9 @@ class Config:
         # --- API variables ---
         self.API_HOST = os.getenv("API_HOST", "0.0.0.0")
         self.API_PORT = int(os.getenv("API_PORT", "8000"))
+        self.CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
+        self.API_KEY = os.getenv("GREENKUBE_API_KEY", "")
+        self.API_RATE_LIMIT = os.getenv("API_RATE_LIMIT", "60/minute")
 
         # --- Recommendation Engine variables ---
         self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (

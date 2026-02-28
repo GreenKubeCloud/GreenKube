@@ -4,7 +4,11 @@ Pydantic response schemas for the API.
 Keeps API-specific response shapes separate from internal domain models.
 """
 
+from typing import List
+
 from pydantic import BaseModel, Field
+
+from greenkube.models.metrics import CombinedMetric
 
 
 class HealthResponse(BaseModel):
@@ -56,3 +60,12 @@ class ConfigResponse(BaseModel):
     prometheus_query_range_step: str
     api_host: str
     api_port: int
+
+
+class PaginatedMetricsResponse(BaseModel):
+    """Paginated list of combined metrics."""
+
+    total: int = Field(..., description="Total number of matching records.")
+    offset: int = Field(0, description="Number of records skipped.")
+    limit: int = Field(1000, description="Maximum records in this page.")
+    items: List[CombinedMetric] = Field(default_factory=list, description="The metrics in this page.")

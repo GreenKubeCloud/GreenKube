@@ -46,6 +46,8 @@ data:
   {{- if .Values.config.api.enabled }}
   API_HOST: {{ .Values.config.api.host | quote }}
   API_PORT: {{ .Values.config.api.port | quote }}
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  API_RATE_LIMIT: {{ .Values.config.apiRateLimit | quote }}
   {{- end }}
 
   # --- Estimator Defaults ---

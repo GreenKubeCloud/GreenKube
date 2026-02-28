@@ -48,6 +48,7 @@ dependencies = [
     "fastapi>=0.109.0", # Web API framework
     "uvicorn[standard]>=0.25.0", # ASGI server for FastAPI
     "prometheus_client>=0.19.0", # Prometheus metrics exposition
+    "slowapi>=0.1.9", # Rate limiting for FastAPI
 ]
 
 [project.optional-dependencies]
