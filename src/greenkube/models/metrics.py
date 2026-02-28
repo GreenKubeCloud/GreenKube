@@ -249,5 +249,9 @@ class CombinedMetric(BaseModel):
     embodied_co2e_grams: Optional[float] = Field(
         0.0, description="The allocated embodied carbon emissions in grams of CO2 equivalent."
     )
+    # Calculation methodology version — allows detecting stale data after algorithm changes
+    calculation_version: Optional[str] = Field(
+        None, description="Version of the calculation algorithm that produced this metric."
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

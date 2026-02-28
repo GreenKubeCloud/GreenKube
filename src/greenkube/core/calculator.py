@@ -8,6 +8,7 @@ from typing import Optional
 
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
+from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from ..storage.base_repository import CarbonIntensityRepository
 from .config import config
 
@@ -59,10 +60,39 @@ class CarbonCalculator:
         async with self._lock:
             self._intensity_cache.clear()
 
-    async def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
+    async def prefetch_intensity(self, zone: str, timestamp: str, intensity: float):
+        """Pre-populate the cache with a known intensity value.
+
+        The timestamp is normalized using the same logic as ``calculate_emissions``
+        so that a subsequent calculation for the same (zone, normalized-time) will
+        hit the cache instead of querying the repository/API again.
+        """
+        dt = _to_datetime(timestamp)
+        gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+        if gran == "hour":
+            normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
+        elif gran == "day":
+            normalized_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            normalized_dt = dt
+        normalized = _iso_z(normalized_dt)
+        cache_key = (zone, normalized)
+
+        async with self._lock:
+            if cache_key not in self._intensity_cache:
+                self._intensity_cache[cache_key] = intensity
+
+    async def calculate_emissions(
+        self, joules: float, zone: str, timestamp: str, pue: Optional[float] = None
+    ) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 
         If intensity is missing in the repository, the configured default is used.
+        Args:
+            joules: Energy consumed in Joules.
+            zone: Electricity Maps zone identifier.
+            timestamp: Timestamp for the carbon intensity lookup.
+            pue: Power Usage Effectiveness to apply. If None, uses the instance default.
         """
         # Normalize timestamp to hour to increase cache hit rate across similar timestamps
         dt = _to_datetime(timestamp)
@@ -89,16 +119,31 @@ class CarbonCalculator:
 
         # Use default if intensity data is missing
         if grid_intensity_value is None:
-            async with self._lock:
-                if cache_key not in self._intensity_cache or self._intensity_cache[cache_key] is None:
+            # Prefer zone-specific default from the Electricity Maps CSV over the
+            # global hardcoded fallback (500 gCO2/kWh) which is far too high for
+            # low-carbon grids like France (26) or Sweden (20).
+            zone_default = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
+            if zone_default is not None:
+                grid_intensity_value = float(zone_default)
+                async with self._lock:
+                    self._intensity_cache[cache_key] = grid_intensity_value
+                    logger.info(
+                        "Carbon intensity missing for zone '%s' at %s; using zone default %s gCO2e/kWh",
+                        zone,
+                        normalized_dt.isoformat(),
+                        grid_intensity_value,
+                    )
+            else:
+                grid_intensity_value = config.DEFAULT_INTENSITY
+                async with self._lock:
                     self._intensity_cache[cache_key] = None
                     logger.warning(
-                        "Carbon intensity missing for zone '%s' at %s; using default %s gCO2e/kWh",
+                        "Carbon intensity missing for zone '%s' at %s and no zone default available; "
+                        "using global fallback %s gCO2e/kWh",
                         zone,
                         normalized_dt.isoformat(),
                         config.DEFAULT_INTENSITY,
                     )
-            grid_intensity_value = config.DEFAULT_INTENSITY
 
         if joules == 0.0:
             return CarbonCalculationResult(
@@ -108,7 +153,8 @@ class CarbonCalculator:
             )
 
         kwh = joules / config.JOULES_PER_KWH
-        kwh_adjusted_for_pue = kwh * self.pue
+        effective_pue = pue if pue is not None else self.pue
+        kwh_adjusted_for_pue = kwh * effective_pue
         co2e_grams = kwh_adjusted_for_pue * grid_intensity_value
 
         return CarbonCalculationResult(

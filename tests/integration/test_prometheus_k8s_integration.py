@@ -96,6 +96,7 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     from greenkube.models.metrics import EnergyMetric
 
     est = MagicMock()
+    est.query_range_step_sec = 300
     sample_dt = datetime.now(timezone.utc).replace(minute=23, second=12, microsecond=0)
     # Use 3.6e6 Joules == 1 kWh, simplifies math
     _energy_metric = EnergyMetric(
@@ -141,8 +142,9 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     cm = combined[0]
     # grid_intensity should come from repository (120.0)
     assert cm.grid_intensity == 120.0
-    # joules -> kWh = 1, * pue (DEFAULT_PUE) * intensity 120 = expected g CO2e
-    expected_co2e = (3.6e6 / config.JOULES_PER_KWH) * config.DEFAULT_PUE * 120.0
+    # joules -> kWh = 1, * pue (per-provider PUE for GCP) * intensity 120 = expected g CO2e
+    expected_pue = config.get_pue_for_provider("gcp")
+    expected_co2e = (3.6e6 / config.JOULES_PER_KWH) * expected_pue * 120.0
     assert pytest.approx(cm.co2e_grams, rel=1e-6) == expected_co2e
 
 

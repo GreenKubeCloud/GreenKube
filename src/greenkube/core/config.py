@@ -18,15 +18,75 @@ load_dotenv(dotenv_path=dotenv_path)
 class Config:
     """
     Handles the application's configuration by loading values from environment variables.
+
+    All values are resolved at instantiation time so that tests can override
+    environment variables before creating a new Config and get deterministic
+    behaviour. Properties are used only for values that must be dynamically
+    derived from other instance attributes.
     """
 
-    def __init__(self):
-        # --- Database variables ---
-        self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
+    # Constants that never change at runtime.
+    JOULES_PER_KWH = 3.6e6
 
-        # --- Recommendation engine options ---
-        # If false, recommendations for system namespaces (e.g., kube-system, coredns) are not generated
-        self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (
+    def __init__(self):
+        # --- Secrets (files or env vars) ---
+        self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
+        self.BOAVIZTA_TOKEN = self._get_secret("BOAVIZTA_TOKEN")
+        self.ELASTICSEARCH_USER = self._get_secret("ELASTICSEARCH_USER")
+        self.ELASTICSEARCH_PASSWORD = self._get_secret("ELASTICSEARCH_PASSWORD")
+        self.PROMETHEUS_BEARER_TOKEN = self._get_secret("PROMETHEUS_BEARER_TOKEN")
+        self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
+        self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
+
+        # --- Default variables ---
+        self.DEFAULT_COST = 0.0
+        self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
+        self.DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
+        self.DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
+
+        # --- Network variables ---
+        self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+        self.USER_AGENT = os.getenv("USER_AGENT", "GreenKube/1.0.0 (+https://github.com/greenkube)")
+        self.DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
+        self.DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
+
+        # --- Database variables ---
+        self.DB_TYPE = os.getenv("DB_TYPE", "postgres")
+        self.DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
+        self.DB_CONNECTION_STRING = os.getenv(
+            "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
+        )
+        self.DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
+
+        # --- Elasticsearch variables ---
+        self.ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
+        self.ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        )
+        self.ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", "carbon_intensity")
+
+        # --- Prometheus variables ---
+        self.PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "")
+        self.PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
+        self.PROMETHEUS_QUERY_RANGE_MAX_SAMPLES = int(os.getenv("PROMETHEUS_QUERY_RANGE_MAX_SAMPLES", "10000"))
+        self.PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        )
+        self.PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
+            "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
+        )
+
+        # --- OpenCost variables ---
+        self.OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
+        self.OPENCOST_VERIFY_CERTS = os.getenv("OPENCOST_VERIFY_CERTS", "True").lower() in (
             "true",
             "1",
             "t",
@@ -36,16 +96,48 @@ class Config:
 
         # --- Boavizta variables ---
         self.BOAVIZTA_API_URL = os.getenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
-        self.BOAVIZTA_TOKEN = self._get_secret("BOAVIZTA_TOKEN")
 
-        # --- ELASTICSEARCH VARIABLES ---
-        self.ELASTICSEARCH_USER = self._get_secret("ELASTICSEARCH_USER")
-        self.ELASTICSEARCH_PASSWORD = self._get_secret("ELASTICSEARCH_PASSWORD")
+        # --- Default instance profile (used when instance type unknown) ---
+        self.DEFAULT_INSTANCE_VCORES = int(os.getenv("DEFAULT_INSTANCE_VCORES", "1"))
+        self.DEFAULT_INSTANCE_MIN_WATTS = float(os.getenv("DEFAULT_INSTANCE_MIN_WATTS", "1.0"))
+        self.DEFAULT_INSTANCE_MAX_WATTS = float(os.getenv("DEFAULT_INSTANCE_MAX_WATTS", "10.0"))
 
-        # -- Prometheus variables ---
-        self.PROMETHEUS_BEARER_TOKEN = self._get_secret("PROMETHEUS_BEARER_TOKEN")
-        self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
-        self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
+        # Threshold in cores below which Prometheus totals are considered too small
+        self.LOW_NODE_CPU_THRESHOLD = float(os.getenv("LOW_NODE_CPU_THRESHOLD", "0.05"))
+
+        # Normalization granularity for carbon intensity lookups and cache keys.
+        # Allowed values: 'hour', 'day', 'none'
+        self.NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
+
+        # --- Node Analysis variables ---
+        self.NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
+        self.NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
+
+        # --- API variables ---
+        self.API_HOST = os.getenv("API_HOST", "0.0.0.0")
+        self.API_PORT = int(os.getenv("API_PORT", "8000"))
+
+        # --- Recommendation Engine variables ---
+        self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        )
+        self.RECOMMENDATION_LOOKBACK_DAYS = int(os.getenv("RECOMMENDATION_LOOKBACK_DAYS", "7"))
+        self.RIGHTSIZING_CPU_THRESHOLD = float(os.getenv("RIGHTSIZING_CPU_THRESHOLD", "0.3"))
+        self.RIGHTSIZING_MEMORY_THRESHOLD = float(os.getenv("RIGHTSIZING_MEMORY_THRESHOLD", "0.3"))
+        self.RIGHTSIZING_HEADROOM = float(os.getenv("RIGHTSIZING_HEADROOM", "1.2"))
+        self.ZOMBIE_COST_THRESHOLD = float(os.getenv("ZOMBIE_COST_THRESHOLD", "0.01"))
+        self.ZOMBIE_ENERGY_THRESHOLD = float(os.getenv("ZOMBIE_ENERGY_THRESHOLD", "1000"))
+        self.AUTOSCALING_CV_THRESHOLD = float(os.getenv("AUTOSCALING_CV_THRESHOLD", "0.7"))
+        self.AUTOSCALING_SPIKE_RATIO = float(os.getenv("AUTOSCALING_SPIKE_RATIO", "3.0"))
+        self.OFF_PEAK_IDLE_THRESHOLD = float(os.getenv("OFF_PEAK_IDLE_THRESHOLD", "0.05"))
+        self.OFF_PEAK_MIN_IDLE_HOURS = int(os.getenv("OFF_PEAK_MIN_IDLE_HOURS", "4"))
+        self.IDLE_NAMESPACE_ENERGY_THRESHOLD = float(os.getenv("IDLE_NAMESPACE_ENERGY_THRESHOLD", "1000"))
+        self.CARBON_AWARE_THRESHOLD = float(os.getenv("CARBON_AWARE_THRESHOLD", "1.5"))
+        self.NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
 
     @staticmethod
     def _get_secret(key: str, default: str = None) -> str:
@@ -118,121 +210,9 @@ class Config:
             return self.DEFAULT_PUE
         return pue
 
-    DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
-    DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
-    JOULES_PER_KWH = 3.6e6
-
-    # --- Boavizta default params ---
-    DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
-
-    # --- Network variables check ---
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-    # --- Network variables ---
-    # Standard User-Agent to identify the client and avoid being blocked by WAFs
-    USER_AGENT = os.getenv("USER_AGENT", "GreenKube/1.0.0 (+https://github.com/greenkube)")
-    # Default connection timeout (seconds)
-    DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
-    # Default read timeout (seconds)
-    DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
-
-    # --- Database variables ---
-    DB_TYPE = os.getenv("DB_TYPE", "postgres")
-    DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
-    DB_CONNECTION_STRING = os.getenv(
-        "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
-    )
-    DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
-
-    # --- ELASTICSEARCH VARIABLES ---
-    ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
-    ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
-        "true",
-        "1",
-        "t",
-        "y",
-        "yes",
-    )
-    ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", "carbon_intensity")
-
-    # -- Prometheus variables ---
-    # Default to empty so the application attempts discovery when no URL is
-    # provided by environment/config. This avoids binding a potentially
-    # stale in-cluster DNS name at import time.
-    PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "")
-    PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
-    PROMETHEUS_QUERY_RANGE_MAX_SAMPLES = int(
-        os.getenv("PROMETHEUS_QUERY_RANGE_MAX_SAMPLES", "10000")
-    )  # Max data points in a range query
-    PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
-        "true",
-        "1",
-        "t",
-        "y",
-        "yes",
-    )
-    PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
-        "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
-    )
-
-    # --- OpenCost API URL (used by OpenCostCollector) ---
-    OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
-    OPENCOST_VERIFY_CERTS = os.getenv("OPENCOST_VERIFY_CERTS", "True").lower() in (
-        "true",
-        "1",
-        "t",
-        "y",
-        "yes",
-    )
-
-    # --- Default instance profile (used when instance type unknown) ---
-    DEFAULT_INSTANCE_VCORES = int(os.getenv("DEFAULT_INSTANCE_VCORES", "1"))
-    DEFAULT_INSTANCE_MIN_WATTS = float(os.getenv("DEFAULT_INSTANCE_MIN_WATTS", "1.0"))
-    DEFAULT_INSTANCE_MAX_WATTS = float(os.getenv("DEFAULT_INSTANCE_MAX_WATTS", "10.0"))
-
-    # Threshold in cores below which Prometheus totals are considered too small
-    LOW_NODE_CPU_THRESHOLD = float(os.getenv("LOW_NODE_CPU_THRESHOLD", "0.05"))
-
-    # Normalization granularity for carbon intensity lookups and cache keys.
-    # Allowed values: 'hour', 'day', 'none'
-    NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
-
-    # --- Node Analysis variables ---
-    NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
-    NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
-
-    # --- API variables ---
-    API_HOST = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT = int(os.getenv("API_PORT", "8000"))
-
-    # --- Recommendation Engine variables ---
-    RECOMMENDATION_LOOKBACK_DAYS = int(os.getenv("RECOMMENDATION_LOOKBACK_DAYS", "7"))
-    RIGHTSIZING_CPU_THRESHOLD = float(os.getenv("RIGHTSIZING_CPU_THRESHOLD", "0.3"))
-    RIGHTSIZING_MEMORY_THRESHOLD = float(os.getenv("RIGHTSIZING_MEMORY_THRESHOLD", "0.3"))
-    RIGHTSIZING_HEADROOM = float(os.getenv("RIGHTSIZING_HEADROOM", "1.2"))
-    ZOMBIE_COST_THRESHOLD = float(os.getenv("ZOMBIE_COST_THRESHOLD", "0.01"))
-    ZOMBIE_ENERGY_THRESHOLD = float(os.getenv("ZOMBIE_ENERGY_THRESHOLD", "1000"))
-    AUTOSCALING_CV_THRESHOLD = float(os.getenv("AUTOSCALING_CV_THRESHOLD", "0.7"))
-    AUTOSCALING_SPIKE_RATIO = float(os.getenv("AUTOSCALING_SPIKE_RATIO", "3.0"))
-    OFF_PEAK_IDLE_THRESHOLD = float(os.getenv("OFF_PEAK_IDLE_THRESHOLD", "0.05"))
-    OFF_PEAK_MIN_IDLE_HOURS = int(os.getenv("OFF_PEAK_MIN_IDLE_HOURS", "4"))
-    IDLE_NAMESPACE_ENERGY_THRESHOLD = float(os.getenv("IDLE_NAMESPACE_ENERGY_THRESHOLD", "1000"))
-    CARBON_AWARE_THRESHOLD = float(os.getenv("CARBON_AWARE_THRESHOLD", "1.5"))
-    NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
-
     @property
     def DATACENTER_PUE_PROFILES(self):
         return DATACENTER_PUE_PROFILES
-
-    @classmethod
-    def validate(cls):
-        """
-        Validates that the necessary configuration variables are set.
-        """
-        # Note: Instance variables initialized in __init__ cannot be validated here easily
-        # unless we instantiate, but this method is @classmethod.
-        # However, we can check os.environ or rely on the fact that config is instantiated below.
-        pass
 
     def validate_instance(self):
         if self.DB_TYPE not in ["sqlite", "postgres", "elasticsearch"]:

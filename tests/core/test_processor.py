@@ -181,7 +181,7 @@ def mock_calculator():
 
     # Configure a side effect to return different results based on input
     # Configure a side effect to return different results based on input
-    async def calculate_side_effect(joules, zone, timestamp):
+    async def calculate_side_effect(joules, zone, timestamp, pue=None):
         # Determine pod name based on joules for simplified mapping in tests
         pod_name = None
         if joules == 1000000:
@@ -277,6 +277,7 @@ def data_processor(
     estimator_mock.instance_profiles = {}
     estimator_mock.DEFAULT_INSTANCE_PROFILE = {"vcores": 2, "minWatts": 10, "maxWatts": 50}
     estimator_mock.calculate_node_energy.return_value = []  # Default return
+    estimator_mock.query_range_step_sec = 300  # 5 minutes
 
     return DataProcessor(
         prometheus_collector=mock_prometheus_collector,
@@ -325,7 +326,9 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
     # Detailed checks for pod-A (has all data)
     metric_a = next(m for m in combined_results if m.pod_name == "pod-A")
     assert metric_a.namespace == "ns-1"
-    assert metric_a.total_cost == SAMPLE_COST_METRICS[0].total_cost
+    # OpenCost returns daily cost; processor divides by steps_per_day (86400/300 = 288)
+    steps_per_day = 86400 / 300
+    assert metric_a.total_cost == pytest.approx(SAMPLE_COST_METRICS[0].total_cost / steps_per_day)
     assert metric_a.co2e_grams == SAMPLE_CALCULATION_RESULT_A.co2e_grams
     assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
     assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
@@ -334,36 +337,40 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
     # Detailed checks for pod-B (has all data)
     metric_b = next(m for m in combined_results if m.pod_name == "pod-B")
     assert metric_b.namespace == "ns-2"
-    assert metric_b.total_cost == SAMPLE_COST_METRICS[1].total_cost
+    assert metric_b.total_cost == pytest.approx(SAMPLE_COST_METRICS[1].total_cost / steps_per_day)
     assert metric_b.co2e_grams == SAMPLE_CALCULATION_RESULT_B.co2e_grams
     assert metric_b.grid_intensity == SAMPLE_CALCULATION_RESULT_B.grid_intensity
     assert metric_b.pue == 1.15  # AWS PUE
 
     # Check calculator calls precisely
     assert mock_calculator.calculate_emissions.call_count == 4
-    # Call 1 (pod-A)
+    # Call 1 (pod-A) - node-1 is gcp
     mock_calculator.calculate_emissions.assert_any_call(
         joules=SAMPLE_ENERGY_METRICS[0].joules,
         zone="US-CISO-NE",  # Result of translation for node-1's zone
         timestamp=SAMPLE_ENERGY_METRICS[0].timestamp,
+        pue=1.09,
     )
-    # Call 2 (pod-B)
+    # Call 2 (pod-B) - node-2 is aws
     mock_calculator.calculate_emissions.assert_any_call(
         joules=SAMPLE_ENERGY_METRICS[1].joules,
         zone="IE",  # Result of translation for node-2's zone
         timestamp=SAMPLE_ENERGY_METRICS[1].timestamp,
+        pue=1.15,
     )
-    # Call 3 (pod-C) - uses pod-A's zone as it's on the same node
+    # Call 3 (pod-C) - uses pod-A's zone as it's on the same node (gcp)
     mock_calculator.calculate_emissions.assert_any_call(
         joules=SAMPLE_ENERGY_METRICS[2].joules,
         zone="US-CISO-NE",
         timestamp=SAMPLE_ENERGY_METRICS[2].timestamp,
+        pue=1.09,
     )
-    # Call 4 (pod-D) - uses default zone
+    # Call 4 (pod-D) - uses default zone, unknown node -> default PUE
     mock_calculator.calculate_emissions.assert_any_call(
         joules=SAMPLE_ENERGY_METRICS[3].joules,
         zone=config.DEFAULT_ZONE,  # Used because node/zone mapping failed
         timestamp=SAMPLE_ENERGY_METRICS[3].timestamp,
+        pue=config.DEFAULT_PUE,
     )
 
 
@@ -410,6 +417,7 @@ async def test_processor_estimates_missing_cost_data(mock_translator, data_proce
         joules=SAMPLE_ENERGY_METRICS[2].joules,
         zone="US-CISO-NE",  # On node-1 -> gcp-us-east1-a -> US-CISO-NE
         timestamp=SAMPLE_ENERGY_METRICS[2].timestamp,
+        pue=1.09,
     )
 
 
@@ -471,6 +479,7 @@ async def test_processor_uses_default_zone_when_node_zone_missing(
             joules=energy_metric.joules,
             zone=config.DEFAULT_ZONE,  # <<< ASSERTION: Default zone used
             timestamp=energy_metric.timestamp,
+            pue=config.DEFAULT_PUE,
         )
 
     # Verify NodeCollector was called

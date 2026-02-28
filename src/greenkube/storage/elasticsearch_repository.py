@@ -79,15 +79,19 @@ class CombinedMetricDoc(Document):
     ephemeral_storage_usage_bytes = Float()
     gpu_usage_millicores = Float()
     restart_count = Float()
+    owner_kind = Keyword()
+    owner_name = Keyword()
     period = Text()
     timestamp = Date()
     duration_seconds = Float()
     grid_intensity_timestamp = Date()
+    node = Keyword()
     node_instance_type = Keyword()
     node_zone = Keyword()
     emaps_zone = Keyword()
     is_estimated = Keyword()
     estimation_reasons = Text()
+    calculation_version = Keyword()
 
     class Index:
         name = "greenkube_combined_metrics"

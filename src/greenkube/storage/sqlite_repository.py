@@ -1,7 +1,7 @@
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List
 
 import aiosqlite
@@ -33,7 +33,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     async def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
-        Only considers data from the last 48 hours to avoid using stale values.
+        Consistent with the PostgreSQL implementation (no arbitrary lookback window).
         """
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -44,31 +44,16 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     dt = ensure_utc(timestamp)
                     normalized_ts = to_iso_z(dt)
                 except ValueError:
-                    # If parsing fails, fallback to using the timestamp as-is (though it likely won't match)
-                    dt = None
                     normalized_ts = timestamp
 
-                # Define lookback window (48 hours)
-                if dt:
-                    lookback_limit = to_iso_z(dt - timedelta(hours=48))
-                    query = """
-                        SELECT carbon_intensity
-                        FROM carbon_intensity_history
-                        WHERE zone = ? AND datetime <= ? AND datetime >= ?
-                        ORDER BY datetime DESC
-                        LIMIT 1
-                    """
-                    params = (zone, normalized_ts, lookback_limit)
-                else:
-                    # Fallback: use original query without time bound if timestamp parsing fails
-                    query = """
-                        SELECT carbon_intensity
-                        FROM carbon_intensity_history
-                        WHERE zone = ? AND datetime <= ?
-                        ORDER BY datetime DESC
-                        LIMIT 1
-                    """
-                    params = (zone, normalized_ts)
+                query = """
+                    SELECT carbon_intensity
+                    FROM carbon_intensity_history
+                    WHERE zone = ? AND datetime <= ?
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                """
+                params = (zone, normalized_ts)
 
                 async with conn.execute(query, params) as cursor:
                     result = await cursor.fetchone()
@@ -171,14 +156,48 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                   gpu_usage_millicores, restart_count,
                                   owner_kind, owner_name,
                                   period, "timestamp", duration_seconds,
-                                  grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
-                                  is_estimated, estimation_reasons, embodied_co2e_grams)
+                                  grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
+                                  is_estimated, estimation_reasons, embodied_co2e_grams,
+                                  calculation_version)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?
                             )
-                            ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
+                            ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
+                                total_cost = excluded.total_cost,
+                                co2e_grams = excluded.co2e_grams,
+                                pue = excluded.pue,
+                                grid_intensity = excluded.grid_intensity,
+                                joules = excluded.joules,
+                                cpu_request = excluded.cpu_request,
+                                memory_request = excluded.memory_request,
+                                cpu_usage_millicores = excluded.cpu_usage_millicores,
+                                memory_usage_bytes = excluded.memory_usage_bytes,
+                                network_receive_bytes = excluded.network_receive_bytes,
+                                network_transmit_bytes = excluded.network_transmit_bytes,
+                                disk_read_bytes = excluded.disk_read_bytes,
+                                disk_write_bytes = excluded.disk_write_bytes,
+                                storage_request_bytes = excluded.storage_request_bytes,
+                                storage_usage_bytes = excluded.storage_usage_bytes,
+                                ephemeral_storage_request_bytes = excluded.ephemeral_storage_request_bytes,
+                                ephemeral_storage_usage_bytes = excluded.ephemeral_storage_usage_bytes,
+                                gpu_usage_millicores = excluded.gpu_usage_millicores,
+                                restart_count = excluded.restart_count,
+                                owner_kind = excluded.owner_kind,
+                                owner_name = excluded.owner_name,
+                                period = excluded.period,
+                                duration_seconds = excluded.duration_seconds,
+                                grid_intensity_timestamp = excluded.grid_intensity_timestamp,
+                                node = excluded.node,
+                                node_instance_type = excluded.node_instance_type,
+                                node_zone = excluded.node_zone,
+                                emaps_zone = excluded.emaps_zone,
+                                is_estimated = excluded.is_estimated,
+                                estimation_reasons = excluded.estimation_reasons,
+                                embodied_co2e_grams = excluded.embodied_co2e_grams,
+                                calculation_version = excluded.calculation_version;
                         """,
                             (
                                 metric.pod_name,
@@ -208,12 +227,14 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 timestamp_iso,
                                 metric.duration_seconds,
                                 grid_intensity_timestamp_iso,
+                                metric.node,
                                 metric.node_instance_type,
                                 metric.node_zone,
                                 metric.emaps_zone,
                                 metric.is_estimated,
                                 json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                                 metric.embodied_co2e_grams,
+                                metric.calculation_version,
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -246,8 +267,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                            gpu_usage_millicores, restart_count,
                            owner_kind, owner_name,
                            period, "timestamp", duration_seconds,
-                           grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
-                           is_estimated, estimation_reasons, embodied_co2e_grams
+                           grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
+                           is_estimated, estimation_reasons, embodied_co2e_grams,
+                           calculation_version
                     FROM combined_metrics
                     WHERE "timestamp" BETWEEN ? AND ?
                 """,
@@ -294,12 +316,14 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 grid_intensity_timestamp=datetime.fromisoformat(row["grid_intensity_timestamp"])
                                 if row["grid_intensity_timestamp"]
                                 else None,
+                                node=row["node"],
                                 node_instance_type=row["node_instance_type"],
                                 node_zone=row["node_zone"],
                                 emaps_zone=row["emaps_zone"],
                                 is_estimated=bool(row["is_estimated"]),
                                 estimation_reasons=estimation_reasons,
                                 embodied_co2e_grams=row["embodied_co2e_grams"],
+                                calculation_version=row["calculation_version"],
                             )
                         )
                     return metrics

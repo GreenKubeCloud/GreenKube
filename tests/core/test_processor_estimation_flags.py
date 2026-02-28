@@ -41,6 +41,7 @@ def mock_components():
 
     calc = AsyncMock()
     calc.calculate_emissions = AsyncMock()
+    calc.calculate_embodied_emissions = MagicMock(return_value=0.0)  # sync method
     calc.clear_cache = AsyncMock()  # async method
 
     return {
@@ -52,7 +53,7 @@ def mock_components():
         "repo": repo,
         "node_repo": node_repo,
         "calc": calc,
-        "est": MagicMock(),
+        "est": MagicMock(query_range_step_sec=300),
     }
 
 

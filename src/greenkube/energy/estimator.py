@@ -10,7 +10,6 @@ hardware profiles of the instances.
 """
 
 import logging
-import sys
 from collections import defaultdict
 from typing import Any, Dict, List
 
@@ -29,12 +28,7 @@ class BasicEstimator:
     """
 
     def __init__(self, settings: Config):
-        # When running under pytest prefer a small default step to keep unit tests deterministic
-        if "pytest" in sys.modules:
-            # Use a deterministic 5-minute step during unit tests regardless of env
-            self.query_range_step_str = "5m"
-        else:
-            self.query_range_step_str = getattr(settings, "PROMETHEUS_QUERY_RANGE_STEP", "5m")
+        self.query_range_step_str = getattr(settings, "PROMETHEUS_QUERY_RANGE_STEP", "5m")
 
         # Converts the chosen step string (e.g., "5m") into seconds
         self.query_range_step_sec = self._parse_step_to_seconds(self.query_range_step_str)

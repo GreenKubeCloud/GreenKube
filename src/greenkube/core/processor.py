@@ -9,6 +9,7 @@ from greenkube.collectors.boavizta_collector import BoaviztaCollector
 from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
 from greenkube.utils.date_utils import parse_iso_date
 
+from .. import __version__
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -267,6 +268,8 @@ class DataProcessor:
         # --- Post-Processing / Dependency Logic ---
 
         # 1. Adjust Node Utilization based on Pod Requests (if Prom CPU is low)
+        # Track which nodes were adjusted so we can flag metrics as estimated.
+        cpu_adjusted_nodes = set()
         if prom_metrics:
             try:
                 # Compute node totals from prom_metrics
@@ -290,6 +293,13 @@ class DataProcessor:
                                 total_reqs += pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
 
                             if total_reqs > 0:
+                                cpu_adjusted_nodes.add(node)
+                                logger.info(
+                                    "Node '%s' CPU %.4f below threshold; substituting pod requests (%.4f)",
+                                    node,
+                                    total_cpu,
+                                    total_reqs,
+                                )
                                 for itm in node_to_items.get(node, []):
                                     req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
                                     if req:
@@ -422,35 +432,18 @@ class DataProcessor:
                 )
 
             # Populate cache entries for each metric timestamp so later lookups
-            # in CarbonCalculator.find in-cache by exact (zone,timestamp) succeed
-            for m in metrics:
-                # Normalize metric timestamp to match calculator cache keys
-                ts = m.timestamp
-                if isinstance(ts, str):
-                    dt = parse_iso_date(ts)
-                    if not dt:
-                        dt = rep_dt
-                else:
-                    dt = ts
-                if gran == "hour":
-                    key_dt = dt.replace(minute=0, second=0, microsecond=0)
-                elif gran == "day":
-                    key_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-                else:
-                    key_dt = dt
-                # Create both 'Z' and '+00:00' ISO formats to be tolerant of
-                # callers/tests that expect either representation.
-                key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
-                key_ts_z = key_dt_utc.isoformat().replace("+00:00", "Z")
-                key_ts_plus = key_dt_utc.isoformat()
-
-                cache_key_z = (zone, key_ts_z)
-                cache_key_plus = (zone, key_ts_plus)
-
-                if cache_key_z not in self.calculator._intensity_cache:
-                    self.calculator._intensity_cache[cache_key_z] = intensity
-                if cache_key_plus not in self.calculator._intensity_cache:
-                    self.calculator._intensity_cache[cache_key_plus] = intensity
+            # in CarbonCalculator succeed via the public prefetch API.
+            if intensity is not None:
+                for m in metrics:
+                    ts = m.timestamp
+                    if isinstance(ts, str):
+                        dt = parse_iso_date(ts)
+                        if not dt:
+                            dt = rep_dt
+                    else:
+                        dt = ts
+                    ts_str = ts if isinstance(ts, str) else dt.isoformat()
+                    await self.calculator.prefetch_intensity(zone, ts_str, intensity)
 
         if zone_to_metrics:
             logger.info("Prefetching intensity for %d zones in parallel...", len(zone_to_metrics))
@@ -493,9 +486,8 @@ class DataProcessor:
                     # Parse GWP from Pydantic model
                     gwp_embedded_kg = impact.impacts.gwp.manufacture
                     if gwp_embedded_kg:
-                        # Default lifespan 4 years (35040 hours) per config requirement
-                        # but API doesn't return it usually
-                        lifespan = 35040
+                        # Use configurable default lifespan
+                        lifespan = config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
 
                         await self.embodied_repository.save_profile(
                             provider=provider, instance_type=instance_type, gwp=gwp_embedded_kg, lifespan=lifespan
@@ -532,15 +524,19 @@ class DataProcessor:
                 logger.warning("Failed to save node snapshots: %s", e)
 
         # 5. Combine and Calculate
+        # OpenCost collect(window="1d") returns daily totals.  Divide by the
+        # number of steps in a day so each CombinedMetric carries the per-step cost.
+        steps_per_day = 86400 / self.estimator.query_range_step_sec
+
         for energy_metric in energy_metrics:
             pod_name = energy_metric.pod_name
             namespace = energy_metric.namespace
             pod_key = (namespace, pod_name)
 
-            # Find corresponding cost metric
+            # Find corresponding cost metric (daily total → per-step)
             cost_metric = cost_map.get(pod_name)
             if cost_metric:
-                total_cost = cost_metric.total_cost
+                total_cost = cost_metric.total_cost / steps_per_day
             else:
                 total_cost = config.DEFAULT_COST
 
@@ -593,7 +589,14 @@ class DataProcessor:
                 is_estimated = True
                 estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
 
-            # 5. Embodied Emissions (Boavizta)
+            # 5. From CPU Adjustment
+            if node_name in cpu_adjusted_nodes:
+                is_estimated = True
+                estimation_reasons.append(
+                    f"CPU usage on node '{node_name}' was below threshold; substituted pod requests"
+                )
+
+            # 6. Embodied Emissions (Boavizta)
             embodied_emissions_grams = 0.0
             node_info = nodes_info.get(node_name)
             if node_info and node_info.cloud_provider and node_info.instance_type:
@@ -605,9 +608,12 @@ class DataProcessor:
                         gwp_kg = profile.get("gwp_manufacture")
                         lifespan = profile.get("lifespan_hours")
 
-                        # Calculate share
+                        # Calculate share using node's actual CPU capacity from K8s API
+                        # Fall back to instance profile vcores if K8s capacity is unavailable
                         node_capacity = 0
-                        if node_info.instance_type:
+                        if node_info.cpu_capacity_cores:
+                            node_capacity = node_info.cpu_capacity_cores
+                        elif node_info.instance_type:
                             prof = self.estimator.instance_profiles.get(node_info.instance_type)
                             if prof:
                                 node_capacity = prof["vcores"]
@@ -634,6 +640,7 @@ class DataProcessor:
                     joules=energy_metric.joules,
                     zone=emaps_zone,
                     timestamp=energy_metric.timestamp,
+                    pue=pue,
                 )
             except Exception as e:
                 logger.error("Failed to calculate emissions for pod '%s': %s", pod_name, e)
@@ -645,9 +652,7 @@ class DataProcessor:
                     namespace=namespace,
                     total_cost=total_cost,
                     co2e_grams=carbon_result.co2e_grams,
-                    pue=config.get_pue_for_provider(
-                        nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-                    ),
+                    pue=pue,
                     grid_intensity=carbon_result.grid_intensity,
                     joules=energy_metric.joules,
                     cpu_request=pod_requests["cpu"],
@@ -663,6 +668,7 @@ class DataProcessor:
                     owner_kind=pod_requests.get("owner_kind"),
                     owner_name=pod_requests.get("owner_name"),
                     timestamp=energy_metric.timestamp,
+                    duration_seconds=self.estimator.query_range_step_sec,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                     node=node_name,
                     node_instance_type=(
@@ -675,6 +681,7 @@ class DataProcessor:
                     is_estimated=is_estimated,
                     estimation_reasons=estimation_reasons,
                     embodied_co2e_grams=embodied_emissions_grams,
+                    calculation_version=__version__,
                 )
                 combined_metrics.append(combined)
             else:
@@ -1045,19 +1052,12 @@ class DataProcessor:
                 context = node_contexts.get(node_name)
                 zone = context.emaps_zone if context else config.DEFAULT_ZONE
                 ts = em.timestamp
-                key_dt = ts.replace(minute=0, second=0, microsecond=0)
-                key_dt_utc = key_dt.astimezone(timezone.utc).replace(microsecond=0)
-                key_plus = key_dt_utc.isoformat()
-                key_z = key_plus.replace("+00:00", "Z")
-                cache_key_plus = (zone, key_plus)
-                cache_key_z = (zone, key_z)
-                if cache_key_plus not in calculator._intensity_cache and cache_key_z not in calculator._intensity_cache:
-                    try:
-                        intensity = await repository.get_for_zone_at_time(zone, key_plus)
-                    except Exception:
-                        intensity = None
-                    calculator._intensity_cache[cache_key_plus] = intensity
-                    calculator._intensity_cache[cache_key_z] = intensity
+                try:
+                    intensity = await repository.get_for_zone_at_time(zone, ts.isoformat())
+                except Exception:
+                    intensity = None
+                if intensity is not None:
+                    await calculator.prefetch_intensity(zone, ts.isoformat(), intensity)
 
             # Build CombinedMetric objects for this chunk
             for em in chunk_energy_metrics:
@@ -1068,8 +1068,12 @@ class DataProcessor:
                 ts = em.timestamp
                 node_context = node_contexts.get(node_name)
                 zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
+                provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                pue = config.get_pue_for_provider(provider)
                 try:
-                    carbon_result = await calculator.calculate_emissions(joules=joules, zone=zone, timestamp=ts)
+                    carbon_result = await calculator.calculate_emissions(
+                        joules=joules, zone=zone, timestamp=ts, pue=pue
+                    )
                 except Exception:
                     carbon_result = None
                 if carbon_result is None:
@@ -1124,9 +1128,7 @@ class DataProcessor:
                             duration_seconds=chosen_step_sec,
                             grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
                             co2e_grams=carbon_result.co2e_grams,
-                            pue=config.get_pue_for_provider(
-                                nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-                            ),
+                            pue=pue,
                             grid_intensity=carbon_result.grid_intensity,
                             joules=joules,
                             cpu_request=cpu_req,
@@ -1147,6 +1149,7 @@ class DataProcessor:
                             disk_write_bytes=range_disk_write_map.get(pod_key),
                             ephemeral_storage_request_bytes=pod_ephemeral_storage_map.get(pod_key) or None,
                             restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
+                            calculation_version=__version__,
                         )
                     )
 
