@@ -40,7 +40,7 @@ async def init_db():
             logger.info("Verified 'instance_carbon_profiles' table exists.")
 
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+        logger.error("Failed to initialize database: %s", e)
         sys.exit(1)
     finally:
         await db_manager.close()
