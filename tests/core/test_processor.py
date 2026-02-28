@@ -326,7 +326,9 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
     # Detailed checks for pod-A (has all data)
     metric_a = next(m for m in combined_results if m.pod_name == "pod-A")
     assert metric_a.namespace == "ns-1"
-    assert metric_a.total_cost == SAMPLE_COST_METRICS[0].total_cost
+    # OpenCost returns daily cost; processor divides by steps_per_day (86400/300 = 288)
+    steps_per_day = 86400 / 300
+    assert metric_a.total_cost == pytest.approx(SAMPLE_COST_METRICS[0].total_cost / steps_per_day)
     assert metric_a.co2e_grams == SAMPLE_CALCULATION_RESULT_A.co2e_grams
     assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
     assert metric_a.grid_intensity == SAMPLE_CALCULATION_RESULT_A.grid_intensity
@@ -335,7 +337,7 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
     # Detailed checks for pod-B (has all data)
     metric_b = next(m for m in combined_results if m.pod_name == "pod-B")
     assert metric_b.namespace == "ns-2"
-    assert metric_b.total_cost == SAMPLE_COST_METRICS[1].total_cost
+    assert metric_b.total_cost == pytest.approx(SAMPLE_COST_METRICS[1].total_cost / steps_per_day)
     assert metric_b.co2e_grams == SAMPLE_CALCULATION_RESULT_B.co2e_grams
     assert metric_b.grid_intensity == SAMPLE_CALCULATION_RESULT_B.grid_intensity
     assert metric_b.pue == 1.15  # AWS PUE
