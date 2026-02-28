@@ -59,10 +59,17 @@ class CarbonCalculator:
         async with self._lock:
             self._intensity_cache.clear()
 
-    async def calculate_emissions(self, joules: float, zone: str, timestamp: str) -> Optional[CarbonCalculationResult]:
+    async def calculate_emissions(
+        self, joules: float, zone: str, timestamp: str, pue: Optional[float] = None
+    ) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 
         If intensity is missing in the repository, the configured default is used.
+        Args:
+            joules: Energy consumed in Joules.
+            zone: Electricity Maps zone identifier.
+            timestamp: Timestamp for the carbon intensity lookup.
+            pue: Power Usage Effectiveness to apply. If None, uses the instance default.
         """
         # Normalize timestamp to hour to increase cache hit rate across similar timestamps
         dt = _to_datetime(timestamp)
@@ -108,7 +115,8 @@ class CarbonCalculator:
             )
 
         kwh = joules / config.JOULES_PER_KWH
-        kwh_adjusted_for_pue = kwh * self.pue
+        effective_pue = pue if pue is not None else self.pue
+        kwh_adjusted_for_pue = kwh * effective_pue
         co2e_grams = kwh_adjusted_for_pue * grid_intensity_value
 
         return CarbonCalculationResult(
