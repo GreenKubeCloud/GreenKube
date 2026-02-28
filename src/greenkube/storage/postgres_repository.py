@@ -36,7 +36,7 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     return row["carbon_intensity"]
                 return None
         except Exception as e:
-            logger.error(f"Error getting carbon intensity from Postgres: {e}")
+            logger.error("Error getting carbon intensity from Postgres: %s", e)
             raise QueryError(f"Error getting carbon intensity: {e}") from e
 
     async def save_history(self, history_data: list, zone: str) -> int:
@@ -89,10 +89,10 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     )
 
                 await conn.executemany(query, records)
-                logger.info(f"Saved {len(history_data)} records to Postgres for zone {zone}.")
+                logger.info("Saved %s records to Postgres for zone %s.", len(history_data), zone)
                 return len(history_data)
         except Exception as e:
-            logger.error(f"Error saving history to Postgres: {e}")
+            logger.error("Error saving history to Postgres: %s", e)
             raise QueryError(f"Error saving history: {e}") from e
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]):
@@ -215,10 +215,10 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
 
                 await conn.executemany(query, metrics_data)
                 # No commit needed as asyncpg usually autocommits or we rely on explicit transaction
-                logger.info(f"Saved {len(metrics)} combined metrics to Postgres.")
+                logger.info("Saved %s combined metrics to Postgres.", len(metrics))
                 return len(metrics)
         except Exception as e:
-            logger.error(f"Error writing combined metrics to Postgres: {e}")
+            logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
@@ -251,5 +251,5 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
 
                 return metrics
         except Exception as e:
-            logger.error(f"Error reading combined metrics from Postgres: {e}")
+            logger.error("Error reading combined metrics from Postgres: %s", e)
             raise QueryError(f"Error reading combined metrics: {e}") from e

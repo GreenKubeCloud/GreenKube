@@ -84,8 +84,8 @@ def get_node_repository() -> NodeRepository:
         # For now, only SQLite and Elasticsearch are supported for nodes
         # Wait, Postgres is also supported now.
         logger.warning(
-            f"NodeRepository not implemented for DB_TYPE '{config.DB_TYPE}'. "
-            "Using SQLite fallback if possible or failing."
+            "NodeRepository not implemented for DB_TYPE '%s'. Using SQLite fallback if possible or failing.",
+            config.DB_TYPE,
         )
         from ..core.db import db_manager
 
@@ -171,8 +171,9 @@ def get_processor() -> DataProcessor:
             estimator=estimator,
         )
     except Exception as e:
-        logger.error(f"An error occurred during processor initialization: {e}")
+        logger.error("An error occurred during processor initialization: %s", e)
         logger.error("Processor initialization failed: %s", traceback.format_exc())
+        clear_caches()
         raise typer.Exit(code=1)
 
 
@@ -180,8 +181,9 @@ def clear_caches():
     """Clear all factory function caches.
 
     This is primarily useful in tests to ensure a fresh set of components
-    after configuration changes. It can also be used at runtime if the
-    application needs to re-initialise its components after a config reload.
+    after configuration changes. It is also called automatically by
+    :func:`get_processor` when initialization fails, so that a subsequent
+    call can retry cleanly.
     """
     get_repository.cache_clear()
     get_node_repository.cache_clear()

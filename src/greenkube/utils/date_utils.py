@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
 
@@ -52,3 +52,38 @@ def to_iso_z(dt: datetime) -> str:
     Converts a datetime to an ISO 8601 string with 'Z' suffix for UTC.
     """
     return ensure_utc(dt).isoformat().replace("+00:00", "Z")
+
+
+def parse_duration(value: str) -> timedelta:
+    """Parse a human-readable duration string into a :class:`~datetime.timedelta`.
+
+    Supported formats: ``'10min'``, ``'2h'``, ``'7d'``, ``'3w'``, ``'1m'`` (month ≈ 30 d),
+    ``'1y'`` (year ≈ 365 d).
+
+    Args:
+        value: The duration string to parse.
+
+    Returns:
+        A timedelta corresponding to the parsed duration.
+
+    Raises:
+        ValueError: If *value* does not match a recognised format.
+    """
+    import re
+
+    match = re.match(r"^(\d+)(min|[hdwmy])$", value.lower())
+    if not match:
+        raise ValueError(
+            f"Invalid duration format: '{value}'. Use format like '10min', '2h', '7d', '3w', '1m' (month), '1y'."
+        )
+
+    amount, unit = int(match.group(1)), match.group(2)
+    mapping = {
+        "min": timedelta(minutes=amount),
+        "h": timedelta(hours=amount),
+        "d": timedelta(days=amount),
+        "w": timedelta(weeks=amount),
+        "m": timedelta(days=amount * 30),
+        "y": timedelta(days=amount * 365),
+    }
+    return mapping[unit]

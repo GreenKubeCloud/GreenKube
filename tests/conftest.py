@@ -33,6 +33,7 @@ def mock_settings_env_vars(monkeypatch):
     ensuring consistency.
     """
     from greenkube.core.config import config
+    from greenkube.core.factory import clear_caches
 
     # Set env vars
     monkeypatch.setenv("DB_TYPE", "sqlite")
@@ -43,6 +44,11 @@ def mock_settings_env_vars(monkeypatch):
     monkeypatch.setattr(config, "DB_TYPE", "sqlite")
     monkeypatch.setattr(config, "DB_PATH", ":memory:")
     monkeypatch.setattr(config, "ELECTRICITY_MAPS_TOKEN", "test-token")
+
+    yield
+
+    # Ensure factory caches are invalidated between tests
+    clear_caches()
 
 
 @pytest.fixture(autouse=True)

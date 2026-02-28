@@ -96,12 +96,18 @@ class RecommendationType(str, Enum):
 class Recommendation(BaseModel):
     """Represents a single actionable optimization recommendation."""
 
-    pod_name: str = Field(..., description="The name of the target pod.")
-    namespace: str = Field(..., description="The namespace of the target pod.")
+    pod_name: Optional[str] = Field(
+        None, description="The name of the target pod (None for namespace/node-level recs)."
+    )
+    namespace: Optional[str] = Field(None, description="The namespace of the target (None for node-level recs).")
     type: RecommendationType = Field(..., description="The category of the recommendation.")
     description: str = Field(..., description="A human-readable description of the recommendation.")
     reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
+    scope: str = Field(
+        "pod",
+        description="Recommendation scope: 'pod', 'namespace', or 'node'.",
+    )
     potential_savings_co2e_grams: Optional[float] = Field(
         None, description="Estimated CO2e savings in grams if implemented."
     )
@@ -120,12 +126,13 @@ class RecommendationRecord(BaseModel):
     """A persisted recommendation snapshot for historical tracking."""
 
     id: Optional[int] = Field(None, description="Auto-generated database ID.")
-    pod_name: str = Field(..., description="The name of the target pod.")
-    namespace: str = Field(..., description="The namespace of the target pod.")
+    pod_name: Optional[str] = Field(None, description="The name of the target pod.")
+    namespace: Optional[str] = Field(None, description="The namespace of the target.")
     type: RecommendationType = Field(..., description="The category of the recommendation.")
     description: str = Field(..., description="A human-readable description of the recommendation.")
     reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
+    scope: str = Field("pod", description="Recommendation scope: 'pod', 'namespace', or 'node'.")
     potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
     potential_savings_co2e_grams: Optional[float] = Field(
         None, description="Estimated CO2e savings in grams if implemented."
@@ -163,6 +170,7 @@ class RecommendationRecord(BaseModel):
             description=rec.description,
             reason=rec.reason,
             priority=rec.priority,
+            scope=rec.scope,
             potential_savings_cost=rec.potential_savings_cost,
             potential_savings_co2e_grams=rec.potential_savings_co2e_grams,
             current_cpu_request_millicores=rec.current_cpu_request_millicores,

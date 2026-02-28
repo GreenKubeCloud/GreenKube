@@ -98,4 +98,8 @@ path = "src/greenkube/__init__.py"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"] # Basic rule selection
+select = ["E", "F", "W", "I", "G"] # Basic rules + flake8-logging-format (lazy %-formatting)
+
+[tool.ruff.lint.per-file-ignores]
+# Allow f-string logging in data loaders (one-time startup, not perf-sensitive)
+"src/greenkube/data/*.py" = ["G"]

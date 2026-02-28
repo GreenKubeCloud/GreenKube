@@ -57,7 +57,7 @@ class ElectricityMapsCollector(BaseCollector):
                 if target_datetime.tzinfo is None:
                     target_datetime = target_datetime.replace(tzinfo=timezone.utc)
                 history_url += f"&datetime={target_datetime.isoformat()}"
-            logger.info(f"Fetching carbon intensity history for zone: {zone}...")
+            logger.info("Fetching carbon intensity history for zone: %s...", zone)
 
             client = await self._get_client()
             try:
@@ -66,13 +66,13 @@ class ElectricityMapsCollector(BaseCollector):
                 data = response.json()
                 return data.get("history", [])
             except httpx.HTTPError as e:
-                logger.error(f"Error fetching data from Electricity Maps API: {e}")
+                logger.error("Error fetching data from Electricity Maps API: %s", e)
                 # Fallback to default values below
             except Exception as e:
-                logger.error(f"Unexpected error fetching data from Electricity Maps API: {e}")
+                logger.error("Unexpected error fetching data from Electricity Maps API: %s", e)
 
         # Fallback to default values
-        logger.info(f"Using default grid intensity for zone: {zone}")
+        logger.info("Using default grid intensity for zone: %s", zone)
         default_intensity = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
         if default_intensity is not None:
             if target_datetime:
@@ -93,5 +93,5 @@ class ElectricityMapsCollector(BaseCollector):
                 }
             ]
 
-        logger.warning(f"No default grid intensity found for zone: {zone}")
+        logger.warning("No default grid intensity found for zone: %s", zone)
         return []

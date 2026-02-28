@@ -497,11 +497,11 @@ class DataProcessor:
                             "lifespan_hours": lifespan,
                         }
             except Exception as e:
-                logger.warning(f"Failed to fetch/save Boavizta profile for {provider}/{instance_type}: {e}")
+                logger.warning("Failed to fetch/save Boavizta profile for %s/%s: %s", provider, instance_type, e)
             return None
 
         if missing_in_db:
-            logger.info(f"Fetching {len(missing_in_db)} missing Boavizta profiles from API...")
+            logger.info("Fetching %s missing Boavizta profiles from API...", len(missing_in_db))
             results = await asyncio.gather(*(fetch_and_save_boavizta(p, i) for p, i in missing_in_db))
             for res in results:
                 if res:
@@ -632,7 +632,7 @@ class DataProcessor:
                             share=cpu_share,
                         )
                     except Exception as e:
-                        logger.warning(f"Error calculating embodied emissions for {node_name}: {e}")
+                        logger.warning("Error calculating embodied emissions for %s: %s", node_name, e)
 
             # Calculate Carbon Emissions
             try:

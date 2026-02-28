@@ -9,35 +9,21 @@ import typer
 from ..core.config import config
 from ..core.factory import get_processor, get_repository
 from ..models.metrics import CombinedMetric
+from ..utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
 
 
 def parse_last_duration(last: str) -> timedelta:
-    """Parses a duration string (e.g., '3h', '7d', '2w') into a timedelta."""
-    match = re.match(r"^(\d+)(min|[hdwmy])$", last.lower())
-    if not match:
-        raise typer.BadParameter(
-            f"Invalid format for --last: '{last}'. Use format like '10min', '2h', '7d', '3w', '1m' (month), '1y'."
-        )
+    """Parses a duration string (e.g., '3h', '7d', '2w') into a timedelta.
 
-    value, unit = int(match.group(1)), match.group(2)
-    if unit == "min":
-        return timedelta(minutes=value)
-    elif unit == "h":
-        return timedelta(hours=value)
-    elif unit == "d":
-        return timedelta(days=value)
-    elif unit == "w":
-        return timedelta(weeks=value)
-    elif unit == "m":
-        # Approximate month as 30 days
-        return timedelta(days=value * 30)
-    elif unit == "y":
-        # Approximate year as 365 days.
-        return timedelta(days=value * 365)
-    # This line is unreachable due to regex
-    return timedelta()
+    Delegates to :func:`greenkube.utils.date_utils.parse_duration` and wraps
+    the :class:`ValueError` into a :class:`typer.BadParameter` for CLI use.
+    """
+    try:
+        return parse_duration(last)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def get_report_time_range(last: Optional[str] = None) -> tuple[datetime, datetime]:
@@ -87,7 +73,7 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
         repository = get_repository()
         processor = get_processor()
     except Exception as e:
-        logger.error(f"Failed to initialize components for combined metrics collection: {e}")
+        logger.error("Failed to initialize components for combined metrics collection: %s", e)
         return
 
     if last:
@@ -105,10 +91,10 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
             return
 
         saved_count = await repository.write_combined_metrics(combined_data)
-        logger.info(f"Successfully saved {saved_count} new combined metrics records.")
+        logger.info("Successfully saved %s new combined metrics records.", saved_count)
 
     except Exception as e:
-        logger.error(f"Failed to process and save combined metrics data: {e}", exc_info=True)
+        logger.exception("Failed to process and save combined metrics data: %s", e)
     finally:
         if "processor" in locals() and processor:
             await processor.close()
@@ -134,5 +120,5 @@ async def read_combined_metrics_from_database(
 
         return data
     except Exception as e:
-        logger.error(f"Failed to read combined metrics from database: {e}")
+        logger.error("Failed to read combined metrics from database: %s", e)
         return []

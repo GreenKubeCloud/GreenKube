@@ -52,7 +52,7 @@ class DatabaseManager:
                         logger.info("Successfully initialized PostgreSQL connection pool.")
                         await self.setup_postgres()
                     except Exception as e:
-                        logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
+                        logger.error("Failed to initialize PostgreSQL connection pool: %s", e)
                         raise
                 elif self.db_type == "elasticsearch":
                     # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
@@ -61,7 +61,7 @@ class DatabaseManager:
                 else:
                     raise ValueError("Unsupported database type specified in config.")
             except Exception as e:
-                logger.error(f"Could not connect to the database: {e}")
+                logger.error("Could not connect to the database: %s", e)
                 raise
 
     @asynccontextmanager
@@ -346,7 +346,7 @@ class DatabaseManager:
             await self.connection.commit()
             logger.info("SQLite schema is up to date.")
         except Exception as e:
-            logger.error(f"Error checking/creating SQLite tables: {e}")
+            logger.error("Error checking/creating SQLite tables: %s", e)
 
     async def setup_postgres(self):
         """
@@ -571,7 +571,7 @@ class DatabaseManager:
                 # Migration: add calculation_version column
                 await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS calculation_version TEXT;")
             except Exception as e:
-                logger.warning(f"Migration warning (non-critical): {e}")
+                logger.warning("Migration warning (non-critical): %s", e)
 
             # No commit() needed for asyncpg (autocommit is default in some contexts).
             # asyncpg connection usage usually auto-commits if not in transaction.

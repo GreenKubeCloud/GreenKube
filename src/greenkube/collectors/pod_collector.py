@@ -104,10 +104,10 @@ class PodCollector(BaseCollector):
                         )
                     )
         except Exception as e:
-            logger.error(f"Error collecting pod metrics from Kubernetes API: {e}", exc_info=True)
+            logger.exception("Error collecting pod metrics from Kubernetes API: %s", e)
             return []  # Return empty list on failure
 
-        logger.debug(f"Collected {len(pod_metrics)} pod/container request metrics.")
+        logger.debug("Collected %s pod/container request metrics.", len(pod_metrics))
         return pod_metrics
 
     async def close(self):

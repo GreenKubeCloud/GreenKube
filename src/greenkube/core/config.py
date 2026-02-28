@@ -164,7 +164,7 @@ class Config:
             try:
                 with open(secret_file, "r") as f:
                     value = f.read().strip()
-                    logging.getLogger(__name__).debug(f"Loaded secret '{key}' from {secret_file}")
+                    logging.getLogger(__name__).debug("Loaded secret '%s' from %s", key, secret_file)
                     return value
             except PermissionError as e:
                 # Fail fast with clear error message for permission issues
@@ -245,8 +245,9 @@ class Config:
 
         if not os.getenv("DEFAULT_ZONE"):
             logging.warning(
-                f"DEFAULT_ZONE is not set. Using hardcoded default '{self.DEFAULT_ZONE}'. "
-                "This may result in inaccurate carbon intensity data if your cluster is not in France."
+                "DEFAULT_ZONE is not set. Using hardcoded default '%s'. "
+                "This may result in inaccurate carbon intensity data if your cluster is not in France.",
+                self.DEFAULT_ZONE,
             )
 
 

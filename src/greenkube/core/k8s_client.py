@@ -39,7 +39,7 @@ async def ensure_k8s_config() -> bool:
         except config.ConfigException:
             logger.debug("In-cluster config not found.")
         except Exception as e:
-            logger.warning(f"Unexpected error loading in-cluster config: {e}")
+            logger.warning("Unexpected error loading in-cluster config: %s", e)
 
         # Try local kubeconfig
         try:
@@ -51,7 +51,7 @@ async def ensure_k8s_config() -> bool:
         except config.ConfigException:
             logger.warning("Could not find kubeconfig file.")
         except Exception as e:
-            logger.warning(f"Unexpected error loading kubeconfig: {e}")
+            logger.warning("Unexpected error loading kubeconfig: %s", e)
 
     logger.warning("Failed to load any Kubernetes configuration.")
     return False

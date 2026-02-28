@@ -4,7 +4,6 @@ API routes for carbon/cost/energy metrics.
 """
 
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -14,31 +13,11 @@ from greenkube.api.dependencies import get_carbon_repository, validate_namespace
 from greenkube.api.schemas import MetricsSummaryResponse, TimeseriesPoint
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CarbonIntensityRepository
+from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _parse_last(last: str) -> timedelta:
-    """Parse a duration string like '10min', '2h', '7d' into a timedelta.
-
-    Raises:
-        ValueError: If the format is invalid.
-    """
-    match = re.match(r"^(\d+)(min|[hdwmy])$", last.lower())
-    if not match:
-        raise ValueError(f"Invalid format for 'last': '{last}'. Use '10min', '2h', '7d', '3w', '1m' (month), '1y'.")
-    value, unit = int(match.group(1)), match.group(2)
-    mapping = {
-        "min": timedelta(minutes=value),
-        "h": timedelta(hours=value),
-        "d": timedelta(days=value),
-        "w": timedelta(weeks=value),
-        "m": timedelta(days=value * 30),
-        "y": timedelta(days=value * 365),
-    }
-    return mapping[unit]
 
 
 def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
@@ -46,7 +25,7 @@ def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
     end = datetime.now(timezone.utc)
     if last:
         try:
-            delta = _parse_last(last)
+            delta = parse_duration(last)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         start = end - delta

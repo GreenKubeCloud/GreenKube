@@ -178,7 +178,7 @@ class BasicEstimator:
             profile = node_to_profile.get(node_name)
             if not profile:
                 if node_name not in self._warned_nodes:
-                    logger.warning(f"No power profile for node {node_name}. Using DEFAULT_INSTANCE_PROFILE.")
+                    logger.warning("No power profile for node %s. Using DEFAULT_INSTANCE_PROFILE.", node_name)
                     self._warned_nodes.add(node_name)
                 profile = self.DEFAULT_INSTANCE_PROFILE
                 node_estimations[node_name].append(f"No profile found for node '{node_name}'; used default profile")
@@ -200,7 +200,7 @@ class BasicEstimator:
 
             energy_metrics.extend(calculated_metrics)
 
-        logger.info(f"Energy estimation complete. {len(energy_metrics)} pod metrics created.")
+        logger.info("Energy estimation complete. %s pod metrics created.", len(energy_metrics))
         return energy_metrics
 
     def calculate_node_energy(

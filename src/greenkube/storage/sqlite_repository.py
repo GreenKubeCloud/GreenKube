@@ -59,10 +59,10 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     result = await cursor.fetchone()
                     return result["carbon_intensity"] if result else None
         except sqlite3.Error as e:
-            logger.error(f"Database error in get_for_zone_at_time for zone {zone} at {timestamp}: {e}")
+            logger.error("Database error in get_for_zone_at_time for zone %s at %s: %s", zone, timestamp, e)
             raise QueryError(f"Database error in get_for_zone_at_time: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error in get_for_zone_at_time: {e}")
+            logger.error("Unexpected error in get_for_zone_at_time: %s", e)
             raise QueryError(f"Unexpected error in get_for_zone_at_time: {e}") from e
 
     async def save_history(self, history_data: list, zone: str) -> int:
@@ -77,7 +77,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 for record in history_data:
                     # Basic validation that record is a dictionary
                     if not isinstance(record, dict):
-                        logging.warning(f"Skipping invalid record (not a dict): {record}")
+                        logging.warning("Skipping invalid record (not a dict): %s", record)
                         continue
 
                     try:
@@ -119,18 +119,18 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         saved_count += cursor.rowcount
                     except sqlite3.Error as e:
                         # Use logging for errors
-                        logging.error(f"Could not save record for zone {zone} at {record.get('datetime')}: {e}")
+                        logging.error("Could not save record for zone %s at %s: %s", zone, record.get("datetime"), e)
                     except Exception as e:
                         # Catch potential errors from record.get() if record structure is unexpected
-                        logging.error(f"Unexpected error processing record {record}: {e}")
+                        logging.error("Unexpected error processing record %s: %s", record, e)
 
                 await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
-            logging.error(f"Failed to commit transaction: {e}")
+            logging.error("Failed to commit transaction: %s", e)
             raise QueryError(f"Failed to commit transaction: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error in save_history: {e}")
+            logging.error("Unexpected error in save_history: %s", e)
             raise QueryError(f"Unexpected error in save_history: {e}") from e
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
@@ -239,17 +239,17 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         )
                         saved_count += cursor.rowcount
                     except sqlite3.Error as e:
-                        logging.error(f"Could not save combined metric for pod {metric.pod_name}: {e}")
+                        logging.error("Could not save combined metric for pod %s: %s", metric.pod_name, e)
                     except Exception as e:
-                        logging.error(f"Unexpected error processing combined metric {metric.pod_name}: {e}")
+                        logging.error("Unexpected error processing combined metric %s: %s", metric.pod_name, e)
 
                 await conn.commit()
                 return saved_count
         except sqlite3.Error as e:
-            logging.error(f"Failed to commit transaction for combined_metrics: {e}")
+            logging.error("Failed to commit transaction for combined_metrics: %s", e)
             raise QueryError(f"Failed to commit combined_metrics: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error in write_combined_metrics: {e}")
+            logging.error("Unexpected error in write_combined_metrics: %s", e)
             raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
@@ -328,8 +328,8 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                         )
                     return metrics
         except sqlite3.Error as e:
-            logging.error(f"Could not read combined metrics: {e}")
+            logging.error("Could not read combined metrics: %s", e)
             raise QueryError(f"Could not read combined metrics: {e}") from e
         except Exception as e:
-            logging.error(f"Unexpected error reading combined metrics: {e}")
+            logging.error("Unexpected error reading combined metrics: %s", e)
             raise QueryError(f"Unexpected error reading combined metrics: {e}") from e
