@@ -171,14 +171,45 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                   gpu_usage_millicores, restart_count,
                                   owner_kind, owner_name,
                                   period, "timestamp", duration_seconds,
-                                  grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
+                                  grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
                                   is_estimated, estimation_reasons, embodied_co2e_grams)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                             )
-                            ON CONFLICT(pod_name, namespace, "timestamp") DO NOTHING;
+                            ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
+                                total_cost = excluded.total_cost,
+                                co2e_grams = excluded.co2e_grams,
+                                pue = excluded.pue,
+                                grid_intensity = excluded.grid_intensity,
+                                joules = excluded.joules,
+                                cpu_request = excluded.cpu_request,
+                                memory_request = excluded.memory_request,
+                                cpu_usage_millicores = excluded.cpu_usage_millicores,
+                                memory_usage_bytes = excluded.memory_usage_bytes,
+                                network_receive_bytes = excluded.network_receive_bytes,
+                                network_transmit_bytes = excluded.network_transmit_bytes,
+                                disk_read_bytes = excluded.disk_read_bytes,
+                                disk_write_bytes = excluded.disk_write_bytes,
+                                storage_request_bytes = excluded.storage_request_bytes,
+                                storage_usage_bytes = excluded.storage_usage_bytes,
+                                ephemeral_storage_request_bytes = excluded.ephemeral_storage_request_bytes,
+                                ephemeral_storage_usage_bytes = excluded.ephemeral_storage_usage_bytes,
+                                gpu_usage_millicores = excluded.gpu_usage_millicores,
+                                restart_count = excluded.restart_count,
+                                owner_kind = excluded.owner_kind,
+                                owner_name = excluded.owner_name,
+                                period = excluded.period,
+                                duration_seconds = excluded.duration_seconds,
+                                grid_intensity_timestamp = excluded.grid_intensity_timestamp,
+                                node = excluded.node,
+                                node_instance_type = excluded.node_instance_type,
+                                node_zone = excluded.node_zone,
+                                emaps_zone = excluded.emaps_zone,
+                                is_estimated = excluded.is_estimated,
+                                estimation_reasons = excluded.estimation_reasons,
+                                embodied_co2e_grams = excluded.embodied_co2e_grams;
                         """,
                             (
                                 metric.pod_name,
@@ -208,6 +239,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 timestamp_iso,
                                 metric.duration_seconds,
                                 grid_intensity_timestamp_iso,
+                                metric.node,
                                 metric.node_instance_type,
                                 metric.node_zone,
                                 metric.emaps_zone,
@@ -246,7 +278,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                            gpu_usage_millicores, restart_count,
                            owner_kind, owner_name,
                            period, "timestamp", duration_seconds,
-                           grid_intensity_timestamp, node_instance_type, node_zone, emaps_zone,
+                           grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
                            is_estimated, estimation_reasons, embodied_co2e_grams
                     FROM combined_metrics
                     WHERE "timestamp" BETWEEN ? AND ?
@@ -294,6 +326,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                                 grid_intensity_timestamp=datetime.fromisoformat(row["grid_intensity_timestamp"])
                                 if row["grid_intensity_timestamp"]
                                 else None,
+                                node=row["node"],
                                 node_instance_type=row["node_instance_type"],
                                 node_zone=row["node_zone"],
                                 emaps_zone=row["emaps_zone"],
