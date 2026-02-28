@@ -46,7 +46,7 @@ class Config:
 
         # --- Network variables ---
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-        self.USER_AGENT = os.getenv("USER_AGENT", "GreenKube/1.0.0 (+https://github.com/greenkube)")
+        self.USER_AGENT = os.getenv("USER_AGENT", f"GreenKube/{self._get_version()} (+https://github.com/greenkube)")
         self.DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
         self.DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
 
@@ -140,6 +140,16 @@ class Config:
         self.NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
 
     @staticmethod
+    def _get_version() -> str:
+        """Return the package version string."""
+        try:
+            from greenkube import __version__
+
+            return __version__
+        except Exception:
+            return "0.0.0"
+
+    @staticmethod
     def _get_secret(key: str, default: str = None) -> str:
         """
         Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
@@ -170,9 +180,6 @@ class Config:
                 ) from e
         # Fallback to environment variable
         return os.getenv(key, default)
-
-    # --- Default variables ---
-    DEFAULT_COST = 0.0
 
     # CLOUD_PROVIDER and DEFAULT_PUE are provided as properties so their
     # values are resolved at access time (reading environment variables and
