@@ -6,6 +6,8 @@ from greenkube.core.db import DatabaseManager
 from greenkube.core.exceptions import QueryError
 from greenkube.utils.date_utils import to_iso_z
 
+from .base_embodied_repository import BaseEmbodiedRepository
+
 # Conditional imports for Elasticsearch
 try:
     from elasticsearch_dsl import Date, Document, Float, Integer, Keyword
@@ -43,36 +45,26 @@ else:
             pass
 
 
-class EmbodiedRepository:
-    """
-    Repository for managing embodied carbon profiles (Scope 3).
-    Supports SQLite, PostgreSQL, and Elasticsearch.
-    """
+# ---------------------------------------------------------------------------
+# SQLite implementation
+# ---------------------------------------------------------------------------
+
+
+class SQLiteEmbodiedRepository(BaseEmbodiedRepository):
+    """Embodied carbon profile repository backed by SQLite."""
 
     def __init__(self, db_manager: DatabaseManager):
         self.db_manager = db_manager
 
     async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
-        """
-        Retrieves the embodied carbon profile for a given provider and instance type.
-        """
-        if self.db_manager.db_type == "elasticsearch":
-            return await self._get_profile_es(provider, instance_type)
-
-        if self.db_manager.db_type == "postgres":
-            return await self._get_profile_postgres(provider, instance_type)
-
         query = """
             SELECT gwp_manufacture, lifespan_hours, source, last_updated
             FROM instance_carbon_profiles
             WHERE provider = ? AND instance_type = ?
         """
-
         try:
             async with self.db_manager.connection_scope() as conn:
-                params = (provider, instance_type)
-
-                async with conn.execute(query, params) as cursor:
+                async with conn.execute(query, (provider, instance_type)) as cursor:
                     row = await cursor.fetchone()
                     if row:
                         return {
@@ -83,11 +75,46 @@ class EmbodiedRepository:
                         }
                     return None
         except Exception as e:
-            logger.error(f"Error fetching embodied profile for {provider}/{instance_type}: {e}")
+            logger.error("Error fetching embodied profile for %s/%s: %s", provider, instance_type, e)
             raise QueryError(f"Database error in get_profile: {e}") from e
 
-    async def _get_profile_postgres(self, provider: str, instance_type: str) -> Optional[dict]:
-        """Retrieve embodied carbon profile from PostgreSQL."""
+    async def save_profile(
+        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+    ):
+        now_iso = to_iso_z(datetime.now(timezone.utc))
+        query = """
+            INSERT INTO instance_carbon_profiles (
+                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider, instance_type)
+            DO UPDATE SET
+                gwp_manufacture = excluded.gwp_manufacture,
+                lifespan_hours = excluded.lifespan_hours,
+                source = excluded.source,
+                last_updated = excluded.last_updated
+        """
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                await conn.execute(query, (provider, instance_type, gwp, lifespan, source, now_iso))
+                await conn.commit()
+        except Exception as e:
+            logger.error("Error saving embodied profile for %s/%s: %s", provider, instance_type, e)
+            raise QueryError(f"Database error in save_profile: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL implementation
+# ---------------------------------------------------------------------------
+
+
+class PostgresEmbodiedRepository(BaseEmbodiedRepository):
+    """Embodied carbon profile repository backed by PostgreSQL."""
+
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+
+    async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
         query = """
             SELECT gwp_manufacture, lifespan_hours, source, last_updated
             FROM instance_carbon_profiles
@@ -105,12 +132,43 @@ class EmbodiedRepository:
                     }
                 return None
         except Exception as e:
-            logger.error(f"Error fetching embodied profile for {provider}/{instance_type}: {e}")
+            logger.error("Error fetching embodied profile for %s/%s: %s", provider, instance_type, e)
             raise QueryError(f"Database error in get_profile: {e}") from e
 
-    async def _get_profile_es(self, provider: str, instance_type: str) -> Optional[dict]:
+    async def save_profile(
+        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+    ):
+        now_iso = to_iso_z(datetime.now(timezone.utc))
+        query = """
+            INSERT INTO instance_carbon_profiles (
+                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (provider, instance_type)
+            DO UPDATE SET
+                gwp_manufacture = EXCLUDED.gwp_manufacture,
+                lifespan_hours = EXCLUDED.lifespan_hours,
+                source = EXCLUDED.source,
+                last_updated = EXCLUDED.last_updated
+        """
         try:
-            # ID structure: provider-instance_type
+            async with self.db_manager.connection_scope() as conn:
+                await conn.execute(query, provider, instance_type, gwp, lifespan, source, now_iso)
+        except Exception as e:
+            logger.error("Error saving embodied profile for %s/%s: %s", provider, instance_type, e)
+            raise QueryError(f"Database error in save_profile: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Elasticsearch implementation
+# ---------------------------------------------------------------------------
+
+
+class ElasticsearchEmbodiedRepository(BaseEmbodiedRepository):
+    """Embodied carbon profile repository backed by Elasticsearch."""
+
+    async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
+        try:
             doc_id = f"{provider}-{instance_type}"
             doc = await InstanceCarbonProfileDoc.get(id=doc_id, ignore=404)
             if doc:
@@ -122,66 +180,13 @@ class EmbodiedRepository:
                 }
             return None
         except Exception as e:
-            logger.error(f"Error fetching embodied profile from ES for {provider}/{instance_type}: {e}")
+            logger.error("Error fetching embodied profile from ES for %s/%s: %s", provider, instance_type, e)
             return None
 
     async def save_profile(
         self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
     ):
-        """
-        Saves or updates an embodied carbon profile.
-        """
         now_iso = to_iso_z(datetime.now(timezone.utc))
-
-        if self.db_manager.db_type == "elasticsearch":
-            await self._save_profile_es(provider, instance_type, gwp, lifespan, source, now_iso)
-            return
-
-        if self.db_manager.db_type == "postgres":
-            query = """
-                INSERT INTO instance_carbon_profiles (
-                    provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
-                )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (provider, instance_type)
-                DO UPDATE SET
-                    gwp_manufacture = EXCLUDED.gwp_manufacture,
-                    lifespan_hours = EXCLUDED.lifespan_hours,
-                    source = EXCLUDED.source,
-                    last_updated = EXCLUDED.last_updated
-            """
-            try:
-                async with self.db_manager.connection_scope() as conn:
-                    await conn.execute(query, provider, instance_type, gwp, lifespan, source, now_iso)
-            except Exception as e:
-                logger.error(f"Error saving embodied profile for {provider}/{instance_type}: {e}")
-                raise QueryError(f"Database error in save_profile: {e}") from e
-            return
-
-        query = """
-            INSERT INTO instance_carbon_profiles (
-                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(provider, instance_type)
-            DO UPDATE SET
-                gwp_manufacture = excluded.gwp_manufacture,
-                lifespan_hours = excluded.lifespan_hours,
-                source = excluded.source,
-                last_updated = excluded.last_updated
-        """
-
-        try:
-            async with self.db_manager.connection_scope() as conn:
-                await conn.execute(query, (provider, instance_type, gwp, lifespan, source, now_iso))
-                await conn.commit()
-        except Exception as e:
-            logger.error(f"Error saving embodied profile for {provider}/{instance_type}: {e}")
-            raise QueryError(f"Database error in save_profile: {e}") from e
-
-    async def _save_profile_es(
-        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str, now_iso: str
-    ):
         try:
             doc_id = f"{provider}-{instance_type}"
             doc = InstanceCarbonProfileDoc(
@@ -194,7 +199,36 @@ class EmbodiedRepository:
                 last_updated=now_iso,
             )
             await doc.save()
-            logger.info(f"Saved ES profile for {doc_id}")
+            logger.info("Saved ES profile for %s", doc_id)
         except Exception as e:
-            logger.error(f"Error saving embodied profile to ES for {provider}/{instance_type}: {e}")
+            logger.error("Error saving embodied profile to ES for %s/%s: %s", provider, instance_type, e)
             raise QueryError(f"ES error in save_profile: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible alias — delegates to the db_type at construction time
+# ---------------------------------------------------------------------------
+
+
+class EmbodiedRepository(BaseEmbodiedRepository):
+    """Factory-style wrapper that delegates to the correct backend.
+
+    Kept for backward compatibility; prefer using the concrete classes
+    via the factory functions in ``factory.py``.
+    """
+
+    def __init__(self, db_manager: DatabaseManager):
+        if db_manager.db_type == "elasticsearch":
+            self._impl: BaseEmbodiedRepository = ElasticsearchEmbodiedRepository()
+        elif db_manager.db_type == "postgres":
+            self._impl = PostgresEmbodiedRepository(db_manager)
+        else:
+            self._impl = SQLiteEmbodiedRepository(db_manager)
+
+    async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
+        return await self._impl.get_profile(provider, instance_type)
+
+    async def save_profile(
+        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+    ):
+        await self._impl.save_profile(provider, instance_type, gwp, lifespan, source)
