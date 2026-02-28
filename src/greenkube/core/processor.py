@@ -867,6 +867,10 @@ class DataProcessor:
         node_contexts = await self._get_node_emaps_map()
 
         # Cost data (reused across chunks)
+        # OpenCost collect_range returns total cost for the entire range.
+        # Normalise per-step so each CombinedMetric carries the per-step cost.
+        range_seconds = (end_dt - start_dt).total_seconds()
+        steps_in_range = max(range_seconds / chosen_step_sec, 1)
         try:
             cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
             cost_map = {c.pod_name: c for c in cost_metrics}
@@ -1080,7 +1084,7 @@ class DataProcessor:
                     skipped_carbon += 1
 
                 cost_metric = cost_map.get(pod_name)
-                total_cost = cost_metric.total_cost if cost_metric else config.DEFAULT_COST
+                total_cost = cost_metric.total_cost / steps_in_range if cost_metric else config.DEFAULT_COST
 
                 estimation_reasons = []
                 is_estimated = False
