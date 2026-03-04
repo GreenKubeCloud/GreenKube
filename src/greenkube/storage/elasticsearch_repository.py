@@ -26,7 +26,7 @@ from elasticsearch.exceptions import (
 
 from ..core.config import config
 from ..models.metrics import CombinedMetric
-from .base_repository import CarbonIntensityRepository
+from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,16 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
         except Exception as e:
             logging.error("Failed to bulk save to Elasticsearch for zone %s: %s", zone, e)
             return 0
+
+
+class ElasticsearchCombinedMetricsRepository(CombinedMetricsRepository):
+    """
+    Repository for handling combined metrics data with Elasticsearch.
+    """
+
+    def __init__(self):
+        """Initializes the repository. Connection setup is handled separately."""
+        pass
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         if not metrics:

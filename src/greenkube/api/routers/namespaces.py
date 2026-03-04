@@ -9,8 +9,8 @@ from typing import List
 
 from fastapi import APIRouter, Depends
 
-from greenkube.api.dependencies import get_carbon_repository
-from greenkube.storage.base_repository import CarbonIntensityRepository
+from greenkube.api.dependencies import get_combined_metrics_repository
+from greenkube.storage.base_repository import CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ router = APIRouter()
 
 @router.get("/namespaces", response_model=List[str])
 async def list_namespaces(
-    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return a sorted list of unique namespaces seen in recent metrics."""
     end = datetime.now(timezone.utc)

@@ -18,7 +18,7 @@ from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
-from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
+from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.date_utils import parse_iso_date
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ class HistoricalRangeProcessor:
         node_collector: NodeCollector,
         pod_collector: PodCollector,
         repository: CarbonIntensityRepository,
+        combined_metrics_repository: CombinedMetricsRepository,
         node_repository: NodeRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
@@ -48,6 +49,7 @@ class HistoricalRangeProcessor:
         self.node_collector = node_collector
         self.pod_collector = pod_collector
         self.repository = repository
+        self.combined_metrics_repository = combined_metrics_repository
         self.node_repository = node_repository
         self.calculator = calculator
         self.estimator = estimator
@@ -101,7 +103,7 @@ class HistoricalRangeProcessor:
                 end_dt = end
 
             if start_dt and end_dt:
-                stored_metrics = await self.repository.read_combined_metrics(start_dt, end_dt)
+                stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
                 if stored_metrics:
                     logger.info(
                         "Found %d stored metrics in repository for range %s - %s",

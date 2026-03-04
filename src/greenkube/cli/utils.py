@@ -7,7 +7,7 @@ from typing import List, Optional
 import typer
 
 from ..core.config import config
-from ..core.factory import get_processor, get_repository
+from ..core.factory import get_combined_metrics_repository, get_processor
 from ..models.metrics import CombinedMetric
 from ..utils.date_utils import parse_duration
 
@@ -70,7 +70,7 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
     """
     logger.info("--- Starting combined metrics collection task ---")
     try:
-        repository = get_repository()
+        combined_metrics_repo = get_combined_metrics_repository()
         processor = get_processor()
     except Exception as e:
         logger.error("Failed to initialize components for combined metrics collection: %s", e)
@@ -90,7 +90,7 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
             logger.info("No new combined metrics data to save.")
             return
 
-        saved_count = await repository.write_combined_metrics(combined_data)
+        saved_count = await combined_metrics_repo.write_combined_metrics(combined_data)
         logger.info("Successfully saved %s new combined metrics records.", saved_count)
 
     except Exception as e:
@@ -110,8 +110,8 @@ async def read_combined_metrics_from_database(
     """
     logger.info("--- Reading combined metrics from %s to %s ---", start, end)
     try:
-        repository = get_repository()
-        data = await repository.read_combined_metrics(start_time=start, end_time=end)
+        combined_metrics_repo = get_combined_metrics_repository()
+        data = await combined_metrics_repo.read_combined_metrics(start_time=start, end_time=end)
         logger.info("Found %d combined metrics records.", len(data))
 
         # Filter by namespace if provided

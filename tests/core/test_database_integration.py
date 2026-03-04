@@ -7,15 +7,15 @@ import pytest
 
 from greenkube.core.db import db_manager
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.elasticsearch_repository import ElasticsearchCarbonIntensityRepository
-from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.storage.elasticsearch_repository import ElasticsearchCombinedMetricsRepository
+from greenkube.storage.sqlite_repository import SQLiteCombinedMetricsRepository
 
 
 # Fixture to initialize and clean up the SQLite database
 @pytest.fixture
 async def sqlite_repo():
     await db_manager.setup_sqlite(db_path=":memory:")
-    repo = SQLiteCarbonIntensityRepository(db_manager)
+    repo = SQLiteCombinedMetricsRepository(db_manager)
     yield repo
     await db_manager.close()
 
@@ -23,7 +23,7 @@ async def sqlite_repo():
 # Fixture to initialize and clean up the Elasticsearch database
 @pytest.fixture
 def elasticsearch_repo():
-    repo = MagicMock(spec=ElasticsearchCarbonIntensityRepository)
+    repo = MagicMock(spec=ElasticsearchCombinedMetricsRepository)
     repo.write_combined_metrics = AsyncMock(return_value=2)
     # read_combined_metrics needs to be awaitable
     repo.read_combined_metrics = AsyncMock()

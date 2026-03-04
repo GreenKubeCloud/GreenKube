@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.postgres_repository import PostgresCarbonIntensityRepository
+from greenkube.storage.postgres_repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 
 
 @pytest.fixture
@@ -33,6 +33,11 @@ def mock_db_manager(connection_mock):
 @pytest.fixture
 def repository(mock_db_manager):
     return PostgresCarbonIntensityRepository(mock_db_manager)
+
+
+@pytest.fixture
+def combined_repository(mock_db_manager):
+    return PostgresCombinedMetricsRepository(mock_db_manager)
 
 
 @pytest.mark.asyncio
@@ -96,7 +101,7 @@ async def test_save_history_updates_existing_record(repository, connection_mock)
 
 
 @pytest.mark.asyncio
-async def test_write_combined_metrics_success(repository, connection_mock):
+async def test_write_combined_metrics_success(combined_repository, connection_mock):
     metrics = [
         CombinedMetric(
             pod_name="pod1",
@@ -120,12 +125,12 @@ async def test_write_combined_metrics_success(repository, connection_mock):
         )
     ]
 
-    await repository.write_combined_metrics(metrics)
+    await combined_repository.write_combined_metrics(metrics)
     connection_mock.executemany.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_read_combined_metrics_success(repository, connection_mock):
+async def test_read_combined_metrics_success(combined_repository, connection_mock):
     start = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
     end = datetime(2023, 1, 1, 23, 59, tzinfo=timezone.utc)
 
@@ -152,7 +157,7 @@ async def test_read_combined_metrics_success(repository, connection_mock):
 
     connection_mock.fetch.return_value = [db_row]
 
-    metrics = await repository.read_combined_metrics(start, end)
+    metrics = await combined_repository.read_combined_metrics(start, end)
 
     assert len(metrics) == 1
     assert metrics[0].pod_name == "pod1"

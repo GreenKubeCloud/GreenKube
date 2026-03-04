@@ -16,7 +16,7 @@ import typer
 from typing_extensions import Annotated
 
 from ..core.config import config
-from ..core.factory import get_node_repository, get_repository
+from ..core.factory import get_combined_metrics_repository, get_node_repository
 from ..core.recommender import Recommender
 from ..reporters.console_reporter import ConsoleReporter
 
@@ -64,7 +64,7 @@ def recommend(
                 combined_data = await processor.run()
             else:
                 logger.info("Reading stored metrics from database...")
-                repository = get_repository()
+                repository = get_combined_metrics_repository()
                 lookback_days = config.RECOMMENDATION_LOOKBACK_DAYS
                 end = datetime.now(timezone.utc)
                 start = end - timedelta(days=lookback_days)

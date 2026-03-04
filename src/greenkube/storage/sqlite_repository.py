@@ -10,15 +10,15 @@ from greenkube.models.metrics import CombinedMetric
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ..core.exceptions import QueryError
-from .base_repository import CarbonIntensityRepository
+from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
 
 class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
     """
-    Implementation of the repository for SQLite.
-    Handles all database interactions for carbon intensity data.
+    SQLite implementation for carbon intensity data storage.
+    Handles saving and retrieving carbon intensity history records.
     """
 
     def __init__(self, db_manager):
@@ -132,6 +132,22 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
         except Exception as e:
             logging.error("Unexpected error in save_history: %s", e)
             raise QueryError(f"Unexpected error in save_history: {e}") from e
+
+
+class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
+    """
+    SQLite implementation for combined metrics data storage.
+    Handles writing and reading CombinedMetric records.
+    """
+
+    def __init__(self, db_manager):
+        """
+        Initializes the repository with a database manager.
+
+        Args:
+            db_manager: The DatabaseManager instance.
+        """
+        self.db_manager = db_manager
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         saved_count = 0

@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from ..core.exceptions import QueryError
 from ..models.metrics import CombinedMetric
-from ..storage.base_repository import CarbonIntensityRepository
+from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,13 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
         except Exception as e:
             logger.error("Error saving history to Postgres: %s", e)
             raise QueryError(f"Error saving history: {e}") from e
+
+
+class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
+    """PostgreSQL implementation for combined metrics data storage."""
+
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]):
         if not metrics:

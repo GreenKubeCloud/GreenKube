@@ -47,6 +47,7 @@ async def test_pue_and_zone_fallback():
         pod_collector=MagicMock(),
         electricity_maps_collector=MagicMock(),
         repository=mock_repo,
+        combined_metrics_repository=MagicMock(),
         node_repository=mock_node_repo,
         embodied_repository=AsyncMock(),
         boavizta_collector=AsyncMock(),

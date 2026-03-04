@@ -9,10 +9,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from greenkube.api.dependencies import get_carbon_repository, validate_namespace
+from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
 from greenkube.api.schemas import MetricsSummaryResponse, PaginatedMetricsResponse, TimeseriesPoint
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.base_repository import CarbonIntensityRepository
+from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ async def list_metrics(
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     offset: int = Query(0, ge=0, description="Number of records to skip."),
     limit: int = Query(1000, ge=1, le=10000, description="Maximum number of records to return."),
-    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """List combined metrics for the given time range and optional namespace filter."""
     start, end = _get_time_range(last)
@@ -56,7 +56,7 @@ async def list_metrics(
 async def metrics_summary(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
-    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return an aggregated summary of metrics over the time range."""
     start, end = _get_time_range(last)
@@ -94,7 +94,7 @@ async def metrics_timeseries(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
     granularity: Optional[str] = Query("hour", description="Grouping: 'hour', 'day', 'week', 'month'."),
-    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return time-series data aggregated by the specified granularity."""
     if granularity not in _GRANULARITY_FORMATS:
