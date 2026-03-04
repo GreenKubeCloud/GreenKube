@@ -13,7 +13,12 @@ from typing import Optional
 
 from fastapi import HTTPException, Query, Request
 
-from greenkube.storage.base_repository import CarbonIntensityRepository, NodeRepository, RecommendationRepository
+from greenkube.storage.base_repository import (
+    CarbonIntensityRepository,
+    CombinedMetricsRepository,
+    NodeRepository,
+    RecommendationRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,13 @@ async def get_carbon_repository() -> CarbonIntensityRepository:
     from greenkube.core.factory import get_repository
 
     return get_repository()
+
+
+async def get_combined_metrics_repository() -> CombinedMetricsRepository:
+    """Provides the CombinedMetricsRepository instance via the factory."""
+    from greenkube.core.factory import get_combined_metrics_repository as factory_get_combined
+
+    return factory_get_combined()
 
 
 async def get_node_repository() -> NodeRepository:

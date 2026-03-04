@@ -14,7 +14,7 @@ import typer
 from typing_extensions import Annotated
 
 from ..core.aggregator import aggregate_metrics
-from ..core.factory import get_repository
+from ..core.factory import get_combined_metrics_repository
 from ..exporters.csv_exporter import CSVExporter
 from ..exporters.json_exporter import JSONExporter
 from ..models.cli import FilterOptions, GroupingOptions, OutputOptions, ReportOptions
@@ -146,7 +146,7 @@ def report(
             if update_data:
                 await write_combined_metrics_to_database(last=last)
 
-            repository = get_repository()
+            repository = get_combined_metrics_repository()
 
             start, end = get_report_time_range(filters.last)
 

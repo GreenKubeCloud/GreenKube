@@ -25,15 +25,21 @@ from ..core.processor import DataProcessor
 from ..energy.estimator import BasicEstimator
 
 # --- GreenKube Storage Imports ---
-from ..storage.base_repository import CarbonIntensityRepository, NodeRepository, RecommendationRepository
+from ..storage.base_repository import (
+    CarbonIntensityRepository,
+    CombinedMetricsRepository,
+    NodeRepository,
+    RecommendationRepository,
+)
 from ..storage.elasticsearch_repository import (
     ElasticsearchCarbonIntensityRepository,
+    ElasticsearchCombinedMetricsRepository,
 )
 from ..storage.embodied_repository import EmbodiedRepository
 from ..storage.postgres_node_repository import PostgresNodeRepository
-from ..storage.postgres_repository import PostgresCarbonIntensityRepository
+from ..storage.postgres_repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 from ..storage.sqlite_node_repository import SQLiteNodeRepository
-from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,31 @@ def get_repository() -> CarbonIntensityRepository:
         return PostgresCarbonIntensityRepository(db_manager)
     else:
         raise NotImplementedError(f"Repository for DB_TYPE '{db_type}' not implemented.")
+
+
+@lru_cache(maxsize=1)
+def get_combined_metrics_repository() -> CombinedMetricsRepository:
+    """
+    Factory function to get the appropriate combined metrics repository based on config.
+    Uses lru_cache to act as a singleton.
+    """
+    db_type = config.DB_TYPE
+
+    if db_type == "elasticsearch":
+        logger.info("Using Elasticsearch combined metrics repository.")
+        return ElasticsearchCombinedMetricsRepository()
+    elif db_type == "sqlite":
+        logger.info("Using SQLite combined metrics repository.")
+        from ..core.db import db_manager
+
+        return SQLiteCombinedMetricsRepository(db_manager)
+    elif db_type == "postgres":
+        logger.info("Using PostgreSQL combined metrics repository.")
+        from ..core.db import db_manager
+
+        return PostgresCombinedMetricsRepository(db_manager)
+    else:
+        raise NotImplementedError(f"CombinedMetricsRepository for DB_TYPE '{db_type}' not implemented.")
 
 
 @lru_cache(maxsize=1)
@@ -141,6 +172,7 @@ def get_processor() -> DataProcessor:
     try:
         # 1. Get the repository
         repository = get_repository()
+        combined_metrics_repository = get_combined_metrics_repository()
         node_repository = get_node_repository()
         embodied_repository = get_embodied_repository()
 
@@ -165,6 +197,7 @@ def get_processor() -> DataProcessor:
             electricity_maps_collector=electricity_maps_collector,
             boavizta_collector=boavizta_collector,
             repository=repository,
+            combined_metrics_repository=combined_metrics_repository,
             node_repository=node_repository,
             embodied_repository=embodied_repository,
             calculator=calculator,
@@ -186,6 +219,7 @@ def clear_caches():
     call can retry cleanly.
     """
     get_repository.cache_clear()
+    get_combined_metrics_repository.cache_clear()
     get_node_repository.cache_clear()
     get_embodied_repository.cache_clear()
     get_recommendation_repository.cache_clear()

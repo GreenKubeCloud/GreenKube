@@ -10,7 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 
 from greenkube.api.dependencies import (
-    get_carbon_repository,
+    get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
     validate_namespace,
@@ -20,7 +20,7 @@ from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.core.config import config
 from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import Recommendation, RecommendationRecord
-from greenkube.storage.base_repository import CarbonIntensityRepository, NodeRepository, RecommendationRepository
+from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ router = APIRouter()
 @router.get("/recommendations", response_model=List[Recommendation])
 async def list_recommendations(
     namespace: Optional[str] = Depends(validate_namespace),
-    repo: CarbonIntensityRepository = Depends(get_carbon_repository),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):

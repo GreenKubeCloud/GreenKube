@@ -31,7 +31,7 @@ from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PrometheusResourceMapper
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
-from ..storage.base_repository import CarbonIntensityRepository, NodeRepository
+from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..storage.embodied_repository import EmbodiedRepository
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ class DataProcessor:
         electricity_maps_collector: ElectricityMapsCollector,
         boavizta_collector: BoaviztaCollector,
         repository: CarbonIntensityRepository,
+        combined_metrics_repository: CombinedMetricsRepository,
         node_repository: NodeRepository,
         embodied_repository: EmbodiedRepository,
         calculator: CarbonCalculator,
@@ -94,6 +95,7 @@ class DataProcessor:
             node_collector=node_collector,
             pod_collector=pod_collector,
             repository=repository,
+            combined_metrics_repository=combined_metrics_repository,
             node_repository=node_repository,
             calculator=calculator,
             estimator=estimator,

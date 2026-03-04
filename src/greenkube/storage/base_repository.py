@@ -88,10 +88,23 @@ class CarbonIntensityRepository(ABC):
         """
         pass
 
+
+class CombinedMetricsRepository(ABC):
+    """
+    Abstract base class for combined metrics data repositories.
+    Defines the contract for writing and reading CombinedMetric records.
+    """
+
     @abstractmethod
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]):
+    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         """
         Writes a list of CombinedMetric objects to the repository.
+
+        Args:
+            metrics: A list of CombinedMetric objects to persist.
+
+        Returns:
+            The number of records saved.
         """
         pass
 
@@ -99,6 +112,13 @@ class CarbonIntensityRepository(ABC):
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
         Reads CombinedMetric objects from the repository within a given time range.
+
+        Args:
+            start_time: Start datetime (inclusive).
+            end_time: End datetime (inclusive).
+
+        Returns:
+            A list of CombinedMetric objects.
         """
         pass
 
