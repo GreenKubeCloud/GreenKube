@@ -45,6 +45,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 * **Data Export:** Export reports to CSV or JSON for integration with other tools and BI systems.
 
 ### 🔧 Infrastructure & Deployment
+* **Demo Mode:** Deploy a standalone demo pod with `kubectl run` to explore GreenKube with realistic sample data—no live cluster metrics needed.
 * **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
 * **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
@@ -105,6 +106,48 @@ helm install greenkube greenkube/greenkube \
 ```
 
 This deploys GreenKube with the collector, the API server, and the web dashboard — all in a single image.
+
+### 🎮 Quick Start with Demo Mode
+
+Want to explore GreenKube with realistic sample data? Deploy the demo mode as a standalone pod:
+
+```bash
+# 1. Deploy GreenKube demo as a one-time pod
+kubectl run greenkube-demo \
+  --image=greenkube/greenkube:0.2.2 \
+  --restart=Never \
+  --command -- greenkube demo --no-browser --port 9000
+
+# 2. Wait for it to start (about 10 seconds)
+kubectl wait --for=condition=Ready pod/greenkube-demo --timeout=30s
+
+# 3. Port-forward to access the dashboard
+kubectl port-forward pod/greenkube-demo 9000:9000
+
+# 4. Open http://localhost:9000 in your browser
+```
+
+This demo mode:
+- Creates a temporary SQLite database with **7 days** of realistic Kubernetes metrics
+- Generates sample data for **22 pods** across **5 namespaces** (production, staging, monitoring, data-pipeline, ci-cd)
+- Includes carbon emissions, costs, resource usage, and optimization recommendations
+- Runs independently from your production GreenKube installation
+
+**Demo options:**
+```bash
+# Generate 14 days of data instead of 7
+kubectl run greenkube-demo --image=greenkube/greenkube:0.2.2 --restart=Never \
+  --command -- greenkube demo --no-browser --days 14 --port 9000
+
+# Clean up when done
+kubectl delete pod greenkube-demo
+```
+
+Perfect for:
+- Evaluating GreenKube before deploying to your production cluster
+- Testing the dashboard and API endpoints with realistic data
+- Learning how GreenKube calculates carbon footprint and cost
+- Creating screenshots or demos for your team
 
 ## 🖥️ Web Dashboard
 

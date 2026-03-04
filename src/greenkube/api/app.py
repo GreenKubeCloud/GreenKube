@@ -101,7 +101,8 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
 
     # Prometheus metrics endpoint for Grafana dashboards
-    @app.get("/metrics", include_in_schema=False)
+    # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
+    @app.get("/prometheus/metrics", include_in_schema=False)
     async def prometheus_metrics():
         """Expose Prometheus-compatible metrics for scraping."""
         return Response(

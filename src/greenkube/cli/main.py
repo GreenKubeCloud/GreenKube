@@ -10,7 +10,7 @@ import logging
 import typer
 
 from ..core.config import config
-from . import recommend, report, start
+from . import demo, recommend, report, start
 
 # --- Setup Logger ---
 logging.basicConfig(
@@ -68,6 +68,7 @@ def main(
 app.add_typer(report.app, name="report")
 app.add_typer(recommend.app, name="recommend")
 app.add_typer(start.app, name="start")
+app.add_typer(demo.app, name="demo")
 
 
 if __name__ == "__main__":

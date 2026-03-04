@@ -40,7 +40,7 @@ def verify_api_key(request: Request) -> None:
 
     # Allow public/operational endpoints without auth
     path = request.url.path
-    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json", "/metrics")
+    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json", "/prometheus/metrics")
     if any(path.startswith(p) for p in exempt):
         return
 
