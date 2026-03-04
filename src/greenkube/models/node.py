@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class NodeInfo(BaseModel):
@@ -36,6 +36,30 @@ class NodeInfo(BaseModel):
     memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
     embodied_emissions_kg: Optional[float] = Field(None, description="Manufactured emissions in kgCO2eq")
+
+    @computed_field
+    @property
+    def cpu_capacity_millicores(self) -> Optional[int]:
+        """CPU capacity in millicores, derived from cores."""
+        if self.cpu_capacity_cores is None:
+            return None
+        return int(self.cpu_capacity_cores * 1000)
+
+    @computed_field
+    @property
+    def cpu_allocatable_millicores(self) -> Optional[int]:
+        """Allocatable CPU in millicores (capacity minus system reserved ~5%)."""
+        if self.cpu_capacity_cores is None:
+            return None
+        return int(self.cpu_capacity_cores * 1000 * 0.95)
+
+    @computed_field
+    @property
+    def memory_allocatable_bytes(self) -> Optional[int]:
+        """Allocatable memory in bytes (capacity minus system reserved ~5%)."""
+        if self.memory_capacity_bytes is None:
+            return None
+        return int(self.memory_capacity_bytes * 0.95)
 
 
 class NodeZoneContext(BaseModel):

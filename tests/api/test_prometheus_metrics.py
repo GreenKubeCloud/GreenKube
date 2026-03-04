@@ -63,21 +63,21 @@ def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_re
 
 
 class TestMetricsEndpoint:
-    """Tests for GET /metrics."""
+    """Tests for GET /prometheus/metrics."""
 
     def test_metrics_endpoint_returns_200(self, client):
         """Should return 200 OK."""
-        response = client.get("/metrics")
+        response = client.get("/prometheus/metrics")
         assert response.status_code == 200
 
     def test_metrics_content_type_is_prometheus(self, client):
         """Should return Prometheus text format content type."""
-        response = client.get("/metrics")
+        response = client.get("/prometheus/metrics")
         assert "text/plain" in response.headers.get("content-type", "")
 
     def test_metrics_contain_recommendation_gauges(self, client):
         """Should contain greenkube_recommendations_total gauge."""
-        response = client.get("/metrics")
+        response = client.get("/prometheus/metrics")
         body = response.text
         assert "greenkube_recommendations_total" in body
 

@@ -89,7 +89,7 @@
 			/>
 			<StatCard
 				label="Total Energy"
-				value={formatEnergy(summary?.total_joules ?? 0)}
+				value={formatEnergy(summary?.total_energy_joules ?? 0)}
 				icon="⚡"
 				color="yellow"
 			/>

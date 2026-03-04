@@ -50,8 +50,9 @@ export function getNamespaces() {
  * @param {string} [opts.last]
  * @returns {Promise<Object[]>}
  */
-export function getMetrics({ namespace, last } = {}) {
-	return request(`${BASE}/metrics`, { namespace, last });
+export async function getMetrics({ namespace, last } = {}) {
+	const data = await request(`${BASE}/metrics`, { namespace, last });
+	return data.items ?? data;
 }
 
 /**

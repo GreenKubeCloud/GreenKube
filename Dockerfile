@@ -31,7 +31,10 @@ COPY src /app/src
 # Build and install the package (and its dependencies) into a temporary prefix
 # Using 'pip install .' reads pyproject.toml and runs the hatchling build backend
 # We install into /install to easily copy it to the final stage
-RUN pip install --no-cache-dir . --prefix=/install
+# Note: packaging is installed explicitly because limits 5.x uses it at runtime
+# but pip considers it satisfied by its own vendored copy.
+RUN pip install --no-cache-dir . --prefix=/install \
+    && pip install --no-cache-dir --ignore-installed --force-reinstall --no-deps packaging --prefix=/install
 
 # --- STAGE 3: Final Image ---
 # This stage creates the final, lean image
