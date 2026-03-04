@@ -27,9 +27,15 @@ flowchart TB
 
         subgraph Core["Core (Business Logic)"]
             Est["Estimator\n(CPU → Joules)"]
-            Proc["Processor\n(Orchestrator)"]
+            Proc["Processor\n(Facade)"]
             Calc["Calculator\n(Joules → CO₂e)"]
             Rec["Recommender\n(9 types)"]
+            CO["CollectionOrchestrator"]
+            MA["MetricAssembler"]
+            NZM["NodeZoneMapper"]
+            ES["EmbodiedService"]
+            PRM["PrometheusResourceMapper"]
+            HRP["HistoricalRangeProcessor"]
         end
 
         subgraph Storage["Storage (Output Adapters)"]
@@ -186,53 +192,26 @@ All collectors are fully asynchronous and implement a common pattern.
 ### Processor (Use Case Orchestrator)
 
 #### **DataProcessor**
-The central orchestrator of the entire pipeline.
+The main orchestrator that coordinates the data pipeline from collection to metric assembly.
 
-**Responsibilities:**
-1. **Concurrent Data Collection:**
-   - Launches all collectors in parallel via `asyncio.gather`
-   - Handles partial failures gracefully
-   - Logs collection metrics and timings
+**Architecture:** The processor acts as a facade, delegating specialized work to focused collaborators while managing the overall pipeline flow.
 
-2. **Node State Management:**
-   - Retrieves historical node snapshots from `NodeRepository`
-   - Reconstructs node timeline for accurate historical reporting
-   - Handles node additions/removals during analysis period
+**Key Responsibilities:**
+1. **Data Collection:** Coordinates parallel collection from Prometheus, Kubernetes, OpenCost, and external APIs
+2. **Energy Estimation:** Converts resource usage into energy consumption (Joules)
+3. **Zone Mapping:** Resolves cloud regions to carbon intensity zones
+4. **Carbon Calculation:** Computes CO2e emissions from energy and grid intensity
+5. **Metric Assembly:** Combines energy, cost, resources, and metadata into unified metrics
+6. **Embodied Emissions:** Integrates hardware manufacturing emissions
 
-3. **Resource Aggregation:**
-   - Builds per-pod maps for all resources:
-     - `pod_cpu_usage_map` (millicores actual usage)
-     - `pod_memory_usage_map` (bytes actual usage)
-     - `pod_network_rx_map` (bytes received)
-     - `pod_network_tx_map` (bytes transmitted)
-     - `pod_disk_read_map` (bytes read)
-     - `pod_disk_write_map` (bytes written)
-     - `pod_restart_map` (restart count)
-     - `pod_request_map` (CPU request)
-     - `pod_mem_map` (memory request)
-     - `pod_ephemeral_storage_map` (storage request)
+**Pipeline Stages:**
+- **Instant Mode (`run()`):** Real-time collection using Prometheus instant queries
+- **Range Mode (`run_range()`):** Historical analysis with day-sized chunking for memory efficiency
 
-4. **Zone Mapping:**
-   - Maps cloud regions to Electricity Maps zones
-   - Groups pods by zone for batch intensity lookups
-   - Handles multi-cloud and hybrid deployments
-
-5. **Carbon Intensity Prefetching:**
-   - Pre-fetches intensity data for all (zone, timestamp) tuples
-   - Populates `CarbonCalculator` cache to avoid redundant API calls
-   - Supports hourly/daily normalization
-
-6. **CombinedMetric Construction:**
-   - Merges energy, cost, resource, and carbon data
-   - Tracks estimation flags and reasons for transparency
-   - Includes all resource metrics in final output
-
-**Key Methods:**
-- `run()` — Instant collection using Prometheus instant queries
-- `run_range(start, end)` — Historical analysis using Prometheus range queries
-  - Day-sized chunking to prevent OOM on large clusters
-  - Concurrent range queries for all resource types
-  - Efficient cleanup of intermediate data structures
+**Implementation Pattern:** 
+- Follows Clean Architecture principles with dependency injection
+- Uses internal collaborators for collection orchestration, zone mapping, resource aggregation, and metric assembly
+- Maintains separation between business logic and infrastructure concerns
 
 ### Calculator (Business Logic)
 

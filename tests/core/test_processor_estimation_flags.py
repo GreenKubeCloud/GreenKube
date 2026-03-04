@@ -197,7 +197,7 @@ async def test_run_no_defaults(processor, mock_components):
     )
 
     # Patch the zone mapper to ensure it returns a value
-    with patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone", return_value="US-TEST"):
+    with patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone", return_value="US-TEST"):
         # Act
         metrics = await processor.run()
 
