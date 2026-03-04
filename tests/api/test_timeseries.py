@@ -44,10 +44,10 @@ class TestTimeseriesEndpoint:
         data = response.json()
         assert data == []
 
-    def test_timeseries_groups_by_hour(self, client, mock_carbon_repo):
+    def test_timeseries_groups_by_hour(self, client, mock_combined_metrics_repo):
         """Should return data grouped by hour by default."""
         metrics = _make_metrics_over_hours(6)
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/metrics/timeseries?last=24h")
         data = response.json()
         assert len(data) > 0
@@ -56,19 +56,19 @@ class TestTimeseriesEndpoint:
         assert "total_cost" in data[0]
         assert "joules" in data[0]
 
-    def test_timeseries_groups_by_day(self, client, mock_carbon_repo):
+    def test_timeseries_groups_by_day(self, client, mock_combined_metrics_repo):
         """Should group by day when granularity=day."""
         metrics = _make_metrics_over_hours(6)
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/metrics/timeseries?last=7d&granularity=day")
         assert response.status_code == 200
         data = response.json()
         assert len(data) > 0
 
-    def test_timeseries_filter_by_namespace(self, client, mock_carbon_repo):
+    def test_timeseries_filter_by_namespace(self, client, mock_combined_metrics_repo):
         """Should filter by namespace."""
         metrics = _make_metrics_over_hours(6)
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/metrics/timeseries?namespace=default")
         data = response.json()
         # All returned points should be aggregations from only 'default' namespace
@@ -79,19 +79,19 @@ class TestTimeseriesEndpoint:
         response = client.get("/api/v1/metrics/timeseries?granularity=invalid")
         assert response.status_code == 400
 
-    def test_timeseries_contains_pod_count(self, client, mock_carbon_repo):
+    def test_timeseries_contains_pod_count(self, client, mock_combined_metrics_repo):
         """Each time point should contain pod_count."""
         metrics = _make_metrics_over_hours(3)
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/metrics/timeseries")
         data = response.json()
         if data:
             assert "pod_count" in data[0]
 
-    def test_timeseries_sorted_by_timestamp(self, client, mock_carbon_repo):
+    def test_timeseries_sorted_by_timestamp(self, client, mock_combined_metrics_repo):
         """Results should be sorted chronologically."""
         metrics = _make_metrics_over_hours(6)
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/metrics/timeseries")
         data = response.json()
         if len(data) > 1:

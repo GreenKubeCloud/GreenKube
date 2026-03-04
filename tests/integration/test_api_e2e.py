@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_carbon_repository,
+    get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
 )
@@ -25,7 +26,7 @@ from greenkube.core.db import db_manager
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
 from greenkube.storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
-from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 
 
 @pytest.fixture
@@ -33,16 +34,17 @@ async def sqlite_repos():
     """Set up in-memory SQLite and yield real repository instances."""
     await db_manager.setup_sqlite(db_path=":memory:")
     carbon_repo = SQLiteCarbonIntensityRepository(db_manager)
+    combined_repo = SQLiteCombinedMetricsRepository(db_manager)
     node_repo = SQLiteNodeRepository(db_manager)
     reco_repo = SQLiteRecommendationRepository(db_manager)
-    yield carbon_repo, node_repo, reco_repo
+    yield carbon_repo, combined_repo, node_repo, reco_repo
     await db_manager.close()
 
 
 @pytest.fixture
 def e2e_client(sqlite_repos):
     """Create a TestClient wired to real SQLite repositories."""
-    carbon_repo, node_repo, reco_repo = sqlite_repos
+    carbon_repo, combined_repo, node_repo, reco_repo = sqlite_repos
 
     with patch("greenkube.api.routers.recommendations.HPACollector") as mock_hpa:
         instance = AsyncMock()
@@ -51,10 +53,11 @@ def e2e_client(sqlite_repos):
 
         app = create_app()
         app.dependency_overrides[get_carbon_repository] = lambda: carbon_repo
+        app.dependency_overrides[get_combined_metrics_repository] = lambda: combined_repo
         app.dependency_overrides[get_node_repository] = lambda: node_repo
         app.dependency_overrides[get_recommendation_repository] = lambda: reco_repo
         with TestClient(app) as c:
-            yield c, carbon_repo
+            yield c, combined_repo
         app.dependency_overrides.clear()
 
 

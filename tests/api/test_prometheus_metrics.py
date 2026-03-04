@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_carbon_repository,
+    get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
 )
@@ -23,6 +24,12 @@ from greenkube.models.metrics import (
 
 @pytest.fixture
 def mock_carbon_repo():
+    repo = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     return repo
@@ -44,9 +51,10 @@ def mock_reco_repo():
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_node_repo, mock_reco_repo):
+def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
+    app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
     with TestClient(app) as c:

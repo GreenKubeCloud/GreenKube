@@ -20,14 +20,14 @@ class TestNamespacesEndpoint:
         data = response.json()
         assert data == []
 
-    def test_namespaces_returns_unique_namespaces(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_namespaces_returns_unique_namespaces(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should return a sorted unique list of namespaces."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/namespaces")
         data = response.json()
         assert data == ["default", "production"]
 
-    def test_namespaces_are_sorted(self, client, mock_carbon_repo):
+    def test_namespaces_are_sorted(self, client, mock_combined_metrics_repo):
         """Should return namespaces in alphabetical order."""
         from datetime import datetime, timezone
 
@@ -48,7 +48,7 @@ class TestNamespacesEndpoint:
                 timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
             ),
         ]
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/namespaces")
         data = response.json()
         assert data == ["a-namespace", "m-namespace", "z-namespace"]

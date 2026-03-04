@@ -21,9 +21,9 @@ class TestMetricsListEndpoint:
         assert data["items"] == []
         assert data["total"] == 0
 
-    def test_metrics_returns_data(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_metrics_returns_data(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should return metrics from the repository."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics")
         data = response.json()
         assert data["total"] == 2
@@ -31,17 +31,17 @@ class TestMetricsListEndpoint:
         assert data["items"][0]["pod_name"] == "nginx-abc123"
         assert data["items"][1]["pod_name"] == "api-server-xyz"
 
-    def test_metrics_filter_by_namespace(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_metrics_filter_by_namespace(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should filter metrics by namespace query param."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics?namespace=production")
         data = response.json()
         assert data["total"] == 1
         assert data["items"][0]["namespace"] == "production"
 
-    def test_metrics_filter_by_last(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_metrics_filter_by_last(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should accept --last style time filter."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics?last=7d")
         assert response.status_code == 200
 
@@ -50,9 +50,9 @@ class TestMetricsListEndpoint:
         response = client.get("/api/v1/metrics?last=invalid")
         assert response.status_code == 400
 
-    def test_metrics_contains_expected_fields(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_metrics_contains_expected_fields(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Each metric should contain the expected fields."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics")
         data = response.json()
         metric = data["items"][0]
@@ -91,9 +91,9 @@ class TestMetricsSummaryEndpoint:
         assert data["pod_count"] == 0
         assert data["namespace_count"] == 0
 
-    def test_summary_with_data(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_summary_with_data(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should return correctly aggregated summary."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics/summary")
         data = response.json()
         assert data["total_co2e_grams"] == pytest.approx(5.7)
@@ -103,16 +103,16 @@ class TestMetricsSummaryEndpoint:
         assert data["pod_count"] == 2
         assert data["namespace_count"] == 2
 
-    def test_summary_filter_by_namespace(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_summary_filter_by_namespace(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should filter summary by namespace."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics/summary?namespace=default")
         data = response.json()
         assert data["pod_count"] == 1
         assert data["total_co2e_grams"] == pytest.approx(1.5)
 
-    def test_summary_filter_by_last(self, client, mock_carbon_repo, sample_combined_metrics):
+    def test_summary_filter_by_last(self, client, mock_combined_metrics_repo, sample_combined_metrics):
         """Should accept last time filter."""
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics/summary?last=24h")
         assert response.status_code == 200

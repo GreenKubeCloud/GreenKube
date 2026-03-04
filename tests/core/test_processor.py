@@ -287,6 +287,7 @@ def data_processor(
         electricity_maps_collector=mock_electricity_maps_collector,
         boavizta_collector=mock_boavizta_collector,
         repository=mock_repository,  # Pass the mock repository
+        combined_metrics_repository=MagicMock(),
         node_repository=mock_node_repository,
         embodied_repository=mock_embodied_repository,
         calculator=mock_calculator,  # Pass the mock calculator
@@ -453,6 +454,7 @@ async def test_processor_uses_default_zone_when_node_zone_missing(
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
+        combined_metrics_repository=MagicMock(),
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
@@ -635,6 +637,7 @@ async def test_processor_aggregates_pod_requests(
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
+        combined_metrics_repository=MagicMock(),
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
@@ -680,6 +683,7 @@ async def test_processor_handles_missing_pod_requests(
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
+        combined_metrics_repository=MagicMock(),
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),
@@ -745,6 +749,7 @@ async def test_processor_nodecollector_instance_type_fallback(
         electricity_maps_collector=MagicMock(collect=AsyncMock(return_value=[])),
         boavizta_collector=MagicMock(get_server_impact=AsyncMock(return_value={})),
         repository=mock_repository,
+        combined_metrics_repository=MagicMock(),
         node_repository=MagicMock(
             get_latest_snapshots_before=AsyncMock(return_value=[]), get_snapshots=AsyncMock(return_value=[])
         ),

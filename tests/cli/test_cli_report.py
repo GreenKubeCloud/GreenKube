@@ -43,7 +43,7 @@ def test_report_without_flags_calls_processor_and_reports(monkeypatch):
 
     dummy_repo = MagicMock()
     dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
-    monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
+    monkeypatch.setattr(report_mod, "get_combined_metrics_repository", lambda: dummy_repo)
 
     reported = []
 
@@ -68,7 +68,7 @@ def test_report_with_range_delegates_to_report_range(monkeypatch):
     # Arrange: patch the repository to capture calls
     mock_repo = MagicMock()
     mock_repo.read_combined_metrics = AsyncMock(return_value=[])
-    monkeypatch.setattr(report_mod, "get_repository", lambda: mock_repo)
+    monkeypatch.setattr(report_mod, "get_combined_metrics_repository", lambda: mock_repo)
 
     runner = CliRunner()
     result = runner.invoke(app, ["report", "--last", "2h"])  # trigger range path
@@ -92,7 +92,7 @@ def test_recommend_generates_and_reports(monkeypatch):
     # The recommend command now reads from the database by default
     dummy_repo = MagicMock()
     dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
-    monkeypatch.setattr(recommend_mod, "get_repository", lambda: dummy_repo)
+    monkeypatch.setattr(recommend_mod, "get_combined_metrics_repository", lambda: dummy_repo)
 
     # Dummy node repository
     dummy_node_repo = MagicMock()
@@ -141,7 +141,7 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
     ]
     dummy_repo = MagicMock()
     dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
-    monkeypatch.setattr(report_mod, "get_repository", lambda: dummy_repo)
+    monkeypatch.setattr(report_mod, "get_combined_metrics_repository", lambda: dummy_repo)
 
     # Patch exporters to write to tmp_path and capture call
     written = {}

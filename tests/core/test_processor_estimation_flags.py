@@ -66,6 +66,7 @@ def processor(mock_components):
         pod_collector=mock_components["pod"],
         electricity_maps_collector=mock_components["emaps"],
         repository=mock_components["repo"],
+        combined_metrics_repository=AsyncMock(),
         node_repository=mock_components["node_repo"],
         embodied_repository=AsyncMock(),
         boavizta_collector=AsyncMock(),

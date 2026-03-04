@@ -18,7 +18,7 @@ class TestRecommendationsEndpoint:
         data = response.json()
         assert data == []
 
-    def test_recommendations_with_zombie_pod(self, client, mock_carbon_repo):
+    def test_recommendations_with_zombie_pod(self, client, mock_combined_metrics_repo):
         """Should detect a zombie pod (cost > threshold, energy < threshold)."""
         from datetime import datetime, timezone
 
@@ -35,13 +35,13 @@ class TestRecommendationsEndpoint:
             timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
             duration_seconds=300,
         )
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
         response = client.get("/api/v1/recommendations")
         data = response.json()
         assert len(data) >= 1
         assert any(r["type"] == "ZOMBIE_POD" for r in data)
 
-    def test_recommendations_filter_by_namespace(self, client, mock_carbon_repo):
+    def test_recommendations_filter_by_namespace(self, client, mock_combined_metrics_repo):
         """Should filter recommendations by namespace."""
         from datetime import datetime, timezone
 
@@ -71,12 +71,12 @@ class TestRecommendationsEndpoint:
                 duration_seconds=300,
             ),
         ]
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=metrics)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
         response = client.get("/api/v1/recommendations?namespace=team-a")
         data = response.json()
         assert all(r["namespace"] == "team-a" for r in data)
 
-    def test_recommendations_contain_expected_fields(self, client, mock_carbon_repo):
+    def test_recommendations_contain_expected_fields(self, client, mock_combined_metrics_repo):
         """Each recommendation should contain expected fields."""
         from datetime import datetime, timezone
 
@@ -93,7 +93,7 @@ class TestRecommendationsEndpoint:
             timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
             duration_seconds=300,
         )
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=[zombie])
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie])
         response = client.get("/api/v1/recommendations")
         data = response.json()
         if data:

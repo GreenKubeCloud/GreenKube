@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_carbon_repository,
+    get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
 )
@@ -25,6 +26,12 @@ from greenkube.models.metrics import (
 
 @pytest.fixture
 def mock_carbon_repo():
+    repo = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.write_combined_metrics = AsyncMock(return_value=0)
@@ -48,9 +55,10 @@ def mock_reco_repo():
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_node_repo, mock_reco_repo):
+def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
+    app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
     with TestClient(app) as c:
@@ -129,7 +137,7 @@ class TestRecommendationHistoryEndpoint:
 class TestRecommendationsPersistence:
     """Tests that recommendations are persisted when generated."""
 
-    def test_recommendations_are_saved_on_generation(self, client, mock_carbon_repo, mock_reco_repo):
+    def test_recommendations_are_saved_on_generation(self, client, mock_combined_metrics_repo, mock_reco_repo):
         """Generating recommendations should also persist them in history."""
         zombie_metric = CombinedMetric(
             pod_name="zombie-pod",
@@ -142,7 +150,7 @@ class TestRecommendationsPersistence:
             timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
             duration_seconds=300,
         )
-        mock_carbon_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
         response = client.get("/api/v1/recommendations")
         assert response.status_code == 200
         data = response.json()

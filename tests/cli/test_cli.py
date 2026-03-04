@@ -54,7 +54,7 @@ def test_report_success(mocker, mock_reporter, sample_combined_metrics):
     """
     Tests that the `greenkube report` command correctly calls the reporter with data.
     """
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
@@ -70,7 +70,7 @@ def test_report_success(mocker, mock_reporter, sample_combined_metrics):
 
 
 def test_report_with_namespace_filter_success(mocker, mock_reporter, sample_combined_metrics):
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
@@ -90,7 +90,7 @@ def test_report_namespace_not_found(mocker, mock_reporter, sample_combined_metri
     Tests that the CLI exits gracefully with a warning when a non-existent
     namespace is provided.
     """
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
@@ -108,7 +108,7 @@ def test_export_placeholder(mocker):
     """
     # Patch the report module logger used when exporting
     mock_logger = mocker.patch("greenkube.cli.report.logger")
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(
         return_value=[
@@ -130,7 +130,7 @@ def test_export_placeholder(mocker):
 def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sample_combined_metrics):
     """Ensure `greenkube recommend` generates recommendations and calls reporter.report with recommendations."""
     # Patch the repository used by the recommend submodule (reads from DB by default)
-    mock_repo = mocker.patch("greenkube.cli.recommend.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.recommend.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
@@ -168,7 +168,7 @@ def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sa
 
 def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_combined_metrics):
     """When namespace filter yields no data, recommend exits cleanly."""
-    mock_repo = mocker.patch("greenkube.cli.recommend.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.recommend.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
@@ -187,7 +187,7 @@ def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_c
 
 def test_report_range_today_no_results(mocker, mock_reporter):
     """Tests the ranged report path with no results (mocked)."""
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=[])
     mock_repo.return_value = repo_inst
@@ -218,7 +218,7 @@ def test_report_range_monthly_flag(mocker, mock_reporter):
     # mock_resp usage removed as requests is no longer used
     # mock_resp provided unused data structure that is now fetched from repo
 
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=[])
     mock_repo.return_value = repo_inst
@@ -232,7 +232,7 @@ def test_report_range_yearly_flag(mocker, mock_reporter):
     """Tests that --yearly aggregates are accepted and reporter called."""
     # mock_resp usage removed as requests is no longer used
 
-    mock_repo = mocker.patch("greenkube.cli.report.get_repository")
+    mock_repo = mocker.patch("greenkube.cli.report.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=[])
     mock_repo.return_value = repo_inst

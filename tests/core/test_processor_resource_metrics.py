@@ -85,6 +85,7 @@ def _build_processor(prom_metrics, pod_metrics, node_info_map):
         electricity_maps_collector=emaps,
         boavizta_collector=boavizta,
         repository=repo,
+        combined_metrics_repository=AsyncMock(),
         node_repository=node_repo,
         embodied_repository=embodied_repo,
         calculator=calculator,
