@@ -1,12 +1,12 @@
 # tests/integration/test_sqlite_migrations.py
 """
-Tests for SQLite schema migrations.
+Tests for SQLite schema migrations via the versioned MigrationRunner.
 
 Creates a database with a minimal "old" schema (missing columns that
 should be added by migrations) and verifies that ``setup_sqlite`` brings
 it up to date without losing existing data.
 
-See: TEST-002 in the issue plan.
+See: ARCH-001 in the Show HN plan.
 """
 
 import sqlite3
@@ -78,12 +78,24 @@ def _column_names(path: str, table: str) -> set[str]:
     return cols
 
 
+def _table_exists(path: str, table: str) -> bool:
+    """Check whether a table exists in the SQLite database."""
+    conn = sqlite3.connect(path)
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    )
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
+
+
 # ── Tests ──────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_migration_adds_missing_columns(tmp_path):
-    """setup_sqlite should ALTER TABLE to add columns missing from v1."""
+    """setup_sqlite should run versioned migrations to add columns missing from v1."""
     db_file = str(tmp_path / "v1.db")
     _create_v1_schema(db_file)
 
@@ -172,9 +184,63 @@ async def test_migration_is_idempotent(tmp_path):
 
     mgr = DatabaseManager()
     await mgr.setup_sqlite(db_path=db_file)
-    # Second run — all ALTER TABLEs should be no-ops
+    # Second run — migrations should be detected as already applied
     await mgr.setup_sqlite(db_path=db_file)
     await mgr.close()
 
     after = _column_names(db_file, "combined_metrics")
     assert "embodied_co2e_grams" in after
+
+
+@pytest.mark.asyncio
+async def test_schema_migrations_table_created(tmp_path):
+    """setup_sqlite should create the schema_migrations tracking table."""
+    db_file = str(tmp_path / "v1.db")
+    _create_v1_schema(db_file)
+
+    mgr = DatabaseManager()
+    await mgr.setup_sqlite(db_path=db_file)
+    await mgr.close()
+
+    assert _table_exists(db_file, "schema_migrations")
+
+
+@pytest.mark.asyncio
+async def test_migration_versions_are_recorded(tmp_path):
+    """Applied migration versions should be recorded in schema_migrations."""
+    db_file = str(tmp_path / "v1.db")
+    _create_v1_schema(db_file)
+
+    mgr = DatabaseManager()
+    await mgr.setup_sqlite(db_path=db_file)
+    await mgr.close()
+
+    conn = sqlite3.connect(db_file)
+    cur = conn.execute("SELECT version, name FROM schema_migrations ORDER BY version")
+    rows = cur.fetchall()
+    conn.close()
+
+    assert len(rows) >= 1
+    assert rows[0][0] == 1
+    assert "baseline" in rows[0][1]
+
+
+@pytest.mark.asyncio
+async def test_fresh_db_records_no_duplicate_errors(tmp_path):
+    """A fresh DB (full CREATE TABLE schema) should not fail on migration."""
+    db_file = str(tmp_path / "fresh.db")
+
+    mgr = DatabaseManager()
+    await mgr.setup_sqlite(db_path=db_file)
+    await mgr.close()
+
+    # All tables should exist and schema_migrations should track version 1
+    assert _table_exists(db_file, "schema_migrations")
+    assert _table_exists(db_file, "combined_metrics")
+
+    conn = sqlite3.connect(db_file)
+    cur = conn.execute("SELECT version FROM schema_migrations")
+    versions = {row[0] for row in cur.fetchall()}
+    conn.close()
+
+    assert 1 in versions

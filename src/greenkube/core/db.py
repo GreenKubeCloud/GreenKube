@@ -2,13 +2,13 @@
 
 import asyncio
 import logging
-import sqlite3
 from contextlib import asynccontextmanager
 
 import aiosqlite
 import asyncpg
 
 from .config import config
+from .migrations import MigrationRunner
 
 logger = logging.getLogger(__name__)
 
@@ -261,87 +261,9 @@ class DatabaseManager:
                 );
             """)
 
-            # Migrations for existing tables
-            # aiosqlite executes raise sqlite3.OperationalError
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN node_instance_type TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN node_zone TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN emaps_zone TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN is_estimated BOOLEAN")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN estimation_reasons TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN embodied_co2e_grams REAL")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN cpu_usage_millicores INTEGER")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN memory_usage_bytes INTEGER")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN owner_kind TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN owner_name TEXT")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                await self.connection.execute("ALTER TABLE node_snapshots ADD COLUMN embodied_emissions_kg REAL")
-            except sqlite3.OperationalError:
-                pass
-            # Extended resource metrics columns
-            for col_name, col_type in [
-                ("network_receive_bytes", "REAL"),
-                ("network_transmit_bytes", "REAL"),
-                ("disk_read_bytes", "REAL"),
-                ("disk_write_bytes", "REAL"),
-                ("storage_request_bytes", "INTEGER"),
-                ("storage_usage_bytes", "INTEGER"),
-                ("ephemeral_storage_request_bytes", "INTEGER"),
-                ("ephemeral_storage_usage_bytes", "INTEGER"),
-                ("gpu_usage_millicores", "INTEGER"),
-                ("restart_count", "INTEGER"),
-            ]:
-                try:
-                    await self.connection.execute(f"ALTER TABLE combined_metrics ADD COLUMN {col_name} {col_type}")
-                except sqlite3.OperationalError:
-                    pass
-
-            # Migration: add node column to combined_metrics
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN node TEXT")
-            except sqlite3.OperationalError:
-                pass
-
-            # Migration: add calculation_version column
-            try:
-                await self.connection.execute("ALTER TABLE combined_metrics ADD COLUMN calculation_version TEXT")
-            except sqlite3.OperationalError:
-                pass
-
-            # Add indexes for common query patterns
-            await self.connection.execute('CREATE INDEX IF NOT EXISTS idx_combined_ts ON combined_metrics("timestamp")')
-            await self.connection.execute(
-                'CREATE INDEX IF NOT EXISTS idx_combined_ns_ts ON combined_metrics(namespace, "timestamp")'
-            )
+            # Run versioned migrations
+            runner = MigrationRunner("sqlite")
+            await runner.run(self.connection)
 
             await self.connection.commit()
             logger.info("SQLite schema is up to date.")
@@ -507,76 +429,10 @@ class DatabaseManager:
                     ON recommendation_history(type);
             """)
 
-            # --- Migrations ---
-            # Use 'ADD COLUMN IF NOT EXISTS' which works in Postgres 9.6+
-            try:
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node_instance_type TEXT;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node_zone TEXT;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS emaps_zone TEXT;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS is_estimated BOOLEAN;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS estimation_reasons TEXT;")
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS embodied_co2e_grams REAL DEFAULT 0.0;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS cpu_usage_millicores INTEGER;"
-                )
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS memory_usage_bytes BIGINT;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS owner_kind TEXT;")
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS owner_name TEXT;")
+            # Run versioned migrations
+            runner = MigrationRunner("postgres")
+            await runner.run(conn)
 
-                # Fix any existing NULLs for non-nullable fields or fields where we expect a default
-                await conn.execute(
-                    "UPDATE combined_metrics SET embodied_co2e_grams = 0.0 WHERE embodied_co2e_grams IS NULL;"
-                )
-
-                await conn.execute("ALTER TABLE node_snapshots ADD COLUMN IF NOT EXISTS embodied_emissions_kg REAL;")
-
-                # Extended resource metrics columns
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS network_receive_bytes DOUBLE PRECISION;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS network_transmit_bytes DOUBLE PRECISION;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS disk_read_bytes DOUBLE PRECISION;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS disk_write_bytes DOUBLE PRECISION;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS storage_request_bytes BIGINT;"
-                )
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS storage_usage_bytes BIGINT;")
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS ephemeral_storage_request_bytes BIGINT;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS ephemeral_storage_usage_bytes BIGINT;"
-                )
-                await conn.execute(
-                    "ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS gpu_usage_millicores INTEGER;"
-                )
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS restart_count INTEGER;")
-
-                # Migration: fix carbon_intensity column type from INTEGER to DOUBLE PRECISION
-                await conn.execute(
-                    "ALTER TABLE carbon_intensity_history ALTER COLUMN carbon_intensity TYPE DOUBLE PRECISION;"
-                )
-
-                # Migration: add node column to combined_metrics
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS node TEXT;")
-
-                # Migration: add calculation_version column
-                await conn.execute("ALTER TABLE combined_metrics ADD COLUMN IF NOT EXISTS calculation_version TEXT;")
-            except Exception as e:
-                logger.warning("Migration warning (non-critical): %s", e)
-
-            # No commit() needed for asyncpg (autocommit is default in some contexts).
-            # asyncpg connection usage usually auto-commits if not in transaction.
-            # But here we are using connection_scope which yields a connection from pool.
-            # It does not start a transaction by default. So execute is autocommit.
             logger.info("PostgreSQL schema is up to date.")
 
 
