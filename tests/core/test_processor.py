@@ -298,7 +298,7 @@ def data_processor(
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_combines_data_correctly(mock_translator, data_processor, mock_calculator):
     """
     Tests the main success path: combines data from all sources correctly.
@@ -375,7 +375,7 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_estimates_missing_cost_data(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor uses the default cost when OpenCost data is missing for a pod,
@@ -423,7 +423,7 @@ async def test_processor_estimates_missing_cost_data(mock_translator, data_proce
 
 @pytest.mark.asyncio
 @patch("greenkube.core.processor.NodeCollector")  # Patch NodeCollector instantiation
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_uses_default_zone_when_node_zone_missing(
     mock_translator,
     mock_node_collector_class,
@@ -542,7 +542,7 @@ async def test_processor_handles_opencost_failure(
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_handles_calculator_failure(mock_translator, data_processor, mock_calculator):
     """
     Tests that the processor skips a metric if the calculator fails for it,
@@ -594,7 +594,7 @@ async def test_processor_handles_calculator_failure(mock_translator, data_proces
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_aggregates_pod_requests(
     mock_translator,
     mock_prometheus_collector,
@@ -657,7 +657,7 @@ async def test_processor_aggregates_pod_requests(
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_handles_missing_pod_requests(
     mock_translator,
     mock_prometheus_collector,
@@ -697,7 +697,7 @@ async def test_processor_handles_missing_pod_requests(
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_processor_nodecollector_instance_type_fallback(
     mock_translator,
     mock_prometheus_collector,
@@ -768,7 +768,7 @@ async def test_processor_nodecollector_instance_type_fallback(
 
 
 @pytest.mark.asyncio
-@patch("greenkube.core.processor.get_emaps_zone_from_cloud_zone")
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
 async def test_run_range_uses_historical_node_data(
     mock_translator,
     data_processor,

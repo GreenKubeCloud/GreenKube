@@ -54,8 +54,8 @@ async def test_pue_and_zone_fallback():
         estimator=mock_estimator,
     )
 
-    # Act - Test Zone Mapping Logic directly via private method
-    node_contexts = await processor._get_node_emaps_map({"node-1": node_info})
+    # Act - Test Zone Mapping Logic directly via zone mapper
+    node_contexts = await processor._zone_mapper.map_nodes({"node-1": node_info})
 
     # Assert - Zone Mapping
     # us-east-1 should map to US-MISO-RTO or similar depending on mapping file,

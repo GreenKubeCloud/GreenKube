@@ -29,22 +29,55 @@ from greenkube.models.prometheus_metrics import (
 )
 
 
-@pytest.fixture
-def mock_processor():
-    """Create a DataProcessor with all collectors mocked."""
+def _build_processor(prom_metrics, pod_metrics, node_info_map):
+    """Helper to build a DataProcessor with pre-configured mocks."""
     prom = AsyncMock()
-    opencost = AsyncMock()
-    node_col = AsyncMock()
-    pod_col = AsyncMock()
-    emaps = AsyncMock()
-    boavizta = AsyncMock()
-    repo = AsyncMock()
-    node_repo = AsyncMock()
-    embodied_repo = AsyncMock()
-    calculator = AsyncMock(spec=CarbonCalculator)
-    estimator = MagicMock(spec=BasicEstimator)
+    prom.collect = AsyncMock(return_value=prom_metrics)
+    prom.collect_range = AsyncMock(return_value=[])
 
-    processor = DataProcessor(
+    opencost = AsyncMock()
+    opencost.collect = AsyncMock(return_value=[])
+
+    node_col = AsyncMock()
+    node_col.collect = AsyncMock(return_value=node_info_map)
+    node_col.collect_instance_types = AsyncMock(return_value={k: v.instance_type for k, v in node_info_map.items()})
+
+    pod_col = AsyncMock()
+    pod_col.collect = AsyncMock(return_value=pod_metrics)
+
+    emaps = AsyncMock()
+    emaps.collect = AsyncMock(return_value=[])
+
+    boavizta = AsyncMock()
+    boavizta.get_server_impact = AsyncMock(return_value=None)
+
+    repo = AsyncMock()
+    repo.get_for_zone_at_time = AsyncMock(return_value=100.0)
+    repo.save_history = AsyncMock()
+    repo.read_combined_metrics = AsyncMock(return_value=[])
+
+    node_repo = AsyncMock()
+    node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
+    node_repo.get_snapshots = AsyncMock(return_value=[])
+    node_repo.save_nodes = AsyncMock()
+
+    embodied_repo = AsyncMock()
+    embodied_repo.get_profile = AsyncMock(return_value=None)
+    embodied_repo.save_profile = AsyncMock()
+
+    calculator = AsyncMock(spec=CarbonCalculator)
+    calculator.calculate_emissions = AsyncMock(
+        return_value=CarbonCalculationResult(co2e_grams=10.0, grid_intensity=100.0)
+    )
+    calculator.clear_cache = AsyncMock()
+    calculator._intensity_cache = {}
+    calculator._lock = AsyncMock()
+
+    estimator = MagicMock(spec=BasicEstimator)
+    estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 3, "maxWatts": 36}}
+    estimator.query_range_step_sec = 300
+
+    return DataProcessor(
         prometheus_collector=prom,
         opencost_collector=opencost,
         node_collector=node_col,
@@ -56,17 +89,36 @@ def mock_processor():
         embodied_repository=embodied_repo,
         calculator=calculator,
         estimator=estimator,
-    )
-    return processor
+    ), estimator
+
+
+NODE_INFO = {
+    "n1": NodeInfo(
+        name="n1",
+        cloud_provider="aws",
+        instance_type="m5.large",
+        zone="us-east-1a",
+        region="us-east-1",
+    ),
+}
+
+POD_METRICS = [
+    PodMetric(
+        pod_name="p1",
+        namespace="ns",
+        container_name="c1",
+        cpu_request=500,
+        memory_request=268435456,
+    ),
+]
 
 
 class TestProcessorResourceWiring:
     """Tests that the processor correctly maps new resource data to CombinedMetric."""
 
     @pytest.mark.asyncio
-    async def test_network_io_populated_in_combined_metric(self, mock_processor):
+    async def test_network_io_populated_in_combined_metric(self):
         """Network I/O data from Prometheus should flow into CombinedMetric."""
-        # Setup Prometheus to return network data
         prom_metrics = PrometheusMetric(
             pod_cpu_usage=[
                 PodCPUUsage(namespace="ns", pod="p1", container="c1", node="n1", cpu_usage_cores=0.5),
@@ -83,26 +135,8 @@ class TestProcessorResourceWiring:
             pod_restart_counts=[],
         )
 
-        mock_processor.prometheus_collector.collect = AsyncMock(return_value=prom_metrics)
-        mock_processor.opencost_collector.collect = AsyncMock(return_value=[])
-        mock_processor.node_collector.collect = AsyncMock(
-            return_value={
-                "n1": NodeInfo(
-                    name="n1", cloud_provider="aws", instance_type="m5.large", zone="us-east-1a", region="us-east-1"
-                ),
-            }
-        )
-        mock_processor.node_collector.collect_instance_types = AsyncMock(return_value={"n1": "m5.large"})
-        mock_processor.pod_collector.collect = AsyncMock(
-            return_value=[
-                PodMetric(
-                    pod_name="p1", namespace="ns", container_name="c1", cpu_request=500, memory_request=268435456
-                ),
-            ]
-        )
-
-        # Setup estimator
-        mock_processor.estimator.estimate = MagicMock(
+        processor, estimator = _build_processor(prom_metrics, POD_METRICS, NODE_INFO)
+        estimator.estimate = MagicMock(
             return_value=[
                 EnergyMetric(
                     pod_name="p1",
@@ -113,22 +147,8 @@ class TestProcessorResourceWiring:
                 ),
             ]
         )
-        mock_processor.estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 3, "maxWatts": 36}}
-        mock_processor.estimator.query_range_step_sec = 300
 
-        # Setup calculator
-        mock_processor.calculator.calculate_emissions = AsyncMock(
-            return_value=CarbonCalculationResult(co2e_grams=10.0, grid_intensity=100.0)
-        )
-        mock_processor.calculator.clear_cache = AsyncMock()
-        mock_processor.calculator._intensity_cache = {}
-        mock_processor.calculator._lock = AsyncMock()
-
-        # Setup repositories
-        mock_processor.repository.get_for_zone_at_time = AsyncMock(return_value=100.0)
-        mock_processor.embodied_repository.get_profile = AsyncMock(return_value=None)
-
-        result = await mock_processor.run()
+        result = await processor.run()
 
         assert len(result) >= 1
         combined = result[0]
@@ -136,7 +156,7 @@ class TestProcessorResourceWiring:
         assert combined.network_transmit_bytes == 512000
 
     @pytest.mark.asyncio
-    async def test_disk_io_populated_in_combined_metric(self, mock_processor):
+    async def test_disk_io_populated_in_combined_metric(self):
         """Disk I/O data from Prometheus should flow into CombinedMetric."""
         prom_metrics = PrometheusMetric(
             pod_cpu_usage=[
@@ -152,25 +172,8 @@ class TestProcessorResourceWiring:
             pod_restart_counts=[],
         )
 
-        mock_processor.prometheus_collector.collect = AsyncMock(return_value=prom_metrics)
-        mock_processor.opencost_collector.collect = AsyncMock(return_value=[])
-        mock_processor.node_collector.collect = AsyncMock(
-            return_value={
-                "n1": NodeInfo(
-                    name="n1", cloud_provider="aws", instance_type="m5.large", zone="us-east-1a", region="us-east-1"
-                ),
-            }
-        )
-        mock_processor.node_collector.collect_instance_types = AsyncMock(return_value={"n1": "m5.large"})
-        mock_processor.pod_collector.collect = AsyncMock(
-            return_value=[
-                PodMetric(
-                    pod_name="p1", namespace="ns", container_name="c1", cpu_request=500, memory_request=268435456
-                ),
-            ]
-        )
-
-        mock_processor.estimator.estimate = MagicMock(
+        processor, estimator = _build_processor(prom_metrics, POD_METRICS, NODE_INFO)
+        estimator.estimate = MagicMock(
             return_value=[
                 EnergyMetric(
                     pod_name="p1",
@@ -181,20 +184,8 @@ class TestProcessorResourceWiring:
                 ),
             ]
         )
-        mock_processor.estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 3, "maxWatts": 36}}
-        mock_processor.estimator.query_range_step_sec = 300
 
-        mock_processor.calculator.calculate_emissions = AsyncMock(
-            return_value=CarbonCalculationResult(co2e_grams=10.0, grid_intensity=100.0)
-        )
-        mock_processor.calculator.clear_cache = AsyncMock()
-        mock_processor.calculator._intensity_cache = {}
-        mock_processor.calculator._lock = AsyncMock()
-
-        mock_processor.repository.get_for_zone_at_time = AsyncMock(return_value=100.0)
-        mock_processor.embodied_repository.get_profile = AsyncMock(return_value=None)
-
-        result = await mock_processor.run()
+        result = await processor.run()
 
         assert len(result) >= 1
         combined = result[0]
@@ -202,7 +193,7 @@ class TestProcessorResourceWiring:
         assert combined.disk_write_bytes == 1024000
 
     @pytest.mark.asyncio
-    async def test_restart_count_populated_in_combined_metric(self, mock_processor):
+    async def test_restart_count_populated_in_combined_metric(self):
         """Restart count from Prometheus should flow into CombinedMetric."""
         prom_metrics = PrometheusMetric(
             pod_cpu_usage=[
@@ -218,25 +209,8 @@ class TestProcessorResourceWiring:
             ],
         )
 
-        mock_processor.prometheus_collector.collect = AsyncMock(return_value=prom_metrics)
-        mock_processor.opencost_collector.collect = AsyncMock(return_value=[])
-        mock_processor.node_collector.collect = AsyncMock(
-            return_value={
-                "n1": NodeInfo(
-                    name="n1", cloud_provider="aws", instance_type="m5.large", zone="us-east-1a", region="us-east-1"
-                ),
-            }
-        )
-        mock_processor.node_collector.collect_instance_types = AsyncMock(return_value={"n1": "m5.large"})
-        mock_processor.pod_collector.collect = AsyncMock(
-            return_value=[
-                PodMetric(
-                    pod_name="p1", namespace="ns", container_name="c1", cpu_request=500, memory_request=268435456
-                ),
-            ]
-        )
-
-        mock_processor.estimator.estimate = MagicMock(
+        processor, estimator = _build_processor(prom_metrics, POD_METRICS, NODE_INFO)
+        estimator.estimate = MagicMock(
             return_value=[
                 EnergyMetric(
                     pod_name="p1",
@@ -247,20 +221,8 @@ class TestProcessorResourceWiring:
                 ),
             ]
         )
-        mock_processor.estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 3, "maxWatts": 36}}
-        mock_processor.estimator.query_range_step_sec = 300
 
-        mock_processor.calculator.calculate_emissions = AsyncMock(
-            return_value=CarbonCalculationResult(co2e_grams=10.0, grid_intensity=100.0)
-        )
-        mock_processor.calculator.clear_cache = AsyncMock()
-        mock_processor.calculator._intensity_cache = {}
-        mock_processor.calculator._lock = AsyncMock()
-
-        mock_processor.repository.get_for_zone_at_time = AsyncMock(return_value=100.0)
-        mock_processor.embodied_repository.get_profile = AsyncMock(return_value=None)
-
-        result = await mock_processor.run()
+        result = await processor.run()
 
         assert len(result) >= 1
         combined = result[0]
