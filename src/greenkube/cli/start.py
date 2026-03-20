@@ -18,7 +18,7 @@ from typing_extensions import Annotated
 
 from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
-from ..core.config import config
+from ..core.config import get_config
 from ..core.factory import get_node_repository, get_repository
 from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
@@ -140,25 +140,26 @@ async def scheduled_write_metrics():
 
 
 async def _async_start(last: Optional[str]):
+    cfg = get_config()
     logging.basicConfig(
-        level=config.LOG_LEVEL.upper(),
+        level=cfg.LOG_LEVEL.upper(),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     logger.info("🚀 Initializing GreenKube (Async)...")
 
     # For SQLite, initialize the DB schema if needed
-    if config.DB_TYPE == "sqlite":
-        from ..core.db import db_manager
+    if cfg.DB_TYPE == "sqlite":
+        from ..core.db import get_db_manager
 
         # Ensure setup_sqlite is awaited if it is async
-        await db_manager.setup_sqlite()
+        await get_db_manager().setup_sqlite()
         logger.info("✅ SQLite Database connection successful and schema is ready.")
 
     scheduler = Scheduler()
     scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
 
-    scheduler.add_job_from_string(scheduled_write_metrics, config.PROMETHEUS_QUERY_RANGE_STEP)
-    scheduler.add_job_from_string(analyze_nodes, config.NODE_ANALYSIS_INTERVAL)
+    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP)
+    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")
