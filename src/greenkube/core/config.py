@@ -242,14 +242,18 @@ class Config:
             if (24 * 3600) % step_seconds != 0:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         if not self.ELECTRICITY_MAPS_TOKEN:
-            logging.warning("ELECTRICITY_MAPS_TOKEN is not set.")
+            logging.warning(
+                "⚠️  ELECTRICITY_MAPS_TOKEN is not set. CO2 figures will use static fallback data "
+                "which may be inaccurate. Get a free token at https://www.electricitymaps.com/"
+            )
         if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
         if not os.getenv("DEFAULT_ZONE"):
             logging.warning(
-                "DEFAULT_ZONE is not set. Using hardcoded default '%s'. "
-                "This may result in inaccurate carbon intensity data if your cluster is not in France.",
+                "⚠️  DEFAULT_ZONE is not set. Defaulting to '%s'. "
+                "If your cluster is NOT in this region, carbon intensity data will be INACCURATE. "
+                "Set DEFAULT_ZONE to your Electricity Maps zone code (e.g., 'US-CAL-CISO', 'DE', 'GB').",
                 self.DEFAULT_ZONE,
             )
 

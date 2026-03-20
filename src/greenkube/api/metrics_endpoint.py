@@ -183,6 +183,25 @@ CLUSTER_NAMESPACE_COUNT = Gauge(
 )
 
 # ---------------------------------------------------------------------------
+# GreenKube self-monitoring gauges
+# ---------------------------------------------------------------------------
+GREENKUBE_ESTIMATED_METRICS_RATIO = Gauge(
+    "greenkube_estimated_metrics_ratio",
+    "Fraction of metrics that rely on estimated values (0.0 = all measured, 1.0 = all estimated)",
+    registry=REGISTRY,
+)
+GREENKUBE_LAST_COLLECTION_TIMESTAMP = Gauge(
+    "greenkube_last_collection_timestamp_seconds",
+    "Unix timestamp of the most recent metric in the database",
+    registry=REGISTRY,
+)
+GREENKUBE_METRICS_TOTAL = Gauge(
+    "greenkube_metrics_total",
+    "Total number of combined metric records in the latest window",
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
 # Node-level gauges
 # ---------------------------------------------------------------------------
 NODE_LABELS = ["node", "instance_type", "zone", "region", "cloud_provider", "architecture"]
@@ -282,6 +301,8 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         CLUSTER_ENERGY_TOTAL.set(0)
         CLUSTER_POD_COUNT.set(0)
         CLUSTER_NAMESPACE_COUNT.set(0)
+        GREENKUBE_ESTIMATED_METRICS_RATIO.set(0)
+        GREENKUBE_METRICS_TOTAL.set(0)
         return
 
     # Namespace aggregations
@@ -336,6 +357,14 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     CLUSTER_ENERGY_TOTAL.set(sum(ns_energy.values()))
     CLUSTER_POD_COUNT.set(len({m.pod_name for m in metrics}))
     CLUSTER_NAMESPACE_COUNT.set(len(ns_co2))
+
+    # Self-monitoring metrics
+    GREENKUBE_METRICS_TOTAL.set(len(metrics))
+    estimated_count = sum(1 for m in metrics if m.is_estimated)
+    GREENKUBE_ESTIMATED_METRICS_RATIO.set(estimated_count / len(metrics) if metrics else 0.0)
+    latest_ts = max((m.timestamp for m in metrics if m.timestamp), default=None)
+    if latest_ts:
+        GREENKUBE_LAST_COLLECTION_TIMESTAMP.set(latest_ts.timestamp())
 
     logger.debug("Updated Prometheus cluster metrics with %d pod metrics.", len(metrics))
 

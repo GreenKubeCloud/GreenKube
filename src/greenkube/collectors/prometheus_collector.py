@@ -483,9 +483,12 @@ class PrometheusCollector(BaseCollector):
         if not all((namespace, pod, container, node)):
             return None
         try:
-            return PodCPUUsage(
-                namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=float(value_str)
-            )
+            cpu = float(value_str)
+            # Reject invalid values: negative (counter resets), Inf, or absurdly high
+            if cpu < 0 or cpu != cpu or cpu == float("inf") or cpu > 10000:
+                logger.debug("Invalid CPU value %.4f for %s/%s, skipping", cpu, namespace, pod)
+                return None
+            return PodCPUUsage(namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=cpu)
         except (TypeError, ValueError, ValidationError):
             # Validation failed (bad types); return None for aggregation by caller.
             return None
@@ -512,9 +515,11 @@ class PrometheusCollector(BaseCollector):
             return None
 
         try:
-            return PodCPUUsage(
-                namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=float(value_str)
-            )
+            cpu = float(value_str)
+            if cpu < 0 or cpu != cpu or cpu == float("inf") or cpu > 10000:
+                logger.debug("Invalid CPU value %.4f for %s/%s (no-container), skipping", cpu, namespace, pod)
+                return None
+            return PodCPUUsage(namespace=namespace, pod=pod, container=container, node=node, cpu_usage_cores=cpu)
         except (TypeError, ValueError, ValidationError):
             return None
 
@@ -543,7 +548,11 @@ class PrometheusCollector(BaseCollector):
             return None
 
         try:
-            return PodMemoryUsage(namespace=namespace, pod=pod, node=node, memory_usage_bytes=float(value_str))
+            mem = float(value_str)
+            if mem < 0 or mem != mem or mem == float("inf"):
+                logger.debug("Invalid memory value %.0f for %s/%s, skipping", mem, namespace, pod)
+                return None
+            return PodMemoryUsage(namespace=namespace, pod=pod, node=node, memory_usage_bytes=mem)
         except (TypeError, ValueError, ValidationError):
             return None
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List
 
 from elasticsearch import AsyncElasticsearch
-from elasticsearch_dsl import Date, Document, Float, Keyword, Text
+from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Text
 
 # Import connections conditionally
 if "connections" not in globals():
@@ -89,7 +89,7 @@ class CombinedMetricDoc(Document):
     node_instance_type = Keyword()
     node_zone = Keyword()
     emaps_zone = Keyword()
-    is_estimated = Keyword()
+    is_estimated = Boolean()
     estimation_reasons = Text()
     calculation_version = Keyword()
 

@@ -87,6 +87,56 @@ def aggregate_metrics(
         # Take the timestamp of the first item in the group for the aggregated metric
         first_timestamp = items[0].timestamp if items else None
 
+        # Preserve metadata through aggregation
+        # is_estimated is True if ANY item was estimated
+        agg_is_estimated = any(i.is_estimated for i in items)
+        # Collect unique estimation reasons
+        agg_reasons = list({r for i in items for r in (i.estimation_reasons or [])})
+        # Use the most common node, emaps_zone, and instance type
+        agg_node = (
+            max(
+                {i.node for i in items if i.node},
+                key=lambda n: sum(1 for i in items if i.node == n),
+                default=None,
+            )
+            if any(i.node for i in items)
+            else None
+        )
+        agg_emaps_zone = (
+            max(
+                {i.emaps_zone for i in items if i.emaps_zone},
+                key=lambda z: sum(1 for i in items if i.emaps_zone == z),
+                default=None,
+            )
+            if any(i.emaps_zone for i in items)
+            else None
+        )
+        agg_instance_type = (
+            max(
+                {i.node_instance_type for i in items if i.node_instance_type},
+                key=lambda t: sum(1 for i in items if i.node_instance_type == t),
+                default=None,
+            )
+            if any(i.node_instance_type for i in items)
+            else None
+        )
+        agg_node_zone = (
+            max(
+                {i.node_zone for i in items if i.node_zone},
+                key=lambda z: sum(1 for i in items if i.node_zone == z),
+                default=None,
+            )
+            if any(i.node_zone for i in items)
+            else None
+        )
+        # Average usage metrics
+        cpu_usages = [i.cpu_usage_millicores for i in items if i.cpu_usage_millicores is not None]
+        agg_cpu_usage = int(round(sum(cpu_usages) / len(cpu_usages))) if cpu_usages else None
+        mem_usages = [i.memory_usage_bytes for i in items if i.memory_usage_bytes is not None]
+        agg_mem_usage = int(round(sum(mem_usages) / len(mem_usages))) if mem_usages else None
+        # Use the latest calculation_version
+        agg_calc_version = items[-1].calculation_version if items else None
+
         combined = CombinedMetric(
             pod_name=pod,
             namespace=namespace,
@@ -99,9 +149,17 @@ def aggregate_metrics(
             joules=total_joules,
             cpu_request=cpu_request,
             memory_request=memory_request,
+            cpu_usage_millicores=agg_cpu_usage,
+            memory_usage_bytes=agg_mem_usage,
             timestamp=first_timestamp,
             duration_seconds=total_duration if total_duration > 0 else None,
-            # grid_intensity_timestamp is lost in aggregation, which is expected.
+            node=agg_node,
+            node_instance_type=agg_instance_type,
+            node_zone=agg_node_zone,
+            emaps_zone=agg_emaps_zone,
+            is_estimated=agg_is_estimated,
+            estimation_reasons=agg_reasons,
+            calculation_version=agg_calc_version,
         )
         result.append(combined)
 
