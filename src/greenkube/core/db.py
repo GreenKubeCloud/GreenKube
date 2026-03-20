@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import aiosqlite
 import asyncpg
 
-from .config import config
+from .config import Config, get_config
 from .migrations import MigrationRunner
 
 logger = logging.getLogger(__name__)
@@ -16,16 +16,27 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """
     Manages the asynchronous connection to the database (SQLite or PostgreSQL).
+
+    Accepts an optional :class:`Config` instance for dependency injection.
+    When *config* is ``None`` the module-level singleton is used.
     """
 
-    def __init__(self):
+    def __init__(self, config: Config | None = None):
+        self._config = config
         self.connection = None
         self.pool = None
         self._lock = asyncio.Lock()
 
     @property
+    def config(self) -> Config:
+        """Resolve the config lazily so the latest singleton is always used."""
+        if self._config is not None:
+            return self._config
+        return get_config()
+
+    @property
     def db_type(self):
-        return config.DB_TYPE
+        return self.config.DB_TYPE
 
     async def connect(self):
         """
@@ -37,17 +48,17 @@ class DatabaseManager:
 
             try:
                 if self.db_type == "sqlite":
-                    self.connection = await aiosqlite.connect(config.DB_PATH)
+                    self.connection = await aiosqlite.connect(self.config.DB_PATH)
                     self.connection.row_factory = aiosqlite.Row
                     logger.info("Successfully connected to SQLite database.")
                     await self.setup_sqlite()
                 elif self.db_type == "postgres":
                     try:
                         self.pool = await asyncpg.create_pool(
-                            dsn=config.DB_CONNECTION_STRING,
+                            dsn=self.config.DB_CONNECTION_STRING,
                             min_size=1,
                             max_size=10,
-                            server_settings={"search_path": config.DB_SCHEMA},
+                            server_settings={"search_path": self.config.DB_SCHEMA},
                         )
                         logger.info("Successfully initialized PostgreSQL connection pool.")
                         await self.setup_postgres()
@@ -280,7 +291,7 @@ class DatabaseManager:
 
         async with self.connection_scope() as conn:
             # Create schema if it doesn't exist
-            await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {config.DB_SCHEMA};")
+            await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.config.DB_SCHEMA};")
 
             # --- Table for carbon_intensity_history ---
             await conn.execute("""
@@ -436,5 +447,16 @@ class DatabaseManager:
             logger.info("PostgreSQL schema is up to date.")
 
 
-# Singleton instance of the DatabaseManager
+# Module-level singleton – kept for backward compatibility.
+# Prefer :func:`get_db_manager` for explicit lifecycle management.
 db_manager = DatabaseManager()
+
+
+def get_db_manager() -> DatabaseManager:
+    """Return the module-level DatabaseManager singleton.
+
+    Using this function (rather than importing ``db_manager`` directly) makes
+    it straightforward to swap or override the instance in tests and enables
+    explicit lifecycle management from application entry points.
+    """
+    return db_manager

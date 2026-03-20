@@ -13,7 +13,7 @@ from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
-from ..core.config import config
+from ..core.config import Config, get_config
 from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..energy.estimator import BasicEstimator
@@ -43,6 +43,7 @@ class HistoricalRangeProcessor:
         estimator: BasicEstimator,
         assembler: MetricAssembler,
         zone_mapper: NodeZoneMapper,
+        config: Config | None = None,
     ):
         self.prometheus_collector = prometheus_collector
         self.opencost_collector = opencost_collector
@@ -55,6 +56,7 @@ class HistoricalRangeProcessor:
         self.estimator = estimator
         self.assembler = assembler
         self.zone_mapper = zone_mapper
+        self._config = config if config is not None else get_config()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -117,7 +119,7 @@ class HistoricalRangeProcessor:
         except Exception as e:
             logger.warning("Failed to read stored metrics: %s", e)
 
-        cfg_step_str = config.PROMETHEUS_QUERY_RANGE_STEP
+        cfg_step_str = self._config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = self._parse_duration_to_seconds(cfg_step_str)
         chosen_step_sec = cfg_step_sec
         chosen_step = f"{chosen_step_sec}s"
@@ -155,7 +157,7 @@ class HistoricalRangeProcessor:
             for ts, info in reversed(timeline):
                 if ts <= timestamp:
                     age = timestamp - ts
-                    if age > timedelta(days=config.NODE_DATA_MAX_AGE_DAYS):
+                    if age > timedelta(days=self._config.NODE_DATA_MAX_AGE_DAYS):
                         logger.warning(
                             "Node snapshot for '%s' at %s is too old (age: %s). Ignoring.",
                             node_name,
@@ -417,7 +419,7 @@ class HistoricalRangeProcessor:
             for em in chunk_energy_metrics:
                 node_name = em.node
                 context = node_contexts.get(node_name)
-                zone = context.emaps_zone if context else config.DEFAULT_ZONE
+                zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
                 ts = em.timestamp
                 try:
                     intensity = await repository.get_for_zone_at_time(zone, ts.isoformat())
@@ -434,9 +436,9 @@ class HistoricalRangeProcessor:
                 joules = em.joules
                 ts = em.timestamp
                 node_context = node_contexts.get(node_name)
-                zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
+                zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
                 provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-                pue = config.get_pue_for_provider(provider)
+                pue = self._config.get_pue_for_provider(provider)
                 try:
                     carbon_result = await calculator.calculate_emissions(
                         joules=joules, zone=zone, timestamp=ts, pue=pue
@@ -447,10 +449,10 @@ class HistoricalRangeProcessor:
                     skipped_carbon += 1
 
                 cost_metric = cost_map.get(pod_name)
-                total_cost = cost_metric.total_cost / steps_in_range if cost_metric else config.DEFAULT_COST
+                total_cost = cost_metric.total_cost / steps_in_range if cost_metric else self._config.DEFAULT_COST
 
                 # Reuse the shared estimation-flags builder
-                is_estimated, estimation_reasons = MetricAssembler.build_estimation_flags(
+                is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
                     energy_metric=em,
                     node_context=node_context,
                     cost_metric=cost_metric,

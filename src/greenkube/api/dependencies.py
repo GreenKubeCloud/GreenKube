@@ -32,9 +32,9 @@ def verify_api_key(request: Request) -> None:
     When the env var is empty the check is skipped (open access).
     Public endpoints (``/health``, ``/metrics``, ``/docs``) are always exempt.
     """
-    from greenkube.core.config import config
+    from greenkube.core.config import get_config
 
-    api_key = config.API_KEY
+    api_key = get_config().API_KEY
     if not api_key:
         return  # no key configured → open access
 

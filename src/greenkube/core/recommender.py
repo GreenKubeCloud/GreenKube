@@ -14,7 +14,7 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-from greenkube.core.config import config
+from greenkube.core.config import Config, get_config
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 
 LOG = logging.getLogger(__name__)
@@ -23,21 +23,30 @@ LOG = logging.getLogger(__name__)
 class Recommender:
     """Analyzes combined metrics to generate optimization recommendations."""
 
-    def __init__(self):
-        """Initializes the recommender with thresholds from config."""
-        self.rightsizing_cpu_threshold = config.RIGHTSIZING_CPU_THRESHOLD
-        self.rightsizing_memory_threshold = config.RIGHTSIZING_MEMORY_THRESHOLD
-        self.rightsizing_headroom = config.RIGHTSIZING_HEADROOM
-        self.zombie_cost_threshold = config.ZOMBIE_COST_THRESHOLD
-        self.zombie_energy_threshold = config.ZOMBIE_ENERGY_THRESHOLD
-        self.autoscaling_cv_threshold = config.AUTOSCALING_CV_THRESHOLD
-        self.autoscaling_spike_ratio = config.AUTOSCALING_SPIKE_RATIO
-        self.off_peak_idle_threshold = config.OFF_PEAK_IDLE_THRESHOLD
-        self.off_peak_min_idle_hours = config.OFF_PEAK_MIN_IDLE_HOURS
-        self.idle_namespace_energy_threshold = config.IDLE_NAMESPACE_ENERGY_THRESHOLD
-        self.carbon_aware_threshold = config.CARBON_AWARE_THRESHOLD
-        self.node_utilization_threshold = config.NODE_UTILIZATION_THRESHOLD
-        self.recommend_system_namespaces = config.RECOMMEND_SYSTEM_NAMESPACES
+    def __init__(self, config: Config | None = None):
+        """Initializes the recommender with thresholds from config.
+
+        Args:
+            config: Optional Config instance for dependency injection.
+                    Falls back to the module-level singleton.
+        """
+        cfg = config if config is not None else get_config()
+        self.rightsizing_cpu_threshold = cfg.RIGHTSIZING_CPU_THRESHOLD
+        self.rightsizing_memory_threshold = cfg.RIGHTSIZING_MEMORY_THRESHOLD
+        self.rightsizing_headroom = cfg.RIGHTSIZING_HEADROOM
+        self.zombie_cost_threshold = cfg.ZOMBIE_COST_THRESHOLD
+        self.zombie_energy_threshold = cfg.ZOMBIE_ENERGY_THRESHOLD
+        self.autoscaling_cv_threshold = cfg.AUTOSCALING_CV_THRESHOLD
+        self.autoscaling_spike_ratio = cfg.AUTOSCALING_SPIKE_RATIO
+        self.off_peak_idle_threshold = cfg.OFF_PEAK_IDLE_THRESHOLD
+        self.off_peak_min_idle_hours = cfg.OFF_PEAK_MIN_IDLE_HOURS
+        self.idle_namespace_energy_threshold = cfg.IDLE_NAMESPACE_ENERGY_THRESHOLD
+        self.carbon_aware_threshold = cfg.CARBON_AWARE_THRESHOLD
+        self.node_utilization_threshold = cfg.NODE_UTILIZATION_THRESHOLD
+        self.recommend_system_namespaces = cfg.RECOMMEND_SYSTEM_NAMESPACES
+        self.default_instance_min_watts = cfg.DEFAULT_INSTANCE_MIN_WATTS
+        self.default_instance_max_watts = cfg.DEFAULT_INSTANCE_MAX_WATTS
+        self.default_instance_vcores = cfg.DEFAULT_INSTANCE_VCORES
 
     def generate_recommendations(
         self,
@@ -242,16 +251,15 @@ class Recommender:
                 )
         return recs
 
-    @staticmethod
-    def _estimate_cpu_usage_percent_legacy(metric: CombinedMetric, instance_profiles: dict) -> float:
+    def _estimate_cpu_usage_percent_legacy(self, metric: CombinedMetric, instance_profiles: dict) -> float:
         """Legacy energy-based CPU usage estimation."""
         if metric.cpu_request == 0:
             return 0.0
         duration = metric.duration_seconds or 1
         current_watts = metric.joules / duration
-        min_watts = config.DEFAULT_INSTANCE_MIN_WATTS
-        max_watts = config.DEFAULT_INSTANCE_MAX_WATTS
-        vcores = config.DEFAULT_INSTANCE_VCORES
+        min_watts = self.default_instance_min_watts
+        max_watts = self.default_instance_max_watts
+        vcores = self.default_instance_vcores
         if metric.node_instance_type:
             profile = instance_profiles.get(metric.node_instance_type)
             if profile:

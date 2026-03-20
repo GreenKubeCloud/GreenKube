@@ -192,9 +192,9 @@ def report(
             raise typer.Exit(code=1)
         finally:
             # Close the database connection to allow clean exit
-            from ..core.db import db_manager
+            from ..core.db import get_db_manager
 
-            await db_manager.close()
+            await get_db_manager().close()
 
     try:
         asyncio.run(_report_async())

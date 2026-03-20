@@ -15,7 +15,7 @@ import webbrowser
 
 import uvicorn
 
-from greenkube.core.config import config
+from greenkube.core.config import get_config
 from greenkube.demo.data_generator import (
     DEMO_ZONE,
     generate_carbon_intensity_history,
@@ -43,7 +43,7 @@ def _configure_demo_environment(db_path: str, port: int) -> None:
     os.environ["LOG_LEVEL"] = "INFO"
     os.environ["DEFAULT_ZONE"] = DEMO_ZONE
 
-    config.reload()
+    get_config().reload()
 
 
 async def _populate_database(days: int) -> dict[str, int]:
@@ -55,9 +55,9 @@ async def _populate_database(days: int) -> dict[str, int]:
     Returns:
         A dict with counts of inserted records per category.
     """
-    from greenkube.core.db import db_manager
+    from greenkube.core.db import get_db_manager
 
-    await db_manager.connect()
+    await get_db_manager().connect()
 
     counts: dict[str, int] = {}
 
@@ -179,8 +179,8 @@ async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) ->
         await server.serve()
     finally:
         # Clean up
-        from greenkube.core.db import db_manager
+        from greenkube.core.db import get_db_manager
 
-        await db_manager.close()
+        await get_db_manager().close()
         logger.info("🧹 Demo database at %s can be manually deleted.", tmp_dir)
         logger.info("👋 GreenKube Demo stopped. Thanks for trying GreenKube!")

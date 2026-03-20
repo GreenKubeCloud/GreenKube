@@ -31,7 +31,7 @@ from greenkube.api.dependencies import (
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations
-from greenkube.core.config import config
+from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ FRONTEND_DIR = Path("/app/frontend")
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
     logger.info("🚀 Starting GreenKube API...")
-    from greenkube.core.db import db_manager
+    from greenkube.core.db import get_db_manager
 
-    await db_manager.connect()
+    await get_db_manager().connect()
     logger.info("✅ Database connection established.")
     yield
     logger.info("🛑 Shutting down GreenKube API...")
-    await db_manager.close()
+    await get_db_manager().close()
     logger.info("Database connection closed.")
 
 
@@ -74,7 +74,8 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
 
     # --- Rate limiting ---
     # Configurable via API_RATE_LIMIT env var (default "60/minute").
-    rate_limit = getattr(config, "API_RATE_LIMIT", "60/minute") or "60/minute"
+    cfg = get_config()
+    rate_limit = getattr(cfg, "API_RATE_LIMIT", "60/minute") or "60/minute"
     limiter = Limiter(key_func=get_remote_address, default_limits=[rate_limit])
     app.state.limiter = limiter
 
@@ -88,7 +89,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     # CORS — configurable via CORS_ORIGINS env var (comma-separated).
     # Defaults to ["*"] for in-cluster use where the SPA is served from
     # the same origin. Override when the API is exposed via an ingress.
-    cors_origins_str = config.CORS_ORIGINS if hasattr(config, "CORS_ORIGINS") else "*"
+    cors_origins_str = cfg.CORS_ORIGINS if hasattr(cfg, "CORS_ORIGINS") else "*"
     cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()] or ["*"]
     app.add_middleware(
         CORSMiddleware,
@@ -166,9 +167,10 @@ def _mount_frontend(app: FastAPI) -> None:
 
 def main():
     """Entry point for the greenkube-api console script."""
+    cfg = get_config()
     logging.basicConfig(
-        level=config.LOG_LEVEL.upper(),
+        level=cfg.LOG_LEVEL.upper(),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     app = create_app(use_lifespan=True)
-    uvicorn.run(app, host=config.API_HOST, port=config.API_PORT)
+    uvicorn.run(app, host=cfg.API_HOST, port=cfg.API_PORT)

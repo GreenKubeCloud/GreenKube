@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 from ..collectors.boavizta_collector import BoaviztaCollector
 from ..core.calculator import CarbonCalculator
-from ..core.config import config
+from ..core.config import Config, get_config
 from ..energy.estimator import BasicEstimator
 from ..models.node import NodeInfo
 from ..storage.base_repository import NodeRepository
@@ -26,12 +26,14 @@ class EmbodiedEmissionsService:
         node_repository: NodeRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
+        config: Config | None = None,
     ):
         self.boavizta_collector = boavizta_collector
         self.embodied_repository = embodied_repository
         self.node_repository = node_repository
         self.calculator = calculator
         self.estimator = estimator
+        self._config = config if config is not None else get_config()
 
     async def prepare_embodied_data(
         self,
@@ -65,7 +67,7 @@ class EmbodiedEmissionsService:
                 if impact and impact.impacts and impact.impacts.gwp and impact.impacts.gwp.manufacture:
                     gwp_embedded_kg = impact.impacts.gwp.manufacture
                     if gwp_embedded_kg:
-                        lifespan = config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
+                        lifespan = self._config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
                         await self.embodied_repository.save_profile(
                             provider=provider,
                             instance_type=instance_type,

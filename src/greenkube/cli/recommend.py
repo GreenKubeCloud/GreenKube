@@ -15,7 +15,7 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-from ..core.config import config
+from ..core.config import get_config
 from ..core.factory import get_combined_metrics_repository, get_node_repository
 from ..core.recommender import Recommender
 from ..reporters.console_reporter import ConsoleReporter
@@ -65,7 +65,7 @@ def recommend(
             else:
                 logger.info("Reading stored metrics from database...")
                 repository = get_combined_metrics_repository()
-                lookback_days = config.RECOMMENDATION_LOOKBACK_DAYS
+                lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
                 end = datetime.now(timezone.utc)
                 start = end - timedelta(days=lookback_days)
                 combined_data = await repository.read_combined_metrics(start_time=start, end_time=end)
@@ -121,9 +121,9 @@ def recommend(
         finally:
             if processor is not None:
                 await processor.close()
-            from ..core.db import db_manager
+            from ..core.db import get_db_manager
 
-            await db_manager.close()
+            await get_db_manager().close()
 
     try:
         asyncio.run(_recommend_async())

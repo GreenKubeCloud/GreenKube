@@ -10,7 +10,7 @@ from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from ..storage.base_repository import CarbonIntensityRepository
-from .config import config
+from .config import Config, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +35,28 @@ class CarbonCalculationResult:
 class CarbonCalculator:
     """Calculates CO2e emissions based on energy consumption and grid carbon intensity."""
 
-    def __init__(self, repository: CarbonIntensityRepository, pue: Optional[float] = None):
+    def __init__(
+        self, repository: CarbonIntensityRepository, pue: Optional[float] = None, config: Config | None = None
+    ):
         """Initialize with a repository and optional PUE.
 
         A small in-memory cache is used to avoid repeated repository/API calls
         for the same (zone, timestamp) during a single run.
+
+        Args:
+            repository: The carbon intensity data source.
+            pue: Explicit PUE override. Falls back to ``config.DEFAULT_PUE``.
+            config: Optional Config instance for dependency injection.
         """
         # Store repository
         self.repository = repository
+        self._config = config if config is not None else get_config()
 
         # Resolve PUE at construction time so changes to config (or env-selected
         # profiles) are picked up when the calculator is instantiated. If the
         # caller explicitly provides a pue value, use it; otherwise fall back
         # to the current value of config.DEFAULT_PUE.
-        self.pue = pue if pue is not None else config.DEFAULT_PUE
+        self.pue = pue if pue is not None else self._config.DEFAULT_PUE
 
         # Simple per-run cache: key = (zone, timestamp) -> intensity value
         # (float or None)
@@ -68,7 +76,7 @@ class CarbonCalculator:
         hit the cache instead of querying the repository/API again.
         """
         dt = _to_datetime(timestamp)
-        gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+        gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
         if gran == "hour":
             normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
         elif gran == "day":
@@ -96,7 +104,7 @@ class CarbonCalculator:
         """
         # Normalize timestamp to hour to increase cache hit rate across similar timestamps
         dt = _to_datetime(timestamp)
-        gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+        gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
         if gran == "hour":
             normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
         elif gran == "day":
@@ -134,7 +142,7 @@ class CarbonCalculator:
                         grid_intensity_value,
                     )
             else:
-                grid_intensity_value = config.DEFAULT_INTENSITY
+                grid_intensity_value = self._config.DEFAULT_INTENSITY
                 async with self._lock:
                     self._intensity_cache[cache_key] = None
                     logger.warning(
@@ -142,7 +150,7 @@ class CarbonCalculator:
                         "using global fallback %s gCO2e/kWh",
                         zone,
                         normalized_dt.isoformat(),
-                        config.DEFAULT_INTENSITY,
+                        self._config.DEFAULT_INTENSITY,
                     )
 
         if joules == 0.0:
@@ -152,7 +160,7 @@ class CarbonCalculator:
                 grid_intensity_timestamp=normalized_dt,
             )
 
-        kwh = joules / config.JOULES_PER_KWH
+        kwh = joules / self._config.JOULES_PER_KWH
         effective_pue = pue if pue is not None else self.pue
         kwh_adjusted_for_pue = kwh * effective_pue
         co2e_grams = kwh_adjusted_for_pue * grid_intensity_value

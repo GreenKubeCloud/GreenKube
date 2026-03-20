@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 from .. import __version__
 from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..core.calculator import CarbonCalculator
-from ..core.config import config
+from ..core.config import Config, get_config
 from ..core.cost_normalizer import CostNormalizer
 from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.node_zone_mapper import NodeZoneMapper
@@ -40,6 +40,7 @@ class MetricAssembler:
         electricity_maps_collector: ElectricityMapsCollector,
         zone_mapper: NodeZoneMapper,
         embodied_service: EmbodiedEmissionsService,
+        config: Config | None = None,
     ):
         self.calculator = calculator
         self.estimator = estimator
@@ -47,6 +48,7 @@ class MetricAssembler:
         self.electricity_maps_collector = electricity_maps_collector
         self.zone_mapper = zone_mapper
         self.embodied_service = embodied_service
+        self._config = config if config is not None else get_config()
 
     # ------------------------------------------------------------------
     # Carbon-intensity prefetch
@@ -62,12 +64,12 @@ class MetricAssembler:
         for em in energy_metrics:
             node_name = em.node
             context = node_contexts.get(node_name)
-            emaps_zone = context.emaps_zone if context else config.DEFAULT_ZONE
+            emaps_zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
             zone_to_metrics.setdefault(emaps_zone, []).append(em)
 
         async def _prefetch_zone(zone: str, metrics: List[EnergyMetric]) -> None:
             representative_ts = max(m.timestamp for m in metrics)
-            gran = getattr(config, "NORMALIZATION_GRANULARITY", "hour")
+            gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
             if isinstance(representative_ts, str):
                 rep_dt = parse_iso_date(representative_ts)
                 if not rep_dt:
@@ -136,8 +138,8 @@ class MetricAssembler:
     # Estimation-flags helper
     # ------------------------------------------------------------------
 
-    @staticmethod
     def build_estimation_flags(
+        self,
         energy_metric: EnergyMetric,
         node_context: Optional[NodeZoneContext],
         cost_metric: Optional[object],
@@ -161,19 +163,19 @@ class MetricAssembler:
         else:
             is_estimated = True
             estimation_reasons.append(
-                f"Node '{node_name}' not found in zone map. Used default zone '{config.DEFAULT_ZONE}'"
+                f"Node '{node_name}' not found in zone map. Used default zone '{self._config.DEFAULT_ZONE}'"
             )
 
         if not cost_metric:
             is_estimated = True
             estimation_reasons.append(
-                f"No cost data for pod '{energy_metric.pod_name}'. Used default cost {config.DEFAULT_COST}"
+                f"No cost data for pod '{energy_metric.pod_name}'. Used default cost {self._config.DEFAULT_COST}"
             )
 
         if not provider:
             is_estimated = True
             estimation_reasons.append(f"Unknown provider for node '{node_name}'. Used default PUE {pue}")
-        elif f"default_{provider.lower()}" not in config.DATACENTER_PUE_PROFILES:
+        elif f"default_{provider.lower()}" not in self._config.DATACENTER_PUE_PROFILES:
             is_estimated = True
             estimation_reasons.append(f"No PUE profile for provider '{provider}'. Used default PUE {pue}")
 
@@ -218,9 +220,9 @@ class MetricAssembler:
             # Zone / PUE
             node_name = energy_metric.node
             node_context = node_contexts.get(node_name)
-            emaps_zone = node_context.emaps_zone if node_context else config.DEFAULT_ZONE
+            emaps_zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
             provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
-            pue = config.get_pue_for_provider(provider)
+            pue = self._config.get_pue_for_provider(provider)
 
             # Estimation flags
             is_estimated, estimation_reasons = self.build_estimation_flags(

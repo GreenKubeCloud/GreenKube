@@ -13,7 +13,7 @@ import logging
 from collections import defaultdict
 from typing import Any, Dict, List
 
-from greenkube.core.config import Config, config
+from greenkube.core.config import Config, get_config
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.models.metrics import EnergyMetric
 from greenkube.models.prometheus_metrics import PrometheusMetric
@@ -40,16 +40,17 @@ class BasicEstimator:
         # Default instance profile to use when instance type is unknown
         # Prefer values from the provided `settings` if available (useful for tests),
         # otherwise fall back to the global config values.
+        _fallback = get_config()
         vcores = getattr(settings, "DEFAULT_INSTANCE_VCORES", None)
         min_watts = getattr(settings, "DEFAULT_INSTANCE_MIN_WATTS", None)
         max_watts = getattr(settings, "DEFAULT_INSTANCE_MAX_WATTS", None)
 
         if vcores is None:
-            vcores = config.DEFAULT_INSTANCE_VCORES
+            vcores = _fallback.DEFAULT_INSTANCE_VCORES
         if min_watts is None:
-            min_watts = config.DEFAULT_INSTANCE_MIN_WATTS
+            min_watts = _fallback.DEFAULT_INSTANCE_MIN_WATTS
         if max_watts is None:
-            max_watts = config.DEFAULT_INSTANCE_MAX_WATTS
+            max_watts = _fallback.DEFAULT_INSTANCE_MAX_WATTS
 
         self.DEFAULT_INSTANCE_PROFILE = {
             "vcores": int(vcores),

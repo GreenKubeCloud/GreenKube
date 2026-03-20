@@ -4,10 +4,13 @@
 import logging
 from typing import Dict
 
-from ..core.config import config
+from ..core.config import get_config
 from ..models.metrics import CostMetric
 
 logger = logging.getLogger(__name__)
+
+# Default cost constant used when no cost data is available.
+_DEFAULT_COST = 0.0
 
 
 class CostNormalizer:
@@ -27,12 +30,12 @@ class CostNormalizer:
             steps_per_day: Number of steps in 24 h (86400 / step_sec).
 
         Returns:
-            Normalised cost or ``config.DEFAULT_COST`` when data is missing.
+            Normalised cost or ``0.0`` when data is missing.
         """
         cost_metric = cost_map.get(pod_name)
         if cost_metric:
             return cost_metric.total_cost / steps_per_day
-        return config.DEFAULT_COST
+        return get_config().DEFAULT_COST
 
     @staticmethod
     def per_range_cost(
@@ -48,9 +51,9 @@ class CostNormalizer:
             steps_in_range: Total number of steps in the requested range.
 
         Returns:
-            Normalised cost or ``config.DEFAULT_COST`` when data is missing.
+            Normalised cost or ``0.0`` when data is missing.
         """
         cost_metric = cost_map.get(pod_name)
         if cost_metric:
             return cost_metric.total_cost / steps_in_range
-        return config.DEFAULT_COST
+        return get_config().DEFAULT_COST
