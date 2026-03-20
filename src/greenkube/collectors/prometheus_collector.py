@@ -456,8 +456,8 @@ class PrometheusCollector(BaseCollector):
                     continue
 
                 results = data.get("data", {}).get("result", [])
-                if not results and "container" in q:
-                    # Fallback
+                if not results and "container_cpu_usage_seconds_total" in q and "container" in q:
+                    # Fallback for CPU query only: retry without container label
                     fallback_query = (
                         f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
                         " by (namespace, pod, node)"

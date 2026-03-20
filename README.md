@@ -17,7 +17,7 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.2.2)
+## ✨ Features (Version 0.2.3)
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
@@ -36,20 +36,29 @@ The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies 
 * **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data.
 
 ### 🎯 Optimization & Reporting
-* **Smart Recommendations:** Identifies optimization opportunities:
+* **9-Type Recommendation Engine:** Identifies optimization opportunities:
   - **Zombie pods** (idle but costly workloads)
-  - **Oversized pods** (underutilized CPU/memory)
-  - **Rightsizing suggestions** with potential cost and emission savings
+  - **CPU rightsizing** (over-provisioned CPU requests)
+  - **Memory rightsizing** (over-provisioned memory requests)
+  - **Autoscaling candidates** (high usage variability)
+  - **Off-peak scheduling** (idle during off-peak hours)
+  - **Idle namespace cleanup** (namespaces with minimal activity)
+  - **Carbon-aware scheduling** (shift to lower-carbon zones/times)
+  - **Overprovisioned nodes** / **Underutilized nodes**
 * **Pod & Namespace Reporting:** Detailed reports of CO₂e emissions, energy usage, and costs per pod and namespace.
 * **Historical Analysis:** Report on any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, `--yearly`).
 * **Data Export:** Export reports to CSV or JSON for integration with other tools and BI systems.
 
 ### 🔧 Infrastructure & Deployment
 * **Demo Mode:** Deploy a standalone demo pod with `kubectl run` to explore GreenKube with realistic sample data—no live cluster metrics needed.
+* **Grafana Dashboard:** Pre-built JSON dashboard with CO₂e, cost, energy, resource, and recommendation panels — import in one click.
+* **Prometheus Integration:** ServiceMonitor and NetworkPolicy for automatic scraping by kube-prometheus-stack.
+* **Database Migration System:** Automated, versioned schema migrations for PostgreSQL and SQLite.
 * **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
 * **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
 * **Cloud Provider Support:** Built-in profiles for AWS, GCP, Azure, OVH, and Scaleway with automatic region-to-carbon-zone mapping.
+* **On-Premises Support:** Manual zone labeling for bare-metal clusters without cloud provider metadata.
 
 
 ## 📦 Dependencies
@@ -74,16 +83,37 @@ helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube
 helm repo update
 ```
 
-### 2. Configure Your Installation
+### 2. Create Secrets
+
+GreenKube uses Kubernetes secrets for API tokens and database credentials. Create them before installing the chart:
+
+```bash
+# Create the namespace
+kubectl create namespace greenkube
+
+# (Optional) Electricity Maps API token — for real-time grid carbon intensity
+# Get a free token at https://www.electricitymaps.com/
+kubectl create secret generic greenkube-secrets \
+  --from-literal=ELECTRICITYMAPS_TOKEN="YOUR_TOKEN_HERE" \
+  -n greenkube
+
+# (Optional) Set a PostgreSQL password (auto-generated if omitted)
+kubectl create secret generic greenkube-db-credentials \
+  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:YOUR_PASSWORD@greenkube-postgres:5432/greenkube" \
+  -n greenkube
+```
+
+> **Note:** GreenKube works without an Electricity Maps token. When no token is provided, a default carbon intensity value (`config.defaultIntensity`, default: 500 gCO₂e/kWh) is used for all zones. This gives approximate results. For accurate, zone-specific carbon data, provide a token from [Electricity Maps](https://www.electricitymaps.com/).
+
+### 3. Configure Your Installation
 
 Create a file named `my-values.yaml` to customize your deployment:
 
 ```yaml
 secrets:
-  # Get your API token from https://www.electricitymaps.com/
-  # Optional: without it, GreenKube uses a default carbon intensity
-  # value (configurable via config.defaultIntensity) for all zones.
-  electricityMapsToken: "YOUR_API_TOKEN_HERE"
+  # If you created the secret above, leave this empty and reference the secret.
+  # Otherwise, set the token here (it will be stored in a Kubernetes Secret).
+  electricityMapsToken: ""
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)
@@ -92,7 +122,26 @@ secrets:
 #     url: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
 ```
 
-> **Note:** GreenKube works without an Electricity Maps token. When no token is provided, a default carbon intensity value (`config.defaultIntensity`, default: 500 gCO₂e/kWh) is used for all zones. This gives approximate results. For accurate, zone-specific carbon data, provide a token from [Electricity Maps](https://www.electricitymaps.com/).
+#### On-Premises / Bare-Metal Clusters
+
+Cloud providers automatically expose zone labels on nodes (e.g., `topology.kubernetes.io/zone`). On-premises clusters do not have these labels, so GreenKube cannot determine the electrical grid zone. You must configure the zone manually:
+
+```bash
+# 1. Label your nodes with their geographic zone (ISO 3166 country code)
+#    This tells GreenKube which electrical grid to use for carbon intensity.
+#    Common zones: FR (France), DE (Germany), US-CAL-CISO (California), GB (UK)
+#    Full list: https://app.electricitymaps.com/map
+kubectl label nodes --all topology.kubernetes.io/zone=FR
+
+# 2. Set the cloud provider to "on-prem" and the default zone in your values
+cat <<EOF >> my-values.yaml
+config:
+  cloudProvider: on-prem
+  defaultZone: FR
+EOF
+```
+
+> **Tip:** If your cluster spans multiple locations, label each node individually with the correct zone (e.g., `FR` for Paris, `DE` for Frankfurt).
 
 #### Install the Chart
 
@@ -114,7 +163,7 @@ Want to explore GreenKube with realistic sample data? Deploy the demo mode as a 
 ```bash
 # 1. Deploy GreenKube demo as a one-time pod
 kubectl run greenkube-demo \
-  --image=greenkube/greenkube:0.2.2 \
+  --image=greenkube/greenkube:0.2.3 \
   --restart=Never \
   --command -- greenkube demo --no-browser --port 9000
 
@@ -136,7 +185,7 @@ This demo mode:
 **Demo options:**
 ```bash
 # Generate 14 days of data instead of 7
-kubectl run greenkube-demo --image=greenkube/greenkube:0.2.2 --restart=Never \
+kubectl run greenkube-demo --image=greenkube/greenkube:0.2.3 --restart=Never \
   --command -- greenkube demo --no-browser --days 14 --port 9000
 
 # Clean up when done
@@ -173,7 +222,67 @@ The dashboard includes:
 - **Export capabilities** for charts and data tables
 - **Advanced filtering** by namespace, time range, and resource type
 
-## 🔌 API Reference
+## � Prometheus & Grafana Integration
+
+GreenKube exposes Prometheus metrics at `/prometheus/metrics` and ships with a pre-built Grafana dashboard.
+
+### Prometheus Scraping
+
+If you use the **kube-prometheus-stack** (Prometheus Operator), the Helm chart automatically creates a `ServiceMonitor` and a `NetworkPolicy`:
+
+```yaml
+# In your my-values.yaml
+monitoring:
+  serviceMonitor:
+    enabled: true            # Creates a ServiceMonitor resource
+    namespace: monitoring    # Must match your Prometheus serviceMonitorNamespaceSelector
+    interval: 30s
+  networkPolicy:
+    enabled: true            # Allows Prometheus to reach the GreenKube API port
+    prometheusNamespace: monitoring
+```
+
+GreenKube metrics include:
+- `greenkube_co2e_grams` — CO₂e emissions per pod
+- `greenkube_energy_joules` — Energy consumption per pod
+- `greenkube_cost_total` — Cost per pod
+- `greenkube_cpu_usage_millicores`, `greenkube_memory_usage_bytes` — Resource usage
+- `greenkube_network_receive_bytes`, `greenkube_network_transmit_bytes` — Network I/O
+- `greenkube_grid_intensity` — Grid carbon intensity per zone
+- `greenkube_recommendation_total` — Recommendation counts by type
+- `greenkube_node_info` — Node metadata (instance type, zone, capacity)
+
+**Manual Prometheus config** (if not using the Operator):
+
+```yaml
+# Add to your prometheus.yml
+scrape_configs:
+  - job_name: 'greenkube'
+    scrape_interval: 30s
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ['greenkube-api.greenkube.svc.cluster.local:8000']
+```
+
+### Grafana Dashboard
+
+Import the pre-built dashboard from `dashboards/greenkube-grafana.json`:
+
+1. In Grafana, go to **Dashboards → Import**
+2. Upload `dashboards/greenkube-grafana.json` (or paste the JSON)
+3. Select your Prometheus data source
+4. Click **Import**
+
+The dashboard includes:
+- **KPI row:** Total CO₂e, total cost, total energy, active pods, active nodes
+- **Time-series:** CO₂e over time, cost over time, energy over time
+- **Namespace breakdown:** Pie charts for CO₂e and cost by namespace
+- **Top pods:** Bar charts for heaviest emitters and most expensive pods
+- **Node utilization:** CPU and memory usage per node
+- **Grid intensity:** Carbon intensity over time per zone
+- **Recommendations:** Summary table of optimization suggestions
+
+## �🔌 API Reference
 
 The API is available at `/api/v1` and serves both JSON endpoints and the web dashboard.
 
@@ -196,7 +305,7 @@ Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 ```bash
 # Get a health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.2"}
+# {"status":"ok","version":"0.2.3"}
 
 # Get metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"
@@ -256,25 +365,24 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **PodCollector:** Collects resource requests (CPU, memory, ephemeral storage) from pod specs
 - **OpenCostCollector:** Retrieves cost allocation data for financial reporting
 - **ElectricityMapsCollector:** Fetches real-time carbon intensity data by geographic zone
+- **BoaviztaCollector:** Fetches hardware embodied emissions from Boavizta API
 
-**Processing Pipeline:**
-- **Estimator:** Converts Prometheus CPU metrics into EnergyMetric objects (Joules) using cloud instance power profiles
-- **Processor:** Orchestrates the entire data collection and processing pipeline:
-  - Runs all collectors concurrently via `asyncio.gather`
-  - Reconstructs historical node states from database snapshots
-  - Groups metrics by carbon zone for efficient intensity lookups
-  - Aggregates estimation flags and reasons for transparency
-  - Manages per-pod resource maps (CPU, memory, network, disk, storage, restarts)
-- **Calculator:** Converts energy (Joules → kWh) to carbon emissions (CO₂e) using grid intensity and PUE
-  - Maintains per-run cache of (zone, timestamp) → intensity mappings
-  - Supports normalization (hourly/daily/none) for efficient lookups
+**Processing Pipeline** (DataProcessor delegates to focused collaborators):
+- **CollectionOrchestrator:** Runs all collectors in parallel via `asyncio.gather`
+- **BasicEstimator:** Converts CPU usage into energy consumption (Joules) using cloud instance power profiles
+- **NodeZoneMapper:** Maps cloud provider zones to Electricity Maps carbon zones
+- **PrometheusResourceMapper:** Builds per-pod resource maps (CPU, memory, network, disk, restarts) from Prometheus data
+- **CostNormalizer:** Divides OpenCost daily/range totals into per-step values
+- **MetricAssembler:** Combines energy, cost, resources, and metadata into unified `CombinedMetric` objects
+- **HistoricalRangeProcessor:** Processes time ranges in day-sized chunks for memory efficiency
+- **EmbodiedEmissionsService:** Fetches, caches, and calculates Boavizta embodied emissions per pod
+- **CarbonCalculator:** Converts energy (Joules → kWh) to CO₂e using grid intensity and PUE
 
 **Business Logic:**
-- **Recommender:** Analyzes CombinedMetric data to identify optimization opportunities:
-  - Zombie detection (idle pods consuming resources)
-  - Rightsizing analysis (over-provisioned CPU/memory)
-  - Autoscaling recommendations based on variability
-  - Carbon-aware scheduling opportunities
+- **Recommender:** Analyzes CombinedMetric data with 9 analyzer types:
+  - Zombie detection, CPU/memory rightsizing, autoscaling candidates
+  - Off-peak scheduling, idle namespace cleanup, carbon-aware scheduling
+  - Overprovisioned/underutilized node detection
 
 **Storage** (Output Adapters):
 - **Repositories:** Abstract interfaces implemented for multiple backends:
@@ -285,12 +393,9 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **EmbodiedRepository:** Boavizta API integration for hardware embodied emissions
 
 **API & Presentation:**
-- **FastAPI Server:** REST API with OpenAPI documentation, CORS support, health checks
-- **SvelteKit Dashboard:** Modern SPA with:
-  - Server-side rendering (SSR) for fast initial load
-  - Client-side navigation for smooth UX
-  - Chart.js/ECharts for interactive visualizations
-  - Tailwind CSS for responsive design
+- **FastAPI Server:** REST API with OpenAPI documentation, CORS support, health checks, Prometheus metrics endpoint
+- **SvelteKit Dashboard:** Modern SPA with ECharts visualizations and Tailwind CSS
+- **Grafana Dashboard:** Pre-built FinGreenOps dashboard via Prometheus integration
 
 ### Data Flow
 

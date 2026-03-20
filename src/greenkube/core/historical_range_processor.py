@@ -273,6 +273,7 @@ class HistoricalRangeProcessor:
             disk_read_query = f"sum(rate(container_fs_reads_bytes_total[{rate_window}])) by (namespace,pod,node)"
             disk_write_query = f"sum(rate(container_fs_writes_bytes_total[{rate_window}])) by (namespace,pod,node)"
             restart_query = "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
+            memory_query = "sum(container_memory_working_set_bytes) by (namespace,pod,node)"
 
             try:
                 (
@@ -281,6 +282,7 @@ class HistoricalRangeProcessor:
                     disk_read_results,
                     disk_write_results,
                     restart_results,
+                    memory_results,
                 ) = await asyncio.gather(
                     self.prometheus_collector.collect_range(
                         start=chunk_start, end=chunk_end, step=chosen_step, query=net_rx_query
@@ -297,6 +299,9 @@ class HistoricalRangeProcessor:
                     self.prometheus_collector.collect_range(
                         start=chunk_start, end=chunk_end, step=chosen_step, query=restart_query
                     ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=memory_query
+                    ),
                 )
             except Exception:
                 net_rx_results = []
@@ -304,6 +309,7 @@ class HistoricalRangeProcessor:
                 disk_read_results = []
                 disk_write_results = []
                 restart_results = []
+                memory_results = []
 
             def _build_pod_map_from_range(range_results):
                 pod_map = {}
@@ -326,8 +332,10 @@ class HistoricalRangeProcessor:
             range_disk_read_map = _build_pod_map_from_range(disk_read_results)
             range_disk_write_map = _build_pod_map_from_range(disk_write_results)
             range_restart_map = _build_pod_map_from_range(restart_results)
+            range_memory_map = _build_pod_map_from_range(memory_results)
 
             del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
+            del memory_results
 
             # Parse results into samples
             samples = defaultdict(lambda: defaultdict(float))
@@ -366,6 +374,19 @@ class HistoricalRangeProcessor:
                 normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
                 for pod_key, cpu_usage in pod_map.items():
                     normalized_samples[normalized_ts_f][pod_key] += cpu_usage
+
+            # Build per-pod CPU usage map (average cores → millicores) across the chunk
+            cpu_usage_sum: dict = defaultdict(float)
+            cpu_usage_count: dict = defaultdict(int)
+            for ts_f, pod_map in normalized_samples.items():
+                for pod_key, cpu_cores in pod_map.items():
+                    cpu_usage_sum[pod_key] += cpu_cores
+                    cpu_usage_count[pod_key] += 1
+            range_cpu_usage_map = {
+                k: int(round((cpu_usage_sum[k] / cpu_usage_count[k]) * 1000))
+                for k in cpu_usage_sum
+                if cpu_usage_count[k] > 0
+            }
 
             for ts_f, pod_map in sorted(normalized_samples.items()):
                 sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
@@ -468,6 +489,10 @@ class HistoricalRangeProcessor:
                             emaps_zone=zone,
                             is_estimated=is_estimated,
                             estimation_reasons=estimation_reasons,
+                            cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
+                            memory_usage_bytes=(
+                                int(range_memory_map[pod_key]) if pod_key in range_memory_map else None
+                            ),
                             network_receive_bytes=range_net_rx_map.get(pod_key),
                             network_transmit_bytes=range_net_tx_map.get(pod_key),
                             disk_read_bytes=range_disk_read_map.get(pod_key),
@@ -481,6 +506,7 @@ class HistoricalRangeProcessor:
             del chunk_energy_metrics
             del range_net_rx_map, range_net_tx_map
             del range_disk_read_map, range_disk_write_map, range_restart_map
+            del range_cpu_usage_map, range_memory_map
 
             chunk_start = chunk_end
 

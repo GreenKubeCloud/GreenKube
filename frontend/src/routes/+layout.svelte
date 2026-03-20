@@ -36,9 +36,7 @@
 	              {$sidebarCollapsed ? 'w-16' : 'w-60'}">
 		<!-- Logo -->
 		<div class="flex items-center gap-3 px-4 py-5 border-b border-dark-700/50">
-			<div class="w-8 h-8 bg-green-600 rounded-lg flex items-center justify-center flex-shrink-0">
-				<span class="text-white font-bold text-sm">G</span>
-			</div>
+			<img src="/greenkube-logo.png" alt="GreenKube" class="w-8 h-8 rounded-lg flex-shrink-0" />
 			{#if !$sidebarCollapsed}
 				<div class="overflow-hidden">
 					<h1 class="text-base font-bold text-dark-100 truncate">GreenKube</h1>

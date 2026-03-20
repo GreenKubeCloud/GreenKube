@@ -11,6 +11,11 @@ from ..core.factory import get_combined_metrics_repository, get_processor
 from ..models.metrics import CombinedMetric
 from ..utils.date_utils import parse_duration
 
+try:
+    from ..api.metrics_endpoint import update_cluster_metrics
+except Exception:  # pragma: no cover – optional dependency
+    update_cluster_metrics = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,6 +97,13 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
 
         saved_count = await combined_metrics_repo.write_combined_metrics(combined_data)
         logger.info("Successfully saved %s new combined metrics records.", saved_count)
+
+        # Update Prometheus gauges for Grafana scraping
+        if update_cluster_metrics is not None:
+            try:
+                update_cluster_metrics(combined_data)
+            except Exception as e:
+                logger.warning("Failed to update Prometheus cluster metrics: %s", e)
 
     except Exception as e:
         logger.exception("Failed to process and save combined metrics data: %s", e)
