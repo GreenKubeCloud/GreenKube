@@ -203,3 +203,26 @@ postgres:
     enabled: true
     size: 1Gi
     storageClassName: ''
+
+# Prometheus monitoring integration
+# Enable ServiceMonitor and NetworkPolicy for kube-prometheus-stack scraping.
+monitoring:
+  serviceMonitor:
+    # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
+    enabled: true
+    # Namespace where the ServiceMonitor will be created (must match Prometheus serviceMonitorNamespaceSelector).
+    namespace: monitoring
+    # Scrape interval (e.g., "30s", "1m").
+    interval: 30s
+    # Scrape timeout.
+    scrapeTimeout: 10s
+    # Additional labels to add to the ServiceMonitor (merged with default kube-prometheus labels).
+    additionalLabels: {}
+    # Name of the Prometheus ServiceAccount (for RBAC). Defaults to "prometheus-k8s".
+    prometheusServiceAccount: prometheus-k8s
+
+  networkPolicy:
+    # Create a NetworkPolicy allowing Prometheus to scrape GreenKube on the API port.
+    enabled: true
+    # Namespace where Prometheus is deployed.
+    prometheusNamespace: monitoring

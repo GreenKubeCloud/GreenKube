@@ -24,6 +24,11 @@ from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from .utils import write_combined_metrics_to_database
 
+try:
+    from ..api.metrics_endpoint import update_node_metrics
+except Exception:  # pragma: no cover – optional dependency
+    update_node_metrics = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(name="start", help="Start the GreenKube data collection service.")
@@ -107,6 +112,13 @@ async def analyze_nodes() -> None:
 
         saved_count = await node_repo.save_nodes(list(nodes_info.values()))
         logger.info("Successfully updated %s nodes in the database.", saved_count)
+
+        # Update Prometheus gauges for Grafana scraping
+        if update_node_metrics is not None:
+            try:
+                update_node_metrics(list(nodes_info.values()))
+            except Exception as e:
+                logger.warning("Failed to update Prometheus node metrics: %s", e)
 
     except Exception as e:
         logger.error("Failed to analyze nodes: %s", e)

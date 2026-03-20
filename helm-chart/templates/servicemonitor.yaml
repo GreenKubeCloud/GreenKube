@@ -1,0 +1,41 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: kube-prometheus
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /prometheus/metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
+      metricRelabelings:
+        # Prometheus renames metric labels that conflict with Kubernetes discovery
+        # labels (namespace, pod) by prefixing them with "exported_".
+        # For GreenKube metrics the original labels carry the meaningful data
+        # (the actual K8s namespace / pod being measured), so we restore them.
+        - sourceLabels: [exported_namespace]
+          targetLabel: namespace
+          regex: (.+)
+          action: replace
+        - sourceLabels: [exported_pod]
+          targetLabel: pod
+          regex: (.+)
+          action: replace
+        - regex: exported_namespace|exported_pod
+          action: labeldrop
+{{- end }}

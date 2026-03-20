@@ -22,8 +22,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from greenkube import __version__
-from greenkube.api.dependencies import verify_api_key
-from greenkube.api.metrics_endpoint import get_metrics_output
+from greenkube.api.dependencies import (
+    get_combined_metrics_repository,
+    get_node_repository,
+    get_recommendation_repository,
+    verify_api_key,
+)
+from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations
 from greenkube.core.config import config
@@ -103,8 +108,15 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     # Prometheus metrics endpoint for Grafana dashboards
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
     @app.get("/prometheus/metrics", include_in_schema=False)
-    async def prometheus_metrics():
+    async def prometheus_metrics(
+        combined_repo=Depends(get_combined_metrics_repository),
+        node_repo=Depends(get_node_repository),
+        reco_repo=Depends(get_recommendation_repository),
+    ):
         """Expose Prometheus-compatible metrics for scraping."""
+        # The scheduler writes data to the DB in a separate container/process,
+        # so we must refresh in-memory Prometheus gauges from the DB on each scrape.
+        await refresh_metrics_from_db(combined_repo, node_repo, reco_repo)
         return Response(
             content=get_metrics_output(),
             media_type="text/plain; version=0.0.4; charset=utf-8",

@@ -1,0 +1,27 @@
+{{- if .Values.monitoring.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "greenkube.fullname" . }}-allow-prometheus
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.monitoring.networkPolicy.prometheusNamespace | default "monitoring" }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.api.port }}
+{{- end }}
