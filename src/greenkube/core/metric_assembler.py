@@ -259,14 +259,32 @@ class MetricAssembler:
                 carbon_result = None
 
             if carbon_result:
+                # Sanity checks: guard against obviously wrong data
+                final_joules = energy_metric.joules
+                final_co2 = carbon_result.co2e_grams
+                if final_joules < 0:
+                    logger.warning(
+                        "Negative energy for pod '%s': %.1f J — clamped to 0.",
+                        pod_name,
+                        final_joules,
+                    )
+                    final_joules = 0.0
+                    final_co2 = 0.0
+                if final_co2 > 10000:
+                    logger.warning(
+                        "Unusually high CO2 for pod '%s': %.1f g in one step. Check node profile and grid intensity.",
+                        pod_name,
+                        final_co2,
+                    )
+
                 combined = CombinedMetric(
                     pod_name=pod_name,
                     namespace=namespace,
                     total_cost=total_cost,
-                    co2e_grams=carbon_result.co2e_grams,
+                    co2e_grams=final_co2,
                     pue=pue,
                     grid_intensity=carbon_result.grid_intensity,
-                    joules=energy_metric.joules,
+                    joules=final_joules,
                     cpu_request=pod_requests["cpu"],
                     memory_request=pod_requests["memory"],
                     cpu_usage_millicores=resource_maps.cpu_usage_map.get(pod_key),
