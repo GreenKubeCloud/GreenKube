@@ -263,6 +263,17 @@ class Config:
         self.__init__()  # type: ignore[misc]
 
 
-# Instantiate the config to be imported by other modules
+# Module-level singleton – kept for backward compatibility.
+# Prefer :func:`get_config` for explicit dependency injection.
 config = Config()
 config.validate_instance()
+
+
+def get_config() -> Config:
+    """Return the module-level Config singleton.
+
+    Using this function (rather than importing ``config`` directly) makes it
+    straightforward to swap or override the instance in tests and enables
+    dependency injection throughout the application.
+    """
+    return config

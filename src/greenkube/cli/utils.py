@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import typer
 
-from ..core.config import config
+from ..core.config import get_config
 from ..core.factory import get_combined_metrics_repository, get_processor
 from ..models.metrics import CombinedMetric
 from ..utils.date_utils import parse_duration
@@ -50,7 +50,7 @@ def get_normalized_window() -> tuple[datetime, datetime]:
     Calculates a consistent, non-overlapping query window based on the configured step.
     The window is aligned to UTC midnight.
     """
-    step_str = config.PROMETHEUS_QUERY_RANGE_STEP
+    step_str = get_config().PROMETHEUS_QUERY_RANGE_STEP
     match = re.match(r"^(\d+)([smh])$", step_str.lower())
     if not match:
         raise ValueError(f"Unsupported PROMETHEUS_QUERY_RANGE_STEP format: '{step_str}'. Use 's', 'm', or 'h'.")

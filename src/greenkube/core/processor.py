@@ -23,7 +23,7 @@ from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
 from ..core.collection_orchestrator import CollectionOrchestrator
-from ..core.config import config
+from ..core.config import Config, get_config
 from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.historical_range_processor import HistoricalRangeProcessor
 from ..core.metric_assembler import MetricAssembler
@@ -57,7 +57,9 @@ class DataProcessor:
         embodied_repository: EmbodiedRepository,
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
+        config: Config | None = None,
     ):
+        self._config = config if config is not None else get_config()
         self.calculator = calculator
         self.estimator = estimator
         self.node_collector = node_collector
@@ -73,13 +75,14 @@ class DataProcessor:
             node_collector=node_collector,
             pod_collector=pod_collector,
         )
-        self._zone_mapper = NodeZoneMapper(node_collector=node_collector)
+        self._zone_mapper = NodeZoneMapper(node_collector=node_collector, config=self._config)
         self._embodied_service = EmbodiedEmissionsService(
             boavizta_collector=boavizta_collector,
             embodied_repository=embodied_repository,
             node_repository=node_repository,
             calculator=calculator,
             estimator=estimator,
+            config=self._config,
         )
         self._assembler = MetricAssembler(
             calculator=calculator,
@@ -88,6 +91,7 @@ class DataProcessor:
             electricity_maps_collector=electricity_maps_collector,
             zone_mapper=self._zone_mapper,
             embodied_service=self._embodied_service,
+            config=self._config,
         )
         self._range_processor = HistoricalRangeProcessor(
             prometheus_collector=prometheus_collector,
@@ -101,6 +105,7 @@ class DataProcessor:
             estimator=estimator,
             assembler=self._assembler,
             zone_mapper=self._zone_mapper,
+            config=self._config,
         )
 
     # ------------------------------------------------------------------
@@ -130,7 +135,7 @@ class DataProcessor:
                     node_totals.setdefault(item.node, 0.0)
                     node_totals[item.node] += item.cpu_usage_cores
 
-                LOW_NODE_CPU_THRESHOLD = config.LOW_NODE_CPU_THRESHOLD
+                LOW_NODE_CPU_THRESHOLD = self._config.LOW_NODE_CPU_THRESHOLD
                 if node_totals:
                     node_to_items: Dict[str, list] = {}
                     for item in prom_metrics.pod_cpu_usage:

@@ -291,11 +291,14 @@ async def test_setup_connection_success(mock_es_connections_module):
     # Arrange
     # Use the autouse fixture which mocks connections
     # Configure config for this specific test
-    with patch("greenkube.storage.elasticsearch_repository.config") as mock_config:
+    with patch("greenkube.storage.elasticsearch_repository.get_config") as mock_get_config:
+        mock_config = MagicMock()
         mock_config.ELASTICSEARCH_HOSTS = "http://testhost:9200"
         mock_config.ELASTICSEARCH_VERIFY_CERTS = True
         mock_config.ELASTICSEARCH_USER = "user"
         mock_config.ELASTICSEARCH_PASSWORD = "password"
+        mock_config.ELASTICSEARCH_INDEX_NAME = "carbon_intensity"
+        mock_get_config.return_value = mock_config
 
         # We also need to patch CarbonIntensityDoc and CombinedMetricDoc init so they don't fail
         with (

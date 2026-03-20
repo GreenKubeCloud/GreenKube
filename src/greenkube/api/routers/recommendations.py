@@ -17,7 +17,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
 from greenkube.collectors.hpa_collector import HPACollector
-from greenkube.core.config import config
+from greenkube.core.config import get_config
 from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import Recommendation, RecommendationRecord
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
@@ -35,7 +35,7 @@ async def list_recommendations(
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
     """Analyze recent metrics and return optimization recommendations."""
-    lookback_days = config.RECOMMENDATION_LOOKBACK_DAYS
+    lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
     metrics = await repo.read_combined_metrics(start_time=start, end_time=end)

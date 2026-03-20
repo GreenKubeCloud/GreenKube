@@ -9,12 +9,12 @@ import logging
 
 import typer
 
-from ..core.config import config
+from ..core.config import get_config
 from . import demo, recommend, report, start
 
 # --- Setup Logger ---
 logging.basicConfig(
-    level=config.LOG_LEVEL.upper(),
+    level=get_config().LOG_LEVEL.upper(),
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)

@@ -24,7 +24,7 @@ from elasticsearch.exceptions import (
     TransportError,
 )
 
-from ..core.config import config
+from ..core.config import get_config
 from ..models.metrics import CombinedMetric
 from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
@@ -48,7 +48,7 @@ class CarbonIntensityDoc(Document):
 
     class Index:
         # Use the index name from the config object
-        name = config.ELASTICSEARCH_INDEX_NAME
+        name = get_config().ELASTICSEARCH_INDEX_NAME
         settings = {"number_of_shards": 1, "number_of_replicas": 0}
 
 
@@ -104,15 +104,16 @@ async def setup_elasticsearch():
     Initializes indices.
     """
     try:
+        cfg = get_config()
         connection_args = {
-            "hosts": [config.ELASTICSEARCH_HOSTS],
-            "verify_certs": config.ELASTICSEARCH_VERIFY_CERTS,
+            "hosts": [cfg.ELASTICSEARCH_HOSTS],
+            "verify_certs": cfg.ELASTICSEARCH_VERIFY_CERTS,
         }
-        if config.ELASTICSEARCH_USER and config.ELASTICSEARCH_PASSWORD:
+        if cfg.ELASTICSEARCH_USER and cfg.ELASTICSEARCH_PASSWORD:
             logging.info("Connecting to Elasticsearch with authentication.")
             connection_args["basic_auth"] = (
-                config.ELASTICSEARCH_USER,
-                config.ELASTICSEARCH_PASSWORD,
+                cfg.ELASTICSEARCH_USER,
+                cfg.ELASTICSEARCH_PASSWORD,
             )
         else:
             logging.info("Connecting to Elasticsearch without authentication.")
@@ -138,7 +139,7 @@ async def setup_elasticsearch():
         await NodeSnapshotDoc.init()
         await InstanceCarbonProfileDoc.init()
 
-        logging.info("Elasticsearch index '%s' is ready.", config.ELASTICSEARCH_INDEX_NAME)
+        logging.info("Elasticsearch index '%s' is ready.", cfg.ELASTICSEARCH_INDEX_NAME)
         logging.info("Elasticsearch index '%s' is ready.", CombinedMetricDoc.Index.name)
         logging.info("Elasticsearch index '%s' is ready.", NodeSnapshotDoc.Index.name)
         logging.info("Elasticsearch index '%s' is ready.", InstanceCarbonProfileDoc.Index.name)
@@ -215,7 +216,7 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             actions.append(
                 {
                     "_op_type": "index",
-                    "_index": config.ELASTICSEARCH_INDEX_NAME,
+                    "_index": get_config().ELASTICSEARCH_INDEX_NAME,
                     "_id": doc_id,
                     "_source": {
                         "zone": zone,

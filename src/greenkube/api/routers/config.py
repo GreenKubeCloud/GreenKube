@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from greenkube import __version__
 from greenkube.api.schemas import ConfigResponse, HealthResponse, VersionResponse
-from greenkube.core.config import config
+from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +29,21 @@ async def version():
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config():
+async def get_config_endpoint():
     """Return non-sensitive configuration values.
 
     Secrets (tokens, passwords, connection strings) are never exposed.
     """
+    cfg = get_config()
     return ConfigResponse(
-        db_type=config.DB_TYPE,
-        cloud_provider=config.CLOUD_PROVIDER,
-        default_zone=config.DEFAULT_ZONE,
-        default_intensity=config.DEFAULT_INTENSITY,
-        default_pue=config.DEFAULT_PUE,
-        log_level=config.LOG_LEVEL,
-        normalization_granularity=config.NORMALIZATION_GRANULARITY,
-        prometheus_query_range_step=config.PROMETHEUS_QUERY_RANGE_STEP,
-        api_host=config.API_HOST,
-        api_port=config.API_PORT,
+        db_type=cfg.DB_TYPE,
+        cloud_provider=cfg.CLOUD_PROVIDER,
+        default_zone=cfg.DEFAULT_ZONE,
+        default_intensity=cfg.DEFAULT_INTENSITY,
+        default_pue=cfg.DEFAULT_PUE,
+        log_level=cfg.LOG_LEVEL,
+        normalization_granularity=cfg.NORMALIZATION_GRANULARITY,
+        prometheus_query_range_step=cfg.PROMETHEUS_QUERY_RANGE_STEP,
+        api_host=cfg.API_HOST,
+        api_port=cfg.API_PORT,
     )

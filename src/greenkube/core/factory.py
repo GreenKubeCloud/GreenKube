@@ -18,7 +18,7 @@ from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
-from ..core.config import config
+from ..core.config import get_config
 from ..core.processor import DataProcessor
 
 # --- GreenKube Core Imports ---
@@ -50,21 +50,22 @@ def get_repository() -> CarbonIntensityRepository:
     Factory function to get the appropriate repository based on config.
     Uses lru_cache to act as a singleton.
     """
-    db_type = config.DB_TYPE
+    cfg = get_config()
+    db_type = cfg.DB_TYPE
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch repository.")
         return ElasticsearchCarbonIntensityRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite repository.")
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
 
-        return SQLiteCarbonIntensityRepository(db_manager)
+        return SQLiteCarbonIntensityRepository(get_db_manager())
     elif db_type == "postgres":
         logger.info("Using PostgreSQL repository.")
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
 
-        return PostgresCarbonIntensityRepository(db_manager)
+        return PostgresCarbonIntensityRepository(get_db_manager())
     else:
         raise NotImplementedError(f"Repository for DB_TYPE '{db_type}' not implemented.")
 
@@ -75,21 +76,22 @@ def get_combined_metrics_repository() -> CombinedMetricsRepository:
     Factory function to get the appropriate combined metrics repository based on config.
     Uses lru_cache to act as a singleton.
     """
-    db_type = config.DB_TYPE
+    cfg = get_config()
+    db_type = cfg.DB_TYPE
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch combined metrics repository.")
         return ElasticsearchCombinedMetricsRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite combined metrics repository.")
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
 
-        return SQLiteCombinedMetricsRepository(db_manager)
+        return SQLiteCombinedMetricsRepository(get_db_manager())
     elif db_type == "postgres":
         logger.info("Using PostgreSQL combined metrics repository.")
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
 
-        return PostgresCombinedMetricsRepository(db_manager)
+        return PostgresCombinedMetricsRepository(get_db_manager())
     else:
         raise NotImplementedError(f"CombinedMetricsRepository for DB_TYPE '{db_type}' not implemented.")
 
@@ -99,28 +101,27 @@ def get_node_repository() -> NodeRepository:
     """
     Factory function to get the node repository.
     """
-    if config.DB_TYPE == "sqlite":
-        from ..core.db import db_manager
+    cfg = get_config()
+    if cfg.DB_TYPE == "sqlite":
+        from ..core.db import get_db_manager
 
-        return SQLiteNodeRepository(db_manager)
-    elif config.DB_TYPE == "elasticsearch":
+        return SQLiteNodeRepository(get_db_manager())
+    elif cfg.DB_TYPE == "elasticsearch":
         from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
 
         return ElasticsearchNodeRepository()
-    elif config.DB_TYPE == "postgres":
-        from ..core.db import db_manager
+    elif cfg.DB_TYPE == "postgres":
+        from ..core.db import get_db_manager
 
-        return PostgresNodeRepository(db_manager)
+        return PostgresNodeRepository(get_db_manager())
     else:
-        # For now, only SQLite and Elasticsearch are supported for nodes
-        # Wait, Postgres is also supported now.
         logger.warning(
             "NodeRepository not implemented for DB_TYPE '%s'. Using SQLite fallback if possible or failing.",
-            config.DB_TYPE,
+            cfg.DB_TYPE,
         )
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
 
-        return SQLiteNodeRepository(db_manager)
+        return SQLiteNodeRepository(get_db_manager())
 
 
 @lru_cache(maxsize=1)
@@ -128,9 +129,9 @@ def get_embodied_repository() -> EmbodiedRepository:
     """
     Factory function to get the embodied emissions repository.
     """
-    from ..core.db import db_manager
+    from ..core.db import get_db_manager
 
-    return EmbodiedRepository(db_manager)
+    return EmbodiedRepository(get_db_manager())
 
 
 @lru_cache(maxsize=1)
@@ -139,27 +140,28 @@ def get_recommendation_repository() -> RecommendationRepository:
     Factory function to get the recommendation history repository.
     Uses lru_cache to act as a singleton.
     """
-    db_type = config.DB_TYPE
+    cfg = get_config()
+    db_type = cfg.DB_TYPE
 
     if db_type == "sqlite":
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
         from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
 
-        return SQLiteRecommendationRepository(db_manager)
+        return SQLiteRecommendationRepository(get_db_manager())
     elif db_type == "postgres":
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
         from ..storage.postgres_recommendation_repository import PostgresRecommendationRepository
 
-        return PostgresRecommendationRepository(db_manager)
+        return PostgresRecommendationRepository(get_db_manager())
     else:
         logger.warning(
             "RecommendationRepository not implemented for DB_TYPE '%s'. Using SQLite fallback.",
             db_type,
         )
-        from ..core.db import db_manager
+        from ..core.db import get_db_manager
         from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
 
-        return SQLiteRecommendationRepository(db_manager)
+        return SQLiteRecommendationRepository(get_db_manager())
 
 
 @lru_cache(maxsize=1)
@@ -168,6 +170,7 @@ def get_processor() -> DataProcessor:
     Factory function to instantiate and return a fully configured DataProcessor.
     Uses lru_cache to act as a singleton.
     """
+    cfg = get_config()
     logger.info("Initializing data collectors and processor...")
     try:
         # 1. Get the repository
@@ -177,7 +180,7 @@ def get_processor() -> DataProcessor:
         embodied_repository = get_embodied_repository()
 
         # 2. Instantiate all collectors
-        prometheus_collector = PrometheusCollector(config)
+        prometheus_collector = PrometheusCollector(cfg)
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
@@ -185,8 +188,8 @@ def get_processor() -> DataProcessor:
         boavizta_collector = BoaviztaCollector()
 
         # 3. Instantiate Calculator and Estimator
-        calculator = CarbonCalculator(repository)
-        estimator = BasicEstimator(config)
+        calculator = CarbonCalculator(repository, config=cfg)
+        estimator = BasicEstimator(cfg)
 
         # 4. Instantiate and return DataProcessor
         return DataProcessor(
@@ -202,6 +205,7 @@ def get_processor() -> DataProcessor:
             embodied_repository=embodied_repository,
             calculator=calculator,
             estimator=estimator,
+            config=cfg,
         )
     except Exception as e:
         logger.error("An error occurred during processor initialization: %s", e)

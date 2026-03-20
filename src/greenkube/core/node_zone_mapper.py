@@ -5,7 +5,7 @@ import logging
 from typing import Dict, List, Optional
 
 from ..collectors.node_collector import NodeCollector
-from ..core.config import config
+from ..core.config import Config, get_config
 from ..models.node import NodeInfo, NodeZoneContext
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 class NodeZoneMapper:
     """Resolves cloud provider zones to Electricity Maps zones for each node."""
 
-    def __init__(self, node_collector: NodeCollector):
+    def __init__(self, node_collector: NodeCollector, config: Config | None = None):
         self.node_collector = node_collector
+        self._config = config if config is not None else get_config()
 
     async def map_nodes(self, nodes_info: Optional[Dict[str, NodeInfo]] = None) -> Dict[str, NodeZoneContext]:
         """Collect node zones and map them to Electricity Maps zones.
@@ -33,13 +34,13 @@ class NodeZoneMapper:
                 if not nodes_info:
                     logger.warning(
                         "NodeCollector returned no zones. Using default zone '%s'.",
-                        config.DEFAULT_ZONE,
+                        self._config.DEFAULT_ZONE,
                     )
             except Exception as e:
                 logger.error(
                     "Failed to collect node zones: %s. Using default zone '%s'.",
                     e,
-                    config.DEFAULT_ZONE,
+                    self._config.DEFAULT_ZONE,
                 )
                 nodes_info = {}
 
@@ -101,10 +102,10 @@ class NodeZoneMapper:
                         cloud_zone,
                     )
                 else:
-                    mapped = config.DEFAULT_ZONE
+                    mapped = self._config.DEFAULT_ZONE
                     reasons.append(
                         f"Could not map cloud zone '{cloud_zone}' or region '{region}'. "
-                        f"Used default zone '{config.DEFAULT_ZONE}'"
+                        f"Used default zone '{self._config.DEFAULT_ZONE}'"
                     )
                     is_estimated = True
                     logger.warning(
@@ -112,7 +113,7 @@ class NodeZoneMapper:
                         cloud_zone,
                         region,
                         node_name,
-                        config.DEFAULT_ZONE,
+                        self._config.DEFAULT_ZONE,
                     )
 
             node_contexts[node_name] = NodeZoneContext(

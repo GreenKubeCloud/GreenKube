@@ -174,14 +174,7 @@ async def test_normalization_day_and_none(monkeypatch, dummy_config):
 
     # Day granularity (use monkeypatch to avoid global state leakage)
     monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "day")
-    # Also ensure the config object referenced inside the calculator module
-    # uses the same granularity (some modules may hold a reference).
-    monkeypatch.setattr(
-        "greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
-        "day",
-        raising=False,
-    )
-    calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE)
+    calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE, config=core_config)
     # Directly call calculate_emissions
     res = await calc_day.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res.grid_intensity == 200.0
@@ -194,11 +187,6 @@ async def test_normalization_day_and_none(monkeypatch, dummy_config):
             return 250.0
 
     monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "none")
-    monkeypatch.setattr(
-        "greenkube.core.calculator.config.NORMALIZATION_GRANULARITY",
-        "none",
-        raising=False,
-    )
-    calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE)
+    calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE, config=core_config)
     res2 = await calc_none.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
     assert res2.grid_intensity == 250.0
