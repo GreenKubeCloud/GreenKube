@@ -5,25 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-- CLI `recommend` command now uses the unified recommendation engine (all 9 types) instead of legacy 2-type API
-- CLI `recommend` reads from database by default (consistent with API); added `--live` flag for real-time mode
-- `read_combined_metrics_from_database()` called with correct parameter names (`start_time`/`end_time`)
-- Cost normalization in `run_range()` now divides range total by number of time steps
-- `USER_AGENT` header dynamically reflects the actual package version
-- Removed duplicate `DEFAULT_COST` class attribute from `Config`
-- Helm `recommendSystemNamespaces` moved inside `recommendations` scope in `values.yaml`
-- PostgreSQL credentials no longer shipped as plain text in Helm defaults
-- DB connection string sourced from Secret instead of inline env var in deployment
-- `collect_detailed_info()` now delegates to `collect()` to avoid inconsistent results
-- Expanded test fixture env patching to prevent production defaults leaking into tests
+## [0.2.3] — 2026-03-20
 
 ### Added
+- **Grafana dashboard:** Pre-built `dashboards/greenkube-grafana.json` with KPIs, time-series, per-namespace breakdown, node utilization, grid intensity, and recommendations panels
+- **Prometheus integration:** ServiceMonitor, NetworkPolicy, and Prometheus RBAC templates in the Helm chart for seamless kube-prometheus-stack scraping
+- **Prometheus `/prometheus/metrics` endpoint:** Comprehensive metric exposition (CO₂e, cost, energy, CPU, memory, network, disk, restarts, nodes, grid intensity, recommendations) with correct label relabeling
+- **Demo mode:** `greenkube demo` command generates 7 days of realistic sample data (22 pods, 5 namespaces) in a standalone SQLite instance — explore the dashboard without a live cluster
+- **Database migration system:** Automated schema migration runner with versioned scripts for PostgreSQL and SQLite
+- **`CarbonIntensityRepository` split:** Dedicated repository implementations per backend (Postgres, SQLite, Elasticsearch) following the same pattern as other repositories
+- **DataProcessor refactor:** Monolithic processor split into focused collaborators — `CollectionOrchestrator`, `MetricAssembler`, `NodeZoneMapper`, `PrometheusResourceMapper`, `CostNormalizer`, `HistoricalRangeProcessor`, `EmbodiedEmissionsService`
+- **On-premises documentation:** Secrets setup and zone configuration commands for bare-metal / on-prem clusters
+- **Prometheus & Grafana guide:** Setup instructions for scraping GreenKube metrics and importing the Grafana dashboard
 - Namespace input validation on all API endpoints (Kubernetes naming rules)
 - Contributing guide (`CONTRIBUTING.md`)
-- This changelog
 - Architecture diagram in `docs/architecture.md`
 - API curl examples in README
 - **API security:** Optional bearer-token authentication (`GREENKUBE_API_KEY`), configurable CORS origins, rate limiting via slowapi
@@ -41,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Helm chart generates a random PostgreSQL password when none is provided
 - Replaced f-string logging with lazy `%`-formatting throughout the codebase
 - `Recommendation` model uses typed `scope` field instead of sentinel `pod_name="*"`
+
+### Fixed
+- CLI `recommend` command now uses the unified recommendation engine (all 9 types) instead of legacy 2-type API
+- CLI `recommend` reads from database by default (consistent with API); added `--live` flag for real-time mode
+- `read_combined_metrics_from_database()` called with correct parameter names (`start_time`/`end_time`)
+- Cost normalization in `run_range()` now divides range total by number of time steps
+- `USER_AGENT` header dynamically reflects the actual package version
+- Removed duplicate `DEFAULT_COST` class attribute from `Config`
+- Helm `recommendSystemNamespaces` moved inside `recommendations` scope in `values.yaml`
+- PostgreSQL credentials no longer shipped as plain text in Helm defaults
+- DB connection string sourced from Secret instead of inline env var in deployment
+- `collect_detailed_info()` now delegates to `collect()` to avoid inconsistent results
+- Expanded test fixture env patching to prevent production defaults leaking into tests
+- Removed `.tgz` artifacts from git tracking
 
 ## [0.2.2] — 2026-02-15
 
@@ -73,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CSV and JSON export
 - SQLite storage backend
 
-[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.1.0...v0.2.2
 [0.1.0]: https://github.com/GreenKubeCloud/GreenKube/releases/tag/v0.1.0

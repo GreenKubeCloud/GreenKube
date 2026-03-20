@@ -26,28 +26,30 @@ flowchart TB
         end
 
         subgraph Core["Core (Business Logic)"]
-            Est["Estimator\n(CPU → Joules)"]
-            Proc["Processor\n(Facade)"]
-            Calc["Calculator\n(Joules → CO₂e)"]
-            Rec["Recommender\n(9 types)"]
-            CO["CollectionOrchestrator"]
-            MA["MetricAssembler"]
-            NZM["NodeZoneMapper"]
-            ES["EmbodiedService"]
-            PRM["PrometheusResourceMapper"]
-            HRP["HistoricalRangeProcessor"]
+            DP["DataProcessor<br/>(Facade)"]
+            CO["CollectionOrchestrator<br/>(Parallel Fetch)"]
+            Est["BasicEstimator<br/>(CPU → Joules)"]
+            Calc["CarbonCalculator<br/>(Joules → CO₂e)"]
+            MA["MetricAssembler<br/>(Build CombinedMetric)"]
+            NZM["NodeZoneMapper<br/>(Cloud → eMaps Zone)"]
+            PRM["PrometheusResourceMapper<br/>(Per-Pod Resources)"]
+            CN["CostNormalizer<br/>(Per-Step Cost)"]
+            ESvc["EmbodiedEmissionsService<br/>(Boavizta Cache)"]
+            HRP["HistoricalRangeProcessor<br/>(Chunked Range)"]
+            Rec["Recommender<br/>(9 Types)"]
         end
 
         subgraph Storage["Storage (Output Adapters)"]
             PG["PostgreSQL"]
             SQLite["SQLite"]
-            ES["Elasticsearch"]
+            Elastic["Elasticsearch"]
         end
 
         subgraph Presentation["Presentation"]
-            API["FastAPI\nREST API"]
+            API["FastAPI<br/>REST API"]
             CLI["Typer CLI"]
-            Dash["SvelteKit\nDashboard"]
+            Dash["SvelteKit<br/>Dashboard"]
+            Grafana["Grafana<br/>(via Prometheus)"]
         end
     end
 
@@ -58,20 +60,30 @@ flowchart TB
     EM --> EMC
     Boavizta --> BC
 
-    PC --> Proc
-    OCC --> Proc
-    NC --> Proc
-    PodC --> Proc
-    EMC --> Proc
-    BC --> Proc
+    PC --> CO
+    OCC --> CO
+    NC --> CO
+    PodC --> CO
 
-    Proc --> Est
-    Proc --> Calc
-    Proc --> Storage
+    CO --> DP
+    EMC --> DP
+    BC --> ESvc
+
+    DP --> Est
+    DP --> NZM
+    DP --> PRM
+    DP --> CN
+    DP --> MA
+    DP --> HRP
+
+    MA --> Calc
+    MA --> ESvc
+    MA --> Storage
 
     Storage --> API
     Storage --> CLI
     API --> Dash
+    API --> Grafana
     Storage --> Rec
     Rec --> API
     Rec --> CLI
@@ -375,7 +387,14 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
   - `greenkube recommend` — Get optimization recommendations
   - `greenkube start` — Run as background service
   - `greenkube api` — Start API server
+  - `greenkube demo` — Launch demo mode with sample data
   - `greenkube version` — Show version info
+
+#### **Grafana Integration**
+- **Dashboard:** `dashboards/greenkube-grafana.json`
+- **Data source:** Prometheus scraping `/prometheus/metrics`
+- **Helm resources:** `ServiceMonitor`, `NetworkPolicy`, Prometheus RBAC
+- **Panels:** KPIs, time-series (CO₂e, cost, energy), namespace breakdown, top pods, node utilization, grid intensity, recommendations
 
 ## Data Flow
 
