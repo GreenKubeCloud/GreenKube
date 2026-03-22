@@ -140,7 +140,9 @@ jobs:
             helm repo index . --url "https://GreenKubeCloud.github.io/GreenKube"
           fi
 
-          git add .
+          # Force-add .tgz files because *.tgz is in .gitignore on main branch
+          git add -f *.tgz
+          git add index.yaml
           
           if git diff --cached --quiet; then
             echo "No changes to publish"

@@ -2,7 +2,7 @@
 
 **Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure. Make your cloud operations both cost-effective and environmentally responsible.**
 
-GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams navigate the complexity of sustainability reporting (CSRD) and optimize their cloud costs (FinOps) through better energy efficiency (GreenOps).
+GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams get clear **carbon visibility** and **cost control** over their Kubernetes infrastructure — without complex setup or expensive SaaS tools.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Stars](https://img.shields.io/github/stars/GreenKubeCloud/greenkube?style=social)](https://github.com/GreenKubeCloud/greenkube/stargazers)
@@ -11,10 +11,10 @@ GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams 
 
 ## 🎯 Mission
 
-The EU's Corporate Sustainability Reporting Directive (CSRD) requires companies to report the carbon footprint of their value chain—including cloud services (Scope 3). GreenKube addresses this urgent need by providing tools to:
+Cloud computing generates significant carbon emissions, yet most engineering teams have no visibility into the footprint of their Kubernetes workloads. GreenKube addresses this by providing tools to:
 
 1.  **Estimate** the energy consumption and CO₂e emissions of each Kubernetes workload.
-2.  **Report** these metrics in a format aligned with regulatory requirements (ESRS E1).
+2.  **Visualize** these metrics in a real-time dashboard for actionable carbon visibility.
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
 ## ✨ Features (Version 0.2.3)
