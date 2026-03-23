@@ -74,44 +74,70 @@ GreenKube uses service auto‑discovery to locate these services automatically. 
 
 The recommended way to install GreenKube is via the official Helm chart.
 
-### 1. Add the GreenKube Helm Repository
-
-First, add the GreenKube chart repository to your local Helm setup:
+### 1. Install
 
 ```bash
 helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube
 helm repo update
+helm install greenkube greenkube/greenkube \
+  -n greenkube \
+  --create-namespace
 ```
 
-### 2. Create Secrets
+#### 🎮 Get a quick insight with demo mode
 
-GreenKube manages all secrets through the Helm chart. Pass sensitive values via `--set` or a dedicated `secrets-values.yaml` file (do **not** commit this file).
+Explore GreenKube with realistic sample data in under 30 seconds — no Prometheus or OpenCost required:
 
 ```bash
-# Create the namespace
-kubectl create namespace greenkube
+kubectl run greenkube-demo \
+  --image=greenkube/greenkube:0.2.3 \
+  --restart=Never \
+  --command -- greenkube demo --no-browser --port 9000
+
+kubectl wait --for=condition=Ready pod/greenkube-demo --timeout=60s
+kubectl port-forward pod/greenkube-demo 9000:9000
+# → Open http://localhost:9000
 ```
 
-> **Note:** GreenKube works without an Electricity Maps token. When no token is provided, a default carbon intensity value (`config.defaultIntensity`, default: 500 gCO₂e/kWh) is used for all zones. This gives approximate results. For accurate, zone-specific carbon data, provide a token from [Electricity Maps](https://www.electricitymaps.com/).
+The demo loads **7 days** of metrics for 22 pods across 5 namespaces (production, staging, monitoring, data-pipeline, ci-cd) with carbon emissions, costs, and optimization recommendations pre-populated.
 
-### 3. Configure Your Installation
+```bash
+kubectl delete pod greenkube-demo  # clean up when done
+```
 
-Create a file named `my-values.yaml` to customize your deployment:
+This deploys GreenKube with the collector, API server, web dashboard, and PostgreSQL — all in a single command.
+
+### 2. Access the Dashboard
+
+```bash
+kubectl port-forward svc/greenkube-api 8000:8000 -n greenkube
+# → Open http://localhost:8000
+```
+
+### 3. (Optional) Add Secrets & Custom Configuration
+
+GreenKube works out of the box, but you have to customize your deployment to have as accurate data as possible. To do so, create a `my-values.yaml`:
 
 ```yaml
 secrets:
   # (Optional) Electricity Maps API token — for real-time grid carbon intensity.
   # Get a free token at https://www.electricitymaps.com/
+  # Without a token, GreenKube uses a default of 500 gCO₂e/kWh.
   electricityMapsToken: "YOUR_TOKEN_HERE"
-
-  # (Optional) Fix the PostgreSQL password to avoid regeneration on upgrade.
-  # If left empty, a random password is generated and preserved across upgrades.
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)
 # config:
 #   prometheus:
 #     url: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+```
+
+Then apply it:
+
+```bash
+helm upgrade greenkube greenkube/greenkube \
+  -f my-values.yaml \
+  -n greenkube
 ```
 
 #### On-Premises / Bare-Metal Clusters
@@ -134,61 +160,6 @@ EOF
 ```
 
 > **Tip:** If your cluster spans multiple locations, label each node individually with the correct zone (e.g., `FR` for Paris, `DE` for Frankfurt).
-
-#### Install the Chart
-
-Install the Helm chart into a dedicated namespace (e.g., `greenkube`):
-
-```bash
-helm install greenkube greenkube/greenkube \
-  -f my-values.yaml \
-  -n greenkube \
-  --create-namespace
-```
-
-This deploys GreenKube with the collector, the API server, and the web dashboard — all in a single image.
-
-### 🎮 Quick Start with Demo Mode
-
-Want to explore GreenKube with realistic sample data? Deploy the demo mode as a standalone pod:
-
-```bash
-# 1. Deploy GreenKube demo as a one-time pod
-kubectl run greenkube-demo \
-  --image=greenkube/greenkube:0.2.3 \
-  --restart=Never \
-  --command -- greenkube demo --no-browser --port 9000
-
-# 2. Wait for it to start (about 10 seconds)
-kubectl wait --for=condition=Ready pod/greenkube-demo --timeout=30s
-
-# 3. Port-forward to access the dashboard
-kubectl port-forward pod/greenkube-demo 9000:9000
-
-# 4. Open http://localhost:9000 in your browser
-```
-
-This demo mode:
-- Creates a temporary SQLite database with **7 days** of realistic Kubernetes metrics
-- Generates sample data for **22 pods** across **5 namespaces** (production, staging, monitoring, data-pipeline, ci-cd)
-- Includes carbon emissions, costs, resource usage, and optimization recommendations
-- Runs independently from your production GreenKube installation
-
-**Demo options:**
-```bash
-# Generate 14 days of data instead of 7
-kubectl run greenkube-demo --image=greenkube/greenkube:0.2.3 --restart=Never \
-  --command -- greenkube demo --no-browser --days 14 --port 9000
-
-# Clean up when done
-kubectl delete pod greenkube-demo
-```
-
-Perfect for:
-- Evaluating GreenKube before deploying to your production cluster
-- Testing the dashboard and API endpoints with realistic data
-- Learning how GreenKube calculates carbon footprint and cost
-- Creating screenshots or demos for your team
 
 ## 🖥️ Web Dashboard
 
