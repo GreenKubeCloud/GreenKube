@@ -24,16 +24,15 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 * **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included at `/api/v1/docs`.
 
 ### 📈 Comprehensive Resource Monitoring
-* **Multi-Resource Metrics Collection:** Beyond CPU, GreenKube now tracks:
+* **Multi-Resource Metrics Collection:** GreenKube collects the following metrics per pod:
   - **CPU usage** (actual utilization in millicores)
   - **Memory usage** (bytes consumed)
   - **Network I/O** (bytes received/transmitted)
   - **Disk I/O** (bytes read/written)
   - **Storage** (ephemeral storage requests and usage)
   - **Pod restarts** (restart count per container)
-  - **GPU usage** (millicores, when available)
-* **Energy Estimation:** Calculates pod-level energy consumption (Joules) using Prometheus metrics and a built-in library of cloud instance power profiles.
-* **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data.
+* **Energy Estimation:** Calculates pod-level energy consumption (Joules) based on **CPU usage** and a built-in library of cloud instance power profiles. Memory, network, disk, and GPU are collected as metrics but are **not yet included in the energy model** — this is planned for a future release.
+* **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data. GPU workloads are currently **not supported** in the carbon model.
 
 ### 🎯 Optimization & Reporting
 * **9-Type Recommendation Engine:** Identifies optimization opportunities:
