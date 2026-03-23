@@ -3,12 +3,12 @@
 {{- if .Values.config.api.enabled }}
 
 📊 Dashboard & API:
-  kubectl port-forward svc/{{ include "greenkube.fullname" . }}-api {{ .Values.config.api.port }}:{{ .Values.config.api.port }}
+  kubectl port-forward svc/{{ include "greenkube.fullname" . }}-api {{ .Values.config.api.port }}:{{ .Values.config.api.port }} -n {{ .Release.Namespace }}
   → http://localhost:{{ .Values.config.api.port }}
 {{- end }}
 
 📋 Logs:
-  kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -f
+  kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -n {{ .Release.Namespace }} -f
 
 💡 No Electricity Maps token? GreenKube uses default carbon intensity values ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
    For accurate data, set your token: secrets.electricityMapsToken in values.yaml

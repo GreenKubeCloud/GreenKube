@@ -27,16 +27,19 @@ from greenkube.demo.data_generator import (
 logger = logging.getLogger(__name__)
 
 
-def _configure_demo_environment(db_path: str, port: int) -> None:
+def _configure_demo_environment(db_path: str, port: int, no_browser: bool = False) -> None:
     """Override environment variables to run in demo mode.
 
     Args:
         db_path: Path to the temporary SQLite database.
         port: Port number for the API server.
+        no_browser: If True, bind to 0.0.0.0 (required for kubectl port-forward).
     """
     os.environ["DB_TYPE"] = "sqlite"
     os.environ["DB_PATH"] = db_path
-    os.environ["API_HOST"] = "127.0.0.1"
+    # Bind to 0.0.0.0 when --no-browser is used (e.g. inside a K8s pod)
+    # so that kubectl port-forward can reach the server.
+    os.environ["API_HOST"] = "0.0.0.0" if no_browser else "127.0.0.1"
     os.environ["API_PORT"] = str(port)
     os.environ["GREENKUBE_API_KEY"] = ""
     os.environ["CORS_ORIGINS"] = "*"
@@ -112,7 +115,7 @@ async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) ->
     logger.info("📁 Demo database: %s", db_path)
 
     # Configure environment for demo
-    _configure_demo_environment(db_path, port)
+    _configure_demo_environment(db_path, port, no_browser=no_browser)
 
     # Clear factory caches so new config is picked up
     from greenkube.core.factory import clear_caches
@@ -130,6 +133,9 @@ async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) ->
     from greenkube.api.app import create_app
 
     app = create_app(use_lifespan=False)
+
+    # Resolve listen address: 0.0.0.0 for K8s (--no-browser), localhost otherwise
+    host = "0.0.0.0" if no_browser else "127.0.0.1"
 
     # Open browser after a short delay
     url = f"http://127.0.0.1:{port}"
@@ -157,7 +163,7 @@ async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) ->
     # Run uvicorn
     uvi_config = uvicorn.Config(
         app,
-        host="127.0.0.1",
+        host=host,
         port=port,
         log_level="info",
     )
