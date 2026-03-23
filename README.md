@@ -85,22 +85,11 @@ helm repo update
 
 ### 2. Create Secrets
 
-GreenKube uses Kubernetes secrets for API tokens and database credentials. Create them before installing the chart:
+GreenKube manages all secrets through the Helm chart. Pass sensitive values via `--set` or a dedicated `secrets-values.yaml` file (do **not** commit this file).
 
 ```bash
 # Create the namespace
 kubectl create namespace greenkube
-
-# (Optional) Electricity Maps API token — for real-time grid carbon intensity
-# Get a free token at https://www.electricitymaps.com/
-kubectl create secret generic greenkube-secrets \
-  --from-literal=ELECTRICITYMAPS_TOKEN="YOUR_TOKEN_HERE" \
-  -n greenkube
-
-# (Optional) Set a PostgreSQL password (auto-generated if omitted)
-kubectl create secret generic greenkube-db-credentials \
-  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:YOUR_PASSWORD@greenkube-postgres:5432/greenkube" \
-  -n greenkube
 ```
 
 > **Note:** GreenKube works without an Electricity Maps token. When no token is provided, a default carbon intensity value (`config.defaultIntensity`, default: 500 gCO₂e/kWh) is used for all zones. This gives approximate results. For accurate, zone-specific carbon data, provide a token from [Electricity Maps](https://www.electricitymaps.com/).
@@ -111,9 +100,12 @@ Create a file named `my-values.yaml` to customize your deployment:
 
 ```yaml
 secrets:
-  # If you created the secret above, leave this empty and reference the secret.
-  # Otherwise, set the token here (it will be stored in a Kubernetes Secret).
-  electricityMapsToken: ""
+  # (Optional) Electricity Maps API token — for real-time grid carbon intensity.
+  # Get a free token at https://www.electricitymaps.com/
+  electricityMapsToken: "YOUR_TOKEN_HERE"
+
+  # (Optional) Fix the PostgreSQL password to avoid regeneration on upgrade.
+  # If left empty, a random password is generated and preserved across upgrades.
 
 # Uncomment to manually set your Prometheus URL
 # (If left empty, GreenKube will try to auto-discover it)
