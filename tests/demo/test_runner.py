@@ -48,10 +48,16 @@ class TestConfigureDemoEnvironment:
         assert os.environ["GREENKUBE_API_KEY"] == ""
 
     def test_sets_localhost(self, monkeypatch):
-        """Demo should bind to localhost only."""
+        """Demo should bind to localhost only when browser is enabled."""
         _configure_demo_environment("/tmp/test.db", port=8000)
 
         assert os.environ["API_HOST"] == "127.0.0.1"
+
+    def test_sets_all_interfaces_when_no_browser(self, monkeypatch):
+        """Demo should bind to 0.0.0.0 when --no-browser is used (K8s pod)."""
+        _configure_demo_environment("/tmp/test.db", port=9000, no_browser=True)
+
+        assert os.environ["API_HOST"] == "0.0.0.0"
 
 
 class TestPopulateDatabase:

@@ -147,12 +147,11 @@ async def _async_start(last: Optional[str]):
     )
     logger.info("🚀 Initializing GreenKube (Async)...")
 
-    # For SQLite, initialize the DB schema if needed
+    # For SQLite, establish the connection and initialize the DB schema
     if cfg.DB_TYPE == "sqlite":
         from ..core.db import get_db_manager
 
-        # Ensure setup_sqlite is awaited if it is async
-        await get_db_manager().setup_sqlite()
+        await get_db_manager().connect()
         logger.info("✅ SQLite Database connection successful and schema is ready.")
 
     scheduler = Scheduler()

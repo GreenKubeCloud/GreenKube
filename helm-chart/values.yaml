@@ -195,8 +195,9 @@ postgres:
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    # IMPORTANT: Override this value with --set postgres.auth.password=YOUR_PASSWORD
-    # A random password will be generated if left empty.
+    # Set a fixed password here to ensure stability across upgrades.
+    # If left empty, a random password is generated on first install and
+    # preserved automatically on subsequent upgrades via secret lookup.
     password: ''
     database: greenkube
   persistence:
