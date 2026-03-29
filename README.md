@@ -206,7 +206,7 @@ The dashboard includes:
 - **Export capabilities** for charts and data tables
 - **Advanced filtering** by namespace, time range, and resource type
 
-## � Prometheus & Grafana Integration
+## Prometheus & Grafana Integration
 
 GreenKube exposes Prometheus metrics at `/prometheus/metrics` and ships with a pre-built Grafana dashboard.
 
@@ -266,7 +266,7 @@ The dashboard includes:
 - **Grid intensity:** Carbon intensity over time per zone
 - **Recommendations:** Summary table of optimization suggestions
 
-## �🔌 API Reference
+## 🔌 API Reference
 
 The API is available at `/api/v1` and serves both JSON endpoints and the web dashboard.
 
