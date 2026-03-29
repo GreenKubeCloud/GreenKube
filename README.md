@@ -6,7 +6,10 @@ GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams 
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Stars](https://img.shields.io/github/stars/GreenKubeCloud/greenkube?style=social)](https://github.com/GreenKubeCloud/greenkube/stargazers)
+[![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
 [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
+
+> **🌐 Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the dashboard with realistic sample data, no install required.
 
 
 ## 🎯 Mission
@@ -87,6 +90,15 @@ helm install greenkube greenkube/greenkube \
 
 Explore GreenKube with realistic sample data in under 30 seconds — no Prometheus or OpenCost required:
 
+**With Docker (no Kubernetes needed):**
+
+```bash
+docker run --rm -p 9000:9000 greenkube/greenkube:0.2.3 demo --no-browser --port 9000
+# → Open http://localhost:9000
+```
+
+**With kubectl:**
+
 ```bash
 kubectl run greenkube-demo \
   --image=greenkube/greenkube:0.2.3 \
@@ -101,10 +113,20 @@ kubectl port-forward pod/greenkube-demo 9000:9000
 The demo loads **7 days** of metrics for 22 pods across 5 namespaces (production, staging, monitoring, data-pipeline, ci-cd) with carbon emissions, costs, and optimization recommendations pre-populated.
 
 ```bash
-kubectl delete pod greenkube-demo  # clean up when done
+kubectl delete pod greenkube-demo  # clean up when done (kubectl only)
 ```
 
 This deploys GreenKube with the collector, API server, web dashboard, and PostgreSQL — all in a single command.
+
+## 📸 Screenshots
+
+| Dashboard | Metrics |
+|-----------|---------|
+| ![Dashboard](assets/demo-dashboard.png) | ![Metrics](assets/demo-metrics.png) |
+
+| Nodes | Recommendations |
+|-------|----------------|
+| ![Nodes](assets/demo-nodes.png) | ![Recommendations](assets/demo-recommendations.png) |
 
 ### 2. Access the Dashboard
 
