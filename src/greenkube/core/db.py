@@ -134,6 +134,17 @@ class DatabaseManager:
             return
 
         try:
+            # Enable WAL mode for significantly better concurrent read performance.
+            # WAL allows readers and the single writer to operate without blocking each other.
+            await self.connection.execute("PRAGMA journal_mode=WAL;")
+            # Increase the in-memory page cache (negative value = kibibytes).
+            # 64 MB cache avoids repeated disk I/O for hot query paths.
+            await self.connection.execute("PRAGMA cache_size=-65536;")
+            # Allow OS-level read-ahead; safe for WAL mode.
+            await self.connection.execute("PRAGMA mmap_size=268435456;")
+            # Relax fsync frequency — acceptable for a demo/dev SQLite database.
+            await self.connection.execute("PRAGMA synchronous=NORMAL;")
+
             # --- Table for carbon_intensity_history ---
             await self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS carbon_intensity_history (
@@ -270,6 +281,26 @@ class DatabaseManager:
                     target_node TEXT,
                     created_at TEXT NOT NULL
                 );
+            """)
+
+            # --- Performance indexes ---
+            # These indexes are critical for the dashboard query performance.
+            # Without them, every API request does a full table scan.
+            await self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_combined_metrics_timestamp
+                ON combined_metrics ("timestamp");
+            """)
+            await self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_combined_metrics_namespace_timestamp
+                ON combined_metrics (namespace, "timestamp");
+            """)
+            await self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_carbon_intensity_zone_datetime
+                ON carbon_intensity_history (zone, datetime);
+            """)
+            await self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_recommendation_history_namespace
+                ON recommendation_history (namespace);
             """)
 
             # Run versioned migrations
