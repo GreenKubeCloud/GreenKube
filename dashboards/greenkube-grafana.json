@@ -250,7 +250,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_co2e_grams_total",
+          "expr": "sum(greenkube_cluster_co2e_grams_total)",
           "legendFormat": "CO2e",
           "refId": "A"
         }
@@ -314,7 +314,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_embodied_co2e_grams_total",
+          "expr": "sum(greenkube_cluster_embodied_co2e_grams_total)",
           "legendFormat": "Embodied",
           "refId": "A"
         }
@@ -378,7 +378,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_cost_dollars_total",
+          "expr": "sum(greenkube_cluster_cost_dollars_total)",
           "legendFormat": "Cost",
           "refId": "A"
         }
@@ -442,7 +442,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_energy_joules_total",
+          "expr": "sum(greenkube_cluster_energy_joules_total)",
           "legendFormat": "Energy",
           "refId": "A"
         }
@@ -498,7 +498,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_pod_count",
+          "expr": "sum(greenkube_cluster_pod_count)",
           "legendFormat": "Pods",
           "refId": "A"
         }
@@ -554,7 +554,7 @@
       },
       "targets": [
         {
-          "expr": "greenkube_cluster_namespace_count",
+          "expr": "sum(greenkube_cluster_namespace_count)",
           "legendFormat": "Namespaces",
           "refId": "A"
         }
