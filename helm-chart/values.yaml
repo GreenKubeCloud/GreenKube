@@ -39,6 +39,11 @@ config:
   # Max age for historical node data in days
   nodeDataMaxAgeDays: 30
 
+  # Timeout in seconds for Kubernetes API calls (list_node, list_pod, etc.).
+  # Prevents greenkube start from hanging indefinitely if the API server is slow.
+  # Set to 0 to disable the timeout.
+  k8sRequestTimeout: 30
+
   # Boavizta configuration
   boavizta:
     url: https://api.boavizta.org

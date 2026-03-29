@@ -18,6 +18,12 @@ from ..utils.k8s_utils import parse_quantity
 logger = logging.getLogger(__name__)
 
 
+def _k8s_timeout() -> int | None:
+    """Return the configured Kubernetes request timeout, or None to disable."""
+    t = global_config.K8S_REQUEST_TIMEOUT
+    return t if t > 0 else None
+
+
 class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
@@ -51,8 +57,9 @@ class NodeCollector(BaseCollector):
             return nodes_info
 
         try:
-            # Async call
-            nodes = await api.list_node(watch=False)
+            # Async call — pass a request timeout so the collector never hangs
+            # indefinitely if the API server is slow or unreachable.
+            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
             if not nodes.items:
                 logger.warning("No nodes found in the cluster.")
                 return nodes_info
@@ -248,7 +255,7 @@ class NodeCollector(BaseCollector):
             return node_instance_map
 
         try:
-            nodes = await api.list_node(watch=False)
+            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
             if not nodes.items:
                 logger.debug("No nodes found when collecting instance types.")
                 return node_instance_map

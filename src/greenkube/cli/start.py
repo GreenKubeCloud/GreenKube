@@ -145,6 +145,7 @@ async def _async_start(last: Optional[str]):
     logging.basicConfig(
         level=cfg.LOG_LEVEL.upper(),
         format="%(asctime)s - %(levelname)s - %(message)s",
+        force=True,
     )
     logger.info("🚀 Initializing GreenKube (Async)...")
 

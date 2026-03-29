@@ -8,6 +8,7 @@ import logging
 from typing import List
 
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
 
@@ -51,7 +52,9 @@ class PodCollector(BaseCollector):
             return pod_metrics
 
         try:
-            pod_list = await api.list_pod_for_all_namespaces(watch=False)
+            pod_list = await api.list_pod_for_all_namespaces(
+                watch=False, _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None
+            )
 
             for pod in pod_list.items:
                 pod_name = pod.metadata.name
