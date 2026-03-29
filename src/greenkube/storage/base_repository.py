@@ -122,6 +122,87 @@ class CombinedMetricsRepository(ABC):
         """
         pass
 
+    async def aggregate_summary(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> dict:
+        """
+        Returns aggregated summary metrics (totals + counts) for the time range.
+
+        Default implementation loads all rows and aggregates in Python.
+        Subclasses may override with a SQL-level implementation for better performance.
+
+        Returns:
+            A dict with keys: total_co2e_grams, total_embodied_co2e_grams, total_cost,
+            total_energy_joules, pod_count, namespace_count.
+        """
+        metrics = await self.read_combined_metrics(start_time, end_time)
+        if namespace:
+            metrics = [m for m in metrics if m.namespace == namespace]
+        return {
+            "total_co2e_grams": sum(m.co2e_grams for m in metrics),
+            "total_embodied_co2e_grams": sum(m.embodied_co2e_grams or 0.0 for m in metrics),
+            "total_cost": sum(m.total_cost for m in metrics),
+            "total_energy_joules": sum(m.joules for m in metrics),
+            "pod_count": len({m.pod_name for m in metrics}),
+            "namespace_count": len({m.namespace for m in metrics}),
+        }
+
+    async def aggregate_timeseries(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        granularity: str = "hour",
+        namespace: Optional[str] = None,
+    ) -> List[dict]:
+        """
+        Returns time-series data bucketed by granularity.
+
+        Default implementation loads all rows and aggregates in Python.
+        Subclasses may override with a SQL-level implementation for better performance.
+
+        Returns:
+            List of dicts with keys: timestamp, co2e_grams, embodied_co2e_grams, total_cost,
+            energy_joules, cpu_usage_millicores, memory_usage_bytes.
+        """
+        from collections import defaultdict
+
+        _GRANULARITY_FORMATS = {
+            "hour": "%Y-%m-%dT%H:00:00Z",
+            "day": "%Y-%m-%dT00:00:00Z",
+            "week": "%Y-W%V",
+            "month": "%Y-%m-01T00:00:00Z",
+        }
+        fmt = _GRANULARITY_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
+
+        metrics = await self.read_combined_metrics(start_time, end_time)
+        if namespace:
+            metrics = [m for m in metrics if m.namespace == namespace]
+
+        buckets: dict[str, list] = defaultdict(list)
+        for m in metrics:
+            if m.timestamp:
+                key = m.timestamp.strftime(fmt)
+                buckets[key].append(m)
+
+        result = []
+        for ts_key in sorted(buckets):
+            bucket = buckets[ts_key]
+            result.append(
+                {
+                    "timestamp": ts_key,
+                    "co2e_grams": sum(m.co2e_grams for m in bucket),
+                    "embodied_co2e_grams": sum(m.embodied_co2e_grams or 0.0 for m in bucket),
+                    "total_cost": sum(m.total_cost for m in bucket),
+                    "energy_joules": sum(m.joules for m in bucket),
+                    "cpu_usage_millicores": sum(m.cpu_usage_millicores or 0 for m in bucket),
+                    "memory_usage_bytes": sum(m.memory_usage_bytes or 0 for m in bucket),
+                }
+            )
+        return result
+
 
 class RecommendationRepository(ABC):
     """

@@ -44,6 +44,23 @@ def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.write_combined_metrics = AsyncMock(return_value=0)
+
+    # aggregate_summary and aggregate_timeseries default to the base class
+    # Python-side implementation which delegates to read_combined_metrics.
+    # We reproduce that delegation here so tests that mock read_combined_metrics
+    # automatically get correct aggregate results without additional setup.
+    from greenkube.storage.base_repository import CombinedMetricsRepository as _Base
+
+    async def _aggregate_summary(start_time, end_time, namespace=None):
+        return await _Base.aggregate_summary(repo, start_time, end_time, namespace=namespace)
+
+    async def _aggregate_timeseries(start_time, end_time, granularity="hour", namespace=None):
+        return await _Base.aggregate_timeseries(
+            repo, start_time, end_time, granularity=granularity, namespace=namespace
+        )
+
+    repo.aggregate_summary = _aggregate_summary
+    repo.aggregate_timeseries = _aggregate_timeseries
     return repo
 
 

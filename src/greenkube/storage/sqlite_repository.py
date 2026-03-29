@@ -2,7 +2,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import aiosqlite
 
@@ -349,3 +349,133 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logging.error("Unexpected error reading combined metrics: %s", e)
             raise QueryError(f"Unexpected error reading combined metrics: {e}") from e
+
+    async def aggregate_summary(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> dict:
+        """
+        Aggregates summary metrics directly in SQLite (no Python-side row scan).
+        Significantly faster than loading all rows into CombinedMetric objects.
+        """
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = """
+                        SELECT
+                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS total_energy,
+                            COUNT(DISTINCT pod_name)               AS pod_count,
+                            COUNT(DISTINCT namespace)              AS namespace_count
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?
+                          AND namespace = ?
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
+                else:
+                    query = """
+                        SELECT
+                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS total_energy,
+                            COUNT(DISTINCT pod_name)               AS pod_count,
+                            COUNT(DISTINCT namespace)              AS namespace_count
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat())
+
+                async with conn.execute(query, params) as cursor:
+                    row = await cursor.fetchone()
+                    return {
+                        "total_co2e_grams": row["total_co2e"] or 0.0,
+                        "total_embodied_co2e_grams": row["total_embodied"] or 0.0,
+                        "total_cost": row["total_cost"] or 0.0,
+                        "total_energy_joules": row["total_energy"] or 0.0,
+                        "pod_count": row["pod_count"] or 0,
+                        "namespace_count": row["namespace_count"] or 0,
+                    }
+        except sqlite3.Error as e:
+            logging.error("aggregate_summary failed: %s", e)
+            raise QueryError(f"aggregate_summary failed: {e}") from e
+
+    async def aggregate_timeseries(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        granularity: str = "hour",
+        namespace: Optional[str] = None,
+    ) -> List[dict]:
+        """
+        Groups time-series data by granularity directly in SQLite.
+        Significantly faster than loading all rows into CombinedMetric objects.
+        """
+        # SQLite strftime format strings for each granularity
+        _SQLITE_FORMATS = {
+            "hour": "%Y-%m-%dT%H:00:00Z",
+            "day": "%Y-%m-%dT00:00:00Z",
+            "week": "%Y-W%W",
+            "month": "%Y-%m-01T00:00:00Z",
+        }
+        ts_format = _SQLITE_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = f"""
+                        SELECT
+                            strftime('{ts_format}', "timestamp") AS ts_bucket,
+                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS energy_joules,
+                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?
+                          AND namespace = ?
+                        GROUP BY ts_bucket
+                        ORDER BY ts_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
+                else:
+                    query = f"""
+                        SELECT
+                            strftime('{ts_format}', "timestamp") AS ts_bucket,
+                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS energy_joules,
+                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?
+                        GROUP BY ts_bucket
+                        ORDER BY ts_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat())
+
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [
+                        {
+                            "timestamp": row["ts_bucket"],
+                            "co2e_grams": row["co2e_grams"],
+                            "embodied_co2e_grams": row["embodied_co2e_grams"],
+                            "total_cost": row["total_cost"],
+                            "energy_joules": row["energy_joules"],
+                            "cpu_usage_millicores": row["cpu_usage_millicores"],
+                            "memory_usage_bytes": row["memory_usage_bytes"],
+                        }
+                        for row in rows
+                    ]
+        except sqlite3.Error as e:
+            logging.error("aggregate_timeseries failed: %s", e)
+            raise QueryError(f"aggregate_timeseries failed: {e}") from e
