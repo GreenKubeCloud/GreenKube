@@ -113,6 +113,11 @@ class Config:
         self.NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
         self.NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
+        # --- Kubernetes client variables ---
+        # Timeout (seconds) for individual Kubernetes API calls (e.g. list_node).
+        # Set to 0 to disable. Override with K8S_REQUEST_TIMEOUT env var.
+        self.K8S_REQUEST_TIMEOUT = int(os.getenv("K8S_REQUEST_TIMEOUT", "30"))
+
         # --- API variables ---
         self.API_HOST = os.getenv("API_HOST", "0.0.0.0")
         self.API_PORT = int(os.getenv("API_PORT", "8000"))

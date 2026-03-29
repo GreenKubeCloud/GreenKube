@@ -14,6 +14,7 @@ data:
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
   NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
   NODE_DATA_MAX_AGE_DAYS: {{ .Values.config.nodeDataMaxAgeDays | quote }}
+  K8S_REQUEST_TIMEOUT: {{ .Values.config.k8sRequestTimeout | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}

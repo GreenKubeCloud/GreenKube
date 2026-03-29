@@ -9,6 +9,7 @@ so the recommender can skip autoscaling recommendations for them.
 import logging
 from typing import Set, Tuple
 
+from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_autoscaling_v2_api
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,9 @@ class HPACollector:
                 logger.debug("AutoscalingV2 API not available; skipping HPA collection.")
                 return targets
 
-            hpa_list = await api.list_horizontal_pod_autoscaler_for_all_namespaces()
+            hpa_list = await api.list_horizontal_pod_autoscaler_for_all_namespaces(
+                _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None
+            )
 
             for hpa in hpa_list.items:
                 namespace = hpa.metadata.namespace
