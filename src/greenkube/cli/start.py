@@ -52,44 +52,45 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         if not nodes_info:
             logger.warning("No node zones discovered.")
             return
+
+        unique_zone_providers = {
+            (node_info.zone, node_info.cloud_provider) for node_info in nodes_info.values() if node_info.zone
+        }
+        emaps_zones: Set[str] = set()
+        for cz, provider in unique_zone_providers:
+            emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
+            if emz and emz != "unknown":
+                emaps_zones.add(emz)
+            else:
+                logger.warning(
+                    "Could not map cloud zone '%s' (provider: %s) to an Electricity Maps zone.", cz, provider
+                )
+
+        if not emaps_zones:
+            logger.warning("No mappable Electricity Maps zones found based on node discovery.")
+            return
+
+        # Parallelize zone history collection
+        async def process_zone(zone):
+            try:
+                history_data = await em_collector.collect(zone=zone)
+                if history_data:
+                    saved_count = await repository.save_history(history_data, zone=zone)
+                    logger.info("Successfully saved %s new records for zone: %s", saved_count, zone)
+                else:
+                    logger.info("No new data to save for zone: %s", zone)
+            except Exception as e:
+                logger.error("Failed to process data for zone %s: %s", zone, e)
+
+        await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
+
     except Exception as e:
         logger.error("Failed to collect node zones: %s", e)
-        return
-
-    unique_zone_providers = {
-        (node_info.zone, node_info.cloud_provider) for node_info in nodes_info.values() if node_info.zone
-    }
-    emaps_zones: Set[str] = set()
-    for cz, provider in unique_zone_providers:
-        emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
-        if emz and emz != "unknown":
-            emaps_zones.add(emz)
-        else:
-            logger.warning("Could not map cloud zone '%s' (provider: %s) to an Electricity Maps zone.", cz, provider)
-
-    if not emaps_zones:
-        logger.warning("No mappable Electricity Maps zones found based on node discovery.")
-        return
-
-    # Parallelize zone history collection
-    async def process_zone(zone):
-        try:
-            history_data = await em_collector.collect(zone=zone)
-            if history_data:
-                saved_count = await repository.save_history(history_data, zone=zone)
-                logger.info("Successfully saved %s new records for zone: %s", saved_count, zone)
-            else:
-                logger.info("No new data to save for zone: %s", zone)
-        except Exception as e:
-            logger.error("Failed to process data for zone %s: %s", zone, e)
-
-    await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
+    finally:
+        await node_collector.close()
+        await em_collector.close()
 
     logger.info("--- Finished carbon intensity collection task ---")
-    if "node_collector" in locals():
-        await node_collector.close()
-    if "em_collector" in locals():
-        await em_collector.close()
 
 
 async def analyze_nodes() -> None:
@@ -147,12 +148,15 @@ async def _async_start(last: Optional[str]):
     )
     logger.info("🚀 Initializing GreenKube (Async)...")
 
-    # For SQLite, establish the connection and initialize the DB schema
-    if cfg.DB_TYPE == "sqlite":
-        from ..core.db import get_db_manager
+    # Establish the database connection and run schema migrations eagerly.
+    # This must happen before any scheduled task runs to guarantee that all
+    # tables exist.  Previously this was only done for SQLite; PostgreSQL
+    # relied on lazy initialization which caused race conditions where tasks
+    # would query tables before setup_postgres() had created them.
+    from ..core.db import get_db_manager
 
-        await get_db_manager().connect()
-        logger.info("✅ SQLite Database connection successful and schema is ready.")
+    await get_db_manager().connect()
+    logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
 
     scheduler = Scheduler()
     scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
