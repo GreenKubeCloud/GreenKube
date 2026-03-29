@@ -15,6 +15,7 @@
 	let metrics = [];
 	let recommendations = [];
 	let loading = true;
+	let recoLoading = true;
 	let error = null;
 
 	$: params = { namespace: $selectedNamespace, last: $selectedTimeRange };
@@ -22,24 +23,36 @@
 
 	async function loadData() {
 		loading = true;
+		recoLoading = true;
 		error = null;
 		try {
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
-			const [s, ts, m, r] = await Promise.all([
+
+			// Load core metrics first — these are fast and unblock the page render.
+			const [s, ts, m] = await Promise.all([
 				getMetricsSummary({ namespace: ns, last }),
 				getTimeseries({ namespace: ns, last, granularity: last === '1h' ? 'hour' : 'day' }),
-				getMetrics({ namespace: ns, last }),
-				getRecommendations({ namespace: ns })
+				getMetrics({ namespace: ns, last })
 			]);
 			summary = s;
 			timeseries = ts;
 			metrics = m;
-			recommendations = r;
 		} catch (e) {
 			error = e.message;
 		} finally {
 			loading = false;
+		}
+
+		// Fetch recommendations in the background — they are slower and not
+		// required for the initial render of KPI cards and charts.
+		try {
+			const ns = $selectedNamespace || undefined;
+			recommendations = await getRecommendations({ namespace: ns });
+		} catch {
+			recommendations = [];
+		} finally {
+			recoLoading = false;
 		}
 	}
 
@@ -120,7 +133,11 @@
 			<div class="card-compact text-center">
 				<p class="stat-label">Recommendations</p>
 				<p class="stat-value text-lg {recommendations.length > 0 ? 'text-yellow-400' : ''}">
-					{recommendations.length}
+					{#if recoLoading}
+						<span class="text-dark-500 text-sm">…</span>
+					{:else}
+						{recommendations.length}
+					{/if}
 				</p>
 			</div>
 		</div>
