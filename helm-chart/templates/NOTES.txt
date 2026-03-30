@@ -1,4 +1,9 @@
-🌿 GreenKube {{ .Chart.AppVersion }} deployed!
+
+   ____                     _  __      _
+  / ___|_ __ ___  ___ _ __ | |/ /   _| |__   ___
+ | |  _| '__/ _ \/ _ \ '_ \| ' / | | | '_ \ / _ \
+ | |_| | | |  __/  __/ | | | . \ |_| | |_) |  __/
+  \____|_|  \___|\___|_| |_|_|\_\__,_|_.__/ \___|  v{{ .Chart.AppVersion }}
 
 {{- if .Values.config.api.enabled }}
 
@@ -10,7 +15,15 @@
 📋 Logs:
   kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -n {{ .Release.Namespace }} -f
 
-💡 No Electricity Maps token? GreenKube uses default carbon intensity values ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
-   For accurate data, set your token: secrets.electricityMapsToken in values.yaml
+📈 Prometheus:
+  GreenKube auto-discovers Prometheus in your cluster — no configuration needed.
+  If Prometheus isn't installed yet, you can use https://github.com/prometheus-operator/kube-prometheus.
+{{- if not .Values.config.prometheus.url }}
+  If auto-discovery fails, set the URL manually:
+    --set config.prometheus.url=http://prometheus-server.monitoring.svc.cluster.local:80
+{{- end }}
 
-📖 Full documentation: https://github.com/GreenKubeCloud/GreenKube
+💡 No Electricity Maps token? GreenKube uses default intensity ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
+   For accurate data, set: secrets.electricityMapsToken
+
+📖 https://github.com/GreenKubeCloud/GreenKube

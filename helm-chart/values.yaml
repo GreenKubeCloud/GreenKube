@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.2.3
+  tag: 0.2.4
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -210,12 +210,19 @@ postgres:
     size: 1Gi
     storageClassName: ''
 
-# Prometheus monitoring integration
-# Enable ServiceMonitor and NetworkPolicy for kube-prometheus-stack scraping.
+# Prometheus → GreenKube monitoring integration (optional).
+# This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.
+# This is NOT required for GreenKube to collect metrics FROM Prometheus — that works automatically.
+# Enable this only if you want GreenKube-computed metrics (CO₂e, cost, energy) in Grafana.
+# IMPORTANT: ServiceMonitor requires the Prometheus Operator CRDs to be installed
+# (e.g. via kube-prometheus-stack). If you don't have Prometheus Operator,
+# leave serviceMonitor.enabled=false to avoid installation errors.
 monitoring:
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
-    enabled: true
+    # Requires Prometheus Operator CRDs (monitoring.coreos.com/v1).
+    # Set to true only if kube-prometheus-stack (or similar) is installed.
+    enabled: false
     # Namespace where the ServiceMonitor will be created (must match Prometheus serviceMonitorNamespaceSelector).
     namespace: monitoring
     # Scrape interval (e.g., "30s", "1m").
@@ -229,6 +236,6 @@ monitoring:
 
   networkPolicy:
     # Create a NetworkPolicy allowing Prometheus to scrape GreenKube on the API port.
-    enabled: true
+    enabled: false
     # Namespace where Prometheus is deployed.
     prometheusNamespace: monitoring
