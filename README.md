@@ -20,7 +20,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 2.  **Visualize** these metrics in a real-time dashboard for actionable carbon visibility.
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.2.3)
+## ✨ Features (Version 0.2.4)
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
@@ -65,12 +65,16 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 
 ## 📦 Dependencies
 
-The chart requires the following services to be available in the cluster:
+GreenKube collects metrics from services running in your cluster. It auto-discovers them — no manual configuration required in most cases.
 
-- **OpenCost** – for cost data.
-- **Prometheus** – for metrics collection.
+| Service | Purpose | Required? |
+|---|---|---|
+| **Prometheus** | CPU, memory, network, disk metrics | Recommended — GreenKube works without it but will have no resource metrics |
+| **OpenCost** | Cost allocation data | Optional — cost fields will be empty without it |
 
-GreenKube uses service auto‑discovery to locate these services automatically. If they are deployed in non‑standard namespaces or with custom names, auto‑discovery may fail. In that case, set the service URLs manually in `values.yaml` (see the `prometheus.url` and `opencost.url` fields).
+> **Note:** GreenKube works with any Prometheus installation — basic `prometheus-community/prometheus`, `kube-prometheus-stack`, or a custom setup. The Prometheus Operator is **not** required for GreenKube to collect data. However, all CO2 data are based on Prometheus, so the installation is **really** recommended.
+>
+> If auto-discovery fails, set the service URLs manually in `values.yaml` (see the `config.prometheus.url` and `config.opencost.url` fields).
 
 ## 🚀 Installation & Usage
 
@@ -93,7 +97,7 @@ Explore GreenKube with realistic sample data in under 30 seconds — no Promethe
 **With Docker (no Kubernetes needed):**
 
 ```bash
-docker run --rm -p 9000:9000 greenkube/greenkube:0.2.3 demo --no-browser --port 9000
+docker run --rm -p 9000:9000 greenkube/greenkube:0.2.4 demo --no-browser --port 9000
 # → Open http://localhost:9000
 ```
 
@@ -101,7 +105,7 @@ docker run --rm -p 9000:9000 greenkube/greenkube:0.2.3 demo --no-browser --port 
 
 ```bash
 kubectl run greenkube-demo \
-  --image=greenkube/greenkube:0.2.3 \
+  --image=greenkube/greenkube:0.2.4 \
   --restart=Never \
   --command -- greenkube demo --no-browser --port 9000
 
@@ -208,22 +212,36 @@ The dashboard includes:
 
 ## Prometheus & Grafana Integration
 
-GreenKube exposes Prometheus metrics at `/prometheus/metrics` and ships with a pre-built Grafana dashboard.
+GreenKube has two distinct Prometheus integrations:
 
-### Prometheus Scraping
+1. **GreenKube → Prometheus** *(automatic)*: GreenKube queries your Prometheus for CPU, memory, network, and disk metrics. This works out of the box with any Prometheus installation — no configuration needed.
+2. **Prometheus → GreenKube** *(optional)*: Prometheus scrapes GreenKube's own `/prometheus/metrics` endpoint to expose GreenKube-computed metrics (CO₂e, cost, energy) in Grafana. This requires either a `ServiceMonitor` (Prometheus Operator) or a manual `scrape_config`.
 
-If you use the **kube-prometheus-stack** (Prometheus Operator), the Helm chart automatically creates a `ServiceMonitor` and a `NetworkPolicy`:
+### Exposing GreenKube Metrics to Prometheus (for Grafana)
+
+If you use the **kube-prometheus-stack** (Prometheus Operator), enable the `ServiceMonitor` to let Prometheus scrape GreenKube metrics:
+
+> **Note:** The ServiceMonitor requires the Prometheus Operator CRDs (`monitoring.coreos.com/v1`). It is disabled by default to allow installation on clusters without Prometheus Operator.
 
 ```yaml
 # In your my-values.yaml
 monitoring:
   serviceMonitor:
-    enabled: true            # Creates a ServiceMonitor resource
+    enabled: true            # Creates a ServiceMonitor resource (requires Prometheus Operator)
     namespace: monitoring    # Must match your Prometheus serviceMonitorNamespaceSelector
     interval: 30s
   networkPolicy:
     enabled: true            # Allows Prometheus to reach the GreenKube API port
     prometheusNamespace: monitoring
+```
+
+Or via `--set` flags:
+
+```bash
+helm install greenkube greenkube/greenkube \
+  -n greenkube --create-namespace \
+  --set monitoring.serviceMonitor.enabled=true \
+  --set monitoring.networkPolicy.enabled=true
 ```
 
 GreenKube metrics include:
@@ -289,7 +307,7 @@ Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 ```bash
 # Get a health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.3"}
+# {"status":"ok","version":"0.2.4"}
 
 # Get metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"

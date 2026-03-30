@@ -1,0 +1,53 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "greenkube.fullname" . }}-crd-check
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: crd-check
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
+      containers:
+        - name: crd-check
+          image: "bitnami/kubectl:latest"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "🔍 GreenKube: Checking prerequisites..."
+              echo ""
+              if kubectl get crd servicemonitors.monitoring.coreos.com > /dev/null 2>&1; then
+                echo "✅ Prometheus Operator CRDs found — ServiceMonitor will be created."
+                exit 0
+              else
+                echo "❌ ERROR: Prometheus Operator CRDs not found!"
+                echo ""
+                echo "   monitoring.serviceMonitor.enabled=true requires the Prometheus Operator"
+                echo "   (CRD: servicemonitors.monitoring.coreos.com) to be installed."
+                echo ""
+                echo "   To fix this, either:"
+                echo ""
+                echo "   1. Install kube-prometheus-stack first:"
+                echo "      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts"
+                echo "      helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \\"
+                echo "        -n monitoring --create-namespace"
+                echo ""
+                echo "   2. Or install GreenKube without ServiceMonitor:"
+                echo "      helm install greenkube greenkube/greenkube -n greenkube --create-namespace \\"
+                echo "        --set monitoring.serviceMonitor.enabled=false"
+                echo ""
+                exit 1
+              fi
+{{- end }}

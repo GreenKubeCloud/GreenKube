@@ -37,6 +37,72 @@ def find_manifest(docs: list[dict], kind: str, name_contains: str = "") -> dict 
     return None
 
 
+class TestDefaultValues:
+    """Tests that default values produce a working install without Prometheus Operator."""
+
+    def test_servicemonitor_disabled_by_default(self):
+        """ServiceMonitor must be disabled by default so fresh installs don't require CRDs."""
+        docs = helm_template()
+        sm = find_manifest(docs, "ServiceMonitor")
+        assert sm is None, "ServiceMonitor should NOT be created with default values"
+
+    def test_networkpolicy_disabled_by_default(self):
+        """NetworkPolicy for Prometheus should be disabled by default."""
+        docs = helm_template()
+        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        assert np is None, "NetworkPolicy should NOT be created with default values"
+
+    def test_prometheus_rbac_not_created_by_default(self):
+        """Prometheus RBAC (Role/RoleBinding) should not be created by default."""
+        docs = helm_template()
+        role = find_manifest(docs, "Role", "prometheus-k8s")
+        rb = find_manifest(docs, "RoleBinding", "prometheus-k8s")
+        assert role is None, "Role should NOT be created with default values"
+        assert rb is None, "RoleBinding should NOT be created with default values"
+
+    def test_no_monitoring_coreos_resources_by_default(self):
+        """No monitoring.coreos.com resources should be rendered with default values."""
+        docs = helm_template()
+        for doc in docs:
+            api_version = doc.get("apiVersion", "")
+            assert "monitoring.coreos.com" not in api_version, (
+                f"Found monitoring.coreos.com resource ({doc.get('kind')}) in default render"
+            )
+
+    def test_crd_check_job_not_created_by_default(self):
+        """Pre-install CRD check job should not be created when serviceMonitor is disabled."""
+        docs = helm_template()
+        job = find_manifest(docs, "Job", "crd-check")
+        assert job is None, "CRD check job should NOT be created with default values"
+
+
+class TestPreInstallCRDCheck:
+    """Tests for the pre-install CRD validation hook."""
+
+    def test_crd_check_created_when_servicemonitor_enabled(self):
+        docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
+        job = find_manifest(docs, "Job", "crd-check")
+        assert job is not None, "CRD check job should be created when serviceMonitor is enabled"
+
+    def test_crd_check_has_pre_install_hook(self):
+        docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
+        job = find_manifest(docs, "Job", "crd-check")
+        annotations = job["metadata"]["annotations"]
+        assert "pre-install" in annotations.get("helm.sh/hook", "")
+        assert "pre-upgrade" in annotations.get("helm.sh/hook", "")
+
+    def test_crd_check_runs_before_other_hooks(self):
+        docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
+        job = find_manifest(docs, "Job", "crd-check")
+        annotations = job["metadata"]["annotations"]
+        assert annotations.get("helm.sh/hook-weight") == "-10"
+
+    def test_crd_check_not_created_when_servicemonitor_disabled(self):
+        docs = helm_template(["monitoring.serviceMonitor.enabled=false"])
+        job = find_manifest(docs, "Job", "crd-check")
+        assert job is None
+
+
 class TestServiceMonitor:
     """Tests for the ServiceMonitor Helm template."""
 
