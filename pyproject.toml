@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 name = "greenkube"
 version = "0.2.4"
 authors = [
-  { name = "Hugo Lelievre", email = "hugo.lelievre.56@gmail.com" },
+  { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]
 description = "Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure."
 readme = "README.md"
@@ -67,8 +67,8 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/GreenKubeCloud/greenkube"
-"Bug Tracker" = "https://github.com/GreenKubeCloud/greenkube/issues"
+"Homepage" = "https://github.com/GreenKubeCloud/GreenKube"
+"Bug Tracker" = "https://github.com/GreenKubeCloud/GreenKube/issues"
 
 # CLI entry point
 # This creates the `greenkube` command in the user's terminal
