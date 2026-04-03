@@ -1,6 +1,7 @@
 # src/greenkube/utils/mapping_translator.py
 
 import logging
+import re
 
 from ..data.region_mapping import CLOUD_REGION_TO_ELECTRICITY_MAPS_ZONE, PROVIDER_REGION_TO_EM_ZONE
 
@@ -14,11 +15,17 @@ def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str
 
     Args:
         cloud_zone: The zone string from the cloud provider (e.g. 'us-east-1a')
-        provider: Optional cloud provider name (e.g. 'aws', 'gcp')
+        provider: Optional cloud provider name (e.g. 'aws', 'gcp', 'ovh')
 
     Returns:
         Electricity Maps zone code or None if no mapping exists.
     """
+    # "nova" is the OpenStack default availability-zone name used by OVH MKS
+    # when the cluster does not expose real AZ information.  It carries no
+    # geographic meaning and must never be treated as a valid region.
+    if cloud_zone == "nova":
+        return None
+
     # Try to find an exact match first (e.g. if the input is already a region)
     if provider and (provider, cloud_zone) in PROVIDER_REGION_TO_EM_ZONE:
         return PROVIDER_REGION_TO_EM_ZONE[(provider, cloud_zone)]
@@ -42,8 +49,11 @@ def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str
     if len(parts) > 1 and parts[-1].isdigit():
         candidates.append("-".join(parts[:-1]))
 
-    # 3. Azure/Generic: sometimes just stripping the last part if it looks like a zone identifier
-    # e.g. "eastus-1" -> "eastus" (not common in Azure but possible in other contexts)
+    # 4. OVH numbered data-centre codes: GRA11 -> GRA, RBX8 -> RBX, BHS5 -> BHS …
+    # OVH trigrams are 2-4 uppercase letters followed by one or more digits.
+    ovh_dc_match = re.fullmatch(r"([A-Z]{2,4})(\d+)", cloud_zone)
+    if ovh_dc_match:
+        candidates.append(ovh_dc_match.group(1))
 
     emaps_zone = None
 
@@ -72,8 +82,6 @@ def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str
                 region_candidate,
             )
             return emaps_zone
-
-    # If no candidates matched, we already checked exact match at the start.
 
     logger.debug("No Electricity Maps mapping for cloud zone '%s' (provider: %s)", cloud_zone, provider)
     return None
