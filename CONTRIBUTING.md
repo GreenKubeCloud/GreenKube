@@ -49,10 +49,80 @@ Thank you for your interest in GreenKube! We welcome contributions of all kinds 
 
 ## Development Workflow
 
-### Branching
+### Branch Model
 
-- Create feature branches from `main`: `feature/your-feature`
-- Create fix branches from `main`: `fix/your-fix`
+```
+main          ← stable, production-only. Every commit here is a released version.
+  └── dev     ← integration branch. All PRs target dev first.
+        └── feat/your-feature   ← short-lived feature/fix branches
+        └── fix/your-fix
+```
+
+| Branch | Purpose | CI triggered |
+|--------|---------|-------------|
+| `main` | Released code only — never commit directly | `ci.yml` (lint + test) |
+| `dev` | Integration — merge PRs here | `ci.yml` + `dev-build.yml` (builds `dev-<sha>` Docker image) |
+| `feat/*`, `fix/*` | Short-lived work branches | `ci.yml` on PR |
+
+**Rule:** feature/fix branches branch off `dev` and PR back to `dev`. `dev` is only merged to `main` as part of a release.
+
+### Day-to-Day Contribution Flow
+
+```bash
+# 1. Branch off dev
+git checkout dev && git pull origin dev
+git checkout -b feat/my-feature
+
+# 2. Work, commit (Conventional Commits)
+git commit -m "feat(api): add pagination to timeseries endpoint"
+
+# 3. Open a PR targeting dev
+# CI runs lint + test automatically
+
+# 4. After merge to dev, GitHub builds:
+#    greenkube/greenkube:dev-<sha>
+#    greenkube/greenkube:dev-latest
+```
+
+### Release Flow (maintainers only)
+
+When `dev` is ready to ship, use the release helper:
+
+```bash
+# Merge dev into main first
+git checkout main
+git merge --no-ff dev -m "chore: merge dev into main for release 0.3.0"
+
+# Then run the release script (from main)
+./scripts/release.sh 0.3.0
+```
+
+The script will:
+1. Bump the version in `pyproject.toml` and all synced files (`Chart.yaml`, `values.yaml`, `__init__.py`, …)
+2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[0.3.0]` header
+3. Commit everything as `chore: release v0.3.0`
+4. Create an annotated git tag `v0.3.0`
+
+Then review the commit and push:
+
+```bash
+git push origin main --tags
+```
+
+Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
+- Runs the full test + lint suite (gate)
+- Builds and pushes `greenkube/greenkube:0.3.0` + `:latest` to Docker Hub
+- Packages and publishes the Helm chart to GitHub Pages
+- Creates a GitHub Release with the changelog notes extracted automatically
+
+### Docker Tag Summary
+
+| Tag | When published | Use case |
+|-----|---------------|----------|
+| `dev-<sha>` | Every push to `dev` | Staging / testing latest dev work |
+| `dev-latest` | Every push to `dev` | Stable pointer to latest dev |
+| `0.3.0` | Push of `v0.3.0` tag | Pinned production image |
+| `latest` | Push of any vX.Y.Z tag | Latest stable release |
 
 ### Code Style
 
