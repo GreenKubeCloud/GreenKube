@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.2.4
+  tag: 0.2.5
 
 serviceAccount:
   # Specifies whether a service account should be created
