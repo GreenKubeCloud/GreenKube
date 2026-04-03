@@ -152,8 +152,12 @@ class NodeCollector(BaseCollector):
         """
         Detect the cloud provider from node labels.
         """
-        # Check for OVH-specific labels
-        if any(key.startswith("k8s.ovh.net/") for key in labels.keys()):
+        # Check for OVH-specific labels.
+        # OVH Managed Kubernetes Service (MKS) uses two label prefixes depending
+        # on the cluster generation:
+        #   - k8s.ovh.net/  (legacy clusters)
+        #   - node.k8s.ovh/ (current MKS — e.g. node.k8s.ovh/type=standard)
+        if any(key.startswith(("k8s.ovh.net/", "node.k8s.ovh/")) for key in labels.keys()):
             return "ovh"
 
         # Check for Azure-specific labels

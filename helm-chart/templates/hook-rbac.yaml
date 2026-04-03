@@ -1,0 +1,52 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+# Dedicated ServiceAccount for the pre-install CRD check hook.
+# Regular resources (like the main ServiceAccount) are not yet created when
+# pre-install hooks run, so this SA carries its own hook annotations to ensure
+# it exists before the Job that references it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "greenkube.fullname" . }}-crd-check
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+---
+# The CRD check needs 'get' on CRDs. Bind it via a dedicated ClusterRole/Binding
+# scoped to the hook lifecycle.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "greenkube.fullname" . }}-crd-check
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "greenkube.fullname" . }}-crd-check
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "greenkube.fullname" . }}-crd-check
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "greenkube.fullname" . }}-crd-check
+    namespace: {{ .Release.Namespace }}
+{{- end }}

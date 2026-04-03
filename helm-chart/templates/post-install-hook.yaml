@@ -18,6 +18,7 @@ spec:
         app.kubernetes.io/component: ready-check
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       containers:
         - name: ready-check
           image: "busybox:1.36"
