@@ -1,0 +1,192 @@
+name: Release — Build, Publish & GitHub Release
+
+# Triggered when a semver tag is pushed (e.g. v0.3.0).
+# 1. Runs the full test suite.
+# 2. Builds and pushes Docker image tagged with the version + "latest".
+# 3. Packages and publishes the Helm chart to GitHub Pages.
+# 4. Creates a GitHub Release with the changelog for this version.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  # ── Gate: run the full test suite before building anything ──
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install '.[test]'
+          pip install ruff
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test
+        run: pytest
+
+  # ── Build multi-arch Docker image and push to Docker Hub ──
+  build-and-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            greenkube/greenkube:${{ steps.version.outputs.version }}
+            greenkube/greenkube:latest
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Package and publish Helm chart to GitHub Pages ──
+  publish-helm-chart:
+    name: Helm Chart Publish
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Lint Helm Chart
+        run: helm lint ./helm-chart
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Package Helm Chart
+        run: |
+          mkdir -p ./charts-packaged
+          helm package ./helm-chart --destination ./charts-packaged
+
+      - name: Publish to GitHub Pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if git show-ref --verify --quiet refs/heads/gh-pages; then
+            git worktree add /tmp/gh-pages gh-pages
+          else
+            git worktree add --checkout -b gh-pages /tmp/gh-pages
+          fi
+
+          mkdir -p /tmp/gh-pages/
+          cp -r charts-packaged/*.tgz /tmp/gh-pages/
+
+          cd /tmp/gh-pages
+          if [ -f "index.yaml" ]; then
+            helm repo index . --merge index.yaml --url "https://GreenKubeCloud.github.io/GreenKube"
+          else
+            helm repo index . --url "https://GreenKubeCloud.github.io/GreenKube"
+          fi
+
+          git add -f *.tgz
+          git add index.yaml
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish"
+          else
+            git commit -m "chore: publish helm chart ${GITHUB_REF_NAME}"
+            git push --force origin gh-pages
+          fi
+
+  # ── Create a GitHub Release with changelog extract ──
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          # Extract the section between this version header and the next version header
+          VERSION="${{ steps.version.outputs.version }}"
+          CHANGELOG=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md)
+          # Use EOF delimiter for multiline output
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "GreenKube v${{ steps.version.outputs.version }}"
+          body: |
+            ## What's Changed
+
+            ${{ steps.changelog.outputs.body }}
+
+            ---
+
+            **Docker:** `docker pull greenkube/greenkube:${{ steps.version.outputs.version }}`
+
+            **Helm:**
+            ```bash
+            helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube
+            helm repo update
+            helm install greenkube greenkube/greenkube -n greenkube --create-namespace
+            ```
+          draft: false
+          prerelease: false
