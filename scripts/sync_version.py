@@ -29,16 +29,6 @@ def update_readme(version):
         f.truncate()
 
 
-def update_ci_cd(version):
-    """Updates the version in .github/workflows/ci-cd.yml."""
-    with open(".github/workflows/ci-cd.yml", "r+") as f:
-        content = f.read()
-        new_content = re.sub(r"(tags: greenkube/greenkube:)\d+\.\d+\.\d+", rf"\g<1>{version}", content)
-        f.seek(0)
-        f.write(new_content)
-        f.truncate()
-
-
 def update_helm_chart_yaml(version):
     """Updates the version in helm-chart/Chart.yaml."""
     yaml = YAML()
@@ -102,9 +92,6 @@ def main():
 
     update_readme(version)
     print("Updated README.md")
-
-    update_ci_cd(version)
-    print("Updated .github/workflows/ci-cd.yml")
 
     update_helm_chart_yaml(version)
     print("Updated helm-chart/Chart.yaml")
