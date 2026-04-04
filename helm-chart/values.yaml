@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.2.5
+  tag: 0.2.6
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -29,7 +29,7 @@ config:
   cloudProvider: unknown
   # Cluster name for multi-cluster environments. Used as the `cluster` label
   # in Prometheus metrics so you can filter/join across clusters in Grafana.
-  clusterName: ""
+  clusterName: ''
   defaultZone: FR
   defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
   # Normalization granularity for carbon intensity lookups.
