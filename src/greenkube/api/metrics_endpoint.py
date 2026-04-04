@@ -17,6 +17,7 @@ from typing import List
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
+from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, Recommendation
 from greenkube.models.node import NodeInfo
 
@@ -229,7 +230,7 @@ GREENKUBE_METRICS_TOTAL = Gauge(
 CARBON_INTENSITY_SCORE = Gauge(
     "greenkube_carbon_intensity_score",
     "Energy-weighted average grid carbon intensity across the cluster (gCO2e/kWh). "
-    "Lower is better — use this as the sustainability golden signal.",
+    "Lower is better — kept for backward compatibility.",
     ["cluster"],
     registry=REGISTRY,
 )
@@ -239,16 +240,20 @@ CARBON_INTENSITY_ZONE = Gauge(
     ["cluster", "zone"],
     registry=REGISTRY,
 )
-CARBON_INTENSITY_LEVEL = Gauge(
-    "greenkube_carbon_intensity_level",
-    "Classified carbon intensity level: 0=low (<100), 1=medium (100-300), 2=high (>300)",
+SUSTAINABILITY_SCORE = Gauge(
+    "greenkube_sustainability_score",
+    "Composite sustainability score (0-100, higher is better). "
+    "Aggregates resource efficiency, carbon intensity, waste elimination, "
+    "node efficiency, scaling practices, carbon-aware scheduling, and stability.",
     ["cluster"],
     registry=REGISTRY,
 )
-
-# Thresholds for carbon intensity classification
-_INTENSITY_LOW_THRESHOLD = 100  # gCO2e/kWh
-_INTENSITY_HIGH_THRESHOLD = 300  # gCO2e/kWh
+SUSTAINABILITY_DIMENSION_SCORE = Gauge(
+    "greenkube_sustainability_dimension_score",
+    "Per-dimension sustainability score (0-100, higher is better)",
+    ["cluster", "dimension"],
+    registry=REGISTRY,
+)
 
 # ---------------------------------------------------------------------------
 # Node-level gauges
@@ -344,7 +349,8 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         NS_POD_COUNT,
         CARBON_INTENSITY_SCORE,
         CARBON_INTENSITY_ZONE,
-        CARBON_INTENSITY_LEVEL,
+        SUSTAINABILITY_SCORE,
+        SUSTAINABILITY_DIMENSION_SCORE,
     ):
         _clear_gauge(g)
 
@@ -358,7 +364,7 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         GREENKUBE_ESTIMATED_METRICS_RATIO.set(0)
         GREENKUBE_METRICS_TOTAL.set(0)
         CARBON_INTENSITY_SCORE.labels(cluster=cluster).set(0)
-        CARBON_INTENSITY_LEVEL.labels(cluster=cluster).set(0)
+        SUSTAINABILITY_SCORE.labels(cluster=cluster).set(50)
         return
 
     # Namespace aggregations
@@ -448,16 +454,12 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     for zone, intensity in zone_intensities.items():
         CARBON_INTENSITY_ZONE.labels(cluster=cluster, zone=zone).set(intensity)
 
-    # Classified intensity level: 0=low, 1=medium, 2=high
-    if weighted_avg <= 0:
-        level = 0
-    elif weighted_avg < _INTENSITY_LOW_THRESHOLD:
-        level = 0
-    elif weighted_avg <= _INTENSITY_HIGH_THRESHOLD:
-        level = 1
-    else:
-        level = 2
-    CARBON_INTENSITY_LEVEL.labels(cluster=cluster).set(level)
+    # Comprehensive sustainability score (0-100, 100 = best)
+    scorer = SustainabilityScorer()
+    score_result = scorer.compute(metrics)
+    SUSTAINABILITY_SCORE.labels(cluster=cluster).set(score_result.overall_score)
+    for dim, dim_score in score_result.dimension_scores.items():
+        SUSTAINABILITY_DIMENSION_SCORE.labels(cluster=cluster, dimension=dim).set(dim_score)
 
     logger.debug("Updated Prometheus cluster metrics with %d pod metrics.", len(metrics))
 

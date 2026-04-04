@@ -240,13 +240,24 @@ class TestSustainabilityGoldenSignal:
         lines = [ln for ln in output.split("\n") if ln.startswith("greenkube_carbon_intensity_zone{")]
         assert len(lines) >= 2, f"Expected at least 2 zone intensity samples, got {len(lines)}"
 
-    def test_carbon_intensity_level_metric_exists(self, sample_combined_metrics):
-        """greenkube_carbon_intensity_level should classify intensity (0=low, 1=medium, 2=high)."""
+    def test_sustainability_score_metric_exists(self, sample_combined_metrics):
+        """greenkube_sustainability_score should be exposed (0-100, 100=best)."""
         update_cluster_metrics(sample_combined_metrics)
         from prometheus_client import generate_latest
 
         output = generate_latest(REGISTRY).decode("utf-8")
-        assert "greenkube_carbon_intensity_level" in output
+        assert "greenkube_sustainability_score" in output
+
+    def test_sustainability_dimension_scores_exist(self, sample_combined_metrics):
+        """Per-dimension scores should be exposed with a 'dimension' label."""
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_sustainability_dimension_score" in output
+        # Verify at least a few dimensions are present
+        for dim in ("resource_efficiency", "carbon_efficiency", "stability"):
+            assert f'dimension="{dim}"' in output, f"Missing dimension '{dim}' in output"
 
 
 class TestEndpointWithNewLabels:

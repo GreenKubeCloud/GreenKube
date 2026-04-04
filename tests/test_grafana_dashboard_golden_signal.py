@@ -106,11 +106,11 @@ class TestSustainabilityGoldenSignalPanels:
             f"No sustainability golden signal row found. Rows: {row_titles}"
         )
 
-    def test_carbon_intensity_level_panel_exists(self):
-        """A panel showing the intensity level (state_timeline or stat) must exist."""
+    def test_sustainability_score_panel_exists(self):
+        """A panel showing the overall sustainability score must exist."""
         titles = _all_panel_titles()
-        assert any("Intensity Level" in t or "Intensity State" in t for t in titles), (
-            f"No Carbon Intensity Level panel found. Titles: {titles}"
+        assert any("Sustainability Score" in t or "Sustainability" in t for t in titles), (
+            f"No Sustainability Score panel found. Titles: {titles}"
         )
 
 

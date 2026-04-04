@@ -320,9 +320,9 @@
       ]
     },
     {
-      "type": "stat",
-      "title": "Carbon Intensity Level",
-      "description": "Classified carbon intensity level. 0 = Low (green grid), 1 = Medium, 2 = High (dirty grid). Schedule workloads during low-intensity windows for maximum CO\u2082 savings.",
+      "type": "gauge",
+      "title": "Sustainability Score",
+      "description": "Comprehensive sustainability score (0\u2013100, higher is better). Aggregates resource efficiency, carbon intensity, waste elimination, node efficiency, scaling practices, carbon-aware scheduling, and stability.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -337,55 +337,42 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
+          "min": 0,
+          "max": 100,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "dark-red",
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 1
+                "color": "red",
+                "value": 20
               },
               {
-                "color": "red",
-                "value": 2
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
               }
             ]
           },
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "\ud83d\udfe2 LOW",
-                  "color": "green"
-                }
-              }
-            },
-            {
-              "type": "value",
-              "options": {
-                "1": {
-                  "text": "\ud83d\udfe1 MEDIUM",
-                  "color": "yellow"
-                }
-              }
-            },
-            {
-              "type": "value",
-              "options": {
-                "2": {
-                  "text": "\ud83d\udd34 HIGH",
-                  "color": "red"
-                }
-              }
-            }
-          ]
+          "mappings": [],
+          "displayName": "Score"
         },
         "overrides": []
       },
@@ -398,15 +385,13 @@
           "values": false
         },
         "orientation": "auto",
-        "textMode": "value",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
       },
       "targets": [
         {
-          "expr": "greenkube_carbon_intensity_level{cluster=~\"$cluster\"}",
-          "legendFormat": "Level",
+          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Score",
           "refId": "A"
         }
       ]
@@ -573,6 +558,175 @@
       ]
     },
     {
+      "type": "bargauge",
+      "title": "Sustainability Dimensions",
+      "description": "Per-dimension sustainability scores (0\u2013100). Resource Efficiency, Carbon Efficiency (grid intensity \u00d7 PUE), Waste Elimination, Node Efficiency, Scaling Practices, Carbon-Aware Scheduling, Stability.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 205,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              },
+              {
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "greenkube_sustainability_dimension_score{cluster=~\"$cluster\"}",
+          "legendFormat": "{{ dimension }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sustainability Score Timeline",
+      "description": "Track the overall sustainability score over time. Higher is better (100 = perfectly optimized cluster).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 206,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 30,
+            "gradientMode": "scheme",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            },
+            "axisCenteredZero": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              },
+              {
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "displayName": "Sustainability Score"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Score",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "\ud83c\udf0d Cluster Overview",
       "collapsed": false,
@@ -580,7 +734,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 22
       },
       "id": 100,
       "panels": []
