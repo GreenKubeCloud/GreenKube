@@ -26,7 +26,7 @@ rbac:
 # These values will be stored in a ConfigMap.
 config:
   logLevel: INFO
-  cloudProvider: aws
+  cloudProvider: unknown
   # Cluster name for multi-cluster environments. Used as the `cluster` label
   # in Prometheus metrics so you can filter/join across clusters in Grafana.
   clusterName: ""

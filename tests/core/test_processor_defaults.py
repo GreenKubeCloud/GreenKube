@@ -67,10 +67,17 @@ async def test_pue_and_zone_fallback():
     # Act - Test PUE Logic
     # We can check config.get_pue_for_provider directly
     aws_pue = config.get_pue_for_provider("aws")
-    default_pue = config.DEFAULT_PUE
 
     # Assert - PUE
-    # AWS PUE should be different from default if configured correctly in profiles
-    # or at least return a float
+    # AWS PUE should come from the profile (1.15), not the DEFAULT_PUE env var
     assert isinstance(aws_pue, float)
-    assert config.get_pue_for_provider("unknown-provider") == default_pue
+    assert aws_pue == 1.15
+
+    # An unknown provider must return the raw DEFAULT_PUE env-var fallback (1.3),
+    # NOT self.DEFAULT_PUE which would resolve through CLOUD_PROVIDER's profile.
+    import os
+
+    expected_fallback = float(os.getenv("DEFAULT_PUE", 1.3))
+    assert config.get_pue_for_provider("unknown-provider") == expected_fallback
+    assert config.get_pue_for_provider(None) == expected_fallback
+    assert config.get_pue_for_provider("") == expected_fallback
