@@ -47,13 +47,14 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
   - **Idle namespace cleanup** (namespaces with minimal activity)
   - **Carbon-aware scheduling** (shift to lower-carbon zones/times)
   - **Overprovisioned nodes** / **Underutilized nodes**
+* **Sustainability Score (0–100):** Composite cluster health score computed across 7 weighted dimensions — resource efficiency, carbon efficiency (grid × PUE), waste elimination, node efficiency, scaling practices, carbon-aware scheduling, and stability. 100 = perfect cluster. Exposed as a Prometheus gauge and visualized in the Grafana dashboard.
 * **Pod & Namespace Reporting:** Detailed reports of CO₂e emissions, energy usage, and costs per pod and namespace.
 * **Historical Analysis:** Report on any time period (`--last 7d`, `--last 3m`) with flexible grouping (`--daily`, `--monthly`, `--yearly`).
 * **Data Export:** Export reports to CSV or JSON for integration with other tools and BI systems.
 
 ### 🔧 Infrastructure & Deployment
 * **Demo Mode:** Deploy a standalone demo pod with `kubectl run` to explore GreenKube with realistic sample data—no live cluster metrics needed.
-* **Grafana Dashboard:** Pre-built JSON dashboard with CO₂e, cost, energy, resource, and recommendation panels — import in one click.
+* **Grafana Dashboard:** Pre-built JSON dashboard with CO₂e, cost, energy, resource, sustainability score, and recommendation panels — import in one click.
 * **Prometheus Integration:** ServiceMonitor and NetworkPolicy for automatic scraping by kube-prometheus-stack.
 * **Database Migration System:** Automated, versioned schema migrations for PostgreSQL and SQLite.
 * **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
@@ -201,6 +202,7 @@ The dashboard includes:
 - **Metrics** — Interactive table with sortable and searchable per-pod metrics including energy, cost, and all resource consumption data (CPU, memory, network, disk, storage)
 - **Nodes** — Cluster node inventory with CPU/memory capacity bars, hardware profiles, cloud provider info, and carbon zones
 - **Recommendations** — Actionable optimization suggestions (zombie pods, rightsizing opportunities) with estimated savings in cost and CO₂e
+- **Report** — Configure, preview and export a FinGreenOps report: choose time range, namespace, aggregation (hourly/daily/weekly/monthly/yearly) and download as **CSV** or **JSON** directly from the browser — no CLI access required
 - **Settings** — Current configuration, API health status, version info, and database connection details
 
 ### 🎨 Dashboard Features
@@ -245,12 +247,15 @@ helm install greenkube greenkube/greenkube \
 ```
 
 GreenKube metrics include:
-- `greenkube_co2e_grams` — CO₂e emissions per pod
-- `greenkube_energy_joules` — Energy consumption per pod
-- `greenkube_cost_total` — Cost per pod
-- `greenkube_cpu_usage_millicores`, `greenkube_memory_usage_bytes` — Resource usage
-- `greenkube_network_receive_bytes`, `greenkube_network_transmit_bytes` — Network I/O
-- `greenkube_grid_intensity` — Grid carbon intensity per zone
+- `greenkube_pod_co2e_grams` — CO₂e emissions per pod (`cluster`, `namespace`, `pod`, `node`, `region`)
+- `greenkube_pod_energy_joules` — Energy consumption per pod
+- `greenkube_pod_cost_dollars` — Cost per pod
+- `greenkube_pod_cpu_usage_millicores`, `greenkube_pod_memory_usage_bytes` — Resource usage
+- `greenkube_pod_network_receive_bytes`, `greenkube_pod_network_transmit_bytes` — Network I/O
+- `greenkube_sustainability_score` — Composite sustainability score (0–100, higher is better) per `cluster`
+- `greenkube_sustainability_dimension_score` — Per-dimension score (0–100) with `cluster` and `dimension` labels
+- `greenkube_carbon_intensity_score` — Energy-weighted average grid carbon intensity (gCO₂e/kWh)
+- `greenkube_carbon_intensity_zone` — Real-time grid carbon intensity per `zone`
 - `greenkube_recommendation_total` — Recommendation counts by type
 - `greenkube_node_info` — Node metadata (instance type, zone, capacity)
 
@@ -282,6 +287,7 @@ The dashboard includes:
 - **Top pods:** Bar charts for heaviest emitters and most expensive pods
 - **Node utilization:** CPU and memory usage per node
 - **Grid intensity:** Carbon intensity over time per zone
+- **Sustainability golden signal:** Composite 0–100 score gauge, per-dimension bar chart, and score timeline — filterable by `cluster` and `region` template variables
 - **Recommendations:** Summary table of optimization suggestions
 
 ## 🔌 API Reference
@@ -299,6 +305,8 @@ The API is available at `/api/v1` and serves both JSON endpoints and the web das
 | `GET /api/v1/namespaces` | List of active namespaces |
 | `GET /api/v1/nodes` | Cluster node inventory |
 | `GET /api/v1/recommendations?namespace=` | Optimization recommendations |
+| `GET /api/v1/report/summary?namespace=&last=24h&aggregate=true&granularity=daily` | Report preview (row count + totals) |
+| `GET /api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily` | Download report as **CSV** or **JSON** |
 
 Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 
@@ -321,6 +329,16 @@ curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
 
 # Get optimization recommendations
 curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+
+# Preview a report (row count + totals) before downloading
+curl "http://localhost:8000/api/v1/report/summary?last=30d&aggregate=true&granularity=daily"
+# {"total_rows":450,"total_co2e_grams":8234.5,"total_cost":12.34,...}
+
+# Download a CSV report for the last 7 days, aggregated daily
+curl -O -J "http://localhost:8000/api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily"
+
+# Download a raw JSON report for a specific namespace
+curl -O -J "http://localhost:8000/api/v1/report/export?format=json&last=30d&namespace=production"
 ```
 
 ## 📈 Running Reports & Getting Recommendations
@@ -385,6 +403,7 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
   - Zombie detection, CPU/memory rightsizing, autoscaling candidates
   - Off-peak scheduling, idle namespace cleanup, carbon-aware scheduling
   - Overprovisioned/underutilized node detection
+- **SustainabilityScorer:** Computes the composite 0–100 sustainability score across 7 dimensions; PUE-aware carbon efficiency uses `grid_intensity × PUE` as the effective carbon cost
 
 **Storage** (Output Adapters):
 - **Repositories:** Abstract interfaces implemented for multiple backends:

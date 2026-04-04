@@ -13,6 +13,7 @@
 		{ href: '/metrics', label: 'Metrics', icon: '📈' },
 		{ href: '/nodes', label: 'Nodes', icon: '🖥️' },
 		{ href: '/recommendations', label: 'Recommendations', icon: '💡' },
+		{ href: '/report', label: 'Report', icon: '📄' },
 		{ href: '/settings', label: 'Settings', icon: '⚙️' }
 	];
 

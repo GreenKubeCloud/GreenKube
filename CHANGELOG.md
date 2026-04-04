@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Report page in the web dashboard:** New `/report` route in the SvelteKit SPA — a full-featured report builder that lets users configure time range (1 h → 1 y), namespace filter, aggregation (hourly/daily/weekly/monthly/yearly) and export format (CSV or JSON), preview totals before downloading, then trigger a direct browser download — no CLI or `kubectl exec` required.
+- **`GET /api/v1/report/summary` endpoint:** Returns a preview of the report (row count, unique pods/namespaces, CO₂e, embodied CO₂e, energy, cost) for the current filter/aggregation parameters.
+- **`GET /api/v1/report/export` endpoint:** Streams a downloadable file (CSV or JSON) with correct `Content-Disposition` headers. Supports the same `namespace`, `last`, `aggregate`, and `granularity` parameters as the CLI `greenkube report` command.
+- **`ReportSummaryResponse` schema:** New Pydantic response model in `api/schemas.py`.
+
+### Fixed
+- **PUE fallback for unknown node provider:** `Config.get_pue_for_provider()` now falls back to the raw `DEFAULT_PUE` environment variable (default **1.3**) when a node's cloud provider is absent or not in `DATACENTER_PUE_PROFILES`, instead of incorrectly re-resolving through `self.DEFAULT_PUE` (which returns the *configured* `CLOUD_PROVIDER`'s profile — e.g. AWS=1.15 — even for unrelated unknown nodes). The `estimation_reasons` message now correctly reports **1.3** for unknown providers.
+- **`CLOUD_PROVIDER` default changed from `aws` to `unknown`:** The env var and `helm-chart/values.yaml` previously defaulted to `"aws"`, silently applying AWS's PUE profile (1.15) on clusters where no cloud provider was configured. The default is now `"unknown"`, which correctly triggers the `DEFAULT_PUE` fallback (1.3) and produces an explicit warning log instead of a silent wrong value.
+- **Settings page API status indicator:** The health dot was always red because the condition checked `health.status === 'healthy'` while the API returns `"ok"`. Fixed to `health.status === 'ok'`.
+
+### Sustainability Score engine (previous unreleased entry)
+- **Sustainability Score engine:** New `SustainabilityScorer` class (`src/greenkube/core/sustainability_score.py`) computes a composite **0–100 score** (100 = perfect cluster) across seven weighted dimensions:
+  - **Resource Efficiency (25%)** — CPU and memory utilisation vs. requests
+  - **Carbon Efficiency (20%)** — energy-weighted `grid_intensity × PUE`; penalises both dirty grids *and* inefficient datacentres equally
+  - **Waste Elimination (15%)** — absence of zombie pods and idle namespaces
+  - **Node Efficiency (15%)** — CPU and memory utilisation at the node level
+  - **Scaling Practices (10%)** — HPA coverage and absence of over-provisioned autoscaling targets
+  - **Carbon-Aware Scheduling (10%)** — share of workloads running in low-carbon zones
+  - **Stability (5%)** — low container restart rate
+- **PUE-aware carbon efficiency:** The carbon dimension uses `effective_intensity = grid_intensity × PUE` so that a high-PUE datacenter (e.g. OVH=1.37) is penalised relative to a hyperscaler-efficient one (e.g. GCP=1.09) even on the same electrical grid. Invalid/missing PUE safely defaults to 1.0.
+- **`SustainabilityResult` Pydantic model:** Carries `overall_score` and a `dimension_scores` dict for structured downstream consumption.
+- **New Prometheus gauges:**
+  - `greenkube_sustainability_score{cluster}` — composite 0–100 score
+  - `greenkube_sustainability_dimension_score{cluster, dimension}` — per-dimension breakdown
+- **kube-state-metrics compatible labels:** All pod-level Prometheus metrics now carry `cluster`, `namespace`, `pod`, `node`, and `region` labels, matching kube-state-metrics conventions and enabling seamless Grafana variable-based filtering.
+- **Grafana template variables:** `cluster` and `region` drop-down template variables added to the pre-built Grafana dashboard for multi-cluster/multi-region environments.
+- **Grafana golden signal panels:** New panels in the Grafana dashboard:
+  - Composite sustainability score gauge (0–100)
+  - Per-dimension horizontal bar gauge
+  - Sustainability score timeline
+  - Carbon intensity by zone timeline
+- **Methodology documentation:** `docs/sustainability-score.md` — full description of the 7-dimension scoring model, formulas, reference thresholds, and PUE impact table.
+
+### Changed
+- **`carbon_intensity` dimension → `carbon_efficiency`:** The scoring dimension was renamed and its formula extended to include PUE (`effective_intensity = grid_intensity × PUE`). The raw Prometheus gauges `greenkube_carbon_intensity_score` and `greenkube_carbon_intensity_zone` are kept unchanged for backward compatibility.
+- **Helm configmap:** `CLUSTER_NAME` now propagated to the metrics endpoint so the `cluster` label is always populated.
+
 ## [0.2.5] — 2026-04-04
 
 ### Changed
@@ -123,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CSV and JSON export
 - SQLite storage backend
 
-[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.1.0...v0.2.2

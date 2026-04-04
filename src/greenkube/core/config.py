@@ -38,6 +38,9 @@ class Config:
         self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
         self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
 
+        # --- Cluster identification ---
+        self.CLUSTER_NAME = os.getenv("CLUSTER_NAME", "")
+
         # --- Default variables ---
         self.DEFAULT_COST = 0.0
         self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
@@ -195,7 +198,7 @@ class Config:
     # time and lets callers create calculators after changing env vars.
     @property
     def CLOUD_PROVIDER(self) -> str:
-        return os.getenv("CLOUD_PROVIDER", "aws").lower()
+        return os.getenv("CLOUD_PROVIDER", "unknown").lower()
 
     @property
     def DEFAULT_PUE(self) -> float:
@@ -213,17 +216,21 @@ class Config:
         return pue
 
     def get_pue_for_provider(self, provider: str) -> float:
-        """
-        Retrieves the PUE for a specific cloud provider.
-        """
-        if not provider:
-            return self.DEFAULT_PUE
+        """Retrieves the PUE for a specific cloud provider.
 
-        profile_key = f"default_{provider.lower()}"
-        pue = DATACENTER_PUE_PROFILES.get(profile_key)
-        if pue is None:
-            return self.DEFAULT_PUE
-        return pue
+        Falls back to the DEFAULT_PUE environment variable (default 1.3) when
+        the provider is absent or has no entry in DATACENTER_PUE_PROFILES.
+        This is intentionally *not* ``self.DEFAULT_PUE`` (which resolves the
+        configured CLOUD_PROVIDER's profile) so that an unknown node provider
+        receives the explicit human-configured fallback rather than an
+        unrelated cloud provider's profile value.
+        """
+        if provider:
+            profile_key = f"default_{provider.lower()}"
+            pue = DATACENTER_PUE_PROFILES.get(profile_key)
+            if pue is not None:
+                return pue
+        return float(os.getenv("DEFAULT_PUE", 1.3))
 
     @property
     def DATACENTER_PUE_PROFILES(self):

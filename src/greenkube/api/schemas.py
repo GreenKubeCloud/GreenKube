@@ -69,3 +69,15 @@ class PaginatedMetricsResponse(BaseModel):
     offset: int = Field(0, description="Number of records skipped.")
     limit: int = Field(1000, description="Maximum records in this page.")
     items: List[CombinedMetric] = Field(default_factory=list, description="The metrics in this page.")
+
+
+class ReportSummaryResponse(BaseModel):
+    """Preview summary for a report before export."""
+
+    total_rows: int = Field(0, description="Total number of rows in the report.")
+    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
+    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_cost: float = Field(0.0, description="Total cost in dollars.")
+    total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
+    unique_pods: int = Field(0, description="Number of unique pods.")
+    unique_namespaces: int = Field(0, description="Number of unique namespaces.")

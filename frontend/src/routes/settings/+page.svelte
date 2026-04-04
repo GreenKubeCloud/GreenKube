@@ -74,7 +74,7 @@
 			<div class="card-compact">
 				<p class="stat-label">API Status</p>
 				<div class="flex items-center gap-2 mt-1">
-					<div class="w-2 h-2 rounded-full {health?.status === 'healthy' ? 'bg-green-500' : 'bg-red-500'}"></div>
+					<div class="w-2 h-2 rounded-full {health?.status === 'ok' ? 'bg-green-500' : 'bg-red-500'}"></div>
 					<p class="stat-value text-lg">{health?.status ?? '—'}</p>
 				</div>
 			</div>

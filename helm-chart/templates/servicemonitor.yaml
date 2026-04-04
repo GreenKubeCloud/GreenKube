@@ -25,7 +25,7 @@ spec:
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
       metricRelabelings:
         # Prometheus renames metric labels that conflict with Kubernetes discovery
-        # labels (namespace, pod) by prefixing them with "exported_".
+        # labels (namespace, pod, cluster, region) by prefixing them with "exported_".
         # For GreenKube metrics the original labels carry the meaningful data
         # (the actual K8s namespace / pod being measured), so we restore them.
         - sourceLabels: [exported_namespace]
@@ -36,6 +36,14 @@ spec:
           targetLabel: pod
           regex: (.+)
           action: replace
-        - regex: exported_namespace|exported_pod
+        - sourceLabels: [exported_cluster]
+          targetLabel: cluster
+          regex: (.+)
+          action: replace
+        - sourceLabels: [exported_region]
+          targetLabel: region
+          regex: (.+)
+          action: replace
+        - regex: exported_namespace|exported_pod|exported_cluster|exported_region
           action: labeldrop
 {{- end }}
