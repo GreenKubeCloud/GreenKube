@@ -178,7 +178,7 @@ class TestServiceMonitor:
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])
-        assert len(relabelings) >= 2, "ServiceMonitor should have at least 2 metricRelabelings"
+        assert len(relabelings) >= 4, "ServiceMonitor should have at least 4 metricRelabelings"
 
     def test_servicemonitor_relabeling_restores_namespace(self):
         """exported_namespace must be copied back to namespace."""

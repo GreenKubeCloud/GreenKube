@@ -5,6 +5,9 @@ Prometheus metrics exposition for GreenKube.
 Exposes comprehensive cluster, namespace, pod, node, and recommendation
 metrics as Prometheus Gauges so they can be scraped by Prometheus and
 visualized in Grafana dashboards.
+
+Label conventions follow kube-state-metrics standards (namespace, pod, node)
+and add `cluster` and `region` for multi-cluster / multi-region environments.
 """
 
 import logging
@@ -13,6 +16,8 @@ from typing import List
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
+from greenkube.core.config import get_config
+from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, Recommendation
 from greenkube.models.node import NodeInfo
 
@@ -22,10 +27,20 @@ logger = logging.getLogger(__name__)
 # process/platform collectors that are irrelevant in a FastAPI context.
 REGISTRY = CollectorRegistry()
 
+
+def _get_cluster_name() -> str:
+    """Return the configured cluster name, falling back to empty string."""
+    try:
+        cfg = get_config()
+        return cfg.CLUSTER_NAME or ""
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
-# Pod-level gauges
+# Pod-level gauges — kube-state-metrics compatible labels
 # ---------------------------------------------------------------------------
-POD_LABELS = ["namespace", "pod", "node"]
+POD_LABELS = ["cluster", "namespace", "pod", "node", "region"]
 
 POD_CO2 = Gauge(
     "greenkube_pod_co2e_grams",
@@ -115,7 +130,7 @@ POD_GRID_INTENSITY = Gauge(
 # ---------------------------------------------------------------------------
 # Namespace-level aggregate gauges
 # ---------------------------------------------------------------------------
-NS_LABELS = ["namespace"]
+NS_LABELS = ["cluster", "namespace"]
 
 NS_CO2_TOTAL = Gauge(
     "greenkube_namespace_co2e_grams_total",
@@ -149,36 +164,44 @@ NS_POD_COUNT = Gauge(
 )
 
 # ---------------------------------------------------------------------------
-# Cluster-level summary gauges (no labels)
+# Cluster-level summary gauges
 # ---------------------------------------------------------------------------
+CLUSTER_LABELS = ["cluster"]
+
 CLUSTER_CO2_TOTAL = Gauge(
     "greenkube_cluster_co2e_grams_total",
     "Total operational CO2e across all pods in grams",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_EMBODIED_CO2_TOTAL = Gauge(
     "greenkube_cluster_embodied_co2e_grams_total",
     "Total embodied CO2e across all pods in grams",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_COST_TOTAL = Gauge(
     "greenkube_cluster_cost_dollars_total",
     "Total cost across all pods in dollars",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_ENERGY_TOTAL = Gauge(
     "greenkube_cluster_energy_joules_total",
     "Total energy across all pods in Joules",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_POD_COUNT = Gauge(
     "greenkube_cluster_pod_count",
     "Total number of unique pods in latest collection",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_NAMESPACE_COUNT = Gauge(
     "greenkube_cluster_namespace_count",
     "Total number of unique namespaces in latest collection",
+    CLUSTER_LABELS,
     registry=REGISTRY,
 )
 
@@ -198,6 +221,37 @@ GREENKUBE_LAST_COLLECTION_TIMESTAMP = Gauge(
 GREENKUBE_METRICS_TOTAL = Gauge(
     "greenkube_metrics_total",
     "Total number of combined metric records in the latest window",
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Sustainability Golden Signal gauges
+# ---------------------------------------------------------------------------
+CARBON_INTENSITY_SCORE = Gauge(
+    "greenkube_carbon_intensity_score",
+    "Energy-weighted average grid carbon intensity across the cluster (gCO2e/kWh). "
+    "Lower is better — kept for backward compatibility.",
+    ["cluster"],
+    registry=REGISTRY,
+)
+CARBON_INTENSITY_ZONE = Gauge(
+    "greenkube_carbon_intensity_zone",
+    "Current grid carbon intensity per electricity zone (gCO2e/kWh)",
+    ["cluster", "zone"],
+    registry=REGISTRY,
+)
+SUSTAINABILITY_SCORE = Gauge(
+    "greenkube_sustainability_score",
+    "Composite sustainability score (0-100, higher is better). "
+    "Aggregates resource efficiency, carbon intensity, waste elimination, "
+    "node efficiency, scaling practices, carbon-aware scheduling, and stability.",
+    ["cluster"],
+    registry=REGISTRY,
+)
+SUSTAINABILITY_DIMENSION_SCORE = Gauge(
+    "greenkube_sustainability_dimension_score",
+    "Per-dimension sustainability score (0-100, higher is better)",
+    ["cluster", "dimension"],
     registry=REGISTRY,
 )
 
@@ -270,6 +324,8 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     Args:
         metrics: The latest list of CombinedMetric objects from all pods.
     """
+    cluster = _get_cluster_name()
+
     # Clear previous values
     for g in (
         POD_CO2,
@@ -291,18 +347,24 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         NS_COST_TOTAL,
         NS_ENERGY_TOTAL,
         NS_POD_COUNT,
+        CARBON_INTENSITY_SCORE,
+        CARBON_INTENSITY_ZONE,
+        SUSTAINABILITY_SCORE,
+        SUSTAINABILITY_DIMENSION_SCORE,
     ):
         _clear_gauge(g)
 
     if not metrics:
-        CLUSTER_CO2_TOTAL.set(0)
-        CLUSTER_EMBODIED_CO2_TOTAL.set(0)
-        CLUSTER_COST_TOTAL.set(0)
-        CLUSTER_ENERGY_TOTAL.set(0)
-        CLUSTER_POD_COUNT.set(0)
-        CLUSTER_NAMESPACE_COUNT.set(0)
+        CLUSTER_CO2_TOTAL.labels(cluster=cluster).set(0)
+        CLUSTER_EMBODIED_CO2_TOTAL.labels(cluster=cluster).set(0)
+        CLUSTER_COST_TOTAL.labels(cluster=cluster).set(0)
+        CLUSTER_ENERGY_TOTAL.labels(cluster=cluster).set(0)
+        CLUSTER_POD_COUNT.labels(cluster=cluster).set(0)
+        CLUSTER_NAMESPACE_COUNT.labels(cluster=cluster).set(0)
         GREENKUBE_ESTIMATED_METRICS_RATIO.set(0)
         GREENKUBE_METRICS_TOTAL.set(0)
+        CARBON_INTENSITY_SCORE.labels(cluster=cluster).set(0)
+        SUSTAINABILITY_SCORE.labels(cluster=cluster).set(50)
         return
 
     # Namespace aggregations
@@ -312,11 +374,19 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     ns_energy: dict[str, float] = defaultdict(float)
     ns_pods: dict[str, set] = defaultdict(set)
 
+    # For sustainability golden signal: energy-weighted intensity
+    total_weighted_intensity = 0.0
+    total_energy = 0.0
+    zone_intensities: dict[str, float] = {}
+
     for m in metrics:
+        region = m.emaps_zone or m.node_zone or ""
         labels = {
+            "cluster": cluster,
             "namespace": m.namespace,
             "pod": m.pod_name,
             "node": m.node or "unknown",
+            "region": region,
         }
 
         POD_CO2.labels(**labels).set(m.co2e_grams)
@@ -342,21 +412,30 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         ns_energy[ns] += m.joules
         ns_pods[ns].add(m.pod_name)
 
+        # Sustainability golden signal: accumulate for weighted average
+        if m.grid_intensity > 0 and m.joules > 0:
+            total_weighted_intensity += m.grid_intensity * m.joules
+            total_energy += m.joules
+        # Track per-zone intensity (last seen value per zone)
+        zone = m.emaps_zone or m.node_zone
+        if zone and m.grid_intensity > 0:
+            zone_intensities[zone] = m.grid_intensity
+
     # Set namespace gauges
     for ns in ns_co2:
-        NS_CO2_TOTAL.labels(namespace=ns).set(ns_co2[ns])
-        NS_EMBODIED_CO2_TOTAL.labels(namespace=ns).set(ns_embodied[ns])
-        NS_COST_TOTAL.labels(namespace=ns).set(ns_cost[ns])
-        NS_ENERGY_TOTAL.labels(namespace=ns).set(ns_energy[ns])
-        NS_POD_COUNT.labels(namespace=ns).set(len(ns_pods[ns]))
+        NS_CO2_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_co2[ns])
+        NS_EMBODIED_CO2_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_embodied[ns])
+        NS_COST_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_cost[ns])
+        NS_ENERGY_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_energy[ns])
+        NS_POD_COUNT.labels(cluster=cluster, namespace=ns).set(len(ns_pods[ns]))
 
     # Cluster totals
-    CLUSTER_CO2_TOTAL.set(sum(ns_co2.values()))
-    CLUSTER_EMBODIED_CO2_TOTAL.set(sum(ns_embodied.values()))
-    CLUSTER_COST_TOTAL.set(sum(ns_cost.values()))
-    CLUSTER_ENERGY_TOTAL.set(sum(ns_energy.values()))
-    CLUSTER_POD_COUNT.set(len({m.pod_name for m in metrics}))
-    CLUSTER_NAMESPACE_COUNT.set(len(ns_co2))
+    CLUSTER_CO2_TOTAL.labels(cluster=cluster).set(sum(ns_co2.values()))
+    CLUSTER_EMBODIED_CO2_TOTAL.labels(cluster=cluster).set(sum(ns_embodied.values()))
+    CLUSTER_COST_TOTAL.labels(cluster=cluster).set(sum(ns_cost.values()))
+    CLUSTER_ENERGY_TOTAL.labels(cluster=cluster).set(sum(ns_energy.values()))
+    CLUSTER_POD_COUNT.labels(cluster=cluster).set(len({m.pod_name for m in metrics}))
+    CLUSTER_NAMESPACE_COUNT.labels(cluster=cluster).set(len(ns_co2))
 
     # Self-monitoring metrics
     GREENKUBE_METRICS_TOTAL.set(len(metrics))
@@ -365,6 +444,22 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     latest_ts = max((m.timestamp for m in metrics if m.timestamp), default=None)
     if latest_ts:
         GREENKUBE_LAST_COLLECTION_TIMESTAMP.set(latest_ts.timestamp())
+
+    # --- Sustainability Golden Signal ---
+    # Energy-weighted average carbon intensity across the cluster
+    weighted_avg = total_weighted_intensity / total_energy if total_energy > 0 else 0.0
+    CARBON_INTENSITY_SCORE.labels(cluster=cluster).set(round(weighted_avg, 2))
+
+    # Per-zone intensity
+    for zone, intensity in zone_intensities.items():
+        CARBON_INTENSITY_ZONE.labels(cluster=cluster, zone=zone).set(intensity)
+
+    # Comprehensive sustainability score (0-100, 100 = best)
+    scorer = SustainabilityScorer()
+    score_result = scorer.compute(metrics)
+    SUSTAINABILITY_SCORE.labels(cluster=cluster).set(score_result.overall_score)
+    for dim, dim_score in score_result.dimension_scores.items():
+        SUSTAINABILITY_DIMENSION_SCORE.labels(cluster=cluster, dimension=dim).set(dim_score)
 
     logger.debug("Updated Prometheus cluster metrics with %d pod metrics.", len(metrics))
 

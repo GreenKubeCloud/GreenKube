@@ -57,12 +57,18 @@
       "id": "gauge",
       "name": "Gauge",
       "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "state-timeline",
+      "name": "State timeline",
+      "version": ""
     }
   ],
   "id": null,
   "uid": "greenkube-fingreenops",
   "title": "GreenKube FinGreenOps Dashboard",
-  "description": "Comprehensive FinGreenOps dashboard for Kubernetes — CO2 emissions, cloud costs, energy, CPU/memory, network, nodes, grid intensity, and optimization recommendations.",
+  "description": "Comprehensive FinGreenOps dashboard for Kubernetes \u2014 CO2 emissions, cloud costs, energy, CPU/memory, network, nodes, grid intensity, and optimization recommendations.",
   "tags": [
     "greenkube",
     "fingreenops",
@@ -82,7 +88,7 @@
   },
   "refresh": "5m",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "links": [
     {
       "title": "GreenKube Docs",
@@ -107,6 +113,54 @@
         "regex": "",
         "skipUrlSync": false,
         "label": "Prometheus"
+      },
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(greenkube_cluster_co2e_grams_total, cluster)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "label": "Cluster"
+      },
+      {
+        "name": "region",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(greenkube_pod_co2e_grams, region)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "label": "Region"
       },
       {
         "name": "namespace",
@@ -177,7 +231,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "🌍 Cluster Overview",
+      "title": "\ud83c\udfaf Sustainability Golden Signal",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -185,12 +239,509 @@
         "x": 0,
         "y": 0
       },
+      "id": 200,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Carbon Intensity Score",
+      "description": "Energy-weighted average grid carbon intensity (gCO\u2082e/kWh). This is the Sustainability Golden Signal \u2014 lower is better. Green = clean grid, red = dirty grid.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 201,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 50
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 300
+              },
+              {
+                "color": "dark-red",
+                "value": 500
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "displayName": "gCO\u2082e/kWh"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "greenkube_carbon_intensity_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Intensity Score",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Sustainability Score",
+      "description": "Comprehensive sustainability score (0\u2013100, higher is better). Aggregates resource efficiency, carbon intensity, waste elimination, node efficiency, scaling practices, carbon-aware scheduling, and stability.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 6,
+        "y": 1
+      },
+      "id": 202,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              },
+              {
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "displayName": "Score"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Score",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Carbon Intensity Score Timeline",
+      "description": "Track the sustainability golden signal over time. Identify low-intensity windows (green) ideal for scheduling batch workloads and carbon-aware scaling.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 14,
+        "x": 10,
+        "y": 1
+      },
+      "id": 203,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 30,
+            "gradientMode": "scheme",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            },
+            "axisCenteredZero": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "displayName": "Score (gCO\u2082e/kWh)"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "greenkube_carbon_intensity_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Cluster Intensity Score",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Carbon Intensity by Zone Timeline",
+      "description": "Real-time carbon intensity per electricity zone. Highlights low-intensity windows across different regions for carbon-aware scheduling decisions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "id": 204,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            },
+            "axisCenteredZero": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "displayName": "gCO\u2082e/kWh"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "min",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "greenkube_carbon_intensity_zone{cluster=~\"$cluster\"}",
+          "legendFormat": "{{ zone }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Sustainability Dimensions",
+      "description": "Per-dimension sustainability scores (0\u2013100). Resource Efficiency, Carbon Efficiency (grid intensity \u00d7 PUE), Waste Elimination, Node Efficiency, Scaling Practices, Carbon-Aware Scheduling, Stability.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 205,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              },
+              {
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "greenkube_sustainability_dimension_score{cluster=~\"$cluster\"}",
+          "legendFormat": "{{ dimension }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sustainability Score Timeline",
+      "description": "Track the overall sustainability score over time. Higher is better (100 = perfectly optimized cluster).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 206,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 30,
+            "gradientMode": "scheme",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            },
+            "axisCenteredZero": false,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 20
+              },
+              {
+                "color": "orange",
+                "value": 40
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "#73BF69",
+                "value": 75
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "displayName": "Sustainability Score"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
+          "legendFormat": "Score",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "\ud83c\udf0d Cluster Overview",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
       "id": 100,
       "panels": []
     },
     {
       "type": "stat",
-      "title": "Total CO2 Emissions (gCO₂e)",
+      "title": "Total CO2 Emissions (gCO\u2082e)",
       "description": "Total operational carbon emissions across the entire cluster.",
       "datasource": {
         "type": "prometheus",
@@ -200,7 +751,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 1
+        "y": 15
       },
       "id": 1,
       "fieldConfig": {
@@ -250,7 +801,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_co2e_grams_total)",
+          "expr": "sum(greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"})",
           "legendFormat": "CO2e",
           "refId": "A"
         }
@@ -258,7 +809,7 @@
     },
     {
       "type": "stat",
-      "title": "Embodied Carbon (gCO₂e)",
+      "title": "Embodied Carbon (gCO\u2082e)",
       "description": "Total embodied carbon emissions from hardware manufacturing.",
       "datasource": {
         "type": "prometheus",
@@ -268,7 +819,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 1
+        "y": 15
       },
       "id": 2,
       "fieldConfig": {
@@ -314,7 +865,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_embodied_co2e_grams_total)",
+          "expr": "sum(greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"})",
           "legendFormat": "Embodied",
           "refId": "A"
         }
@@ -332,7 +883,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 1
+        "y": 15
       },
       "id": 3,
       "fieldConfig": {
@@ -378,7 +929,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_cost_dollars_total)",
+          "expr": "sum(greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"})",
           "legendFormat": "Cost",
           "refId": "A"
         }
@@ -396,7 +947,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 1
+        "y": 15
       },
       "id": 4,
       "fieldConfig": {
@@ -442,7 +993,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_energy_joules_total)",
+          "expr": "sum(greenkube_cluster_energy_joules_total{cluster=~\"$cluster\"})",
           "legendFormat": "Energy",
           "refId": "A"
         }
@@ -460,7 +1011,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 1
+        "y": 15
       },
       "id": 5,
       "fieldConfig": {
@@ -498,7 +1049,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_pod_count)",
+          "expr": "sum(greenkube_cluster_pod_count{cluster=~\"$cluster\"})",
           "legendFormat": "Pods",
           "refId": "A"
         }
@@ -516,7 +1067,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 1
+        "y": 15
       },
       "id": 6,
       "fieldConfig": {
@@ -554,7 +1105,7 @@
       },
       "targets": [
         {
-          "expr": "sum(greenkube_cluster_namespace_count)",
+          "expr": "sum(greenkube_cluster_namespace_count{cluster=~\"$cluster\"})",
           "legendFormat": "Namespaces",
           "refId": "A"
         }
@@ -562,20 +1113,20 @@
     },
     {
       "type": "row",
-      "title": "🌱 Carbon Emissions",
+      "title": "\ud83c\udf31 Carbon Emissions",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 19
       },
       "id": 101,
       "panels": []
     },
     {
       "type": "timeseries",
-      "title": "CO2 Emissions by Namespace (gCO₂e)",
+      "title": "CO2 Emissions by Namespace (gCO\u2082e)",
       "description": "Operational CO2e per namespace over time.",
       "datasource": {
         "type": "prometheus",
@@ -585,7 +1136,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 20
       },
       "id": 10,
       "fieldConfig": {
@@ -644,7 +1195,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 6
+        "y": 20
       },
       "id": 11,
       "fieldConfig": {
@@ -687,7 +1238,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Embodied Carbon by Namespace (gCO₂e)",
+      "title": "Embodied Carbon by Namespace (gCO\u2082e)",
       "description": "Embodied CO2e per namespace.",
       "datasource": {
         "type": "prometheus",
@@ -697,7 +1248,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 6
+        "y": 20
       },
       "id": 12,
       "fieldConfig": {
@@ -756,7 +1307,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 28
       },
       "id": 13,
       "fieldConfig": {
@@ -805,13 +1356,13 @@
     },
     {
       "type": "row",
-      "title": "💰 Cloud Cost",
+      "title": "\ud83d\udcb0 Cloud Cost",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 36
       },
       "id": 102,
       "panels": []
@@ -828,7 +1379,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 23
+        "y": 37
       },
       "id": 20,
       "fieldConfig": {
@@ -887,7 +1438,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 23
+        "y": 37
       },
       "id": 21,
       "fieldConfig": {
@@ -940,7 +1491,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 23
+        "y": 37
       },
       "id": 22,
       "fieldConfig": {
@@ -989,13 +1540,13 @@
     },
     {
       "type": "row",
-      "title": "⚡ Energy Consumption",
+      "title": "\u26a1 Energy Consumption",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 45
       },
       "id": 103,
       "panels": []
@@ -1012,7 +1563,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 46
       },
       "id": 30,
       "fieldConfig": {
@@ -1061,7 +1612,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Grid Carbon Intensity (gCO₂/kWh)",
+      "title": "Grid Carbon Intensity (gCO\u2082/kWh)",
       "description": "Real-time grid carbon intensity per pod/node.",
       "datasource": {
         "type": "prometheus",
@@ -1071,7 +1622,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 32
+        "y": 46
       },
       "id": 31,
       "fieldConfig": {
@@ -1130,7 +1681,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 32
+        "y": 46
       },
       "id": 32,
       "fieldConfig": {
@@ -1187,13 +1738,13 @@
     },
     {
       "type": "row",
-      "title": "🖥️ CPU & Memory Resources",
+      "title": "\ud83d\udda5\ufe0f CPU & Memory Resources",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 54
       },
       "id": 104,
       "panels": []
@@ -1210,7 +1761,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 41
+        "y": 55
       },
       "id": 40,
       "fieldConfig": {
@@ -1274,7 +1825,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 41
+        "y": 55
       },
       "id": 41,
       "fieldConfig": {
@@ -1338,7 +1889,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 63
       },
       "id": 42,
       "fieldConfig": {
@@ -1405,7 +1956,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 63
       },
       "id": 43,
       "fieldConfig": {
@@ -1462,13 +2013,13 @@
     },
     {
       "type": "row",
-      "title": "🌐 Network & Disk I/O",
+      "title": "\ud83c\udf10 Network & Disk I/O",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 71
       },
       "id": 105,
       "panels": []
@@ -1485,7 +2036,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 72
       },
       "id": 50,
       "fieldConfig": {
@@ -1544,7 +2095,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 72
       },
       "id": 51,
       "fieldConfig": {
@@ -1603,7 +2154,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 80
       },
       "id": 52,
       "fieldConfig": {
@@ -1662,7 +2213,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 80
       },
       "id": 53,
       "fieldConfig": {
@@ -1711,13 +2262,13 @@
     },
     {
       "type": "row",
-      "title": "🖧 Node Infrastructure",
+      "title": "\ud83d\udda7 Node Infrastructure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 88
       },
       "id": 106,
       "panels": []
@@ -1734,7 +2285,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 75
+        "y": 89
       },
       "id": 60,
       "fieldConfig": {
@@ -1846,7 +2397,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 83
+        "y": 97
       },
       "id": 61,
       "fieldConfig": {
@@ -1899,7 +2450,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 83
+        "y": 97
       },
       "id": 62,
       "fieldConfig": {
@@ -1942,13 +2493,13 @@
     },
     {
       "type": "row",
-      "title": "💡 Optimization Recommendations & Savings",
+      "title": "\ud83d\udca1 Optimization Recommendations & Savings",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 105
       },
       "id": 107,
       "panels": []
@@ -1965,7 +2516,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 92
+        "y": 106
       },
       "id": 70,
       "fieldConfig": {
@@ -2029,7 +2580,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 92
+        "y": 106
       },
       "id": 71,
       "fieldConfig": {
@@ -2083,7 +2634,7 @@
     },
     {
       "type": "stat",
-      "title": "Potential CO2 Savings (gCO₂e)",
+      "title": "Potential CO2 Savings (gCO\u2082e)",
       "description": "Total potential CO2e savings from all active recommendations.",
       "datasource": {
         "type": "prometheus",
@@ -2093,7 +2644,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 92
+        "y": 106
       },
       "id": 72,
       "fieldConfig": {
@@ -2157,7 +2708,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 96
+        "y": 110
       },
       "id": 73,
       "fieldConfig": {
@@ -2218,7 +2769,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 96
+        "y": 110
       },
       "id": 74,
       "fieldConfig": {
@@ -2267,13 +2818,13 @@
     },
     {
       "type": "row",
-      "title": "📊 Namespace Deep-Dive",
+      "title": "\ud83d\udcca Namespace Deep-Dive",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 104
+        "y": 118
       },
       "id": 108,
       "panels": []
@@ -2290,7 +2841,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 105
+        "y": 119
       },
       "id": 80,
       "fieldConfig": {
@@ -2343,7 +2894,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 105
+        "y": 119
       },
       "id": 81,
       "fieldConfig": {
@@ -2362,7 +2913,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "CO2 (gCO₂e)"
+                "value": "CO2 (gCO\u2082e)"
               },
               {
                 "id": "unit",
@@ -2424,7 +2975,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "CO2 (gCO₂e)",
+            "displayName": "CO2 (gCO\u2082e)",
             "desc": true
           }
         ],

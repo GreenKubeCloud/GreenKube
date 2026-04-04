@@ -38,6 +38,9 @@ class Config:
         self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
         self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
 
+        # --- Cluster identification ---
+        self.CLUSTER_NAME = os.getenv("CLUSTER_NAME", "")
+
         # --- Default variables ---
         self.DEFAULT_COST = 0.0
         self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
