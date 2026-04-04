@@ -366,12 +366,12 @@ async def test_processor_combines_data_correctly(mock_translator, data_processor
         timestamp=SAMPLE_ENERGY_METRICS[2].timestamp,
         pue=1.09,
     )
-    # Call 4 (pod-D) - uses default zone, unknown node -> default PUE
+    # Call 4 (pod-D) - uses default zone, unknown node -> DEFAULT_PUE env-var fallback (1.3)
     mock_calculator.calculate_emissions.assert_any_call(
         joules=SAMPLE_ENERGY_METRICS[3].joules,
         zone=config.DEFAULT_ZONE,  # Used because node/zone mapping failed
         timestamp=SAMPLE_ENERGY_METRICS[3].timestamp,
-        pue=config.DEFAULT_PUE,
+        pue=1.3,  # Raw DEFAULT_PUE env-var fallback, not the cloud provider's profile
     )
 
 
@@ -481,7 +481,7 @@ async def test_processor_uses_default_zone_when_node_zone_missing(
             joules=energy_metric.joules,
             zone=config.DEFAULT_ZONE,  # <<< ASSERTION: Default zone used
             timestamp=energy_metric.timestamp,
-            pue=config.DEFAULT_PUE,
+            pue=1.3,  # No node info → no provider → raw DEFAULT_PUE env-var fallback
         )
 
     # Verify NodeCollector was called

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Report page in the web dashboard:** New `/report` route in the SvelteKit SPA — a full-featured report builder that lets users configure time range (1 h → 1 y), namespace filter, aggregation (hourly/daily/weekly/monthly/yearly) and export format (CSV or JSON), preview totals before downloading, then trigger a direct browser download — no CLI or `kubectl exec` required.
+- **`GET /api/v1/report/summary` endpoint:** Returns a preview of the report (row count, unique pods/namespaces, CO₂e, embodied CO₂e, energy, cost) for the current filter/aggregation parameters.
+- **`GET /api/v1/report/export` endpoint:** Streams a downloadable file (CSV or JSON) with correct `Content-Disposition` headers. Supports the same `namespace`, `last`, `aggregate`, and `granularity` parameters as the CLI `greenkube report` command.
+- **`ReportSummaryResponse` schema:** New Pydantic response model in `api/schemas.py`.
+
+### Fixed
+- **PUE fallback for unknown node provider:** `Config.get_pue_for_provider()` now falls back to the raw `DEFAULT_PUE` environment variable (default **1.3**) when a node's cloud provider is absent or not in `DATACENTER_PUE_PROFILES`, instead of incorrectly re-resolving through `self.DEFAULT_PUE` (which returns the *configured* `CLOUD_PROVIDER`'s profile — e.g. AWS=1.15 — even for unrelated unknown nodes). The `estimation_reasons` message now correctly reports **1.3** for unknown providers.
+- **`CLOUD_PROVIDER` default changed from `aws` to `unknown`:** The env var and `helm-chart/values.yaml` previously defaulted to `"aws"`, silently applying AWS's PUE profile (1.15) on clusters where no cloud provider was configured. The default is now `"unknown"`, which correctly triggers the `DEFAULT_PUE` fallback (1.3) and produces an explicit warning log instead of a silent wrong value.
+- **Settings page API status indicator:** The health dot was always red because the condition checked `health.status === 'healthy'` while the API returns `"ok"`. Fixed to `health.status === 'ok'`.
+
+### Sustainability Score engine (previous unreleased entry)
 - **Sustainability Score engine:** New `SustainabilityScorer` class (`src/greenkube/core/sustainability_score.py`) computes a composite **0–100 score** (100 = perfect cluster) across seven weighted dimensions:
   - **Resource Efficiency (25%)** — CPU and memory utilisation vs. requests
   - **Carbon Efficiency (20%)** — energy-weighted `grid_intensity × PUE`; penalises both dirty grids *and* inefficient datacentres equally

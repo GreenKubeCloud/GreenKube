@@ -202,6 +202,7 @@ The dashboard includes:
 - **Metrics** — Interactive table with sortable and searchable per-pod metrics including energy, cost, and all resource consumption data (CPU, memory, network, disk, storage)
 - **Nodes** — Cluster node inventory with CPU/memory capacity bars, hardware profiles, cloud provider info, and carbon zones
 - **Recommendations** — Actionable optimization suggestions (zombie pods, rightsizing opportunities) with estimated savings in cost and CO₂e
+- **Report** — Configure, preview and export a FinGreenOps report: choose time range, namespace, aggregation (hourly/daily/weekly/monthly/yearly) and download as **CSV** or **JSON** directly from the browser — no CLI access required
 - **Settings** — Current configuration, API health status, version info, and database connection details
 
 ### 🎨 Dashboard Features
@@ -304,6 +305,8 @@ The API is available at `/api/v1` and serves both JSON endpoints and the web das
 | `GET /api/v1/namespaces` | List of active namespaces |
 | `GET /api/v1/nodes` | Cluster node inventory |
 | `GET /api/v1/recommendations?namespace=` | Optimization recommendations |
+| `GET /api/v1/report/summary?namespace=&last=24h&aggregate=true&granularity=daily` | Report preview (row count + totals) |
+| `GET /api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily` | Download report as **CSV** or **JSON** |
 
 Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 
@@ -326,6 +329,16 @@ curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
 
 # Get optimization recommendations
 curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+
+# Preview a report (row count + totals) before downloading
+curl "http://localhost:8000/api/v1/report/summary?last=30d&aggregate=true&granularity=daily"
+# {"total_rows":450,"total_co2e_grams":8234.5,"total_cost":12.34,...}
+
+# Download a CSV report for the last 7 days, aggregated daily
+curl -O -J "http://localhost:8000/api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily"
+
+# Download a raw JSON report for a specific namespace
+curl -O -J "http://localhost:8000/api/v1/report/export?format=json&last=30d&namespace=production"
 ```
 
 ## 📈 Running Reports & Getting Recommendations
