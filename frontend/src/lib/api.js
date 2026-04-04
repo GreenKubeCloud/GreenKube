@@ -89,3 +89,35 @@ export function getNodes() {
 export function getRecommendations({ namespace } = {}) {
 	return request(`${BASE}/recommendations`, { namespace });
 }
+
+/**
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @param {boolean} [opts.aggregate]
+ * @param {string} [opts.granularity]
+ * @returns {Promise<Object>}
+ */
+export function getReportSummary({ namespace, last, aggregate, granularity } = {}) {
+	return request(`${BASE}/report/summary`, { namespace, last, aggregate: aggregate || undefined, granularity });
+}
+
+/**
+ * Build the URL for report export (used for direct browser download).
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @param {boolean} [opts.aggregate]
+ * @param {string} [opts.granularity]
+ * @param {string} [opts.format]
+ * @returns {string}
+ */
+export function buildReportExportUrl({ namespace, last, aggregate, granularity, format } = {}) {
+	const url = new URL(`${BASE}/report/export`, window.location.origin);
+	if (namespace) url.searchParams.set('namespace', namespace);
+	if (last) url.searchParams.set('last', last);
+	if (aggregate) url.searchParams.set('aggregate', 'true');
+	if (granularity) url.searchParams.set('granularity', granularity);
+	if (format) url.searchParams.set('format', format);
+	return url.toString();
+}

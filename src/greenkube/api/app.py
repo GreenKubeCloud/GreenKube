@@ -30,7 +30,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import config as config_router
-from greenkube.api.routers import metrics, namespaces, nodes, recommendations
+from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
 from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
+    app.include_router(report.router, prefix="/api/v1", tags=["Report"])
 
     # Prometheus metrics endpoint for Grafana dashboards
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.

@@ -356,6 +356,15 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 - `GET /api/v1/namespaces` — Active namespaces list
 - `GET /api/v1/nodes` — Node inventory
 - `GET /api/v1/recommendations` — Optimization suggestions
+- `GET /api/v1/report/summary` — Report preview (row count, totals, unique pods/namespaces)
+- `GET /api/v1/report/export` — Stream a report file (CSV or JSON) for direct browser download
+
+**Report export query parameters:**
+- `format` — `csv` (default) or `json`
+- `last` — time range string (`1h`, `24h`, `7d`, `30d`, `1y`, etc.)
+- `namespace` — filter to a single namespace
+- `aggregate` — `true` to aggregate by (namespace, pod, period)
+- `granularity` — grouping when aggregate=true: `hourly`, `daily`, `weekly`, `monthly`, `yearly`
 
 #### **SvelteKit Dashboard**
 - **Location:** `frontend/`
@@ -370,13 +379,14 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 - `/metrics` — Interactive metrics table
 - `/nodes` — Node inventory
 - `/recommendations` — Optimization recommendations
+- `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
 - `/settings` — Configuration and system info
 
 **Features:**
 - Client-side routing for smooth navigation
 - Responsive design (mobile-first)
 - Real-time data updates (polling)
-- Export functionality (CSV, JSON)
+- Export functionality (CSV, JSON) — both from the Report page and via the CLI
 - Theme support (light/dark)
 
 #### **CLI**
@@ -756,7 +766,6 @@ Follow conventional commits:
 **Enhanced Reporting:**
 - CSRD/ESRS E1 compliant templates
 - Multi-tenant isolation
-- Custom report builder
 - PDF/Excel export
 
 ### Extension Points
