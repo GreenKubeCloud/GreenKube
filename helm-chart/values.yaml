@@ -27,6 +27,9 @@ rbac:
 config:
   logLevel: INFO
   cloudProvider: aws
+  # Cluster name for multi-cluster environments. Used as the `cluster` label
+  # in Prometheus metrics so you can filter/join across clusters in Grafana.
+  clusterName: ""
   defaultZone: FR
   defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
   # Normalization granularity for carbon intensity lookups.

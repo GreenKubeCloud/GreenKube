@@ -54,6 +54,7 @@ def mock_settings_env_vars(monkeypatch):
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
     monkeypatch.setenv("CLOUD_PROVIDER", "aws")
     monkeypatch.setenv("DEFAULT_ZONE", "FR")
+    monkeypatch.setenv("CLUSTER_NAME", "")
 
     # Reload the singleton so all attributes pick up the patched env vars.
     config.reload()
