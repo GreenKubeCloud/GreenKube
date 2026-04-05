@@ -1,0 +1,257 @@
+suite: deployment
+templates:
+  - templates/deployment.yaml
+  - templates/configmap.yaml
+  - templates/secret.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Basic rendering
+  # --------------------------------------------------------------------------
+  - it: should render a Deployment by default
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: apiVersion
+          value: apps/v1
+
+  - it: should default to 1 replica
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: should honour replicaCount override
+    set:
+      replicaCount: 3
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  # --------------------------------------------------------------------------
+  # Image
+  # --------------------------------------------------------------------------
+  - it: should use the correct image with default tag
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^greenkube/greenkube:"
+
+  - it: should respect a custom image tag
+    set:
+      image.tag: "1.2.3"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube:1.2.3"
+
+  # --------------------------------------------------------------------------
+  # Collector container (first container)
+  # --------------------------------------------------------------------------
+  - it: collector container should run greenkube start
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["greenkube"]
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: ["start"]
+
+  # --------------------------------------------------------------------------
+  # API container (second container, enabled by default)
+  # --------------------------------------------------------------------------
+  - it: should render the API container when api.enabled is true
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].command
+          value: ["greenkube-api"]
+
+  - it: API container should expose the configured port
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].ports[0].containerPort
+          value: 8000
+
+  - it: should not render the API container when api.enabled is false
+    set:
+      config.api.enabled: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+
+  # --------------------------------------------------------------------------
+  # Liveness / Readiness probes
+  # --------------------------------------------------------------------------
+  - it: should configure liveness probe on API container
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].livenessProbe.httpGet.path
+          value: /api/v1/health
+      - equal:
+          path: spec.template.spec.containers[1].livenessProbe.httpGet.port
+          value: http-api
+      - equal:
+          path: spec.template.spec.containers[1].livenessProbe.initialDelaySeconds
+          value: 10
+
+  - it: should configure readiness probe on API container
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].readinessProbe.httpGet.path
+          value: /api/v1/health
+      - equal:
+          path: spec.template.spec.containers[1].readinessProbe.initialDelaySeconds
+          value: 5
+
+  - it: should omit liveness probe when disabled
+    set:
+      config.api.livenessProbe.enabled: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[1].livenessProbe
+
+  # --------------------------------------------------------------------------
+  # Volumes — postgres mode (default)
+  # --------------------------------------------------------------------------
+  - it: should mount the secrets volume
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: secrets
+            secret:
+              secretName: RELEASE-NAME-greenkube
+
+  - it: should not add a data volume in postgres mode
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir: {}
+
+  # --------------------------------------------------------------------------
+  # SQLite mode
+  # --------------------------------------------------------------------------
+  - it: should set fsGroup when using sqlite
+    set:
+      config.db.type: sqlite
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 1000
+
+  - it: should mount data volume from emptyDir in sqlite mode without persistence
+    set:
+      config.db.type: sqlite
+      config.persistence.enabled: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir: {}
+
+  - it: should mount data volume from PVC in sqlite mode with persistence enabled
+    set:
+      config.db.type: sqlite
+      config.persistence.enabled: true
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            persistentVolumeClaim:
+              claimName: RELEASE-NAME-greenkube
+
+  - it: should not set fsGroup in postgres mode
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - isNull:
+          path: spec.template.spec.securityContext
+
+  # --------------------------------------------------------------------------
+  # Service account binding
+  # --------------------------------------------------------------------------
+  - it: should set serviceAccountName when serviceAccount.create is true
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-greenkube
+
+  - it: should not set serviceAccountName when serviceAccount.create is false
+    set:
+      serviceAccount.create: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - isNull:
+          path: spec.template.spec.serviceAccountName
+
+  # --------------------------------------------------------------------------
+  # Resource requests/limits
+  # --------------------------------------------------------------------------
+  - it: should apply default resource requests on collector container
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 128Mi
+
+  - it: should honour custom resource limits
+    set:
+      resources.limits.cpu: 2000m
+      resources.limits.memory: 1Gi
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.cpu
+          value: 2000m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi

@@ -68,7 +68,7 @@ class NodeCollector(BaseCollector):
                 node_name = node.metadata.name
                 labels = node.metadata.labels or {}
 
-                cloud_provider = self._detect_cloud_provider(labels)
+                cloud_provider = self._detect_cloud_provider(labels, node)
                 instance_type = self._extract_instance_type(labels, node, cloud_provider)
 
                 zone = labels.get("topology.kubernetes.io/zone") or labels.get("failure-domain.beta.kubernetes.io/zone")
@@ -148,9 +148,9 @@ class NodeCollector(BaseCollector):
             for name, info in nodes.items()
         }
 
-    def _detect_cloud_provider(self, labels: dict) -> str:
+    def _detect_cloud_provider(self, labels: dict, node=None) -> str:
         """
-        Detect the cloud provider from node labels.
+        Detect the cloud provider from node labels and, optionally, providerID.
         """
         # Check for OVH-specific labels.
         # OVH Managed Kubernetes Service (MKS) uses two label prefixes depending
@@ -177,9 +177,16 @@ class NodeCollector(BaseCollector):
         if any(key.startswith("cloud.google.com/") for key in labels.keys()):
             return "gcp"
 
-        # Check ProviderID patterns (fallback)
-        # This would require accessing node.spec.providerID, but we only have labels here
-        # So we return unknown if no cloud-specific labels are found
+        # Check for Scaleway Kapsule labels (k8s.scaleway.com/* prefix)
+        if any(key.startswith("k8s.scaleway.com/") for key in labels.keys()):
+            return "scaleway"
+
+        # Fallback: inspect node.spec.provider_id for Scaleway's "scaleway://" scheme
+        if node is not None:
+            provider_id = getattr(getattr(node, "spec", None), "provider_id", None) or ""
+            if provider_id.startswith("scaleway://"):
+                return "scaleway"
+
         return "unknown"
 
     def _extract_instance_type(self, labels: dict, node, cloud_provider: str) -> str:
@@ -239,6 +246,9 @@ class NodeCollector(BaseCollector):
             return labels.get("eks.amazonaws.com/nodegroup")
         elif cloud_provider == "gcp":
             return labels.get("cloud.google.com/gke-nodepool")
+        elif cloud_provider == "scaleway":
+            # Scaleway Kapsule exposes the pool name and ID via k8s.scaleway.com labels
+            return labels.get("k8s.scaleway.com/nodepool-name") or labels.get("k8s.scaleway.com/nodepool-id")
 
         return None
 

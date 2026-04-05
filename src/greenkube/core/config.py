@@ -43,7 +43,7 @@ class Config:
 
         # --- Default variables ---
         self.DEFAULT_COST = 0.0
-        self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "FR")
+        self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "unknown")
         self.DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
         self.DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
 
@@ -261,12 +261,13 @@ class Config:
         if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
-        if not os.getenv("DEFAULT_ZONE"):
+        if self.DEFAULT_ZONE == "unknown":
             logging.warning(
-                "⚠️  DEFAULT_ZONE is not set. Defaulting to '%s'. "
-                "If your cluster is NOT in this region, carbon intensity data will be INACCURATE. "
-                "Set DEFAULT_ZONE to your Electricity Maps zone code (e.g., 'US-CAL-CISO', 'DE', 'GB').",
-                self.DEFAULT_ZONE,
+                "⚠️  DEFAULT_ZONE is not set (or set to 'unknown'). Carbon intensity will use the global "
+                "fallback (%s gCO2e/kWh) when zone auto-discovery fails, which may be INACCURATE. "
+                "Set DEFAULT_ZONE to your Electricity Maps zone code (e.g., 'FR', 'DE', 'US-CAL-CISO') "
+                "in values.yaml or via the DEFAULT_ZONE environment variable.",
+                self.DEFAULT_INTENSITY,
             )
 
     def reload(self) -> None:

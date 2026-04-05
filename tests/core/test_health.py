@@ -1,0 +1,474 @@
+# tests/core/test_health.py
+"""
+Tests for the health check service.
+"""
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+
+from greenkube.core.health import (
+    check_boavizta,
+    check_electricity_maps,
+    check_kubernetes,
+    check_opencost,
+    check_prometheus,
+    invalidate_health_cache,
+    run_health_checks,
+)
+from greenkube.models.health import ServiceHealth, ServiceStatus
+
+
+class TestCheckPrometheus:
+    """Tests for the Prometheus health check."""
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_no_discovery(self, monkeypatch):
+        """When PROMETHEUS_URL is empty and discovery fails, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("PROMETHEUS_URL", "")
+        config.reload()
+
+        with patch(
+            "greenkube.collectors.discovery.prometheus.PrometheusDiscovery.discover",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await check_prometheus(config)
+
+        assert result.status == ServiceStatus.UNCONFIGURED
+        assert result.name == "prometheus"
+        assert "not configured" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_healthy_configured(self, monkeypatch):
+        """When Prometheus responds with status=success, health is HEALTHY."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("PROMETHEUS_URL", "http://prometheus:9090")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "success"}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_prometheus(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+        assert result.configured is True
+        assert result.url == "http://prometheus:9090"
+        assert result.latency_ms is not None
+
+    @pytest.mark.asyncio
+    async def test_unreachable(self, monkeypatch):
+        """When Prometheus connection fails, status is UNREACHABLE."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("PROMETHEUS_URL", "http://prometheus:9090")
+        config.reload()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_prometheus(config)
+
+        assert result.status == ServiceStatus.UNREACHABLE
+        assert "cannot reach" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_degraded_non_200(self, monkeypatch):
+        """When Prometheus returns non-200, status is DEGRADED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("PROMETHEUS_URL", "http://prometheus:9090")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_prometheus(config)
+
+        assert result.status == ServiceStatus.DEGRADED
+
+
+class TestCheckOpenCost:
+    """Tests for the OpenCost health check."""
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_no_discovery(self, monkeypatch):
+        """When OPENCOST_API_URL is empty and discovery fails, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("OPENCOST_API_URL", "")
+        config.reload()
+
+        with patch(
+            "greenkube.collectors.discovery.opencost.OpenCostDiscovery.discover",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await check_opencost(config)
+
+        assert result.status == ServiceStatus.UNCONFIGURED
+        assert result.name == "opencost"
+
+    @pytest.mark.asyncio
+    async def test_healthy(self, monkeypatch):
+        """When OpenCost /healthz returns 200, status is HEALTHY."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("OPENCOST_API_URL", "http://opencost:9003")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_opencost(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+        assert result.configured is True
+
+
+class TestCheckElectricityMaps:
+    """Tests for the Electricity Maps health check."""
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_no_token(self, monkeypatch):
+        """When token is not set, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "")
+        config.reload()
+
+        result = await check_electricity_maps(config)
+        assert result.status == ServiceStatus.UNCONFIGURED
+        assert "token" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_healthy_with_token(self, monkeypatch):
+        """When API returns 200, status is HEALTHY."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "valid-token")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_electricity_maps(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_401(self, monkeypatch):
+        """When API returns 401, status is DEGRADED (bad token)."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "bad-token")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_electricity_maps(config)
+
+        assert result.status == ServiceStatus.DEGRADED
+        assert "401" in result.message
+
+
+class TestCheckBoavizta:
+    """Tests for the Boavizta health check."""
+
+    @pytest.mark.asyncio
+    async def test_unconfigured(self, monkeypatch):
+        """When Boavizta URL is empty, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("BOAVIZTA_API_URL", "")
+        config.reload()
+
+        result = await check_boavizta(config)
+        assert result.status == ServiceStatus.UNCONFIGURED
+
+    @pytest.mark.asyncio
+    async def test_healthy(self, monkeypatch):
+        """When Boavizta returns 200, status is HEALTHY."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_boavizta(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+
+
+class TestCheckKubernetes:
+    """Tests for the Kubernetes health check."""
+
+    @pytest.mark.asyncio
+    async def test_unreachable_no_client(self):
+        """When K8s client cannot be initialized, status is UNREACHABLE."""
+        with patch("greenkube.core.k8s_client.get_core_v1_api", new_callable=AsyncMock, return_value=None):
+            result = await check_kubernetes()
+
+        assert result.status == ServiceStatus.UNREACHABLE
+        assert "could not be initialized" in result.message.lower()
+
+
+class TestRunHealthChecks:
+    """Tests for the aggregated health check runner."""
+
+    @pytest.mark.asyncio
+    async def test_returns_all_services(self, monkeypatch):
+        """run_health_checks should return status for all services."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("PROMETHEUS_URL", "")
+        monkeypatch.setenv("OPENCOST_API_URL", "")
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "")
+        monkeypatch.setenv("BOAVIZTA_API_URL", "")
+        config.reload()
+
+        invalidate_health_cache()
+
+        # Mock all individual checks to return quickly
+        prom_health = ServiceHealth(
+            name="prometheus",
+            status=ServiceStatus.UNCONFIGURED,
+            message="Not configured.",
+            last_check=datetime.now(timezone.utc),
+        )
+        oc_health = ServiceHealth(
+            name="opencost",
+            status=ServiceStatus.UNCONFIGURED,
+            message="Not configured.",
+            last_check=datetime.now(timezone.utc),
+        )
+        emaps_health = ServiceHealth(
+            name="electricity_maps",
+            status=ServiceStatus.UNCONFIGURED,
+            message="Not configured.",
+            last_check=datetime.now(timezone.utc),
+        )
+        boavizta_health = ServiceHealth(
+            name="boavizta",
+            status=ServiceStatus.UNCONFIGURED,
+            message="Not configured.",
+            last_check=datetime.now(timezone.utc),
+        )
+        k8s_health = ServiceHealth(
+            name="kubernetes",
+            status=ServiceStatus.UNREACHABLE,
+            message="Not available.",
+            last_check=datetime.now(timezone.utc),
+        )
+
+        with (
+            patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, return_value=prom_health),
+            patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, return_value=oc_health),
+            patch("greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, return_value=emaps_health),
+            patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, return_value=boavizta_health),
+            patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, return_value=k8s_health),
+        ):
+            result = await run_health_checks(force=True)
+
+        assert result.version is not None
+        assert "prometheus" in result.services
+        assert "opencost" in result.services
+        assert "electricity_maps" in result.services
+        assert "boavizta" in result.services
+        assert "kubernetes" in result.services
+
+    @pytest.mark.asyncio
+    async def test_cache_is_used(self, monkeypatch):
+        """Second call within TTL should return cached result."""
+
+        invalidate_health_cache()
+
+        health = ServiceHealth(
+            name="prometheus",
+            status=ServiceStatus.HEALTHY,
+            message="OK",
+            last_check=datetime.now(timezone.utc),
+        )
+
+        call_count = 0
+
+        async def mock_check_prom(cfg):
+            nonlocal call_count
+            call_count += 1
+            return health
+
+        with (
+            patch("greenkube.core.health.check_prometheus", side_effect=mock_check_prom),
+            patch(
+                "greenkube.core.health.check_opencost",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="opencost",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_electricity_maps",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="electricity_maps",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_boavizta",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="boavizta",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_kubernetes",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="kubernetes",
+                    status=ServiceStatus.UNREACHABLE,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+        ):
+            await run_health_checks(force=True)
+            await run_health_checks(force=False)  # should use cache
+            assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_force_bypasses_cache(self, monkeypatch):
+        """force=True should bypass the cache."""
+
+        invalidate_health_cache()
+
+        call_count = 0
+
+        async def mock_check_prom(cfg):
+            nonlocal call_count
+            call_count += 1
+            return ServiceHealth(
+                name="prometheus",
+                status=ServiceStatus.HEALTHY,
+                message="OK",
+                last_check=datetime.now(timezone.utc),
+            )
+
+        with (
+            patch("greenkube.core.health.check_prometheus", side_effect=mock_check_prom),
+            patch(
+                "greenkube.core.health.check_opencost",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="opencost",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_electricity_maps",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="electricity_maps",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_boavizta",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="boavizta",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_kubernetes",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="kubernetes",
+                    status=ServiceStatus.UNREACHABLE,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+        ):
+            await run_health_checks(force=True)
+            await run_health_checks(force=True)
+            assert call_count == 2
+
+
+class TestInvalidateHealthCache:
+    """Tests for cache invalidation."""
+
+    def test_invalidate_resets_cache(self):
+        """invalidate_health_cache should reset the cached result."""
+        import greenkube.core.health as health_mod
+
+        health_mod._cached_result = "something"
+        health_mod._cached_at = 9999.0
+
+        invalidate_health_cache()
+
+        assert health_mod._cached_result is None
+        assert health_mod._cached_at == 0.0

@@ -1,12 +1,15 @@
 <script>
 	import '../app.css';
 	import { page } from '$app/stores';
-	import { sidebarCollapsed } from '$lib/stores.js';
-	import { getHealth } from '$lib/api.js';
+	import { sidebarCollapsed, servicesHealth, healthPopupDismissed } from '$lib/stores.js';
+	import { getHealth, getServicesHealth } from '$lib/api.js';
 	import { onMount } from 'svelte';
+	import HealthBadge from '$lib/components/HealthBadge.svelte';
+	import HealthPopup from '$lib/components/HealthPopup.svelte';
 
 	let health = null;
 	let healthError = false;
+	let showHealthPopup = false;
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard', icon: '📊' },
@@ -23,13 +26,65 @@
 		} catch {
 			healthError = true;
 		}
+
+		// Fetch services health on first load
+		try {
+			const result = await getServicesHealth();
+			servicesHealth.set(result);
+
+			// Show popup if there are connectivity issues
+			const services = result?.services || {};
+			const hasIssues = Object.values(services).some(
+				s => s.status === 'unreachable' || s.status === 'unconfigured'
+			);
+			if (hasIssues && !$healthPopupDismissed) {
+				showHealthPopup = true;
+			}
+		} catch (e) {
+			// Silently fail — health check is non-blocking
+		}
 	});
+
+	function handlePopupDismiss() {
+		showHealthPopup = false;
+		healthPopupDismissed.set(true);
+	}
+
+	function handlePopupUpdated(event) {
+		servicesHealth.set(event.detail);
+	}
 
 	function isActive(href, pathname) {
 		if (href === '/') return pathname === '/';
 		return pathname.startsWith(href);
 	}
+
+	// Compute sidebar health indicators from services health
+	$: svcData = $servicesHealth?.services || {};
+	$: worstStatus = (() => {
+		const statuses = Object.values(svcData).map(s => s.status);
+		if (statuses.includes('unreachable')) return 'unreachable';
+		if (statuses.includes('unconfigured')) return 'unconfigured';
+		if (statuses.includes('degraded')) return 'degraded';
+		if (statuses.length > 0) return 'healthy';
+		return null;
+	})();
+
+	const statusColors = {
+		healthy: 'bg-green-500',
+		degraded: 'bg-yellow-500',
+		unreachable: 'bg-red-500',
+		unconfigured: 'bg-dark-500'
+	};
 </script>
+
+<!-- Health Popup (shown once on first load if issues detected) -->
+<HealthPopup
+	services={$servicesHealth?.services}
+	visible={showHealthPopup}
+	on:dismiss={handlePopupDismiss}
+	on:updated={handlePopupUpdated}
+/>
 
 <div class="flex h-screen overflow-hidden">
 	<!-- Sidebar -->
@@ -66,7 +121,22 @@
 
 		<!-- Bottom section -->
 		<div class="p-3 border-t border-dark-700/50">
-			<!-- Health indicator -->
+			<!-- Service health indicators -->
+			{#if Object.keys(svcData).length > 0}
+				<div class="space-y-1 mb-2">
+					{#each Object.entries(svcData) as [name, svc]}
+						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
+							<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
+							            {svc.status === 'degraded' ? 'animate-pulse' : ''}"></div>
+							{#if !$sidebarCollapsed}
+								<span class="text-[10px] text-dark-500 truncate capitalize">{name.replace('_', ' ')}</span>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			<!-- API health indicator -->
 			<div class="flex items-center gap-2 px-2 py-1.5">
 				<div class="w-2 h-2 rounded-full flex-shrink-0
 				            {healthError ? 'bg-red-500' : health ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}">

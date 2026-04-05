@@ -1,0 +1,108 @@
+suite: postgres
+templates:
+  - templates/postgres-statefulset.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Conditional rendering
+  # --------------------------------------------------------------------------
+  - it: should render the Postgres StatefulSet when postgres.enabled is true
+    asserts:
+      - isKind:
+          of: StatefulSet
+
+  - it: should not render the StatefulSet when postgres.enabled is false
+    set:
+      postgres.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # --------------------------------------------------------------------------
+  # Image
+  # --------------------------------------------------------------------------
+  - it: should use the configured postgres image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "postgres:17-alpine"
+
+  - it: should honour a custom postgres image tag
+    set:
+      postgres.image.tag: "16-alpine"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "postgres:16-alpine"
+
+  # --------------------------------------------------------------------------
+  # Environment variables
+  # --------------------------------------------------------------------------
+  - it: should set POSTGRES_USER from values
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: POSTGRES_USER
+      - equal:
+          path: spec.template.spec.containers[0].env[0].value
+          value: greenkube
+
+  - it: should set POSTGRES_DB from values
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POSTGRES_DB
+            value: greenkube
+
+  - it: should load POSTGRES_PASSWORD from the secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-greenkube
+                key: POSTGRES_PASSWORD
+
+  # --------------------------------------------------------------------------
+  # Persistence
+  # --------------------------------------------------------------------------
+  - it: should use emptyDir when persistence is disabled
+    set:
+      postgres.persistence.enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir: {}
+
+  - it: should define volumeClaimTemplates when persistence is enabled
+    set:
+      postgres.persistence.enabled: true
+    asserts:
+      - isNotEmpty:
+          path: spec.volumeClaimTemplates
+      - equal:
+          path: spec.volumeClaimTemplates[0].spec.resources.requests.storage
+          value: 1Gi
+
+  - it: should honour a custom persistence size
+    set:
+      postgres.persistence.enabled: true
+      postgres.persistence.size: 10Gi
+    asserts:
+      - equal:
+          path: spec.volumeClaimTemplates[0].spec.resources.requests.storage
+          value: 10Gi
+
+  - it: should set the storageClassName when provided
+    set:
+      postgres.persistence.enabled: true
+      postgres.persistence.storageClassName: fast
+    asserts:
+      - equal:
+          path: spec.volumeClaimTemplates[0].spec.storageClassName
+          value: fast

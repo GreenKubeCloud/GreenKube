@@ -65,7 +65,7 @@ USER greenkube
 # Health check for standalone Docker usage (when running the API).
 # In Kubernetes, liveness/readiness probes from the Helm chart take precedence.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:' + __import__('os').environ.get('API_PORT', '8000') + '/api/v1/health')" || exit 1
 
 ENTRYPOINT ["greenkube"]
 

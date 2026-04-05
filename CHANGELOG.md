@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Scaleway Kapsule support in `NodeCollector`:** `_detect_cloud_provider` now recognises Scaleway nodes via `k8s.scaleway.com/*` labels (primary signal set by the Scaleway Cloud Controller Manager on every Kapsule node) and falls back to `node.spec.provider_id` starting with `scaleway://` for clusters where those labels may be absent. `_extract_node_pool` returns `k8s.scaleway.com/nodepool-name` (with `nodepool-id` as a fallback). Scaleway region mappings (`fr-par`, `nl-ams`, `pl-waw` → Electricity Maps zones) and PUE profile (`1.37`) were already present in the data layer and are now fully wired up.
+- **Collector health checks:** New `HealthCheckService` (`src/greenkube/core/health.py`) that performs periodic connectivity checks against all data sources — Prometheus, OpenCost, Electricity Maps, Boavizta, and Kubernetes. Each probe reports status (`healthy`, `degraded`, `unreachable`, `unconfigured`), latency, resolved URL, and whether the service was auto-discovered or manually configured.
+- **`GET /api/v1/health/services` endpoint:** Returns aggregated health status for all data sources with per-service details. Supports `?force=true` to bypass the 30-second cache and trigger fresh probes.
+- **`GET /api/v1/health/services/{service_name}` endpoint:** Returns health status for a single named service.
+- **`POST /api/v1/config/services` endpoint:** Allows updating service URLs (Prometheus, OpenCost, Boavizta) and the Electricity Maps token at runtime from the frontend. Changes are session-scoped and do not persist across pod restarts.
+- **Health models:** New `ServiceHealth`, `HealthCheckResponse`, and `ServiceConfigUpdate` Pydantic models in `src/greenkube/models/health.py`.
+- **Frontend service health overview:** The Settings page now displays a color-coded health card for each data source (green=healthy, yellow=degraded, red=unreachable, gray=unconfigured) with latency, URL, and auto-discovery status.
+- **Frontend service configuration:** New "Configure Services" section on the Settings page allows users to override Prometheus URL, OpenCost URL, Electricity Maps token, and Boavizta URL directly from the browser — with immediate health re-check feedback.
+- **Frontend startup health popup:** On first load, if any data source is unreachable or unconfigured, a modal popup alerts the user and offers inline fields to configure the missing service URLs/tokens.
+- **Sidebar health indicators:** The sidebar now shows per-service health dots for all data sources, giving an at-a-glance overview of system health from any page.
+- **`HealthBadge` component:** Reusable Svelte component (`frontend/src/lib/components/HealthBadge.svelte`) for color-coded service health indicators.
+- **`HealthPopup` component:** Modal component (`frontend/src/lib/components/HealthPopup.svelte`) for first-connection service configuration.
+- **Health check caching:** Results are cached for 30 seconds to avoid hammering external services on repeated page loads.
+- **CI/CD CLI flags:** New `--no-color` flag (and `NO_COLOR` env var support) to disable Rich formatting for clean pipeline logs. New `--fail-on-recommendations` flag on `greenkube recommend` to exit with code 1 when recommendations are found. New `--fail-on-co2-threshold` and `--fail-on-cost-threshold` flags on `greenkube report` to enforce carbon/cost policy gates in CI/CD pipelines.
+- **Frontend test suite:** Comprehensive Vitest test suite (`frontend/tests/`) with 133 tests across 8 files covering all JS utility modules (formatters, API client, Svelte stores, ECharts option builders) and Svelte components (StatCard, Card, DataState, HealthBadge) using `@testing-library/svelte`. Added `npm test`, `npm run test:watch`, and `npm run test:coverage` scripts.
+- **Test coverage badges in README:** Added Python coverage (79%), frontend coverage (93%), and total tests (771 passed) shields.io badges at the top of the README.
+
 ## [0.2.6] — 2026-04-05
 
 ### Added

@@ -29,6 +29,43 @@ export function getHealth() {
 	return request(`${BASE}/health`);
 }
 
+/** @returns {Promise<{status: string, version: string, services: Object}>} */
+export function getServicesHealth(force = false) {
+	return request(`${BASE}/health/services`, { force: force || undefined });
+}
+
+/**
+ * @param {string} serviceName
+ * @param {boolean} [force]
+ * @returns {Promise<Object>}
+ */
+export function getServiceHealth(serviceName, force = false) {
+	return request(`${BASE}/health/services/${serviceName}`, { force: force || undefined });
+}
+
+/**
+ * Update service URLs/tokens at runtime.
+ * @param {Object} config
+ * @param {string} [config.prometheus_url]
+ * @param {string} [config.opencost_url]
+ * @param {string} [config.electricity_maps_token]
+ * @param {string} [config.boavizta_url]
+ * @returns {Promise<Object>}
+ */
+export async function updateServiceConfig(config) {
+	const url = new URL(`${BASE}/config/services`, window.location.origin);
+	const res = await fetch(url.toString(), {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(config)
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
 /** @returns {Promise<{version: string}>} */
 export function getVersion() {
 	return request(`${BASE}/version`);
