@@ -6,6 +6,7 @@ It aggregates all commands from the submodules (report, recommend, etc.)
 """
 
 import logging
+import os
 
 import typer
 
@@ -61,11 +62,18 @@ def main(
         is_eager=True,
         help="Show the version and exit.",
     ),
+    no_color: bool = typer.Option(
+        False,
+        "--no-color",
+        help="Disable colors and Rich formatting. Useful for CI/CD pipelines and log parsers.",
+        is_eager=True,
+    ),
 ):
     """
     GreenKube CLI main entry point.
     """
-    pass
+    if no_color or os.environ.get("NO_COLOR"):
+        os.environ["NO_COLOR"] = "1"
 
 
 # Register command sub-apps
