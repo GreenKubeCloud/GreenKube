@@ -4,6 +4,7 @@ A reporter that displays the final data in a formatted table in the console.
 """
 
 import logging
+import os
 from typing import List
 
 from rich.console import Console
@@ -18,10 +19,15 @@ logger = logging.getLogger(__name__)
 class ConsoleReporter(BaseReporter):
     """
     Renders FinGreenOps data to the console using the 'rich' library.
+
+    When the ``NO_COLOR`` environment variable is set (or the ``--no-color``
+    CLI flag is used), Rich markup and ANSI escape sequences are disabled so
+    that output is safe to consume in CI/CD log parsers.
     """
 
     def __init__(self):
-        self.console = Console()
+        no_color = bool(os.environ.get("NO_COLOR"))
+        self.console = Console(no_color=no_color, highlight=not no_color)
 
     def report(
         self,

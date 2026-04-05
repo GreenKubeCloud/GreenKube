@@ -75,6 +75,43 @@ async def handle_export(
         raise typer.Exit(code=1)
 
 
+def _check_ci_thresholds(
+    data: List[CombinedMetric],
+    fail_on_co2_threshold: Optional[float],
+    fail_on_cost_threshold: Optional[float],
+) -> None:
+    """
+    Evaluates CI/CD policy gates against the report data.
+
+    Exits with code 1 if any pod's metric exceeds the configured threshold.
+    Always runs *after* display so results are visible in pipeline logs.
+    """
+    violations: List[str] = []
+
+    if fail_on_co2_threshold is not None:
+        breached = [item for item in data if item.co2e_grams > fail_on_co2_threshold]
+        if breached:
+            for item in breached:
+                violations.append(
+                    f"CO2e gate: {item.pod_name} ({item.namespace}) "
+                    f"emits {item.co2e_grams:.2f}g > threshold {fail_on_co2_threshold}g"
+                )
+
+    if fail_on_cost_threshold is not None:
+        breached = [item for item in data if item.total_cost > fail_on_cost_threshold]
+        if breached:
+            for item in breached:
+                violations.append(
+                    f"Cost gate: {item.pod_name} ({item.namespace}) "
+                    f"costs ${item.total_cost:.4f} > threshold ${fail_on_cost_threshold}"
+                )
+
+    if violations:
+        for msg in violations:
+            logger.warning("CI/CD gate violated: %s", msg)
+        raise typer.Exit(code=1)
+
+
 @app.callback(invoke_without_command=True)
 def report(
     ctx: typer.Context,
@@ -120,6 +157,26 @@ def report(
             help="Update the database with the latest metrics before generating the report.",
         ),
     ] = False,
+    fail_on_co2_threshold: Annotated[
+        Optional[float],
+        typer.Option(
+            "--fail-on-co2-threshold",
+            help=(
+                "Exit with code 1 if any pod's CO2e (grams) exceeds this value. Useful as a CI/CD carbon policy gate."
+            ),
+            min=0.0,
+        ),
+    ] = None,
+    fail_on_cost_threshold: Annotated[
+        Optional[float],
+        typer.Option(
+            "--fail-on-cost-threshold",
+            help=(
+                "Exit with code 1 if any pod's total cost ($) exceeds this value. Useful as a CI/CD cost policy gate."
+            ),
+            min=0.0,
+        ),
+    ] = None,
 ):
     """
     Generate and export FinGreenOps reports.
@@ -183,6 +240,10 @@ def report(
                 # Default to console output
                 console_reporter = ConsoleReporter()
                 console_reporter.report(data=combined_data)
+
+            # CI/CD policy gates — evaluated after display so results are
+            # always visible before the process exits with a non-zero code.
+            _check_ci_thresholds(combined_data, fail_on_co2_threshold, fail_on_cost_threshold)
 
         except typer.Exit:
             raise

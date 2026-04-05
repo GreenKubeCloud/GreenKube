@@ -39,6 +39,13 @@ def recommend(
         bool,
         typer.Option("--live", help="Run the full processor pipeline live instead of reading from the database."),
     ] = False,
+    fail_on_recommendations: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-recommendations",
+            help="Exit with code 1 if any recommendations are found. Useful for CI/CD policy gates.",
+        ),
+    ] = False,
 ):
     """
     Analyzes data and provides optimization recommendations.
@@ -114,6 +121,15 @@ def recommend(
             console_reporter = ConsoleReporter()
             console_reporter.report_recommendations(recommendations)
 
+            if fail_on_recommendations and recommendations:
+                logger.warning(
+                    "CI/CD gate: %d recommendation(s) found. Exiting with code 1 (--fail-on-recommendations).",
+                    len(recommendations),
+                )
+                raise typer.Exit(code=1)
+
+        except typer.Exit:
+            raise
         except Exception as e:
             logger.error("An error occurred during recommendation generation: %s", e)
             logger.error("Recommendation generation failed: %s", traceback.format_exc())
