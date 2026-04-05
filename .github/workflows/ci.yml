@@ -44,6 +44,30 @@ jobs:
       - name: Run tests with pytest
         run: pytest
 
+  frontend-test:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
