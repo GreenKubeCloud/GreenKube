@@ -81,7 +81,7 @@ jobs:
           version: 'latest'
 
       - name: Install helm-unittest plugin
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version=0.7.2
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version=0.7.2 --verify=false
 
       - name: Lint Helm Chart
         run: helm lint ./helm-chart
