@@ -30,7 +30,9 @@ config:
   # Cluster name for multi-cluster environments. Used as the `cluster` label
   # in Prometheus metrics so you can filter/join across clusters in Grafana.
   clusterName: ''
-  defaultZone: FR
+  defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
+                  # Leave empty to let GreenKube auto-discover the zone from node labels.
+                  # Falls back to DEFAULT_INTENSITY (gCO2/kWh) if zone cannot be determined.
   defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
   # Normalization granularity for carbon intensity lookups.
   # Supported: "hour", "day", "none"
