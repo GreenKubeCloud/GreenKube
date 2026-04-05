@@ -1,0 +1,99 @@
+suite: services
+templates:
+  - templates/api-service.yaml
+  - templates/postgres-service.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # API Service
+  # --------------------------------------------------------------------------
+  - it: should render the API Service when api.enabled is true
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+
+  - it: should not render the API Service when api.enabled is false
+    set:
+      config.api.enabled: false
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: API Service should expose the configured port
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 8000
+      - equal:
+          path: spec.ports[0].targetPort
+          value: http-api
+
+  - it: API Service should be ClusterIP type
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+
+  - it: API Service port should reflect a custom api.port
+    set:
+      config.api.port: 9000
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 9000
+
+  - it: API Service selector should use selectorLabels
+    templates:
+      - templates/api-service.yaml
+    asserts:
+      - equal:
+          path: spec.selector["app.kubernetes.io/name"]
+          value: greenkube
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: app
+
+  # --------------------------------------------------------------------------
+  # Postgres Service
+  # --------------------------------------------------------------------------
+  - it: should render Postgres Service when postgres.enabled is true
+    templates:
+      - templates/postgres-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+
+  - it: should not render Postgres Service when postgres.enabled is false
+    set:
+      postgres.enabled: false
+    templates:
+      - templates/postgres-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: Postgres Service should expose port 5432
+    templates:
+      - templates/postgres-service.yaml
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 5432
+
+  - it: Postgres Service should be ClusterIP
+    templates:
+      - templates/postgres-service.yaml
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP

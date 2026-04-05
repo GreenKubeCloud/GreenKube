@@ -1,0 +1,127 @@
+suite: monitoring
+templates:
+  - templates/servicemonitor.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # ServiceMonitor — disabled by default
+  # --------------------------------------------------------------------------
+  - it: should not render ServiceMonitor when disabled
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render ServiceMonitor when enabled
+    set:
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+
+  - it: ServiceMonitor should use the configured namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: observability
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: observability
+
+  - it: ServiceMonitor should scrape /prometheus/metrics
+    set:
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /prometheus/metrics
+
+  - it: ServiceMonitor should use the configured scrape interval
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.interval: 1m
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 1m
+
+  - it: ServiceMonitor should include the label relabeling rules
+    set:
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.endpoints[0].metricRelabelings
+
+  - it: ServiceMonitor should carry kube-prometheus labels
+    set:
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/part-of"]
+          value: kube-prometheus
+
+  - it: ServiceMonitor should merge additionalLabels
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.additionalLabels:
+        release: prometheus
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: metadata.labels.release
+          value: prometheus
+
+  # --------------------------------------------------------------------------
+  # NetworkPolicy — disabled by default
+  # --------------------------------------------------------------------------
+  - it: should not render NetworkPolicy when disabled
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render NetworkPolicy when enabled
+    set:
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+
+  - it: NetworkPolicy should allow ingress from the configured prometheus namespace
+    set:
+      monitoring.networkPolicy.enabled: true
+      monitoring.networkPolicy.prometheusNamespace: observability
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: observability
+
+  - it: NetworkPolicy should open the API port
+    set:
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - equal:
+          path: spec.ingress[0].ports[0].port
+          value: 8000
