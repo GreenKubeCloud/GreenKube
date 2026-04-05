@@ -1,0 +1,180 @@
+suite: configmap
+templates:
+  - templates/configmap.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Kind / structure
+  # --------------------------------------------------------------------------
+  - it: should render a ConfigMap
+    asserts:
+      - isKind:
+          of: ConfigMap
+
+  - it: should include the chart labels
+    asserts:
+      - isNotEmpty:
+          path: metadata.labels["helm.sh/chart"]
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: greenkube
+
+  # --------------------------------------------------------------------------
+  # Core environment variables
+  # --------------------------------------------------------------------------
+  - it: should set LOG_LEVEL from values
+    asserts:
+      - equal:
+          path: data.LOG_LEVEL
+          value: "INFO"
+
+  - it: should reflect a custom log level
+    set:
+      config.logLevel: DEBUG
+    asserts:
+      - equal:
+          path: data.LOG_LEVEL
+          value: "DEBUG"
+
+  - it: should set DB_TYPE
+    asserts:
+      - equal:
+          path: data.DB_TYPE
+          value: "postgres"
+
+  - it: should reflect sqlite db type
+    set:
+      config.db.type: sqlite
+    asserts:
+      - equal:
+          path: data.DB_TYPE
+          value: "sqlite"
+
+  - it: should set CLOUD_PROVIDER
+    asserts:
+      - equal:
+          path: data.CLOUD_PROVIDER
+          value: "unknown"
+
+  - it: should set DEFAULT_INTENSITY
+    asserts:
+      - equal:
+          path: data.DEFAULT_INTENSITY
+          value: "500"
+
+  - it: should set Boavizta URL
+    asserts:
+      - equal:
+          path: data.BOAVIZTA_API_URL
+          value: "https://api.boavizta.org"
+
+  - it: should set NORMALIZATION_GRANULARITY
+    asserts:
+      - equal:
+          path: data.NORMALIZATION_GRANULARITY
+          value: "hour"
+
+  # --------------------------------------------------------------------------
+  # Prometheus config
+  # --------------------------------------------------------------------------
+  - it: should NOT include PROMETHEUS_URL when url is empty
+    asserts:
+      - isNull:
+          path: data.PROMETHEUS_URL
+
+  - it: should set PROMETHEUS_URL when provided
+    set:
+      config.prometheus.url: "http://prometheus:9090"
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_URL
+          value: "http://prometheus:9090"
+
+  - it: should set PROMETHEUS_QUERY_RANGE_STEP
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_QUERY_RANGE_STEP
+          value: "5m"
+
+  - it: should set PROMETHEUS_NODE_INSTANCE_LABEL
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_NODE_INSTANCE_LABEL
+          value: "label_node_kubernetes_io_instance_type"
+
+  # --------------------------------------------------------------------------
+  # OpenCost config
+  # --------------------------------------------------------------------------
+  - it: should NOT include OPENCOST_API_URL when url is empty
+    asserts:
+      - isNull:
+          path: data.OPENCOST_API_URL
+
+  - it: should set OPENCOST_API_URL when provided
+    set:
+      config.opencost.url: "http://opencost:9003"
+    asserts:
+      - equal:
+          path: data.OPENCOST_API_URL
+          value: "http://opencost:9003"
+
+  # --------------------------------------------------------------------------
+  # API config
+  # --------------------------------------------------------------------------
+  - it: should set API_PORT
+    asserts:
+      - equal:
+          path: data.API_PORT
+          value: "8000"
+
+  - it: should set CORS_ORIGINS
+    asserts:
+      - equal:
+          path: data.CORS_ORIGINS
+          value: "*"
+
+  - it: should set API_RATE_LIMIT
+    asserts:
+      - equal:
+          path: data.API_RATE_LIMIT
+          value: "60/minute"
+
+  - it: should omit API keys when api.enabled is false
+    set:
+      config.api.enabled: false
+    asserts:
+      - isNull:
+          path: data.API_HOST
+      - isNull:
+          path: data.API_PORT
+
+  # --------------------------------------------------------------------------
+  # Recommendation engine config
+  # --------------------------------------------------------------------------
+  - it: should set RECOMMENDATION_LOOKBACK_DAYS
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_LOOKBACK_DAYS
+          value: "7"
+
+  - it: should set RIGHTSIZING_CPU_THRESHOLD
+    asserts:
+      - equal:
+          path: data.RIGHTSIZING_CPU_THRESHOLD
+          value: "0.3"
+
+  # --------------------------------------------------------------------------
+  # Default zone (conditional key)
+  # --------------------------------------------------------------------------
+  - it: should NOT include DEFAULT_ZONE when empty
+    asserts:
+      - isNull:
+          path: data.DEFAULT_ZONE
+
+  - it: should set DEFAULT_ZONE when provided
+    set:
+      config.defaultZone: "FR"
+    asserts:
+      - equal:
+          path: data.DEFAULT_ZONE
+          value: "FR"

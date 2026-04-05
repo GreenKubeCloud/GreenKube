@@ -1,0 +1,123 @@
+suite: helpers and naming
+templates:
+  - templates/deployment.yaml
+  - templates/configmap.yaml
+  - templates/serviceaccount.yaml
+  - templates/pvc.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Default name (release name + chart name)
+  # --------------------------------------------------------------------------
+  - it: should generate fullname as release-chart when release name differs from chart
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube
+
+  - it: should use release name alone when it already contains the chart name
+    release:
+      name: greenkube
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: greenkube
+
+  # --------------------------------------------------------------------------
+  # nameOverride
+  # --------------------------------------------------------------------------
+  - it: should respect nameOverride
+    set:
+      nameOverride: myapp
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-myapp
+
+  # --------------------------------------------------------------------------
+  # fullnameOverride
+  # --------------------------------------------------------------------------
+  - it: should respect fullnameOverride
+    set:
+      fullnameOverride: custom-fullname
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: custom-fullname
+
+  - it: should truncate fullnameOverride to 63 chars
+    set:
+      fullnameOverride: "this-is-a-very-long-name-that-exceeds-sixty-three-characters-limit"
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: "^.{1,63}$"
+
+  # --------------------------------------------------------------------------
+  # Common labels
+  # --------------------------------------------------------------------------
+  - it: should include helm.sh/chart label on all resources
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: metadata.labels["helm.sh/chart"]
+          pattern: "^greenkube-"
+
+  - it: should include app.kubernetes.io/version label from Chart.AppVersion
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - isNotEmpty:
+          path: metadata.labels["app.kubernetes.io/version"]
+
+  - it: should include app.kubernetes.io/managed-by label
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm
+
+  # --------------------------------------------------------------------------
+  # PVC — SQLite persistence
+  # --------------------------------------------------------------------------
+  - it: should not render PVC in postgres mode
+    templates:
+      - templates/pvc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not render PVC when sqlite but persistence disabled
+    set:
+      config.db.type: sqlite
+      config.persistence.enabled: false
+    templates:
+      - templates/pvc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render PVC when sqlite and persistence enabled
+    set:
+      config.db.type: sqlite
+      config.persistence.enabled: true
+    templates:
+      - templates/pvc.yaml
+    asserts:
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: spec.resources.requests.storage
+          value: 1Gi

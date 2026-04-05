@@ -1,0 +1,123 @@
+suite: rbac
+templates:
+  - templates/serviceaccount.yaml
+  - templates/clusterrole.yaml
+  - templates/clusterrolebinding.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # ServiceAccount
+  # --------------------------------------------------------------------------
+  - it: should render a ServiceAccount when serviceAccount.create is true
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - isKind:
+          of: ServiceAccount
+
+  - it: should not render a ServiceAccount when serviceAccount.create is false
+    set:
+      serviceAccount.create: false
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should use a custom service account name when provided
+    set:
+      serviceAccount.name: my-sa
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: my-sa
+
+  # --------------------------------------------------------------------------
+  # ClusterRole
+  # --------------------------------------------------------------------------
+  - it: should render a ClusterRole when rbac.create is true
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - isKind:
+          of: ClusterRole
+
+  - it: should not render a ClusterRole when rbac.create is false
+    set:
+      rbac.create: false
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ClusterRole should grant read access to nodes, pods, services
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules[0].resources
+          content: nodes
+      - contains:
+          path: rules[0].resources
+          content: pods
+      - contains:
+          path: rules[0].resources
+          content: services
+      - contains:
+          path: rules[0].verbs
+          content: list
+
+  - it: ClusterRole should grant read access to HPAs
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules[1].resources
+          content: horizontalpodautoscalers
+      - contains:
+          path: rules[1].verbs
+          content: list
+
+  # --------------------------------------------------------------------------
+  # ClusterRoleBinding
+  # --------------------------------------------------------------------------
+  - it: should render a ClusterRoleBinding when rbac.create is true
+    templates:
+      - templates/clusterrolebinding.yaml
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+
+  - it: should not render a ClusterRoleBinding when rbac.create is false
+    set:
+      rbac.create: false
+    templates:
+      - templates/clusterrolebinding.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ClusterRoleBinding should reference the ClusterRole
+    templates:
+      - templates/clusterrolebinding.yaml
+    asserts:
+      - equal:
+          path: roleRef.kind
+          value: ClusterRole
+      - equal:
+          path: roleRef.name
+          value: RELEASE-NAME-greenkube
+
+  - it: ClusterRoleBinding should bind the ServiceAccount
+    templates:
+      - templates/clusterrolebinding.yaml
+    asserts:
+      - equal:
+          path: subjects[0].kind
+          value: ServiceAccount
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-greenkube
