@@ -244,3 +244,137 @@ async def test_init_fails_gracefully(mock_get_api):
 
     # Assert
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Scaleway detection tests
+# ---------------------------------------------------------------------------
+
+
+def _make_scaleway_node(name: str, labels: dict, provider_id: str = "", capacity_cpu: str = "4"):
+    """Create a mock node with Scaleway-style metadata."""
+    node = MagicMock(spec=client.V1Node)
+    node.metadata = MagicMock(spec=client.V1ObjectMeta)
+    node.metadata.name = name
+    node.metadata.labels = labels
+    node.spec = MagicMock()
+    node.spec.provider_id = provider_id
+    node.status = MagicMock()
+    node.status.capacity = {"cpu": capacity_cpu}
+    return node
+
+
+def test_detect_cloud_provider_scaleway_via_label():
+    """_detect_cloud_provider returns 'scaleway' when k8s.scaleway.com/* labels are present."""
+    collector = NodeCollector()
+    labels = {
+        "k8s.scaleway.com/nodepool-id": "abc-123",
+        "k8s.scaleway.com/nodepool-name": "default",
+        "node.kubernetes.io/instance-type": "DEV1-M",
+        "topology.kubernetes.io/zone": "fr-par-1",
+    }
+    assert collector._detect_cloud_provider(labels) == "scaleway"
+
+
+def test_detect_cloud_provider_scaleway_via_provider_id():
+    """_detect_cloud_provider falls back to providerID when no Scaleway labels exist."""
+    collector = NodeCollector()
+    labels = {
+        "node.kubernetes.io/instance-type": "DEV1-M",
+        "topology.kubernetes.io/zone": "fr-par-1",
+    }
+    node = _make_scaleway_node("scw-node", labels, provider_id="scaleway://instance/fr-par-1/uuid-1234")
+    assert collector._detect_cloud_provider(labels, node) == "scaleway"
+
+
+def test_detect_cloud_provider_unknown_without_node():
+    """_detect_cloud_provider returns 'unknown' with no cloud-specific labels and no node."""
+    collector = NodeCollector()
+    labels = {"kubernetes.io/hostname": "my-node"}
+    assert collector._detect_cloud_provider(labels) == "unknown"
+
+
+def test_extract_node_pool_scaleway_name_label():
+    """_extract_node_pool returns the pool name from k8s.scaleway.com/nodepool-name."""
+    collector = NodeCollector()
+    labels = {
+        "k8s.scaleway.com/nodepool-name": "my-pool",
+        "k8s.scaleway.com/nodepool-id": "pool-uuid-1234",
+    }
+    assert collector._extract_node_pool(labels, "scaleway") == "my-pool"
+
+
+def test_extract_node_pool_scaleway_id_fallback():
+    """_extract_node_pool falls back to nodepool-id when nodepool-name is absent."""
+    collector = NodeCollector()
+    labels = {"k8s.scaleway.com/nodepool-id": "pool-uuid-1234"}
+    assert collector._extract_node_pool(labels, "scaleway") == "pool-uuid-1234"
+
+
+def test_extract_node_pool_scaleway_none_when_no_labels():
+    """_extract_node_pool returns None when Scaleway pool labels are absent."""
+    collector = NodeCollector()
+    assert collector._extract_node_pool({}, "scaleway") is None
+
+
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_scaleway_node_full(mock_get_api):
+    """collect() correctly identifies a full Scaleway Kapsule node."""
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
+
+    scaleway_labels = {
+        "k8s.scaleway.com/nodepool-id": "pool-abc123",
+        "k8s.scaleway.com/nodepool-name": "default",
+        "node.kubernetes.io/instance-type": "DEV1-M",
+        "topology.kubernetes.io/zone": "fr-par-1",
+        "topology.kubernetes.io/region": "fr-par",
+        "kubernetes.io/arch": "amd64",
+    }
+    scw_node = _make_scaleway_node(
+        "scw-kapsule-node-1",
+        scaleway_labels,
+        provider_id="scaleway://instance/fr-par-1/uuid-deadbeef",
+    )
+
+    mock_api_instance.list_node = AsyncMock(return_value=client.V1NodeList(items=[scw_node]))
+
+    collector = NodeCollector()
+    result = await collector.collect()
+
+    assert "scw-kapsule-node-1" in result
+    node_info = result["scw-kapsule-node-1"]
+    assert node_info.cloud_provider == "scaleway"
+    assert node_info.instance_type == "DEV1-M"
+    assert node_info.zone == "fr-par-1"
+    assert node_info.region == "fr-par"
+    assert node_info.node_pool == "default"
+    assert node_info.architecture == "amd64"
+
+
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_scaleway_node_providerid_fallback(mock_get_api):
+    """collect() detects Scaleway via providerID when k8s.scaleway.com labels are absent."""
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
+
+    # Minimal labels — no k8s.scaleway.com/* present
+    labels = {
+        "node.kubernetes.io/instance-type": "GP1-XS",
+        "topology.kubernetes.io/zone": "nl-ams-1",
+        "topology.kubernetes.io/region": "nl-ams",
+    }
+    scw_node = _make_scaleway_node(
+        "scw-node-minimal",
+        labels,
+        provider_id="scaleway://instance/nl-ams-1/uuid-cafebabe",
+    )
+
+    mock_api_instance.list_node = AsyncMock(return_value=client.V1NodeList(items=[scw_node]))
+
+    collector = NodeCollector()
+    result = await collector.collect()
+
+    assert "scw-node-minimal" in result
+    assert result["scw-node-minimal"].cloud_provider == "scaleway"
+    assert result["scw-node-minimal"].instance_type == "GP1-XS"
