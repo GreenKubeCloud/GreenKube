@@ -349,6 +349,9 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 
 **Endpoints:**
 - `GET /api/v1/health` — Health check and version
+- `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Boavizta, Kubernetes)
+- `GET /api/v1/health/services/{name}` — Health status for a single data source
+- `POST /api/v1/config/services` — Update service URLs or tokens at runtime
 - `GET /api/v1/config` — Current configuration (sanitized secrets)
 - `GET /api/v1/metrics` — Per-pod metrics with filtering
 - `GET /api/v1/metrics/summary` — Aggregated totals
@@ -380,7 +383,7 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 - `/nodes` — Node inventory
 - `/recommendations` — Optimization recommendations
 - `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
-- `/settings` — Configuration and system info
+- `/settings` — Configuration, service health overview with color-coded status indicators, and runtime service configuration
 
 **Features:**
 - Client-side routing for smooth navigation
@@ -388,6 +391,9 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 - Real-time data updates (polling)
 - Export functionality (CSV, JSON) — both from the Report page and via the CLI
 - Theme support (light/dark)
+- **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
+- **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
+- **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps) can be updated from the Settings page without restarting the pod
 
 #### **CLI**
 - **Location:** `src/greenkube/cli/`
