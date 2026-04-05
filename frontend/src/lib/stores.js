@@ -15,3 +15,9 @@ export const timeRanges = [
 
 /** Sidebar state */
 export const sidebarCollapsed = writable(false);
+
+/** Services health state — populated on first load and refreshable */
+export const servicesHealth = writable(null);
+
+/** Whether the initial health check popup has been dismissed */
+export const healthPopupDismissed = writable(false);

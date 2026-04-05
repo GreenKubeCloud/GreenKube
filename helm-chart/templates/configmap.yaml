@@ -9,9 +9,11 @@ data:
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
-  DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
   DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
+  {{- if .Values.config.defaultZone }}
+  DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}
+  {{- end }}
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
   NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
   NODE_DATA_MAX_AGE_DAYS: {{ .Values.config.nodeDataMaxAgeDays | quote }}
