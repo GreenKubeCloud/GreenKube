@@ -125,6 +125,8 @@ jobs:
 
           mkdir -p /tmp/gh-pages/
           cp -r charts-packaged/*.tgz /tmp/gh-pages/
+          # Copy Artifact Hub repo metadata (must sit next to index.yaml)
+          cp artifacthub-repo.yml /tmp/gh-pages/artifacthub-repo.yml
 
           cd /tmp/gh-pages
           if [ -f "index.yaml" ]; then
@@ -135,6 +137,7 @@ jobs:
 
           git add -f *.tgz
           git add index.yaml
+          git add artifacthub-repo.yml
 
           if git diff --cached --quiet; then
             echo "No changes to publish"

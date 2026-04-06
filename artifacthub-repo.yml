@@ -1,0 +1,9 @@
+# Artifact Hub repository metadata file
+# This file must be served at the root of the Helm repository (same level as index.yaml).
+# It enables the "Verified Publisher" badge on Artifact Hub once the repositoryID is set.
+
+repositoryID: "2d55808d-2ebd-40b5-a0e9-41d6db40aa1b"
+
+owners:
+  - name: Hugo Lelievre
+    email: hugo.lelievre@greenkube.cloud

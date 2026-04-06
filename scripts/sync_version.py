@@ -30,13 +30,20 @@ def update_readme(version):
 
 
 def update_helm_chart_yaml(version):
-    """Updates the version in helm-chart/Chart.yaml."""
+    """Updates the version in helm-chart/Chart.yaml, including ArtifactHub image annotation."""
     yaml = YAML()
     with open("helm-chart/Chart.yaml", "r") as f:
         chart = yaml.load(f)
 
     chart["version"] = version
     chart["appVersion"] = version
+
+    # Keep the artifacthub.io/images annotation in sync with the new version
+    if "annotations" in chart and "artifacthub.io/images" in chart["annotations"]:
+        chart["annotations"]["artifacthub.io/images"] = (
+            f"- name: greenkube\n  image: greenkube/greenkube:{version}\n"
+            "  platforms:\n    - linux/amd64\n    - linux/arm64\n"
+        )
 
     with open("helm-chart/Chart.yaml", "w") as f:
         yaml.dump(chart, f)

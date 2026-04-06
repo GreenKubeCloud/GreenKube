@@ -11,15 +11,39 @@ version = "0.2.7"
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]
-description = "Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure."
+description = "Open-source FinGreenOps platform for Kubernetes - measure CO2e emissions, energy usage, cloud costs, and get optimization recommendations."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
+keywords = [
+    "kubernetes",
+    "carbon",
+    "co2",
+    "sustainability",
+    "finops",
+    "greenops",
+    "fingreenops",
+    "carbon-footprint",
+    "cloud-cost",
+    "prometheus",
+    "energy",
+    "csrd",
+    "esrs",
+    "k8s",
+    "devops",
+    "sre",
+    "green-software",
+    "carbon-monitoring",
+    "cloud-sustainability",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
     "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -27,7 +51,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
 ]
 
 # Production dependencies
@@ -67,8 +96,12 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/GreenKubeCloud/GreenKube"
+"Homepage" = "https://greenkube.cloud"
+"Documentation" = "https://greenkube.cloud/docs/"
+"Repository" = "https://github.com/GreenKubeCloud/GreenKube"
 "Bug Tracker" = "https://github.com/GreenKubeCloud/GreenKube/issues"
+"Changelog" = "https://github.com/GreenKubeCloud/GreenKube/blob/main/CHANGELOG.md"
+"Docker Hub" = "https://hub.docker.com/r/greenkube/greenkube"
 
 # CLI entry point
 # This creates the `greenkube` command in the user's terminal
