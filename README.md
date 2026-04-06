@@ -136,6 +136,10 @@ This deploys GreenKube with the collector, API server, web dashboard, and Postgr
 |-------|----------------|
 | ![Nodes](assets/demo-nodes.png) | ![Recommendations](assets/demo-recommendations.png) |
 
+| Report | Settings |
+|--------|---------|
+| ![Report](assets/demo-report.png) | ![Settings](assets/demo-settings.png) |
+
 ### 2. Access the Dashboard
 
 ```bash
