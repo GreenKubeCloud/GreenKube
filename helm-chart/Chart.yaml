@@ -1,11 +1,88 @@
 apiVersion: v2
 name: greenkube
-description: A Helm chart for GreenKube to measure, understand, and reduce the 
-  carbon footprint of your Kubernetes infrastructure.
+description: >-
+  GreenKube is an open-source FinGreenOps platform for Kubernetes. Measure,
+  report (CSRD/ESRS E1), and optimize the carbon footprint and cloud costs of
+  your workloads. Provides real-time CO₂e metrics, energy estimation, cost
+  optimization recommendations, Grafana dashboard, and a REST API — deployable
+  in minutes with a single Helm install.
 type: application
-icon: 
-  https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
+icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
 version: 0.2.7
 appVersion: 0.2.7
+keywords:
+  - greenkube
+  - finops
+  - greenops
+  - fingreenops
+  - carbon
+  - co2
+  - sustainability
+  - kubernetes
+  - monitoring
+  - energy
+  - csrd
+  - esrs
+  - carbon-footprint
+  - cloud-cost
+  - prometheus
+  - grafana
+  - opencost
+home: https://greenkube.cloud
+sources:
+  - https://github.com/GreenKubeCloud/GreenKube
+maintainers:
+  - name: Hugo Lelievre
+    email: hugo.lelievre@greenkube.cloud
+    url: https://github.com/GreenKubeCloud
+annotations:
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/recommendations: |
+    - url: https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack
+    - url: https://artifacthub.io/packages/helm/opencost/opencost
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://greenkube.cloud/docs/
+    - name: GitHub
+      url: https://github.com/GreenKubeCloud/GreenKube
+    - name: Docker Hub
+      url: https://hub.docker.com/r/greenkube/greenkube
+    - name: support
+      url: https://github.com/GreenKubeCloud/GreenKube/issues
+  artifacthub.io/maintainers: |
+    - name: Hugo Lelievre
+      email: hugo.lelievre@greenkube.cloud
+  artifacthub.io/images: |
+    - name: greenkube
+      image: greenkube/greenkube:0.2.7
+      platforms:
+        - linux/amd64
+        - linux/arm64
+  artifacthub.io/screenshots: |
+    - title: Real-time CO₂e & Energy Dashboard
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
+    - title: Per-Pod Metrics Table
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-metrics.png
+    - title: Node Inventory
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
+    - title: Optimization Recommendations
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-recommendations.png
+    - title: Report Builder & Export
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
+    - title: Settings & Service Health
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
+  artifacthub.io/changes: |
+    - kind: added
+      description: Sustainability Score (0–100) composite metric across 7 dimensions
+    - kind: added
+      description: Historical analysis with daily/monthly/yearly grouping
+    - kind: added
+      description: Carbon-aware scheduling recommendations
+    - kind: added
+      description: Database migration system for PostgreSQL and SQLite
+    - kind: changed
+      description: Improved auto-discovery for Prometheus and OpenCost
 
 
