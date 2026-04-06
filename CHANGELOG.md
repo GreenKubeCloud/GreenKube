@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Artifact Hub listing:** `helm-chart/Chart.yaml` enriched with full Artifact Hub annotations — `artifacthub.io/category`, `artifacthub.io/screenshots` (6 screenshots), `artifacthub.io/links` (docs, GitHub, Docker Hub, support), `artifacthub.io/recommendations` (kube-prometheus-stack, opencost), `artifacthub.io/changes`, `artifacthub.io/images` (linux/amd64 + linux/arm64), `artifacthub.io/maintainers`. Chart now includes `keywords`, `home`, `sources`, and `maintainers` fields for richer search indexing.
+- **`artifacthub-repo.yml`:** Artifact Hub repository metadata file with `repositoryID` for Verified Publisher badge. Automatically copied to `gh-pages` by the release workflow alongside `index.yaml`.
+- **`llms.txt`** (`greenkube-website/public/`): LLM/AI crawler guidance file following the [llms.txt](https://llmstxt.org/) convention — enables AI assistants (Claude, ChatGPT, Perplexity) to understand GreenKube when crawling the website.
+- **New dashboard screenshots:** `assets/demo-report.png` and `assets/demo-settings.png` added to README, `Chart.yaml` Artifact Hub screenshots, and `llms.txt`.
+
+### Changed
+- **`pyproject.toml`:** Added 20 SEO keywords, 5 new PyPI classifiers, and 4 additional project URLs (Documentation, Changelog, Docker Hub, Repository).
+- **`release.yml`:** Release workflow now copies `artifacthub-repo.yml` to `gh-pages` on every release so Artifact Hub always picks up the latest metadata.
+- **`scripts/sync_version.py`:** `update_helm_chart_yaml()` now also keeps the `artifacthub.io/images` annotation in sync with the new version on each release.
+
 ## [0.2.7] — 2026-04-05
 
 ### Added
@@ -183,7 +194,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CSV and JSON export
 - SQLite storage backend
 
-[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.7...v0.2.8
+[0.2.7]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.5...v0.2.7
 [0.2.5]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/GreenKubeCloud/GreenKube/compare/v0.2.2...v0.2.3
