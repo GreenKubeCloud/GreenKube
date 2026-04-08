@@ -53,17 +53,29 @@ async def collect_carbon_intensity_for_all_zones() -> None:
             logger.warning("No node zones discovered.")
             return
 
-        unique_zone_providers = {
-            (node_info.zone, node_info.cloud_provider) for node_info in nodes_info.values() if node_info.zone
+        # Collect unique (zone, region, provider) tuples for mapping.
+        unique_zone_region_providers = {
+            (node_info.zone, node_info.region, node_info.cloud_provider)
+            for node_info in nodes_info.values()
+            if node_info.zone or node_info.region
         }
         emaps_zones: Set[str] = set()
-        for cz, provider in unique_zone_providers:
-            emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
+        for cz, region, provider in unique_zone_region_providers:
+            emz = None
+            # Try zone first
+            if cz:
+                emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
+            # Fallback to region (mirrors NodeZoneMapper logic)
+            if not emz and region:
+                emz = get_emaps_zone_from_cloud_zone(region, provider=provider)
             if emz and emz != "unknown":
                 emaps_zones.add(emz)
             else:
                 logger.warning(
-                    "Could not map cloud zone '%s' (provider: %s) to an Electricity Maps zone.", cz, provider
+                    "Could not map cloud zone '%s' or region '%s' (provider: %s) to an Electricity Maps zone.",
+                    cz,
+                    region,
+                    provider,
                 )
 
         if not emaps_zones:
@@ -160,10 +172,10 @@ async def _async_start(last: Optional[str]):
     logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
 
     scheduler = Scheduler()
-    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
+    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1, skip_initial=True)
 
-    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP)
-    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL)
+    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
+    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL, skip_initial=True)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")

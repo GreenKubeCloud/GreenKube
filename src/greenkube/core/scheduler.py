@@ -19,11 +19,22 @@ class Scheduler:
         self.tasks: List[asyncio.Task] = []
         logger.info("AsyncScheduler initialized.")
 
-    async def _run_periodically(self, interval_seconds: int, job_func: Callable[[], Coroutine]):
+    async def _run_periodically(
+        self,
+        interval_seconds: int,
+        job_func: Callable[[], Coroutine],
+        skip_initial: bool = False,
+    ):
         """Internal loop to run a job periodically with jitter and exponential backoff."""
         consecutive_failures = 0
+        first_run = True
         try:
             while True:
+                if first_run and skip_initial:
+                    first_run = False
+                    await asyncio.sleep(interval_seconds)
+                    continue
+                first_run = False
                 start = asyncio.get_event_loop().time()
                 try:
                     await job_func()
@@ -51,9 +62,19 @@ class Scheduler:
             logger.info("Job '%s' cancelled.", job_func.__name__)
             raise
 
-    def add_job(self, job_func: Callable[[], Coroutine], interval_hours: int = 0, interval_minutes: int = 0):
+    def add_job(
+        self,
+        job_func: Callable[[], Coroutine],
+        interval_hours: int = 0,
+        interval_minutes: int = 0,
+        skip_initial: bool = False,
+    ):
         """
         Adds a new async job to the schedule.
+
+        Args:
+            skip_initial: If True, the first execution is skipped (sleep first).
+                          Use this when you manually call the function at startup.
         """
         interval_seconds = 0
         if interval_hours > 0:
@@ -64,10 +85,10 @@ class Scheduler:
             logger.info("Scheduled job '%s' to run every %s minute(s).", job_func.__name__, interval_minutes)
 
         if interval_seconds > 0:
-            task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
+            task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
             self.tasks.append(task)
 
-    def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str):
+    def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str, skip_initial: bool = False):
         """
         Adds a job based on a Prometheus-style duration string like '5m' or '1h'.
         """
@@ -79,7 +100,7 @@ class Scheduler:
         multipliers = {"s": 1, "m": 60, "h": 3600}
         interval_seconds = value * multipliers[unit]
 
-        task = asyncio.create_task(self._run_periodically(interval_seconds, job_func))
+        task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
         self.tasks.append(task)
         logger.info("Scheduled job '%s' to run every %s.", job_func.__name__, interval_str)
 
