@@ -72,6 +72,11 @@ config:
     path: /data/greenkube_data.db
     # Database schema (only used if db.type is "postgres")
     schema: public
+    # Connection pool sizing (PostgreSQL only)
+    poolMinSize: 1
+    poolMaxSize: 10
+    # Statement timeout in milliseconds (prevents runaway queries)
+    statementTimeoutMs: 30000
 
   # Persistence configuration for SQLite
   persistence:
