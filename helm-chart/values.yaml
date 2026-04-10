@@ -49,10 +49,12 @@ config:
   # into hourly aggregates. Aligns with Electricity Maps hourly granularity.
   metricsCompressionAgeHours: 24
   # Maximum number of days to retain raw (uncompressed) 5-min metrics.
-  # Older raw rows are deleted after compression. Set 0 to disable deletion.
+  # Older raw rows are deleted after compression. Set -1 to disable deletion.
   metricsRawRetentionDays: 7
   # Maximum number of days to retain hourly aggregated metrics.
-  metricsAggregatedRetentionDays: 365
+  # Set -1 (default) to keep data indefinitely — required for multi-year
+  # comparison and CSRD/ESRS E1 yearly reporting.
+  metricsAggregatedRetentionDays: -1
 
   # Timeout in seconds for Kubernetes API calls (list_node, list_pod, etc.).
   # Prevents greenkube start from hanging indefinitely if the API server is slow.

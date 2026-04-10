@@ -315,36 +315,80 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> dict:
-        """SQL-level aggregation for summary — avoids loading all rows into Python."""
+        """SQL-level aggregation for summary — queries both raw and hourly tables."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
-                if namespace:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                # Raw table — only for data within the compression window
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
                         FROM combined_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2
-                          AND namespace = $3
-                    """
-                    row = await conn.fetchrow(query, start_time, end_time, namespace)
-                else:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
-                        FROM combined_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2
-                    """
-                    row = await conn.fetchrow(query, start_time, end_time)
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                # Hourly table — only for data before the compression cutoff
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return {
+                        "total_co2e_grams": 0.0,
+                        "total_embodied_co2e_grams": 0.0,
+                        "total_cost": 0.0,
+                        "total_energy_joules": 0.0,
+                        "pod_count": 0,
+                        "namespace_count": 0,
+                    }
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS total_energy,
+                        COUNT(DISTINCT pod_name)               AS pod_count,
+                        COUNT(DISTINCT namespace)              AS namespace_count
+                    FROM ({union_query}) AS combined
+                """
+                row = await conn.fetchrow(query, *params)
 
                 return {
                     "total_co2e_grams": row["total_co2e"] or 0.0,
@@ -365,7 +409,12 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         granularity: str = "hour",
         namespace: Optional[str] = None,
     ) -> list:
-        """SQL-level time-series aggregation — avoids loading all rows."""
+        """SQL-level time-series aggregation — queries both raw and hourly tables."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
         _PG_TRUNC = {
             "hour": "hour",
             "day": "day",
@@ -374,41 +423,71 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         }
         trunc_unit = _PG_TRUNC.get(granularity, "hour")
 
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
-                if namespace:
-                    query = f"""
-                        SELECT
-                            date_trunc('{trunc_unit}', timestamp) AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                # Raw table — recent data
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT timestamp AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_millicores, memory_usage_bytes
                         FROM combined_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2
-                          AND namespace = $3
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    rows = await conn.fetch(query, start_time, end_time, namespace)
-                else:
-                    query = f"""
-                        SELECT
-                            date_trunc('{trunc_unit}', timestamp) AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
-                        FROM combined_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    rows = await conn.fetch(query, start_time, end_time)
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                # Hourly table — old data
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT hour_bucket AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_avg AS cpu_usage_millicores,
+                               memory_usage_avg AS memory_usage_bytes
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        date_trunc('{trunc_unit}', ts) AS ts_bucket,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS energy_joules,
+                        COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                        COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                    FROM ({union_query}) AS combined
+                    GROUP BY ts_bucket
+                    ORDER BY ts_bucket
+                """
+                rows = await conn.fetch(query, *params)
 
                 _FORMATS = {
                     "hour": "%Y-%m-%dT%H:00:00Z",

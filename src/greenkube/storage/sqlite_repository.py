@@ -357,40 +357,72 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         namespace: Optional[str] = None,
     ) -> dict:
         """
-        Aggregates summary metrics directly in SQLite (no Python-side row scan).
-        Significantly faster than loading all rows into CombinedMetric objects.
+        Aggregates summary metrics from both raw and hourly SQLite tables.
         """
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                if namespace:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                          AND namespace = ?
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
-                else:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat())
+                parts: list[str] = []
+                params: list = []
 
+                # Raw table — recent data
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                # Hourly table — old data
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return {
+                        "total_co2e_grams": 0.0,
+                        "total_embodied_co2e_grams": 0.0,
+                        "total_cost": 0.0,
+                        "total_energy_joules": 0.0,
+                        "pod_count": 0,
+                        "namespace_count": 0,
+                    }
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS total_energy,
+                        COUNT(DISTINCT pod_name)               AS pod_count,
+                        COUNT(DISTINCT namespace)              AS namespace_count
+                    FROM ({union_query})
+                """
                 async with conn.execute(query, params) as cursor:
                     row = await cursor.fetchone()
                     return {
@@ -413,10 +445,13 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         namespace: Optional[str] = None,
     ) -> List[dict]:
         """
-        Groups time-series data by granularity directly in SQLite.
-        Significantly faster than loading all rows into CombinedMetric objects.
+        Groups time-series data by granularity from both raw and hourly SQLite tables.
         """
-        # SQLite strftime format strings for each granularity
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
         _SQLITE_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
             "day": "%Y-%m-%dT00:00:00Z",
@@ -425,43 +460,62 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         }
         ts_format = _SQLITE_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
 
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                if namespace:
-                    query = f"""
-                        SELECT
-                            strftime('{ts_format}', "timestamp") AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                          AND namespace = ?
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
-                else:
-                    query = f"""
-                        SELECT
-                            strftime('{ts_format}', "timestamp") AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat())
+                parts: list[str] = []
+                params: list = []
 
+                # Raw table — recent data
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT "timestamp" AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_millicores, memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                # Hourly table — old data
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT hour_bucket AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_avg AS cpu_usage_millicores,
+                               memory_usage_avg AS memory_usage_bytes
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        strftime('{ts_format}', ts) AS ts_bucket,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS energy_joules,
+                        COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                        COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                    FROM ({union_query})
+                    GROUP BY ts_bucket
+                    ORDER BY ts_bucket
+                """
                 async with conn.execute(query, params) as cursor:
                     rows = await cursor.fetchall()
                     return [

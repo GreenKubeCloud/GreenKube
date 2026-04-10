@@ -232,9 +232,12 @@ class MetricsCompressor:
     # ------------------------------------------------------------------
 
     async def _prune_raw(self) -> int:
-        """Delete raw metrics older than METRICS_RAW_RETENTION_DAYS."""
+        """Delete raw metrics older than METRICS_RAW_RETENTION_DAYS.
+
+        Set to -1 to disable pruning (keep raw data indefinitely).
+        """
         retention_days = self._config.METRICS_RAW_RETENTION_DAYS
-        if retention_days <= 0:
+        if retention_days < 0:
             return 0
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
@@ -260,9 +263,12 @@ class MetricsCompressor:
                 return count
 
     async def _prune_hourly(self) -> int:
-        """Delete hourly aggregates older than METRICS_AGGREGATED_RETENTION_DAYS."""
+        """Delete hourly aggregates older than METRICS_AGGREGATED_RETENTION_DAYS.
+
+        Set to -1 to disable pruning (keep aggregated data indefinitely).
+        """
         retention_days = self._config.METRICS_AGGREGATED_RETENTION_DAYS
-        if retention_days <= 0:
+        if retention_days < 0:
             return 0
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)

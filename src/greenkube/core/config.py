@@ -124,10 +124,12 @@ class Config:
         # into hourly aggregates. Default 24h aligns with Electricity Maps granularity.
         self.METRICS_COMPRESSION_AGE_HOURS = int(os.getenv("METRICS_COMPRESSION_AGE_HOURS", "24"))
         # Maximum number of raw (uncompressed) metrics days to retain.
-        # Older raw rows are deleted after compression. Set 0 to disable deletion.
+        # Older raw rows are deleted after compression. Set -1 to disable deletion.
         self.METRICS_RAW_RETENTION_DAYS = int(os.getenv("METRICS_RAW_RETENTION_DAYS", "7"))
         # Maximum total retention in days for hourly aggregated data.
-        self.METRICS_AGGREGATED_RETENTION_DAYS = int(os.getenv("METRICS_AGGREGATED_RETENTION_DAYS", "365"))
+        # Set -1 (default) to keep data indefinitely — required for multi-year
+        # comparison and CSRD/ESRS E1 yearly reporting.
+        self.METRICS_AGGREGATED_RETENTION_DAYS = int(os.getenv("METRICS_AGGREGATED_RETENTION_DAYS", "-1"))
 
         # --- Kubernetes client variables ---
         # Timeout (seconds) for individual Kubernetes API calls (e.g. list_node).
