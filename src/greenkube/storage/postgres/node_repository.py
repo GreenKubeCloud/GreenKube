@@ -9,9 +9,9 @@ import logging
 from datetime import datetime
 from typing import List
 
-from ..core.exceptions import QueryError
-from ..models.node import NodeInfo
-from ..storage.base_repository import NodeRepository
+from ...core.exceptions import QueryError
+from ...models.node import NodeInfo
+from ..base_repository import NodeRepository
 
 logger = logging.getLogger(__name__)
 

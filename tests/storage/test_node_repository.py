@@ -9,7 +9,7 @@ import pytest
 
 from greenkube.core.exceptions import QueryError
 from greenkube.models.node import NodeInfo
-from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
+from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
 
 # --- Fixtures ---
 
@@ -219,7 +219,7 @@ async def test_save_nodes_multiple_snapshots(node_repo, db_connection):
     # Let's patch datetime in the module
     from unittest.mock import patch
 
-    with patch("greenkube.storage.sqlite_node_repository.datetime") as mock_datetime:
+    with patch("greenkube.storage.sqlite.node_repository.datetime") as mock_datetime:
         # First save
         mock_datetime.now.return_value = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
         await node_repo.save_nodes(SAMPLE_NODES)

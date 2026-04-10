@@ -6,7 +6,7 @@ import aiosqlite
 import pytest
 
 from greenkube.models.node import NodeInfo
-from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
+from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
 
 
 async def _create_test_db():

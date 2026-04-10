@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from greenkube.models.node import NodeInfo
-from greenkube.storage.elasticsearch_node_repository import (
+from greenkube.storage.elastic.node_repository import (
     ElasticsearchNodeRepository,
 )
 
@@ -15,7 +15,7 @@ from greenkube.storage.elasticsearch_node_repository import (
 
 @pytest.fixture
 def mock_connections():
-    with patch("greenkube.storage.elasticsearch_node_repository.connections") as mock:
+    with patch("greenkube.storage.elastic.node_repository.connections") as mock:
         mock_conn = MagicMock()
         mock_conn.ping = AsyncMock(return_value=True)
         mock.get_connection.return_value = mock_conn
@@ -25,7 +25,7 @@ def mock_connections():
 @pytest.fixture
 def mock_bulk():
     """Mock async_bulk."""
-    with patch("greenkube.storage.elasticsearch_node_repository.async_bulk", new_callable=AsyncMock) as mock:
+    with patch("greenkube.storage.elastic.node_repository.async_bulk", new_callable=AsyncMock) as mock:
         mock.return_value = (1, [])
         yield mock
 
@@ -124,7 +124,7 @@ async def test_get_snapshots(es_node_repo, mock_connections):
     mock_search.filter.return_value.sort.return_value.scan = MagicMock(side_effect=async_scan)
 
     # Patch NodeSnapshotDoc.search to return our mock search object
-    with patch("greenkube.storage.elasticsearch_node_repository.NodeSnapshotDoc.search", return_value=mock_search):
+    with patch("greenkube.storage.elastic.node_repository.NodeSnapshotDoc.search", return_value=mock_search):
         start = datetime(2023, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
         end = datetime(2023, 1, 1, 14, 0, 0, tzinfo=timezone.utc)
 
@@ -141,7 +141,7 @@ async def test_get_latest_snapshots_before(es_node_repo, mock_connections):
     """Test retrieving latest snapshots before timestamp."""
     # Mock search and aggregation response
     mock_search = MagicMock()
-    with patch("greenkube.storage.elasticsearch_node_repository.NodeSnapshotDoc.search", return_value=mock_search):
+    with patch("greenkube.storage.elastic.node_repository.NodeSnapshotDoc.search", return_value=mock_search):
         mock_response = MagicMock()
 
         # s.execute() is awaited

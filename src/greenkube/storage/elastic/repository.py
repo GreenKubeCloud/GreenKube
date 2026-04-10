@@ -24,9 +24,9 @@ from elasticsearch.exceptions import (
     TransportError,
 )
 
-from ..core.config import get_config
-from ..models.metrics import CombinedMetric
-from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ...core.config import get_config
+from ...models.metrics import CombinedMetric
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +131,8 @@ async def setup_elasticsearch():
         # Initialize indices
         # We need to import NodeSnapshotDoc here to avoid circular dependencies at top level if any,
         # or just to keep initialization logic centralized.
-        from .elasticsearch_node_repository import NodeSnapshotDoc
-        from .embodied_repository import InstanceCarbonProfileDoc
+        from ..embodied_repository import InstanceCarbonProfileDoc
+        from .node_repository import NodeSnapshotDoc
 
         await CarbonIntensityDoc.init()
         await CombinedMetricDoc.init()

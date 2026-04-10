@@ -42,7 +42,6 @@ flowchart TB
         subgraph Storage["Storage (Output Adapters)"]
             PG["PostgreSQL"]
             SQLite["SQLite"]
-            Elastic["Elasticsearch"]
         end
 
         subgraph Presentation["Presentation"]
@@ -112,7 +111,6 @@ The core business logic (`src/greenkube/core`) **NEVER** depends on a specific s
 Supported backends:
 - **PostgreSQL** (production): Full SQL features, transactional integrity, robust migrations
 - **SQLite** (development): Lightweight, file-based, perfect for local testing
-- **Elasticsearch** (scale): Time-series optimized, distributed, advanced analytics
 
 ### 2. Cloud Provider Agnosticism
 Cloud-specific details (AWS, GCP, Azure, OVH, Scaleway) are isolated in:
@@ -287,12 +285,6 @@ Implementations:
   - Schema: Same as PostgreSQL for compatibility
   - Migrations: ALTER TABLE with existence checks
 
-- **ElasticsearchCarbonIntensityRepository** (Scale/Analytics):
-  - Driver: `elasticsearch` (async client)
-  - Features: Time-series optimized, distributed, searchable
-  - Index: `carbon_intensity` with date-based partitioning
-  - Queries: DSL-based with aggregations support
-
 #### **NodeRepository**
 Abstract base class for node state snapshots.
 
@@ -305,10 +297,6 @@ Implementations:
 - **SQLiteNodeRepository:**
   - Same schema and features as PostgreSQL
   - Lightweight for single-node deployments
-
-- **ElasticsearchNodeRepository:**
-  - Document-based node snapshots
-  - Time-series queries with aggregations
 
 #### **CombinedMetricRepository**
 Stores final aggregated metrics (energy + carbon + cost + resources).
@@ -563,10 +551,9 @@ Used for reporting over time ranges with historical accuracy.
 All configuration flows through `src/greenkube/core/config.py`:
 
 **Database:**
-- `DB_TYPE` — postgres|sqlite|elasticsearch
+- `DB_TYPE` — postgres|sqlite
 - `DB_CONNECTION_STRING` — PostgreSQL connection URL
 - `DB_PATH` — SQLite file path
-- `ELASTICSEARCH_HOSTS` — ES cluster endpoints
 
 **External Services:**
 - `PROMETHEUS_URL` — Override auto-discovery
@@ -678,7 +665,6 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 
 ### Scalability
 - **PostgreSQL:** Handles 100K+ metrics/day with proper indexing
-- **Elasticsearch:** Designed for millions of metrics with sharding
 - **API:** FastAPI with async workers (Uvicorn)
 
 ## Testing Strategy

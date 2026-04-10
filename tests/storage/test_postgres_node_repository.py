@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.models.node import NodeInfo
-from greenkube.storage.postgres_node_repository import PostgresNodeRepository
+from greenkube.storage.postgres.node_repository import PostgresNodeRepository
 
 
 @pytest.fixture

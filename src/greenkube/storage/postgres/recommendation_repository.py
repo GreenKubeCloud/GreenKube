@@ -8,8 +8,8 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from greenkube.models.metrics import RecommendationRecord, RecommendationType
-from greenkube.storage.base_repository import RecommendationRepository
+from ...models.metrics import RecommendationRecord, RecommendationType
+from ..base_repository import RecommendationRepository
 
 logger = logging.getLogger(__name__)
 

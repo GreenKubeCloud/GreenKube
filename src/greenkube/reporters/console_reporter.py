@@ -32,8 +32,6 @@ class ConsoleReporter(BaseReporter):
     def report(
         self,
         data: List[CombinedMetric],
-        group_by: str = "namespace",
-        sort_by: str = "cost",
         recommendations: List[Recommendation] | None = None,
     ):
         """

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import aiosqlite
 import pytest
 
-from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository
 
 
 @pytest.fixture

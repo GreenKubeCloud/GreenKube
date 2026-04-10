@@ -12,7 +12,7 @@ from elasticsearch.exceptions import (
 )
 
 from greenkube.core.config import config
-from greenkube.storage.elasticsearch_repository import ElasticsearchCarbonIntensityRepository, setup_elasticsearch
+from greenkube.storage.elastic.repository import ElasticsearchCarbonIntensityRepository, setup_elasticsearch
 
 # Sample data for testing
 SAMPLE_HISTORY_DATA = [
@@ -60,7 +60,7 @@ def mock_es_connections_module():
     mock_conn.ping = AsyncMock(return_value=True)  # ping is awaited
 
     # Mock the connections module used by elasticsearch-dsl
-    with patch("greenkube.storage.elasticsearch_repository.connections") as mock_connections:
+    with patch("greenkube.storage.elastic.repository.connections") as mock_connections:
         # Configure get_connection to return our mock connection
         mock_connections.get_connection.return_value = mock_conn
         # Also mock create_connection used in setup_connection
@@ -72,7 +72,7 @@ def mock_es_connections_module():
 @pytest.fixture
 def mock_bulk_helper():
     """Fixture to mock the elasticsearch async_bulk helper."""
-    with patch("greenkube.storage.elasticsearch_repository.async_bulk", new_callable=AsyncMock) as mock_bulk:
+    with patch("greenkube.storage.elastic.repository.async_bulk", new_callable=AsyncMock) as mock_bulk:
         # Default success: return tuple (success_count, errors_list)
         # Simulate successful processing of all items
         mock_bulk.return_value = (len(SAMPLE_HISTORY_DATA), [])
@@ -105,10 +105,8 @@ def mock_carbon_intensity_doc():
 
     # Use patch.object for class methods like init and search
     with (
-        patch(
-            "greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init", new_callable=AsyncMock
-        ) as mock_init,
-        patch("greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.search") as mock_search,
+        patch("greenkube.storage.elastic.repository.CarbonIntensityDoc.init", new_callable=AsyncMock) as mock_init,
+        patch("greenkube.storage.elastic.repository.CarbonIntensityDoc.search") as mock_search,
     ):
         mock_search.return_value = mock_search_obj
         # Yield mocks and the search object for configuration in tests
@@ -133,7 +131,7 @@ async def test_repository_initialization_connection_error_ping(mock_carbon_inten
     mock_conn_fail.ping = AsyncMock(return_value=False)
     # Patch get_connection specifically for this test
     with patch(
-        "greenkube.storage.elasticsearch_repository.connections.get_connection",
+        "greenkube.storage.elastic.repository.connections.get_connection",
         return_value=mock_conn_fail,
     ):
         # We need to call setup_elasticsearch to trigger ping check.
@@ -151,7 +149,7 @@ async def test_repository_initialization_connection_error_ping(mock_carbon_inten
         # NOTE: The original test `test_repository_initialization_connection_error_ping` seemed to assume
         # something triggered connection setup.
         # `test_repository_initialization_connection_error_ping` in previous file used:
-        # `with patch("greenkube.storage.elasticsearch_repository.setup_connection"): ... importlib.reload...`
+        # `with patch("greenkube.storage.elastic.repository.setup_connection"): ... importlib.reload...`
         # It seems it was testing `setup_connection` logic IF it was called?
         # Or maybe `setup_connection` WAS called in older version.
 
@@ -291,7 +289,7 @@ async def test_setup_connection_success(mock_es_connections_module):
     # Arrange
     # Use the autouse fixture which mocks connections
     # Configure config for this specific test
-    with patch("greenkube.storage.elasticsearch_repository.get_config") as mock_get_config:
+    with patch("greenkube.storage.elastic.repository.get_config") as mock_get_config:
         mock_config = MagicMock()
         mock_config.ELASTICSEARCH_HOSTS = "http://testhost:9200"
         mock_config.ELASTICSEARCH_VERIFY_CERTS = True
@@ -302,9 +300,9 @@ async def test_setup_connection_success(mock_es_connections_module):
 
         # We also need to patch CarbonIntensityDoc and CombinedMetricDoc init so they don't fail
         with (
-            patch("greenkube.storage.elasticsearch_repository.CarbonIntensityDoc.init", new_callable=AsyncMock),
-            patch("greenkube.storage.elasticsearch_repository.CombinedMetricDoc.init", new_callable=AsyncMock),
-            patch("greenkube.storage.elasticsearch_node_repository.NodeSnapshotDoc.init", new_callable=AsyncMock),
+            patch("greenkube.storage.elastic.repository.CarbonIntensityDoc.init", new_callable=AsyncMock),
+            patch("greenkube.storage.elastic.repository.CombinedMetricDoc.init", new_callable=AsyncMock),
+            patch("greenkube.storage.elastic.node_repository.NodeSnapshotDoc.init", new_callable=AsyncMock),
             patch("greenkube.storage.embodied_repository.InstanceCarbonProfileDoc.init", new_callable=AsyncMock),
         ):
             await setup_elasticsearch()
@@ -344,7 +342,7 @@ async def test_setup_connection_transport_error():
     # Arrange
     # Patch create_connection to raise a TransportError
     with patch(
-        "greenkube.storage.elasticsearch_repository.connections.create_connection",
+        "greenkube.storage.elastic.repository.connections.create_connection",
         side_effect=TransportError("Host not found"),
     ):
         # Act & Assert
@@ -360,7 +358,7 @@ async def test_setup_connection_ping_fails(mock_es_connections_module):
     mock_es_connections_module["connection"].ping.return_value = False
     # Act & Assert
     with pytest.raises(ConnectionError):
-        import greenkube.storage.elasticsearch_repository as es_repo
+        import greenkube.storage.elastic.repository as es_repo
 
         await es_repo.setup_elasticsearch()
 

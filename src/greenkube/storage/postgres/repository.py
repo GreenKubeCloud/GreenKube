@@ -3,9 +3,9 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from ..core.exceptions import QueryError
-from ..models.metrics import CombinedMetric
-from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ...core.exceptions import QueryError
+from ...models.metrics import CombinedMetric
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 

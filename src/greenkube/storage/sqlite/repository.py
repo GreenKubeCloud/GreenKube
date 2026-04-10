@@ -9,8 +9,8 @@ import aiosqlite
 from greenkube.models.metrics import CombinedMetric
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
-from ..core.exceptions import QueryError
-from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ...core.exceptions import QueryError
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 

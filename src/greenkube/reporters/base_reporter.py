@@ -18,8 +18,6 @@ class BaseReporter(ABC):
     def report(
         self,
         data: List[CombinedMetric],
-        group_by: str = "namespace",
-        sort_by: str = "cost",
         recommendations=None,
     ):
         """

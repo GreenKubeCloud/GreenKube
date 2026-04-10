@@ -31,15 +31,15 @@ from ..storage.base_repository import (
     NodeRepository,
     RecommendationRepository,
 )
-from ..storage.elasticsearch_repository import (
+from ..storage.elastic.repository import (
     ElasticsearchCarbonIntensityRepository,
     ElasticsearchCombinedMetricsRepository,
 )
 from ..storage.embodied_repository import EmbodiedRepository
-from ..storage.postgres_node_repository import PostgresNodeRepository
-from ..storage.postgres_repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
-from ..storage.sqlite_node_repository import SQLiteNodeRepository
-from ..storage.sqlite_repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
+from ..storage.postgres.node_repository import PostgresNodeRepository
+from ..storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
+from ..storage.sqlite.node_repository import SQLiteNodeRepository
+from ..storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def get_node_repository() -> NodeRepository:
 
         return SQLiteNodeRepository(get_db_manager())
     elif cfg.DB_TYPE == "elasticsearch":
-        from ..storage.elasticsearch_node_repository import ElasticsearchNodeRepository
+        from ..storage.elastic.node_repository import ElasticsearchNodeRepository
 
         return ElasticsearchNodeRepository()
     elif cfg.DB_TYPE == "postgres":
@@ -145,12 +145,12 @@ def get_recommendation_repository() -> RecommendationRepository:
 
     if db_type == "sqlite":
         from ..core.db import get_db_manager
-        from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
+        from ..storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
         return SQLiteRecommendationRepository(get_db_manager())
     elif db_type == "postgres":
         from ..core.db import get_db_manager
-        from ..storage.postgres_recommendation_repository import PostgresRecommendationRepository
+        from ..storage.postgres.recommendation_repository import PostgresRecommendationRepository
 
         return PostgresRecommendationRepository(get_db_manager())
     else:
@@ -159,7 +159,7 @@ def get_recommendation_repository() -> RecommendationRepository:
             db_type,
         )
         from ..core.db import get_db_manager
-        from ..storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
+        from ..storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
         return SQLiteRecommendationRepository(get_db_manager())
 

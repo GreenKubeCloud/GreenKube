@@ -24,9 +24,9 @@ from greenkube.api.dependencies import (
 )
 from greenkube.core.db import db_manager
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
-from greenkube.storage.sqlite_recommendation_repository import SQLiteRecommendationRepository
-from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
+from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
+from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
+from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 
 
 @pytest.fixture

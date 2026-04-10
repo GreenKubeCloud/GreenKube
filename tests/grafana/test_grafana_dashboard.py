@@ -3,7 +3,9 @@ import os
 
 import pytest
 
-DASHBOARD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboards", "greenkube-grafana.json")
+DASHBOARD_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dashboards", "greenkube-grafana.json"
+)
 
 
 class TestGrafanaDashboardFile:
