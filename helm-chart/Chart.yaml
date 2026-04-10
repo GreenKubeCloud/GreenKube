@@ -73,16 +73,28 @@ annotations:
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
     - title: Settings & Service Health
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
+  artifacthub.io/readme: |
+    https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/README.md
   artifacthub.io/changes: |
+    - kind: security
+      description: "Dockerfile: upgrade base images to node:22-alpine and run apt-get upgrade to patch OS CVEs (libssl3, zlib1g, ncurses)"
+    - kind: security
+      description: "Helm: full pod/container securityContext on all workloads (runAsNonRoot, readOnlyRootFilesystem, capabilities.drop ALL, seccompProfile RuntimeDefault)"
+    - kind: security
+      description: "Helm: remove secrets resource from ClusterRole (fixes critical RBAC over-permission)"
+    - kind: security
+      description: "Helm: PostgreSQL upgraded to postgres:18-alpine with scram-sha-256 authentication and liveness/readiness probes"
+    - kind: security
+      description: "API: OWASP security headers middleware (CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy) and restricted CORS"
+    - kind: security
+      description: "CI: automated Trivy vulnerability scanning workflow for images and Helm IaC with SARIF upload"
     - kind: added
-      description: Sustainability Score (0–100) composite metric across 7 dimensions
+      description: "SQLite: SCD2 node snapshots for deduplication and recommendation scope column"
     - kind: added
-      description: Historical analysis with daily/monthly/yearly grouping
-    - kind: added
-      description: Carbon-aware scheduling recommendations
-    - kind: added
-      description: Database migration system for PostgreSQL and SQLite
+      description: "PostgreSQL: configurable connection pool size (DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE) and statement timeout (DB_STATEMENT_TIMEOUT_MS)"
+    - kind: fixed
+      description: "aggregate_summary and aggregate_timeseries now query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for CSRD compliance"
     - kind: changed
-      description: Improved auto-discovery for Prometheus and OpenCost
+      description: "Storage layer refactored into postgres/, sqlite/, elastic/ subpackages for cleaner architecture"
 
 

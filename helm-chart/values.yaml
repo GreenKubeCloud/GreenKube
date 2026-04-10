@@ -234,7 +234,11 @@ postgres:
   enabled: true
   image:
     repository: postgres
-    tag: 17-alpine
+    # postgres:18-alpine — latest major with active security support.
+    # Remaining CVEs (libcrypto3 CVE-2026-28390, zlib CVE-2026-22184, gosu Go stdlib)
+    # are upstream-only: not yet patched in Alpine 3.23.3 or gosu binary.
+    # Tracked in .trivyignore; will auto-resolve on next Alpine package update.
+    tag: 18-alpine
     pullPolicy: IfNotPresent
   auth:
     username: greenkube

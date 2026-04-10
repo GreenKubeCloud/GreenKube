@@ -25,7 +25,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "postgres:17-alpine"
+          value: "postgres:18-alpine"
 
   - it: should honour a custom postgres image tag
     set:

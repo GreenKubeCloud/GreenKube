@@ -1,0 +1,36 @@
+# .trivyignore — documented exceptions for upstream-only CVEs that cannot
+# be fixed by GreenKube. Each entry is reviewed and justified below.
+# Remove entries as soon as upstream patches land.
+#
+# Review date: 2026-04-10
+# Next review: 2026-07-10 (quarterly)
+
+# ─── postgres:18-alpine / gosu binary (Go stdlib CVEs) ───────────────────────
+# gosu is a helper binary shipped inside the official postgres image.
+# These CVEs are in the Go standard library used to compile gosu.
+# Fix: upstream gosu must be rebuilt with Go >= 1.24.13 / 1.25.7.
+# Impact: gosu is only used at container startup for UID switching; it does
+#         not serve network traffic, so the TLS and net/url CVEs are not
+#         exploitable in this deployment.
+# Ref: https://github.com/tianon/gosu/issues
+CVE-2025-68121  # CRITICAL — crypto/tls: incorrect cert validation (gosu binary, not reachable)
+CVE-2025-58183  # HIGH     — archive/tar: unbounded alloc (gosu binary, startup only)
+CVE-2025-61726  # HIGH     — net/url: memory exhaustion (gosu binary, startup only)
+CVE-2025-61728  # HIGH     — archive/zip: CPU exhaustion (gosu binary, startup only)
+CVE-2025-61729  # HIGH     — crypto/x509: excessive resource use (gosu binary, startup only)
+CVE-2026-25679  # HIGH     — net/url: IPv6 parsing (gosu binary, startup only)
+
+# ─── Alpine 3.23.3 — libcrypto3 / libssl3 ────────────────────────────────────
+# Fixed version 3.5.6-r0 is not yet available in Alpine 3.23.3 package repos.
+# Impact: affects CMS_decrypt path; GreenKube does not use CMS/PKCS#7.
+# Fix: will auto-resolve on next `docker pull postgres:18-alpine` once Alpine
+#      promotes openssl 3.5.6-r0 to the stable repository.
+CVE-2026-28390  # HIGH — openssl: NULL pointer dereference in CMS (not used by PG)
+
+# ─── Alpine 3.23.3 — zlib ────────────────────────────────────────────────────
+# Fixed version 1.3.2-r0 is not yet available in Alpine 3.23.3 package repos.
+# Impact: affects the standalone `untgz` utility, not the shared library used
+#         by PostgreSQL wire protocol or GreenKube Python runtime.
+# Fix: will auto-resolve on next `docker pull postgres:18-alpine` once Alpine
+#      promotes zlib 1.3.2-r0.
+CVE-2026-22184  # HIGH — zlib: buffer overflow in untgz utility (not used at runtime)
