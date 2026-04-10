@@ -116,6 +116,16 @@ class Config:
         self.NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
         self.NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
 
+        # --- Metrics Retention & Compression ---
+        # Age threshold (hours) after which raw 5-min metrics are compressed
+        # into hourly aggregates. Default 24h aligns with Electricity Maps granularity.
+        self.METRICS_COMPRESSION_AGE_HOURS = int(os.getenv("METRICS_COMPRESSION_AGE_HOURS", "24"))
+        # Maximum number of raw (uncompressed) metrics days to retain.
+        # Older raw rows are deleted after compression. Set 0 to disable deletion.
+        self.METRICS_RAW_RETENTION_DAYS = int(os.getenv("METRICS_RAW_RETENTION_DAYS", "7"))
+        # Maximum total retention in days for hourly aggregated data.
+        self.METRICS_AGGREGATED_RETENTION_DAYS = int(os.getenv("METRICS_AGGREGATED_RETENTION_DAYS", "365"))
+
         # --- Kubernetes client variables ---
         # Timeout (seconds) for individual Kubernetes API calls (e.g. list_node).
         # Set to 0 to disable. Override with K8S_REQUEST_TIMEOUT env var.

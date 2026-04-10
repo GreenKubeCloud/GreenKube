@@ -146,12 +146,7 @@ spec:
             successThreshold: {{ .Values.config.api.readinessProbe.successThreshold }}
           {{- end }}
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
+            {{- toYaml .Values.apiResources | nindent 12 }}
         {{- end }}
       volumes:
         - name: secrets

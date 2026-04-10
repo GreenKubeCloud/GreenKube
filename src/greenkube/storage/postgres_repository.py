@@ -237,6 +237,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                 query = """
                     SELECT * FROM combined_metrics
                     WHERE timestamp >= $1 AND timestamp <= $2
+                    ORDER BY timestamp
                 """
                 results = await conn.fetch(query, start_time, end_time)
 
@@ -260,3 +261,195 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logger.error("Error reading combined metrics from Postgres: %s", e)
             raise QueryError(f"Error reading combined metrics: {e}") from e
+
+    async def read_hourly_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Read pre-aggregated hourly metrics from the hourly table."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                          AND namespace = $3
+                        ORDER BY hour_bucket
+                    """
+                    results = await conn.fetch(query, start_time, end_time, namespace)
+                else:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                        ORDER BY hour_bucket
+                    """
+                    results = await conn.fetch(query, start_time, end_time)
+
+                metrics = []
+                for row in results:
+                    data = dict(row)
+                    data.pop("id", None)
+                    data.pop("sample_count", None)
+                    data.pop("cpu_usage_max", None)
+                    data.pop("memory_usage_max", None)
+                    # Map hourly columns back to CombinedMetric fields
+                    data["timestamp"] = data.pop("hour_bucket", None)
+                    data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
+                    data["memory_usage_bytes"] = data.pop("memory_usage_avg", None)
+                    if "estimation_reasons" in data and isinstance(data["estimation_reasons"], str):
+                        try:
+                            data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+                        except json.JSONDecodeError:
+                            data["estimation_reasons"] = []
+                    metrics.append(CombinedMetric(**data))
+                return metrics
+        except Exception as e:
+            logger.error("Error reading hourly metrics from Postgres: %s", e)
+            raise QueryError(f"Error reading hourly metrics: {e}") from e
+
+    async def aggregate_summary(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> dict:
+        """SQL-level aggregation for summary — avoids loading all rows into Python."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    query = """
+                        SELECT
+                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS total_energy,
+                            COUNT(DISTINCT pod_name)               AS pod_count,
+                            COUNT(DISTINCT namespace)              AS namespace_count
+                        FROM combined_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2
+                          AND namespace = $3
+                    """
+                    row = await conn.fetchrow(query, start_time, end_time, namespace)
+                else:
+                    query = """
+                        SELECT
+                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS total_energy,
+                            COUNT(DISTINCT pod_name)               AS pod_count,
+                            COUNT(DISTINCT namespace)              AS namespace_count
+                        FROM combined_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2
+                    """
+                    row = await conn.fetchrow(query, start_time, end_time)
+
+                return {
+                    "total_co2e_grams": row["total_co2e"] or 0.0,
+                    "total_embodied_co2e_grams": row["total_embodied"] or 0.0,
+                    "total_cost": row["total_cost"] or 0.0,
+                    "total_energy_joules": row["total_energy"] or 0.0,
+                    "pod_count": row["pod_count"] or 0,
+                    "namespace_count": row["namespace_count"] or 0,
+                }
+        except Exception as e:
+            logger.error("Error in aggregate_summary: %s", e)
+            raise QueryError(f"aggregate_summary failed: {e}") from e
+
+    async def aggregate_timeseries(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        granularity: str = "hour",
+        namespace: Optional[str] = None,
+    ) -> list:
+        """SQL-level time-series aggregation — avoids loading all rows."""
+        _PG_TRUNC = {
+            "hour": "hour",
+            "day": "day",
+            "week": "week",
+            "month": "month",
+        }
+        trunc_unit = _PG_TRUNC.get(granularity, "hour")
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    query = f"""
+                        SELECT
+                            date_trunc('{trunc_unit}', timestamp) AS ts_bucket,
+                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS energy_joules,
+                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2
+                          AND namespace = $3
+                        GROUP BY ts_bucket
+                        ORDER BY ts_bucket
+                    """
+                    rows = await conn.fetch(query, start_time, end_time, namespace)
+                else:
+                    query = f"""
+                        SELECT
+                            date_trunc('{trunc_unit}', timestamp) AS ts_bucket,
+                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                            COALESCE(SUM(total_cost), 0)          AS total_cost,
+                            COALESCE(SUM(joules), 0)              AS energy_joules,
+                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2
+                        GROUP BY ts_bucket
+                        ORDER BY ts_bucket
+                    """
+                    rows = await conn.fetch(query, start_time, end_time)
+
+                _FORMATS = {
+                    "hour": "%Y-%m-%dT%H:00:00Z",
+                    "day": "%Y-%m-%dT00:00:00Z",
+                    "week": "%Y-W%V",
+                    "month": "%Y-%m-01T00:00:00Z",
+                }
+                fmt = _FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
+                return [
+                    {
+                        "timestamp": row["ts_bucket"].strftime(fmt) if row["ts_bucket"] else "",
+                        "co2e_grams": row["co2e_grams"],
+                        "embodied_co2e_grams": row["embodied_co2e_grams"],
+                        "total_cost": row["total_cost"],
+                        "energy_joules": row["energy_joules"],
+                        "cpu_usage_millicores": row["cpu_usage_millicores"],
+                        "memory_usage_bytes": row["memory_usage_bytes"],
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error("Error in aggregate_timeseries: %s", e)
+            raise QueryError(f"aggregate_timeseries failed: {e}") from e
+
+    async def list_namespaces(self) -> list:
+        """Return namespaces from the cache table (fast, no table scan)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                rows = await conn.fetch("SELECT namespace FROM namespace_cache ORDER BY namespace")
+                if rows:
+                    return [row["namespace"] for row in rows]
+                # Fallback: scan recent combined_metrics if cache is empty
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT namespace
+                    FROM combined_metrics
+                    WHERE timestamp > NOW() - INTERVAL '7 days'
+                    ORDER BY namespace
+                    """
+                )
+                return [row["namespace"] for row in rows]
+        except Exception as e:
+            logger.warning("list_namespaces failed, returning empty list: %s", e)
+            return []

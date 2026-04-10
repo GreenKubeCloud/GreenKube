@@ -140,6 +140,28 @@ async def scheduled_write_metrics():
     await async_write_combined_metrics_to_database(last=None)
 
 
+async def compress_metrics() -> None:
+    """Compress old raw metrics into hourly aggregates and prune stale data."""
+    logger.info("--- Starting metrics compression task ---")
+    try:
+        from ..core.db import get_db_manager
+        from ..core.metrics_compressor import MetricsCompressor
+
+        compressor = MetricsCompressor(get_db_manager())
+        stats = await compressor.run()
+        # Also refresh the namespace cache
+        await compressor.refresh_namespace_cache()
+        logger.info(
+            "Compression stats: %d hours compressed, %d raw pruned, %d hourly pruned",
+            stats["hours_compressed"],
+            stats["raw_rows_pruned"],
+            stats["hourly_rows_pruned"],
+        )
+    except Exception as e:
+        logger.error("Metrics compression failed: %s", e)
+    logger.info("--- Finished metrics compression task ---")
+
+
 async def _async_start(last: Optional[str]):
     cfg = get_config()
     logging.basicConfig(
@@ -164,6 +186,8 @@ async def _async_start(last: Optional[str]):
 
     scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP)
     scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL)
+    # Compress old raw metrics into hourly aggregates every hour
+    scheduler.add_job(compress_metrics, interval_hours=1)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")
@@ -174,6 +198,7 @@ async def _async_start(last: Optional[str]):
     await analyze_nodes()
     # pass 'last' only to the initial run
     await async_write_combined_metrics_to_database(last=last)
+    await compress_metrics()
     logger.info("Initial collection complete.")
 
     stop_event = asyncio.Event()

@@ -479,3 +479,102 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except sqlite3.Error as e:
             logging.error("aggregate_timeseries failed: %s", e)
             raise QueryError(f"aggregate_timeseries failed: {e}") from e
+
+    async def read_hourly_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Read pre-aggregated hourly metrics from the hourly table."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                          AND namespace = ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
+                else:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat())
+
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    metrics = []
+                    for row in rows:
+                        estimation_reasons = []
+                        if row["estimation_reasons"]:
+                            try:
+                                estimation_reasons = json.loads(row["estimation_reasons"])
+                            except json.JSONDecodeError:
+                                pass
+                        metrics.append(
+                            CombinedMetric(
+                                pod_name=row["pod_name"],
+                                namespace=row["namespace"],
+                                total_cost=row["total_cost"],
+                                co2e_grams=row["co2e_grams"],
+                                embodied_co2e_grams=row["embodied_co2e_grams"],
+                                pue=row["pue"],
+                                grid_intensity=row["grid_intensity"],
+                                joules=row["joules"],
+                                cpu_request=row["cpu_request"],
+                                memory_request=row["memory_request"],
+                                cpu_usage_millicores=row["cpu_usage_avg"],
+                                memory_usage_bytes=row["memory_usage_avg"],
+                                network_receive_bytes=row["network_receive_bytes"],
+                                network_transmit_bytes=row["network_transmit_bytes"],
+                                disk_read_bytes=row["disk_read_bytes"],
+                                disk_write_bytes=row["disk_write_bytes"],
+                                storage_request_bytes=row["storage_request_bytes"],
+                                storage_usage_bytes=row["storage_usage_bytes"],
+                                gpu_usage_millicores=row["gpu_usage_millicores"],
+                                restart_count=row["restart_count"],
+                                owner_kind=row["owner_kind"],
+                                owner_name=row["owner_name"],
+                                timestamp=datetime.fromisoformat(row["hour_bucket"]) if row["hour_bucket"] else None,
+                                duration_seconds=row["duration_seconds"],
+                                node=row["node"],
+                                node_instance_type=row["node_instance_type"],
+                                node_zone=row["node_zone"],
+                                emaps_zone=row["emaps_zone"],
+                                is_estimated=bool(row["is_estimated"]),
+                                estimation_reasons=estimation_reasons,
+                                calculation_version=row["calculation_version"],
+                            )
+                        )
+                    return metrics
+        except sqlite3.Error as e:
+            logging.error("Could not read hourly metrics: %s", e)
+            raise QueryError(f"Could not read hourly metrics: {e}") from e
+
+    async def list_namespaces(self) -> List[str]:
+        """Return namespaces from the cache table (fast, no table scan)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute("SELECT namespace FROM namespace_cache ORDER BY namespace") as cursor:
+                    rows = await cursor.fetchall()
+                    if rows:
+                        return [row["namespace"] for row in rows]
+
+                # Fallback: scan recent combined_metrics if cache is empty
+                async with conn.execute(
+                    """
+                    SELECT DISTINCT namespace FROM combined_metrics
+                    WHERE "timestamp" > datetime('now', '-7 days')
+                    ORDER BY namespace
+                    """
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [row["namespace"] for row in rows]
+        except sqlite3.Error:
+            return []

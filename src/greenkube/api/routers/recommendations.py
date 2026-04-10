@@ -38,10 +38,7 @@ async def list_recommendations(
     lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
-
-    if namespace:
-        metrics = [m for m in metrics if m.namespace == namespace]
+    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
     if not metrics:
         return []

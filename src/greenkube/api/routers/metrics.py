@@ -43,9 +43,7 @@ async def list_metrics(
 ):
     """List combined metrics for the given time range and optional namespace filter."""
     start, end = _get_time_range(last)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
-    if namespace:
-        metrics = [m for m in metrics if m.namespace == namespace]
+    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
     total = len(metrics)
     page = metrics[offset : offset + limit]
     return PaginatedMetricsResponse(total=total, offset=offset, limit=limit, items=page)

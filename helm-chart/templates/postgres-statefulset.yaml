@@ -38,6 +38,10 @@ spec:
               value: {{ .Values.postgres.auth.database }}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+          {{- if .Values.postgres.resources }}
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
