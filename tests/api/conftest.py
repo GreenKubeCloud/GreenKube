@@ -61,6 +61,21 @@ def mock_combined_metrics_repo():
 
     repo.aggregate_summary = _aggregate_summary
     repo.aggregate_timeseries = _aggregate_timeseries
+
+    # Wire up read_combined_metrics_smart and read_hourly_metrics
+    # so that tests mocking read_combined_metrics get correct behavior.
+    async def _read_combined_metrics_smart(start_time, end_time, namespace=None):
+        return await _Base.read_combined_metrics_smart(repo, start_time, end_time, namespace=namespace)
+
+    async def _read_hourly_metrics(start_time, end_time, namespace=None):
+        return await _Base.read_hourly_metrics(repo, start_time, end_time, namespace=namespace)
+
+    async def _list_namespaces():
+        return await _Base.list_namespaces(repo)
+
+    repo.read_combined_metrics_smart = _read_combined_metrics_smart
+    repo.read_hourly_metrics = _read_hourly_metrics
+    repo.list_namespaces = _list_namespaces
     return repo
 
 

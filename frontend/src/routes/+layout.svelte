@@ -143,7 +143,7 @@
 				</div>
 				{#if !$sidebarCollapsed}
 					<span class="text-xs text-dark-500 truncate">
-						{healthError ? 'API offline' : health ? `v${health.version}` : 'Connecting…'}
+						{healthError ? 'API offline' : health ? (health.version.startsWith('v') ? health.version : `v${health.version}`) : 'Connecting…'}
 					</span>
 				{/if}
 			</div>

@@ -38,10 +38,7 @@ async def list_recommendations(
     lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
-
-    if namespace:
-        metrics = [m for m in metrics if m.namespace == namespace]
+    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
     if not metrics:
         return []
@@ -72,10 +69,8 @@ async def list_recommendations(
     update_recommendation_metrics(recommendations)
 
     # Persist recommendations in history (best-effort)
-    # Node-level recommendations (pod_name=None) are cluster-scoped and not
-    # saved to history since the table schema requires a non-null pod_name.
     try:
-        records = [RecommendationRecord.from_recommendation(r) for r in recommendations if r.pod_name is not None]
+        records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
         if records:
             await reco_repo.save_recommendations(records)
     except Exception as e:

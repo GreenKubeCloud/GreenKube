@@ -9,7 +9,9 @@ Tests for Grafana dashboard ticket #182:
 import json
 import os
 
-DASHBOARD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboards", "greenkube-grafana.json")
+DASHBOARD_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dashboards", "greenkube-grafana.json"
+)
 
 
 def _load_dashboard() -> dict:

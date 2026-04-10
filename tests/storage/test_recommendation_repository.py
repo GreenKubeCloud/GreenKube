@@ -113,7 +113,7 @@ class TestSQLiteRecommendationRepository:
     @pytest.fixture
     def repo(self, mock_db_manager):
         """Returns a SQLiteRecommendationRepository with mocked DB."""
-        from greenkube.storage.sqlite_recommendation_repository import (
+        from greenkube.storage.sqlite.recommendation_repository import (
             SQLiteRecommendationRepository,
         )
 
@@ -181,7 +181,7 @@ class TestPostgresRecommendationRepository:
     @pytest.fixture
     def repo(self, mock_db_manager):
         """Returns a PostgresRecommendationRepository with mocked DB."""
-        from greenkube.storage.postgres_recommendation_repository import (
+        from greenkube.storage.postgres.recommendation_repository import (
             PostgresRecommendationRepository,
         )
 

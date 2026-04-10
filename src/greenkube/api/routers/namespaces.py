@@ -1,10 +1,12 @@
 # src/greenkube/api/routers/namespaces.py
 """
 API route for listing available Kubernetes namespaces.
+
+Uses the namespace_cache table when available to avoid scanning
+the entire combined_metrics table.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends
@@ -22,8 +24,4 @@ async def list_namespaces(
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return a sorted list of unique namespaces seen in recent metrics."""
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=7)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
-    namespaces = sorted({m.namespace for m in metrics})
-    return namespaces
+    return await repo.list_namespaces()
