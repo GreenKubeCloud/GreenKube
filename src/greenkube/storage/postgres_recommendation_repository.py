@@ -41,12 +41,12 @@ class PostgresRecommendationRepository(RecommendationRepository):
             query = """
                 INSERT INTO recommendation_history (
                     pod_name, namespace, type, description, reason,
-                    priority, potential_savings_cost, potential_savings_co2e_grams,
+                    priority, scope, potential_savings_cost, potential_savings_co2e_grams,
                     current_cpu_request_millicores, recommended_cpu_request_millicores,
                     current_memory_request_bytes, recommended_memory_request_bytes,
                     cron_schedule, target_node, created_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
                 )
             """
             data = []
@@ -59,6 +59,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
                         rec.description,
                         rec.reason,
                         rec.priority,
+                        rec.scope,
                         rec.potential_savings_cost,
                         rec.potential_savings_co2e_grams,
                         rec.current_cpu_request_millicores,
@@ -122,6 +123,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
                         description=row["description"],
                         reason=row.get("reason", ""),
                         priority=row.get("priority", "medium"),
+                        scope=row.get("scope", "pod"),
                         potential_savings_cost=row.get("potential_savings_cost"),
                         potential_savings_co2e_grams=row.get("potential_savings_co2e_grams"),
                         current_cpu_request_millicores=row.get("current_cpu_request_millicores"),

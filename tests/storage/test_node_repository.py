@@ -35,6 +35,24 @@ async def db_connection():
                 UNIQUE(node_name, timestamp)
             );
         """)
+        await conn.execute("""
+            CREATE TABLE node_snapshots_scd (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_name TEXT NOT NULL,
+                instance_type TEXT,
+                cpu_capacity_cores REAL,
+                architecture TEXT,
+                cloud_provider TEXT,
+                region TEXT,
+                zone TEXT,
+                node_pool TEXT,
+                memory_capacity_bytes INTEGER,
+                embodied_emissions_kg REAL,
+                valid_from TEXT NOT NULL,
+                valid_to TEXT,
+                is_current BOOLEAN NOT NULL DEFAULT 1
+            );
+        """)
         await conn.commit()
         yield conn
 

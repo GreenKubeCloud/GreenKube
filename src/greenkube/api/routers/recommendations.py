@@ -69,10 +69,8 @@ async def list_recommendations(
     update_recommendation_metrics(recommendations)
 
     # Persist recommendations in history (best-effort)
-    # Node-level recommendations (pod_name=None) are cluster-scoped and not
-    # saved to history since the table schema requires a non-null pod_name.
     try:
-        records = [RecommendationRecord.from_recommendation(r) for r in recommendations if r.pod_name is not None]
+        records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
         if records:
             await reco_repo.save_recommendations(records)
     except Exception as e:
