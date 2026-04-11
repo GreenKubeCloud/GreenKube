@@ -64,7 +64,7 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             - secretRef:
-                name: {{ include "greenkube.fullname" . }}
+                name: {{ include "greenkube.secretName" . }}
                 optional: true
 
 
@@ -90,7 +90,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
+                  name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
                 
@@ -125,7 +125,7 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             - secretRef:
-                name: {{ include "greenkube.fullname" . }}
+                name: {{ include "greenkube.secretName" . }}
                 optional: true
           env:
             {{- if eq .Values.config.db.type "postgres" }}
@@ -134,7 +134,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
+                  name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
           ports:
@@ -185,7 +185,7 @@ spec:
       volumes:
         - name: secrets
           secret:
-            secretName: {{ include "greenkube.fullname" . }}
+            secretName: {{ include "greenkube.secretName" . }}
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi

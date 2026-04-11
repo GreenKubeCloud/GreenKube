@@ -295,3 +295,30 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
+
+  # --------------------------------------------------------------------------
+  # existingSecret — use a pre-created Secret
+  # --------------------------------------------------------------------------
+  - it: should reference the chart-managed secret by default
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: RELEASE-NAME-greenkube
+
+  - it: should reference an external secret when existingSecret is set
+    set:
+      secrets.existingSecret: "my-external-secret"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: my-external-secret
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: my-external-secret
+              optional: true

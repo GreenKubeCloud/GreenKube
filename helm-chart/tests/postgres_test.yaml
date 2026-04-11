@@ -87,7 +87,7 @@ tests:
           path: spec.volumeClaimTemplates
       - equal:
           path: spec.volumeClaimTemplates[0].spec.resources.requests.storage
-          value: 1Gi
+          value: 10Gi
 
   - it: should honour a custom persistence size
     set:

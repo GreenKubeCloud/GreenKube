@@ -86,7 +86,7 @@ config:
     # Storage Class Name (leave empty for default)
     storageClassName: ''
     accessMode: ReadWriteOnce
-    size: 1Gi
+    size: 10Gi
 
   # Prometheus collector configuration
   prometheus:
@@ -175,31 +175,54 @@ elasticsearch:
   indexName: carbon_intensity
   verifyCerts: true
 
-# Sensitive values that will be stored in a Kubernetes Secret.
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+# Option A (default): leave existingSecret empty and fill in the values below.
+# The chart creates a Secret named "<release>". Not recommended when
+# values.yaml is committed to Git (credentials would be stored in plain text).
+#
+# Option B (recommended for production): create the Secret manually, then
+# set secrets.existingSecret to its name. The chart will skip Secret
+# creation and all other secrets.* values are ignored.
+#
+#   kubectl create secret generic greenkube-secrets -n greenkube \
+#     --from-literal=GREENKUBE_API_KEY="..." \
+#     --from-literal=ELECTRICITY_MAPS_TOKEN="..." \
+#     --from-literal=POSTGRES_PASSWORD="..." \
+#     --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<password>@greenkube-postgres:5432/greenkube"
+#
+#   helm install greenkube ./helm-chart -n greenkube \
+#     --set secrets.existingSecret=greenkube-secrets
+#
+# Optional keys: BOAVIZTA_TOKEN, PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD,
+#   PROMETHEUS_BEARER_TOKEN, ELASTICSEARCH_USER, ELASTICSEARCH_PASSWORD
 secrets:
-  # Electricity Maps API Token (Optional)
-  # Without it, GreenKube uses the default carbon intensity value (config.defaultIntensity).
-  # Get yours at: https://www.electricitymaps.com/
+  # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
+  existingSecret: ''
+
+  # Electricity Maps API Token — get yours at https://www.electricitymaps.com/
+  # Without it, GreenKube uses the default carbon intensity (config.defaultIntensity).
   electricityMapsToken: ''
 
-  # Boavizta API Token (Optional)
+  # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API Key for GreenKube API authentication (Optional).
-  # If empty, no authentication is required.
+  # API Key for GreenKube API authentication (optional — no auth if empty)
   apiKey: ''
 
-  # Connection string for PostgreSQL (only used if db.type is "postgres")
+  # PostgreSQL connection string (only used when db.type is "postgres" and
+  # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)
   # Example: "postgresql://user:password@host:port/dbname"
   dbConnectionString: ''
 
-  # Prometheus authentication
+  # Prometheus authentication (optional)
   prometheus:
     username: ''
     password: ''
     bearerToken: ''
 
-  # Elasticsearch authentication
+  # Elasticsearch authentication (optional)
   elasticsearch:
     user: ''
     password: ''
@@ -249,7 +272,7 @@ postgres:
     database: greenkube
   persistence:
     enabled: true
-    size: 1Gi
+    size: 10Gi
     storageClassName: ''
   # Resource requests and limits for the PostgreSQL container.
   # These defaults are appropriate for small-to-medium clusters (<500 pods).
