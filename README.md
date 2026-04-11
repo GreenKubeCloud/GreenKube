@@ -63,6 +63,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 * **Flexible Data Backends:** Supports PostgreSQL (default/recommended) and SQLite (local/dev) for storing metrics and carbon intensity data.
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
 * **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
+* **Security Hardening:** All containers run as non-root (UID 10001), with `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, dropped capabilities, and `seccompProfile: RuntimeDefault`. PostgreSQL uses scram-sha-256 authentication. OWASP security headers (CSP, X-Frame-Options, Referrer-Policy) on every API response. Automated Trivy vulnerability scanning in CI. Secrets can be managed externally via `secrets.existingSecret` to avoid storing credentials in `values.yaml`.
 * **Cloud Provider Support:** Built-in profiles for AWS, GCP, Azure, OVH, and Scaleway with automatic region-to-carbon-zone mapping.
 * **On-Premises Support:** Manual zone labeling for bare-metal clusters without cloud provider metadata.
 

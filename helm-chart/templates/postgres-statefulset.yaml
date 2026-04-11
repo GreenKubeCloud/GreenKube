@@ -19,10 +19,45 @@ spec:
         {{- include "greenkube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # The official postgres entrypoint runs "chmod 2777 /var/run/postgresql"
+        # which fails when the container runs as non-root (UID 70).
+        # This init container pre-sets the correct permissions on the emptyDir.
+        - name: init-pgrun-perms
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          command: ["sh", "-c", "chmod 2777 /var/run/postgresql && chown 70:70 /var/run/postgresql"]
+          volumeMounts:
+            - name: pg-run
+              mountPath: /var/run/postgresql
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 5432
               name: postgres
@@ -32,23 +67,67 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
+                  name: {{ include "greenkube.secretName" . }}
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
               value: {{ .Values.postgres.auth.database }}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
           {{- if .Values.postgres.resources }}
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgres.auth.username }}
+                - -d
+                - {{ .Values.postgres.auth.database }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgres.auth.username }}
+                - -d
+                - {{ .Values.postgres.auth.database }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: pg-run
+              mountPath: /var/run/postgresql
+            - name: pg-tmp
+              mountPath: /tmp
       {{- if not .Values.postgres.persistence.enabled }}
       volumes:
         - name: data
           emptyDir: {}
+        - name: pg-run
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: pg-tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- else }}
+      volumes:
+        - name: pg-run
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: pg-tmp
+          emptyDir:
+            sizeLimit: 64Mi
       {{- end }}
   {{- if .Values.postgres.persistence.enabled }}
   volumeClaimTemplates:

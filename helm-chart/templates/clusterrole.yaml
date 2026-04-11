@@ -6,14 +6,14 @@ metadata:
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
 rules:
-  # GreenKube needs to list nodes, pods, and services for discovery and data collection
+  # GreenKube needs to list nodes, pods, and services for discovery and data collection.
+  # Secrets access is intentionally excluded (CRITICAL: KSV-0041).
 - apiGroups: [""]
   resources:
   - nodes
   - pods
   - services
   - configmaps
-  - secrets
   verbs:
   - get
   - list

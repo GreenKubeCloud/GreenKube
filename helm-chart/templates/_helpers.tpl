@@ -60,3 +60,15 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Return the name of the Secret to use.
+If secrets.existingSecret is set, use that; otherwise use the chart-managed name.
+*/}}
+{{- define "greenkube.secretName" -}}
+{{- if .Values.secrets.existingSecret -}}
+{{- .Values.secrets.existingSecret -}}
+{{- else -}}
+{{- include "greenkube.fullname" . -}}
+{{- end -}}
+{{- end -}}
