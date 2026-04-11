@@ -94,6 +94,10 @@ annotations:
       description: "PostgreSQL: configurable connection pool size (DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE) and statement timeout (DB_STATEMENT_TIMEOUT_MS)"
     - kind: fixed
       description: "aggregate_summary and aggregate_timeseries now query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for CSRD compliance"
+    - kind: fixed
+      description: "Trivy KSV-0014: added readOnlyRootFilesystem to PostgreSQL init container"
+    - kind: fixed
+      description: "Frontend npm audit: updated svelte, vite, rollup, picomatch, devalue to fix HIGH-severity advisories"
     - kind: changed
       description: "Storage layer refactored into postgres/, sqlite/, elastic/ subpackages for cleaner architecture"
 
