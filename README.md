@@ -23,7 +23,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 2.  **Visualize** these metrics in a real-time dashboard for actionable carbon visibility.
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.2.7)
+## ✨ Features (Version 0.2.8)
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
@@ -102,7 +102,7 @@ Explore GreenKube with realistic sample data in under 30 seconds — no Promethe
 **With Docker (no Kubernetes needed):**
 
 ```bash
-docker run --rm -p 9000:9000 greenkube/greenkube:0.2.7 demo --no-browser --port 9000
+docker run --rm -p 9000:9000 greenkube/greenkube:0.2.8 demo --no-browser --port 9000
 # → Open http://localhost:9000
 ```
 
@@ -110,7 +110,7 @@ docker run --rm -p 9000:9000 greenkube/greenkube:0.2.7 demo --no-browser --port 
 
 ```bash
 kubectl run greenkube-demo \
-  --image=greenkube/greenkube:0.2.7 \
+  --image=greenkube/greenkube:0.2.8 \
   --restart=Never \
   --command -- greenkube demo --no-browser --port 9000
 
@@ -323,7 +323,7 @@ Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 ```bash
 # Get a health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.7"}
+# {"status":"ok","version":"0.2.8"}
 
 # Get metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"

@@ -7,38 +7,39 @@ description: >-
   optimization recommendations, Grafana dashboard, and a REST API — deployable
   in minutes with a single Helm install.
 type: application
-icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.2.7
-appVersion: 0.2.7
+icon: 
+  https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
+version: 0.2.8
+appVersion: 0.2.8
 keywords:
-  - greenkube
-  - finops
-  - greenops
-  - fingreenops
-  - carbon
-  - co2
-  - sustainability
-  - kubernetes
-  - monitoring
-  - energy
-  - csrd
-  - esrs
-  - carbon-footprint
-  - cloud-cost
-  - prometheus
-  - grafana
-  - opencost
+- greenkube
+- finops
+- greenops
+- fingreenops
+- carbon
+- co2
+- sustainability
+- kubernetes
+- monitoring
+- energy
+- csrd
+- esrs
+- carbon-footprint
+- cloud-cost
+- prometheus
+- grafana
+- opencost
 home: https://greenkube.cloud
 sources:
-  - https://github.com/GreenKubeCloud/GreenKube
+- https://github.com/GreenKubeCloud/GreenKube
 maintainers:
-  - name: Hugo Lelievre
-    email: hugo.lelievre@greenkube.cloud
-    url: https://github.com/GreenKubeCloud
+- name: Hugo Lelievre
+  email: hugo.lelievre@greenkube.cloud
+  url: https://github.com/GreenKubeCloud
 annotations:
   artifacthub.io/category: monitoring-logging
   artifacthub.io/license: Apache-2.0
-  artifacthub.io/prerelease: "false"
+  artifacthub.io/prerelease: 'false'
   artifacthub.io/recommendations: |
     - url: https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack
     - url: https://artifacthub.io/packages/helm/opencost/opencost
@@ -56,7 +57,7 @@ annotations:
       email: hugo.lelievre@greenkube.cloud
   artifacthub.io/images: |
     - name: greenkube
-      image: greenkube/greenkube:0.2.7
+      image: greenkube/greenkube:0.2.8
       platforms:
         - linux/amd64
         - linux/arm64

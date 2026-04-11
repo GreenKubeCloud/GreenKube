@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-04-11
+
 ### Security
 - **Dockerfile hardening:** Base image for the frontend build stage upgraded from `node:20-alpine` to `node:22-alpine`. Both the builder and final runtime stages now run `apt-get upgrade` at build time to patch known OS CVEs (libssl3, zlib1g, ncurses, libc). The final image user (`greenkube`, UID/GID 10001) is created with an explicit `groupadd`/`useradd` and `/sbin/nologin` shell.
 - **Helm deployment securityContext:** Full pod-level and per-container security hardening on both the collector and API containers — `runAsNonRoot: true`, `runAsUser/Group: 10001`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, and `seccompProfile.type: RuntimeDefault`. `/tmp` directories served by `emptyDir` volumes (64 MiB each) to satisfy Python's runtime tmp needs under a read-only root.
