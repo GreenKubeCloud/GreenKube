@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.postgres_repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
+from greenkube.storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 
 
 @pytest.fixture

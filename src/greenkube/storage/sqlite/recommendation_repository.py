@@ -44,11 +44,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             query = """
                 INSERT INTO recommendation_history (
                     pod_name, namespace, type, description, reason,
-                    priority, potential_savings_cost, potential_savings_co2e_grams,
+                    priority, scope, potential_savings_cost, potential_savings_co2e_grams,
                     current_cpu_request_millicores, recommended_cpu_request_millicores,
                     current_memory_request_bytes, recommended_memory_request_bytes,
                     cron_schedule, target_node, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             for rec in records:
                 created_at_str = to_iso_z(rec.created_at) if rec.created_at else None
@@ -61,6 +61,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         rec.description,
                         rec.reason,
                         rec.priority,
+                        rec.scope,
                         rec.potential_savings_cost,
                         rec.potential_savings_co2e_grams,
                         rec.current_cpu_request_millicores,
@@ -123,6 +124,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         description=row["description"],
                         reason=row["reason"] or "",
                         priority=row["priority"] or "medium",
+                        scope=row["scope"] if "scope" in row.keys() else "pod",
                         potential_savings_cost=row["potential_savings_cost"],
                         potential_savings_co2e_grams=row["potential_savings_co2e_grams"],
                         current_cpu_request_millicores=row["current_cpu_request_millicores"],

@@ -60,6 +60,9 @@ class Config:
             "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
         )
         self.DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
+        self.DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+        self.DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
+        self.DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "30000"))
 
         # --- Elasticsearch variables ---
         self.ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
@@ -115,6 +118,18 @@ class Config:
         # --- Node Analysis variables ---
         self.NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
         self.NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
+
+        # --- Metrics Retention & Compression ---
+        # Age threshold (hours) after which raw 5-min metrics are compressed
+        # into hourly aggregates. Default 24h aligns with Electricity Maps granularity.
+        self.METRICS_COMPRESSION_AGE_HOURS = int(os.getenv("METRICS_COMPRESSION_AGE_HOURS", "24"))
+        # Maximum number of raw (uncompressed) metrics days to retain.
+        # Older raw rows are deleted after compression. Set -1 to disable deletion.
+        self.METRICS_RAW_RETENTION_DAYS = int(os.getenv("METRICS_RAW_RETENTION_DAYS", "7"))
+        # Maximum total retention in days for hourly aggregated data.
+        # Set -1 (default) to keep data indefinitely — required for multi-year
+        # comparison and CSRD/ESRS E1 yearly reporting.
+        self.METRICS_AGGREGATED_RETENTION_DAYS = int(os.getenv("METRICS_AGGREGATED_RETENTION_DAYS", "-1"))
 
         # --- Kubernetes client variables ---
         # Timeout (seconds) for individual Kubernetes API calls (e.g. list_node).

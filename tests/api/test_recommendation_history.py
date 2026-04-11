@@ -7,63 +7,11 @@ TDD: Tests written before implementation.
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
-import pytest
-from fastapi.testclient import TestClient
-
-from greenkube.api.app import create_app
-from greenkube.api.dependencies import (
-    get_carbon_repository,
-    get_combined_metrics_repository,
-    get_node_repository,
-    get_recommendation_repository,
-)
 from greenkube.models.metrics import (
     CombinedMetric,
     RecommendationRecord,
     RecommendationType,
 )
-
-
-@pytest.fixture
-def mock_carbon_repo():
-    repo = AsyncMock()
-    return repo
-
-
-@pytest.fixture
-def mock_combined_metrics_repo():
-    repo = AsyncMock()
-    repo.read_combined_metrics = AsyncMock(return_value=[])
-    repo.write_combined_metrics = AsyncMock(return_value=0)
-    return repo
-
-
-@pytest.fixture
-def mock_node_repo():
-    repo = AsyncMock()
-    repo.get_latest_snapshots_before = AsyncMock(return_value=[])
-    repo.get_snapshots = AsyncMock(return_value=[])
-    return repo
-
-
-@pytest.fixture
-def mock_reco_repo():
-    repo = AsyncMock()
-    repo.save_recommendations = AsyncMock(return_value=0)
-    repo.get_recommendations = AsyncMock(return_value=[])
-    return repo
-
-
-@pytest.fixture
-def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
-    app = create_app()
-    app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
-    app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
-    app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
-    app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
 
 
 class TestRecommendationHistoryEndpoint:

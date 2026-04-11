@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from greenkube.core.factory import get_node_repository
-from greenkube.storage.sqlite_node_repository import SQLiteNodeRepository
+from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
 
 
 def test_get_node_repository_sqlite(monkeypatch):

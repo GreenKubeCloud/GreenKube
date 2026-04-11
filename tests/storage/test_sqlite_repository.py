@@ -8,7 +8,7 @@ import aiosqlite
 import pytest
 
 from greenkube.core.exceptions import QueryError
-from greenkube.storage.sqlite_repository import SQLiteCarbonIntensityRepository
+from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 # --- Fixtures ---

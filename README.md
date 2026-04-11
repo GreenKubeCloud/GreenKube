@@ -60,9 +60,10 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 * **Grafana Dashboard:** Pre-built JSON dashboard with CO₂e, cost, energy, resource, sustainability score, and recommendation panels — import in one click.
 * **Prometheus Integration:** ServiceMonitor and NetworkPolicy for automatic scraping by kube-prometheus-stack.
 * **Database Migration System:** Automated, versioned schema migrations for PostgreSQL and SQLite.
-* **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
+* **Flexible Data Backends:** Supports PostgreSQL (default/recommended) and SQLite (local/dev) for storing metrics and carbon intensity data.
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
 * **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
+* **Security Hardening:** All containers run as non-root (UID 10001), with `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, dropped capabilities, and `seccompProfile: RuntimeDefault`. PostgreSQL uses scram-sha-256 authentication. OWASP security headers (CSP, X-Frame-Options, Referrer-Policy) on every API response. Automated Trivy vulnerability scanning in CI. Secrets can be managed externally via `secrets.existingSecret` to avoid storing credentials in `values.yaml`.
 * **Cloud Provider Support:** Built-in profiles for AWS, GCP, Azure, OVH, and Scaleway with automatic region-to-carbon-zone mapping.
 * **On-Premises Support:** Manual zone labeling for bare-metal clusters without cloud provider metadata.
 
@@ -416,7 +417,6 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **Repositories:** Abstract interfaces implemented for multiple backends:
   - **PostgresRepository:** Production-grade persistent storage (asyncpg driver)
   - **SQLiteRepository:** Local development and testing (aiosqlite driver)
-  - **ElasticsearchRepository:** High-scale time-series storage and analytics
 - **NodeRepository:** Historical node state snapshots for accurate time-range reporting
 - **EmbodiedRepository:** Boavizta API integration for hardware embodied emissions
 
