@@ -56,13 +56,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
         response.headers["Cache-Control"] = "no-store"
         # Content-Security-Policy: restrict resource loading for the SPA.
-        # 'unsafe-inline' is required for SvelteKit style injection.
+        # 'unsafe-inline' is required for SvelteKit's inline bootstrap script
+        # and style injection. Without it the page is blank because the browser
+        # blocks the <script> tag that bootstraps the SPA.
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
-            "font-src 'self'; "
+            "font-src 'self' https://fonts.gstatic.com; "
             "connect-src 'self'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'; "
