@@ -15,6 +15,9 @@ from greenkube.models.metrics import MetricsSummaryRow, TimeseriesCachePoint
 
 _WINDOW_COUNT = len(_WINDOWS)
 
+# Expected granularity per slug — mirrors the _WINDOWS definition.
+_EXPECTED_GRANULARITIES = {slug: gran for slug, _, gran in _WINDOWS}
+
 
 def _make_agg(co2=10.0, embodied=1.0, cost=0.5, energy=36000.0, pods=5, ns_count=2):
     return {
@@ -217,3 +220,12 @@ async def test_run_timeseries_point_values_match_aggregation():
             assert p.co2e_grams == pytest.approx(raw["co2e_grams"])
             assert p.total_cost == pytest.approx(raw["total_cost"])
             assert p.bucket_ts == raw["timestamp"]
+
+
+def test_windows_granularities():
+    """Each window slug must map to the expected granularity for readable charts."""
+    assert _EXPECTED_GRANULARITIES["24h"] == "hour"  # ≤24 bars
+    assert _EXPECTED_GRANULARITIES["7d"] == "day"  # 7 bars
+    assert _EXPECTED_GRANULARITIES["30d"] == "day"  # 30 bars
+    assert _EXPECTED_GRANULARITIES["1y"] == "week"  # ≤53 bars
+    assert _EXPECTED_GRANULARITIES["ytd"] == "month"  # ≤12 bars

@@ -71,7 +71,7 @@
 				timeseriesPromise = getTimeseries({
 					namespace: ns,
 					last,
-					granularity: last === '1h' ? 'hour' : 'day'
+					granularity: 'hour'  // 1h and 6h are both sub-day → hourly buckets
 				});
 			}
 
@@ -123,10 +123,10 @@
 	}
 
 	$: co2Option = timeseries.length
-		? buildTimeseriesOption(timeseries, { valueKey: 'co2e_grams', label: 'CO₂ Emissions', unit: 'g' })
+		? buildTimeseriesOption(timeseries, { valueKey: 'co2e_grams', label: 'CO₂ Emissions', unit: 'g', windowSlug: $selectedTimeRange })
 		: null;
 
-	$: multiOption = timeseries.length ? buildMultiSeriesOption(timeseries) : null;
+	$: multiOption = timeseries.length ? buildMultiSeriesOption(timeseries, { windowSlug: $selectedTimeRange }) : null;
 
 	$: nsDonutOption = metrics.length
 		? buildNamespaceDonutOption(metrics, { label: 'CO₂ by Namespace' })

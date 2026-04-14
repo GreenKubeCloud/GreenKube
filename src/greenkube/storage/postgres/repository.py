@@ -492,7 +492,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                 _FORMATS = {
                     "hour": "%Y-%m-%dT%H:00:00Z",
                     "day": "%Y-%m-%dT00:00:00Z",
-                    "week": "%Y-W%V",
+                    "week": "%Y-%m-%dT00:00:00Z",  # date_trunc('week') → Monday
                     "month": "%Y-%m-01T00:00:00Z",
                 }
                 fmt = _FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")

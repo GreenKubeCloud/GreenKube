@@ -49,7 +49,7 @@ const BASE_OPTION = {
 /**
  * Build a time-series area chart option.
  */
-export function buildTimeseriesOption(data, { title = '', yAxisName = '' } = {}) {
+export function buildTimeseriesOption(data, { title = '', yAxisName = '', windowSlug = '' } = {}) {
 	if (!data || data.length === 0) return { ...BASE_OPTION };
 
 	const timestamps = data.map(d => d.timestamp);
@@ -61,7 +61,7 @@ export function buildTimeseriesOption(data, { title = '', yAxisName = '' } = {})
 			type: 'category',
 			data: timestamps,
 			axisLine: { lineStyle: { color: COLORS.dark.border } },
-			axisLabel: { color: COLORS.dark.text, fontSize: 10, rotate: 0, formatter: (v) => formatTimeLabel(v) },
+			axisLabel: { color: COLORS.dark.text, fontSize: 10, rotate: 0, formatter: (v) => formatTimeLabel(v, windowSlug) },
 			splitLine: { show: false }
 		},
 		yAxis: {
@@ -98,7 +98,7 @@ export function buildTimeseriesOption(data, { title = '', yAxisName = '' } = {})
 /**
  * Build a multi-series area chart (CO2, Cost, Energy).
  */
-export function buildMultiSeriesOption(data) {
+export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 	if (!data || data.length === 0) return { ...BASE_OPTION };
 
 	const timestamps = data.map(d => d.timestamp);
@@ -115,7 +115,7 @@ export function buildMultiSeriesOption(data) {
 			type: 'category',
 			data: timestamps,
 			axisLine: { lineStyle: { color: COLORS.dark.border } },
-			axisLabel: { color: COLORS.dark.text, fontSize: 10, formatter: (v) => formatTimeLabel(v) },
+			axisLabel: { color: COLORS.dark.text, fontSize: 10, formatter: (v) => formatTimeLabel(v, windowSlug) },
 			splitLine: { show: false }
 		},
 		yAxis: [
@@ -259,19 +259,38 @@ export function buildTopPodsOption(metrics, { field = 'co2e_grams', title = 'Top
 	};
 }
 
-function formatTimeLabel(v) {
+/**
+ * Format an ISO timestamp bucket label for the x-axis.
+ *
+ * The label style is chosen based on the window slug:
+ *   24h  → "14:00"         (hour)
+ *   7d   → "Mon 14"        (weekday + day)
+ *   30d  → "Apr 14"        (month + day)
+ *   1y   → "Apr 14"        (week start date shown as month + day)
+ *   ytd  → "Apr"           (month name)
+ */
+function formatTimeLabel(v, windowSlug = '') {
 	if (!v) return '';
-	// "2026-02-08T12:00:00Z" -> "12:00"  or "Feb 8"
-	if (v.includes('T')) {
-		const d = new Date(v);
-		if (isNaN(d.getTime())) return v;
-		const hours = d.getUTCHours().toString().padStart(2, '0');
-		const mins = d.getUTCMinutes().toString().padStart(2, '0');
-		const day = d.getUTCDate();
-		const month = d.toLocaleString('en', { month: 'short', timeZone: 'UTC' });
-		// If time is 00:00, show date
-		if (hours === '00' && mins === '00') return `${month} ${day}`;
-		return `${hours}:${mins}`;
+	const d = new Date(v);
+	if (isNaN(d.getTime())) return v;
+
+	const opts = { timeZone: 'UTC' };
+
+	if (windowSlug === '24h') {
+		const hh = d.getUTCHours().toString().padStart(2, '0');
+		const mm = d.getUTCMinutes().toString().padStart(2, '0');
+		return `${hh}:${mm}`;
 	}
-	return v;
+	if (windowSlug === '7d') {
+		const weekday = d.toLocaleString('en', { weekday: 'short', ...opts });
+		const day = d.getUTCDate();
+		return `${weekday} ${day}`;
+	}
+	if (windowSlug === 'ytd') {
+		return d.toLocaleString('en', { month: 'short', ...opts });
+	}
+	// 30d and 1y: "Apr 14"
+	const month = d.toLocaleString('en', { month: 'short', ...opts });
+	const day = d.getUTCDate();
+	return `${month} ${day}`;
 }

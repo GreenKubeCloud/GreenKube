@@ -14,11 +14,11 @@ of raw metric rows, eliminating OOM errors.
 
 Windows and granularity
 -----------------------
-* ``24h``  – last 24 hours   → hourly buckets  (≤ 24 rows)
-* ``7d``   – last 7 days     → daily  buckets  (7 rows)
-* ``30d``  – last 30 days    → daily  buckets  (30 rows)
-* ``1y``   – last 365 days   → daily  buckets  (365 rows)
-* ``ytd``  – since Jan 1st   → daily  buckets  (≤ 366 rows)
+* ``24h``  – last 24 hours   → hourly  buckets  (≤ 24 rows)
+* ``7d``   – last 7 days     → daily   buckets  (7 rows)
+* ``30d``  – last 30 days    → daily   buckets  (30 rows)
+* ``1y``   – last 365 days   → weekly  buckets  (≤ 53 rows)
+* ``ytd``  – since Jan 1st   → monthly buckets  (≤ 12 rows)
 """
 
 import logging
@@ -40,8 +40,8 @@ _WINDOWS: List[tuple] = [
     ("24h", timedelta(hours=24), "hour"),
     ("7d", timedelta(days=7), "day"),
     ("30d", timedelta(days=30), "day"),
-    ("1y", timedelta(days=365), "day"),
-    ("ytd", None, "day"),
+    ("1y", timedelta(days=365), "week"),
+    ("ytd", None, "month"),
 ]
 
 

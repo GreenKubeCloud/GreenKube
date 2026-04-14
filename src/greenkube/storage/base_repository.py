@@ -249,7 +249,7 @@ class CombinedMetricsRepository(ABC):
         _GRANULARITY_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
             "day": "%Y-%m-%dT00:00:00Z",
-            "week": "%Y-W%V",
+            "week": "%Y-%m-%dT00:00:00Z",  # applied to date_trunc('week') → Monday
             "month": "%Y-%m-01T00:00:00Z",
         }
         fmt = _GRANULARITY_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
@@ -374,11 +374,11 @@ class TimeseriesCacheRepository(ABC):
     time-series charts without scanning millions of raw metric rows.
 
     Granularity per window:
-        - ``24h``  → hourly buckets  (≤24 rows)
-        - ``7d``   → daily  buckets  (7 rows)
-        - ``30d``  → daily  buckets  (30 rows)
-        - ``1y``   → daily  buckets  (365 rows)
-        - ``ytd``  → daily  buckets  (≤366 rows)
+        - ``24h``  → hourly  buckets  (≤24 rows)
+        - ``7d``   → daily   buckets  (7 rows)
+        - ``30d``  → daily   buckets  (30 rows)
+        - ``1y``   → weekly  buckets  (≤53 rows)
+        - ``ytd``  → monthly buckets  (≤12 rows)
     """
 
     @abstractmethod
