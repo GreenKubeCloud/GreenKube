@@ -19,6 +19,7 @@ from greenkube.storage.base_repository import (
     NodeRepository,
     RecommendationRepository,
     SummaryRepository,
+    TimeseriesCacheRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,3 +105,10 @@ async def get_summary_repository() -> SummaryRepository:
     from greenkube.core.factory import get_summary_repository as factory_get_summary
 
     return factory_get_summary()
+
+
+async def get_timeseries_cache_repository() -> TimeseriesCacheRepository:
+    """Provides the TimeseriesCacheRepository instance via the factory."""
+    from greenkube.core.factory import get_timeseries_cache_repository as factory_get_ts
+
+    return factory_get_ts()

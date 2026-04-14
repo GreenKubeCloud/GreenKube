@@ -7,6 +7,7 @@
 		getMetrics,
 		getRecommendations,
 		getDashboardSummary,
+		getDashboardTimeseries,
 		refreshDashboardSummary
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatEnergy, formatNumber, formatRelativeTime } from '$lib/utils/format.js';
@@ -17,8 +18,8 @@
 	import Chart from '$lib/components/Chart.svelte';
 	import Card from '$lib/components/Card.svelte';
 
-	// Slugs served by the pre-computed summary table
-	const SUMMARY_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);
+	// Slugs served by the pre-computed summary / timeseries cache tables
+	const PRECOMPUTED_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);
 
 	let summary = null;
 	let timeseries = [];
@@ -32,6 +33,20 @@
 	$: params = { namespace: $selectedNamespace, last: $selectedTimeRange };
 	$: if (params) loadData();
 
+	/**
+	 * Normalise a pre-computed TimeseriesCachePoint into the shape the chart
+	 * builders expect (same as a TimeseriesPoint from /metrics/timeseries).
+	 */
+	function normaliseCachePoint(p) {
+		return {
+			timestamp: p.bucket_ts,
+			co2e_grams: p.co2e_grams,
+			embodied_co2e_grams: p.embodied_co2e_grams,
+			total_cost: p.total_cost,
+			joules: p.joules
+		};
+	}
+
 	async function loadData() {
 		loading = true;
 		recoLoading = true;
@@ -40,20 +55,33 @@
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
 
-			// For built-in slugs, the KPI cards come from the pre-computed summary
-			// table (instantaneous query). For other ranges we fall back to the
-			// on-demand endpoint.
-			const summaryPromise = SUMMARY_SLUGS.has(last)
-				? getDashboardSummary({ namespace: ns }).then((r) => r.windows?.[last] ?? null)
-				: getMetricsSummary({ namespace: ns, last });
+			// For pre-computed slugs: KPI cards from summary table,
+			// chart data from timeseries cache table — both are instantaneous.
+			// For other ranges (1h, 6h): fall back to on-demand endpoints.
+			let summaryPromise, timeseriesPromise;
+			if (PRECOMPUTED_SLUGS.has(last)) {
+				summaryPromise = getDashboardSummary({ namespace: ns }).then(
+					(r) => r.windows?.[last] ?? null
+				);
+				timeseriesPromise = getDashboardTimeseries({ windowSlug: last, namespace: ns }).then(
+					(r) => (r.points ?? []).map(normaliseCachePoint)
+				);
+			} else {
+				summaryPromise = getMetricsSummary({ namespace: ns, last });
+				timeseriesPromise = getTimeseries({
+					namespace: ns,
+					last,
+					granularity: last === '1h' ? 'hour' : 'day'
+				});
+			}
 
-			// Timeseries + raw metrics still use on-demand APIs (charts).
-			// For 'ytd' we fall back to '1y' as on-demand API doesn't know 'ytd'.
+			// getMetrics (for donut + top-pods) still uses on-demand API.
+			// For 'ytd' the API doesn't understand that slug, so map to '1y'.
 			const apiLast = last === 'ytd' ? '1y' : last;
 
 			const [s, ts, m] = await Promise.all([
 				summaryPromise,
-				getTimeseries({ namespace: ns, last: apiLast, granularity: apiLast === '1h' ? 'hour' : 'day' }),
+				timeseriesPromise,
 				getMetrics({ namespace: ns, last: apiLast })
 			]);
 			summary = s;
@@ -77,7 +105,7 @@
 		}
 	}
 
-	/** Trigger an on-demand summary refresh then reload the page data. */
+	/** Trigger an on-demand summary + timeseries cache refresh then reload. */
 	async function handleRefresh() {
 		if (refreshing) return;
 		refreshing = true;

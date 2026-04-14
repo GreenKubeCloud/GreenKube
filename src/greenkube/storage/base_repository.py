@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Optional
 
-from ..models.metrics import CombinedMetric, MetricsSummaryRow, RecommendationRecord
+from ..models.metrics import CombinedMetric, MetricsSummaryRow, RecommendationRecord, TimeseriesCachePoint
 from ..models.node import NodeInfo
 
 
@@ -360,5 +360,54 @@ class SummaryRepository(ABC):
 
         Returns:
             A list of :class:`MetricsSummaryRow` objects.
+        """
+        pass
+
+
+class TimeseriesCacheRepository(ABC):
+    """
+    Abstract base class for the pre-computed timeseries chart cache.
+
+    The ``metrics_timeseries_cache`` table holds one row per
+    (window_slug, namespace, bucket_ts) triple.  It is refreshed hourly
+    alongside :class:`SummaryRepository` so the frontend can render
+    time-series charts without scanning millions of raw metric rows.
+
+    Granularity per window:
+        - ``24h``  → hourly buckets  (≤24 rows)
+        - ``7d``   → daily  buckets  (7 rows)
+        - ``30d``  → daily  buckets  (30 rows)
+        - ``1y``   → daily  buckets  (365 rows)
+        - ``ytd``  → daily  buckets  (≤366 rows)
+    """
+
+    @abstractmethod
+    async def upsert_points(self, points: List[TimeseriesCachePoint]) -> None:
+        """Replace all cached points for a (window_slug, namespace) pair.
+
+        The caller passes the complete, freshly-computed list for one
+        window+namespace combination.  The implementation should delete
+        existing rows for that pair then insert the new ones, keeping
+        the table consistent without requiring explicit deletes elsewhere.
+
+        Args:
+            points: The new time-series cache points for one window+namespace.
+        """
+        pass
+
+    @abstractmethod
+    async def get_points(
+        self,
+        window_slug: str,
+        namespace: Optional[str] = None,
+    ) -> List[TimeseriesCachePoint]:
+        """Return all cached points for a given window slug and namespace.
+
+        Args:
+            window_slug: The time window identifier (e.g. ``'7d'``).
+            namespace: Namespace filter; ``None`` returns cluster-wide points.
+
+        Returns:
+            An ordered list of :class:`TimeseriesCachePoint` objects.
         """
         pass

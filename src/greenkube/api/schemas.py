@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow
+from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 
 
 class HealthResponse(BaseModel):
@@ -99,4 +99,19 @@ class DashboardSummaryResponse(BaseModel):
     namespace: Optional[str] = Field(
         None,
         description="The namespace filter applied, or None for cluster-wide.",
+    )
+
+
+class DashboardTimeseriesResponse(BaseModel):
+    """Pre-computed time-series chart data for the frontend dashboard.
+
+    ``points`` is an ordered list of buckets for the requested window,
+    ready to be passed directly to the chart builders.
+    """
+
+    window_slug: str = Field(..., description="The requested time window slug.")
+    namespace: Optional[str] = Field(None, description="Namespace filter applied, or None.")
+    points: List[TimeseriesCachePoint] = Field(
+        default_factory=list,
+        description="Ordered time-series buckets for this window.",
     )

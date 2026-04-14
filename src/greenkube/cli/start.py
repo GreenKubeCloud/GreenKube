@@ -166,12 +166,17 @@ async def refresh_dashboard_summary() -> None:
     """Refresh the pre-computed dashboard summary table."""
     logger.info("--- Starting dashboard summary refresh task ---")
     try:
-        from ..core.factory import get_combined_metrics_repository, get_summary_repository
+        from ..core.factory import (
+            get_combined_metrics_repository,
+            get_summary_repository,
+            get_timeseries_cache_repository,
+        )
         from ..core.summary_refresher import SummaryRefresher
 
         refresher = SummaryRefresher(
             metrics_repo=get_combined_metrics_repository(),
             summary_repo=get_summary_repository(),
+            timeseries_cache_repo=get_timeseries_cache_repository(),
         )
         count = await refresher.run()
         logger.info("Dashboard summary refresh complete: %d rows upserted.", count)

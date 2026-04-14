@@ -173,9 +173,22 @@ export function getDashboardSummary({ namespace } = {}) {
 }
 
 /**
- * Trigger an on-demand refresh of the pre-computed dashboard summary.
- * The backend responds immediately (HTTP 202) and runs the refresh in the
- * background.
+ * Fetch the pre-computed time-series chart data for a specific window.
+ * Returns an ordered array of buckets ready for the chart builders.
+ *
+ * @param {Object} opts
+ * @param {string} opts.windowSlug  — '24h' | '7d' | '30d' | '1y' | 'ytd'
+ * @param {string} [opts.namespace]
+ * @returns {Promise<{window_slug: string, namespace: string|null, points: Object[]}>}
+ */
+export function getDashboardTimeseries({ windowSlug, namespace } = {}) {
+	return request(`${BASE}/metrics/dashboard-timeseries/${windowSlug}`, { namespace });
+}
+
+/**
+ * Trigger an on-demand refresh of the pre-computed dashboard summary and
+ * timeseries cache.  The backend responds immediately (HTTP 202) and runs
+ * the refresh in the background.
  *
  * @param {Object} opts
  * @param {string} [opts.namespace]

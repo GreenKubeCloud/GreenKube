@@ -217,6 +217,24 @@ class MetricsSummaryRow(BaseModel):
     )
 
 
+class TimeseriesCachePoint(BaseModel):
+    """
+    A single pre-computed time-series bucket stored in ``metrics_timeseries_cache``.
+
+    The table holds one row per (window_slug, namespace, bucket_ts) so the
+    frontend can retrieve chart data with a single lightweight indexed query.
+    Buckets are hourly for ``24h`` and daily for all longer windows.
+    """
+
+    window_slug: str = Field(..., description="The parent time window slug (e.g. '7d', 'ytd').")
+    namespace: Optional[str] = Field(None, description="Namespace, or None for cluster-wide.")
+    bucket_ts: str = Field(..., description="ISO-8601 bucket timestamp (UTC).")
+    co2e_grams: float = Field(0.0, description="Operational CO2e in grams for this bucket.")
+    embodied_co2e_grams: float = Field(0.0, description="Embodied CO2e in grams for this bucket.")
+    total_cost: float = Field(0.0, description="Total cost for this bucket.")
+    joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
+
+
 class EnvironmentalMetric(BaseModel):
     """
     Holds environmental factors for a specific location (e.g., a cloud region).
