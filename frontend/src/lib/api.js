@@ -158,3 +158,36 @@ export function buildReportExportUrl({ namespace, last, aggregate, granularity, 
 	if (format) url.searchParams.set('format', format);
 	return url.toString();
 }
+
+/**
+ * Fetch the pre-computed dashboard KPI summary rows.
+ * Returns a map of window slug → summary row for the fastest possible
+ * dashboard load.
+ *
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @returns {Promise<{windows: Object, namespace: string|null}>}
+ */
+export function getDashboardSummary({ namespace } = {}) {
+	return request(`${BASE}/metrics/dashboard-summary`, { namespace });
+}
+
+/**
+ * Trigger an on-demand refresh of the pre-computed dashboard summary.
+ * The backend responds immediately (HTTP 202) and runs the refresh in the
+ * background.
+ *
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @returns {Promise<{detail: string}>}
+ */
+export async function refreshDashboardSummary({ namespace } = {}) {
+	const url = new URL(`${BASE}/metrics/dashboard-summary/refresh`, window.location.origin);
+	if (namespace) url.searchParams.set('namespace', namespace);
+	const res = await fetch(url.toString(), { method: 'POST' });
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}

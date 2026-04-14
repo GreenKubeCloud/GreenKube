@@ -183,6 +183,40 @@ class RecommendationRecord(BaseModel):
         )
 
 
+class MetricsSummaryRow(BaseModel):
+    """
+    A single pre-computed summary row for a specific time window.
+
+    These rows are maintained in the ``metrics_summary`` table and updated
+    hourly by the :class:`~greenkube.core.summary_refresher.SummaryRefresher`
+    so that the frontend can load KPI data instantly without scanning
+    millions of raw metric rows.
+    """
+
+    window_slug: str = Field(
+        ...,
+        description=(
+            "Identifier for the time window. "
+            "Built-in slugs: '24h', '7d', '30d', '1y', 'ytd'. "
+            "Prefixed with '<namespace>/' when scoped to a namespace."
+        ),
+    )
+    namespace: Optional[str] = Field(
+        None,
+        description="Kubernetes namespace, or None for cluster-wide aggregation.",
+    )
+    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
+    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_cost: float = Field(0.0, description="Total cost in dollars.")
+    total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
+    pod_count: int = Field(0, description="Number of unique pods.")
+    namespace_count: int = Field(0, description="Number of unique namespaces.")
+    updated_at: Optional[datetime] = Field(
+        None,
+        description="Timestamp of the last refresh.",
+    )
+
+
 class EnvironmentalMetric(BaseModel):
     """
     Holds environmental factors for a specific location (e.g., a cloud region).

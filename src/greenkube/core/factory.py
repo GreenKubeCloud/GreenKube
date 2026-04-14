@@ -30,6 +30,7 @@ from ..storage.base_repository import (
     CombinedMetricsRepository,
     NodeRepository,
     RecommendationRepository,
+    SummaryRepository,
 )
 from ..storage.elastic.repository import (
     ElasticsearchCarbonIntensityRepository,
@@ -38,8 +39,10 @@ from ..storage.elastic.repository import (
 from ..storage.embodied_repository import EmbodiedRepository
 from ..storage.postgres.node_repository import PostgresNodeRepository
 from ..storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
+from ..storage.postgres.summary_repository import PostgresSummaryRepository
 from ..storage.sqlite.node_repository import SQLiteNodeRepository
 from ..storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
+from ..storage.sqlite.summary_repository import SQLiteSummaryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +168,34 @@ def get_recommendation_repository() -> RecommendationRepository:
 
 
 @lru_cache(maxsize=1)
+def get_summary_repository() -> SummaryRepository:
+    """Factory function to get the pre-computed summary repository.
+
+    Uses lru_cache to act as a singleton.
+    """
+    cfg = get_config()
+    db_type = cfg.DB_TYPE
+
+    if db_type == "sqlite":
+        from ..core.db import get_db_manager
+
+        return SQLiteSummaryRepository(get_db_manager())
+    elif db_type == "postgres":
+        from ..core.db import get_db_manager
+
+        return PostgresSummaryRepository(get_db_manager())
+    else:
+        # Elasticsearch or unknown — fall back to SQLite
+        logger.warning(
+            "SummaryRepository not implemented for DB_TYPE '%s'. Using SQLite fallback.",
+            db_type,
+        )
+        from ..core.db import get_db_manager
+
+        return SQLiteSummaryRepository(get_db_manager())
+
+
+@lru_cache(maxsize=1)
 def get_processor() -> DataProcessor:
     """
     Factory function to instantiate and return a fully configured DataProcessor.
@@ -227,4 +258,5 @@ def clear_caches():
     get_node_repository.cache_clear()
     get_embodied_repository.cache_clear()
     get_recommendation_repository.cache_clear()
+    get_summary_repository.cache_clear()
     get_processor.cache_clear()

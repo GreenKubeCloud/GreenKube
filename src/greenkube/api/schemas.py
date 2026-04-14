@@ -4,11 +4,11 @@ Pydantic response schemas for the API.
 Keeps API-specific response shapes separate from internal domain models.
 """
 
-from typing import List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from greenkube.models.metrics import CombinedMetric
+from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow
 
 
 class HealthResponse(BaseModel):
@@ -81,3 +81,22 @@ class ReportSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     unique_pods: int = Field(0, description="Number of unique pods.")
     unique_namespaces: int = Field(0, description="Number of unique namespaces.")
+
+
+class DashboardSummaryResponse(BaseModel):
+    """Pre-computed KPI summaries for the frontend dashboard.
+
+    Each key in *windows* is a window slug (e.g. ``'24h'``, ``'7d'``) and
+    the value is the corresponding :class:`MetricsSummaryRow`.  The response
+    is intentionally flat so the frontend can look up any window by slug
+    without iterating a list.
+    """
+
+    windows: Dict[str, MetricsSummaryRow] = Field(
+        default_factory=dict,
+        description="Map of window slug → pre-computed summary row.",
+    )
+    namespace: Optional[str] = Field(
+        None,
+        description="The namespace filter applied, or None for cluster-wide.",
+    )

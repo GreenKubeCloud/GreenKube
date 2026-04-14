@@ -18,6 +18,7 @@ from greenkube.storage.base_repository import (
     CombinedMetricsRepository,
     NodeRepository,
     RecommendationRepository,
+    SummaryRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,3 +97,10 @@ async def get_recommendation_repository() -> RecommendationRepository:
     from greenkube.core.factory import get_recommendation_repository as factory_get_reco_repo
 
     return factory_get_reco_repo()
+
+
+async def get_summary_repository() -> SummaryRepository:
+    """Provides the SummaryRepository instance via the factory."""
+    from greenkube.core.factory import get_summary_repository as factory_get_summary
+
+    return factory_get_summary()
