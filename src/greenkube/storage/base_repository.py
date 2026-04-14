@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Optional
 
-from ..models.metrics import CombinedMetric, RecommendationRecord
+from ..models.metrics import CombinedMetric, MetricsSummaryRow, RecommendationRecord, TimeseriesCachePoint
 from ..models.node import NodeInfo
 
 
@@ -249,7 +249,7 @@ class CombinedMetricsRepository(ABC):
         _GRANULARITY_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
             "day": "%Y-%m-%dT00:00:00Z",
-            "week": "%Y-W%V",
+            "week": "%Y-%m-%dT00:00:00Z",  # applied to date_trunc('week') → Monday
             "month": "%Y-%m-01T00:00:00Z",
         }
         fmt = _GRANULARITY_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
@@ -319,5 +319,95 @@ class RecommendationRepository(ABC):
 
         Returns:
             A list of RecommendationRecord objects.
+        """
+        pass
+
+
+class SummaryRepository(ABC):
+    """
+    Abstract base class for the pre-computed dashboard summary table.
+
+    The ``metrics_summary`` table holds one row per (window_slug, namespace)
+    pair.  It is refreshed hourly by
+    :class:`~greenkube.core.summary_refresher.SummaryRefresher` so the
+    frontend can retrieve KPI data with a single lightweight query.
+    """
+
+    # Built-in window slugs that are always computed cluster-wide.
+    BUILTIN_SLUGS: List[str] = ["24h", "7d", "30d", "1y", "ytd"]
+
+    @abstractmethod
+    async def upsert_row(self, row: MetricsSummaryRow) -> None:
+        """
+        Inserts or updates a summary row identified by (window_slug, namespace).
+
+        Args:
+            row: The pre-computed :class:`MetricsSummaryRow` to persist.
+        """
+        pass
+
+    @abstractmethod
+    async def get_rows(self, namespace: Optional[str] = None) -> List[MetricsSummaryRow]:
+        """
+        Returns all summary rows, optionally filtered by namespace.
+
+        Pass ``namespace=None`` to retrieve only cluster-wide rows
+        (where the stored namespace IS NULL).
+
+        Args:
+            namespace: If provided, return only rows for that namespace.
+                       If ``None``, return only cluster-wide rows.
+
+        Returns:
+            A list of :class:`MetricsSummaryRow` objects.
+        """
+        pass
+
+
+class TimeseriesCacheRepository(ABC):
+    """
+    Abstract base class for the pre-computed timeseries chart cache.
+
+    The ``metrics_timeseries_cache`` table holds one row per
+    (window_slug, namespace, bucket_ts) triple.  It is refreshed hourly
+    alongside :class:`SummaryRepository` so the frontend can render
+    time-series charts without scanning millions of raw metric rows.
+
+    Granularity per window:
+        - ``24h``  → hourly  buckets  (≤24 rows)
+        - ``7d``   → daily   buckets  (7 rows)
+        - ``30d``  → daily   buckets  (30 rows)
+        - ``1y``   → weekly  buckets  (≤53 rows)
+        - ``ytd``  → monthly buckets  (≤12 rows)
+    """
+
+    @abstractmethod
+    async def upsert_points(self, points: List[TimeseriesCachePoint]) -> None:
+        """Replace all cached points for a (window_slug, namespace) pair.
+
+        The caller passes the complete, freshly-computed list for one
+        window+namespace combination.  The implementation should delete
+        existing rows for that pair then insert the new ones, keeping
+        the table consistent without requiring explicit deletes elsewhere.
+
+        Args:
+            points: The new time-series cache points for one window+namespace.
+        """
+        pass
+
+    @abstractmethod
+    async def get_points(
+        self,
+        window_slug: str,
+        namespace: Optional[str] = None,
+    ) -> List[TimeseriesCachePoint]:
+        """Return all cached points for a given window slug and namespace.
+
+        Args:
+            window_slug: The time window identifier (e.g. ``'7d'``).
+            namespace: Namespace filter; ``None`` returns cluster-wide points.
+
+        Returns:
+            An ordered list of :class:`TimeseriesCachePoint` objects.
         """
         pass

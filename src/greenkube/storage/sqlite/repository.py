@@ -455,10 +455,16 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         _SQLITE_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
             "day": "%Y-%m-%dT00:00:00Z",
-            "week": "%Y-W%W",
+            "week": None,  # handled separately: floor to Monday via date modifier
             "month": "%Y-%m-01T00:00:00Z",
         }
         ts_format = _SQLITE_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
+
+        # For weekly buckets SQLite has no date_trunc; compute Monday of each week.
+        if granularity == "week":
+            ts_bucket_expr = "strftime('%Y-%m-%dT00:00:00Z', ts, 'weekday 1', '-6 days')"
+        else:
+            ts_bucket_expr = f"strftime('{ts_format}', ts)"
 
         cfg = get_config()
         now = datetime.now(tz.utc)
@@ -505,7 +511,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                 union_query = " UNION ALL ".join(parts)
                 query = f"""
                     SELECT
-                        strftime('{ts_format}', ts) AS ts_bucket,
+                        {ts_bucket_expr} AS ts_bucket,
                         COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
                         COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
                         COALESCE(SUM(total_cost), 0)          AS total_cost,

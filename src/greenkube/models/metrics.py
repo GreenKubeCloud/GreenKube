@@ -183,6 +183,58 @@ class RecommendationRecord(BaseModel):
         )
 
 
+class MetricsSummaryRow(BaseModel):
+    """
+    A single pre-computed summary row for a specific time window.
+
+    These rows are maintained in the ``metrics_summary`` table and updated
+    hourly by the :class:`~greenkube.core.summary_refresher.SummaryRefresher`
+    so that the frontend can load KPI data instantly without scanning
+    millions of raw metric rows.
+    """
+
+    window_slug: str = Field(
+        ...,
+        description=(
+            "Identifier for the time window. "
+            "Built-in slugs: '24h', '7d', '30d', '1y', 'ytd'. "
+            "Prefixed with '<namespace>/' when scoped to a namespace."
+        ),
+    )
+    namespace: Optional[str] = Field(
+        None,
+        description="Kubernetes namespace, or None for cluster-wide aggregation.",
+    )
+    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
+    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_cost: float = Field(0.0, description="Total cost in dollars.")
+    total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
+    pod_count: int = Field(0, description="Number of unique pods.")
+    namespace_count: int = Field(0, description="Number of unique namespaces.")
+    updated_at: Optional[datetime] = Field(
+        None,
+        description="Timestamp of the last refresh.",
+    )
+
+
+class TimeseriesCachePoint(BaseModel):
+    """
+    A single pre-computed time-series bucket stored in ``metrics_timeseries_cache``.
+
+    The table holds one row per (window_slug, namespace, bucket_ts) so the
+    frontend can retrieve chart data with a single lightweight indexed query.
+    Buckets are hourly for ``24h`` and daily for all longer windows.
+    """
+
+    window_slug: str = Field(..., description="The parent time window slug (e.g. '7d', 'ytd').")
+    namespace: Optional[str] = Field(None, description="Namespace, or None for cluster-wide.")
+    bucket_ts: str = Field(..., description="ISO-8601 bucket timestamp (UTC).")
+    co2e_grams: float = Field(0.0, description="Operational CO2e in grams for this bucket.")
+    embodied_co2e_grams: float = Field(0.0, description="Embodied CO2e in grams for this bucket.")
+    total_cost: float = Field(0.0, description="Total cost for this bucket.")
+    joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
+
+
 class EnvironmentalMetric(BaseModel):
     """
     Holds environmental factors for a specific location (e.g., a cloud region).
