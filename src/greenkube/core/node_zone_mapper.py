@@ -108,13 +108,25 @@ class NodeZoneMapper:
                         f"Used default zone '{self._config.DEFAULT_ZONE}'"
                     )
                     is_estimated = True
-                    logger.warning(
-                        "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
-                        cloud_zone,
-                        region,
-                        node_name,
-                        self._config.DEFAULT_ZONE,
-                    )
+                    if self._config.DEFAULT_ZONE == "unknown":
+                        logger.warning(
+                            "⚠️  DEFAULT_ZONE is not set (or set to 'unknown'). Carbon intensity will use the global "
+                            "fallback (%s gCO2e/kWh) for node '%s' (cloud zone '%s', region '%s'). "
+                            "Set DEFAULT_ZONE to your Electricity Maps zone code (e.g., 'FR', 'DE', 'US-CAL-CISO') "
+                            "in values.yaml or via the DEFAULT_ZONE environment variable.",
+                            self._config.DEFAULT_INTENSITY,
+                            node_name,
+                            cloud_zone,
+                            region,
+                        )
+                    else:
+                        logger.warning(
+                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
+                            cloud_zone,
+                            region,
+                            node_name,
+                            self._config.DEFAULT_ZONE,
+                        )
 
             node_contexts[node_name] = NodeZoneContext(
                 node=node_name,

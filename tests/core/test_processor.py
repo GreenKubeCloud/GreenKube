@@ -711,8 +711,9 @@ async def test_processor_nodecollector_instance_type_fallback(
     mock_calculator,
 ):
     """
-    If Prometheus returns no node instance types, DataProcessor should call
-    NodeCollector.collect_instance_types() and supply those to the estimator.
+    If Prometheus returns no node instance types, DataProcessor should use the
+    NodeInfo objects collected in Phase 1 to enrich the PrometheusMetric with
+    instance-type information — without calling collect_instance_types().
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -729,10 +730,18 @@ async def test_processor_nodecollector_instance_type_fallback(
     # Configure the mocked PrometheusCollector to return this metric
     mock_prometheus_collector.collect.return_value = prom_metric
 
-    # Configure the NodeCollector instance to return instance types via collect_instance_types
-    node_instance_map = {"node-1": "m5.large"}
-    mock_node_instance_collector = mock_node_collector
-    mock_node_instance_collector.collect_instance_types.return_value = node_instance_map
+    # NodeCollector.collect() (Phase 1) returns a NodeInfo with the instance type.
+    # collect_instance_types() must NOT be called in the new phased pipeline.
+    node_info_with_type = NodeInfo(
+        name="node-1",
+        instance_type="m5.large",
+        zone="us-east-1a",
+        region="us-east-1",
+        cloud_provider="aws",
+        architecture="amd64",
+        node_pool=None,
+    )
+    mock_node_collector.collect = AsyncMock(return_value={"node-1": node_info_with_type})
 
     # Spy on the estimator to see the PrometheusMetric it receives
     estimator_spy = MagicMock()
@@ -761,8 +770,12 @@ async def test_processor_nodecollector_instance_type_fallback(
     # Run
     await dp.run()
 
-    # Assert NodeCollector.collect_instance_types was called
-    mock_node_collector.collect_instance_types.assert_called_once()
+    # NodeCollector.collect_instance_types() must NOT be called — instance types
+    # come from NodeCollector.collect() in Phase 1.
+    mock_node_collector.collect_instance_types.assert_not_called()
+
+    # NodeCollector.collect() must have been called exactly once (Phase 1).
+    mock_node_collector.collect.assert_called_once()
 
     # Assert estimator was called with a PrometheusMetric that now has node_instance_types populated
     called_metric = estimator_spy.estimate.call_args[0][0]
