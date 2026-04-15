@@ -12,6 +12,7 @@ Delegates the heavy lifting to focused collaborators:
 * :class:`HistoricalRangeProcessor` – chunked historical range processing
 """
 
+import asyncio
 import logging
 from typing import Dict, List, Set
 
@@ -72,7 +73,6 @@ class DataProcessor:
         self._orchestrator = CollectionOrchestrator(
             prometheus_collector=prometheus_collector,
             opencost_collector=opencost_collector,
-            node_collector=node_collector,
             pod_collector=pod_collector,
         )
         self._zone_mapper = NodeZoneMapper(node_collector=node_collector, config=self._config)
@@ -113,20 +113,76 @@ class DataProcessor:
     # ------------------------------------------------------------------
 
     async def run(self) -> List[CombinedMetric]:
-        """Execute the data processing pipeline."""
+        """Execute the data processing pipeline.
+
+        The pipeline is structured into sequential phases to guarantee correct
+        data dependencies and avoid concurrent Kubernetes API calls:
+
+        Phase 1 — Node discovery (sequential, K8s API):
+            Collect node metadata (zone, region, provider, instance type).
+
+        Phase 2 — Zone resolution + service-profile prefetch (parallel, uses Phase-1 data):
+            * Map cloud zones → Electricity Maps zones (NodeZoneMapper).
+            * Build the node-instance map from Phase-1 data (no extra K8s call).
+
+        Phase 3 — External metrics + carbon-intensity fetch (parallel, uses Phase-2 data):
+            * Prometheus, OpenCost, Pod collection (metrics collectors).
+            * Boavizta embodied-emissions profiles (uses instance types from Phase 1).
+            * Electricity Maps carbon intensity (uses resolved zones from Phase 2).
+
+        Phase 4 — Assembly:
+            Estimate energy, build CombinedMetric objects.
+        """
         logger.info("Starting data processing cycle...")
 
-        # 1. Collect from all sources in parallel
-        cr = await self._orchestrator.collect_all()
+        # ------------------------------------------------------------------
+        # Phase 1: Node discovery (must run alone — single K8s API call)
+        # ------------------------------------------------------------------
+        logger.debug("Phase 1: Collecting node metadata from Kubernetes...")
+        try:
+            nodes_info = await self.node_collector.collect() or {}
+        except Exception as e:
+            logger.error("Failed to collect node metadata: %s", e)
+            nodes_info = {}
+
+        # Build node_instance_map directly from Phase-1 data (no extra K8s call).
+        node_instance_map: Dict[str, str] = {
+            name: info.instance_type
+            for name, info in nodes_info.items()
+            if info.instance_type and info.instance_type != "unknown"
+        }
+
+        # ------------------------------------------------------------------
+        # Phase 2: Zone resolution (depends on Phase-1 nodes_info)
+        # ------------------------------------------------------------------
+        logger.debug("Phase 2: Resolving cloud zones to Electricity Maps zones...")
+        node_contexts = await self._zone_mapper.map_nodes(nodes_info)
+
+        # ------------------------------------------------------------------
+        # Phase 3: Parallel metrics collection + Boavizta (all independent,
+        #          but use Phase-1/2 data for enrichment)
+        # ------------------------------------------------------------------
+        logger.debug("Phase 3: Collecting Prometheus/OpenCost/Pod metrics and Boavizta profiles in parallel...")
+        cr, boavizta_cache = await asyncio.gather(
+            self._orchestrator.collect_all(nodes_info=nodes_info),
+            self._embodied_service.prepare_embodied_data(nodes_info),
+        )
 
         prom_metrics = cr.prom_metrics
-        node_instance_map = cr.node_instance_map
+        # Merge any instance types found by Prometheus (e.g. kube_node_labels)
+        # with those collected in Phase 1.  Phase-1 data wins for correctness.
+        if cr.node_instance_map:
+            merged = dict(cr.node_instance_map)
+            merged.update(node_instance_map)
+            node_instance_map = merged
+
         cost_map = cr.cost_map
         pod_request_map_simple = cr.pod_request_map_simple
         pod_request_map = cr.pod_request_map_agg
-        nodes_info = cr.nodes_info
 
-        # 2. Adjust low-CPU nodes with pod requests
+        # ------------------------------------------------------------------
+        # Step: Adjust low-CPU nodes with pod requests
+        # ------------------------------------------------------------------
         cpu_adjusted_nodes: Set[str] = set()
         if prom_metrics:
             try:
@@ -166,7 +222,7 @@ class DataProcessor:
                     exc_info=True,
                 )
 
-            # 3. Estimate energy
+            # Estimate energy
             try:
                 energy_metrics = self.estimator.estimate(prom_metrics)
                 logger.info(
@@ -179,26 +235,15 @@ class DataProcessor:
         else:
             energy_metrics = []
 
-        # 4. Build per-pod resource maps from Prometheus data
+        # Build per-pod resource maps from Prometheus data
         resource_maps = PrometheusResourceMapper.build(prom_metrics)
 
-        # 5. Node zone mapping
-        node_contexts = await self._zone_mapper.map_nodes(nodes_info)
-
-        # 6. Prefetch carbon intensities
+        # ------------------------------------------------------------------
+        # Phase 4: Prefetch carbon intensities and assemble CombinedMetrics
+        # ------------------------------------------------------------------
+        logger.debug("Phase 4: Prefetching carbon intensities and assembling metrics...")
         await self._assembler.prefetch_intensities(energy_metrics, node_contexts)
 
-        # 7. Ensure node instance map
-        if not node_instance_map:
-            try:
-                node_instance_map = await self.node_collector.collect_instance_types() or {}
-            except Exception:
-                node_instance_map = {}
-
-        # 8. Prepare embodied emissions (Boavizta)
-        boavizta_cache = await self._embodied_service.prepare_embodied_data(nodes_info)
-
-        # 9. Assemble CombinedMetrics
         steps_per_day = 86400 / self.estimator.query_range_step_sec
 
         combined_metrics = await self._assembler.assemble(
@@ -242,6 +287,7 @@ class DataProcessor:
     async def close(self):
         """Close all collectors to release resources."""
         await self._orchestrator.close()
+        await self.node_collector.close()
         await self.electricity_maps_collector.close()
         await self.boavizta_collector.close()
         logger.debug("DataProcessor closed all collectors.")
