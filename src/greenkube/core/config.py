@@ -276,15 +276,6 @@ class Config:
         if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
 
-        if self.DEFAULT_ZONE == "unknown":
-            logging.warning(
-                "⚠️  DEFAULT_ZONE is not set (or set to 'unknown'). Carbon intensity will use the global "
-                "fallback (%s gCO2e/kWh) when zone auto-discovery fails, which may be INACCURATE. "
-                "Set DEFAULT_ZONE to your Electricity Maps zone code (e.g., 'FR', 'DE', 'US-CAL-CISO') "
-                "in values.yaml or via the DEFAULT_ZONE environment variable.",
-                self.DEFAULT_INTENSITY,
-            )
-
     def reload(self) -> None:
         """Re-read all configuration from the current environment variables.
 
