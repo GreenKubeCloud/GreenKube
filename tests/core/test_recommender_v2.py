@@ -521,6 +521,32 @@ class TestOverprovisionedNode:
         node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
         assert len(node_recs) == 0
 
+    def test_multi_pod_utilization_is_summed_not_averaged(self, recommender):
+        """Multiple pods on the same node must be summed per timestamp, not averaged.
+
+        Regression test: 3 pods each using ~160-244m on a 4-core node
+        yields ~565m total = ~14% utilization, which is below the 20% threshold.
+        Previously, the per-pod average (188m / 4000m = 4.7%) was used instead,
+        reporting 0% utilization in the recommendation reason.
+        """
+        node_infos = [MagicMock(name="node-3a7e1d", cpu_capacity_cores=4.0)]
+        node_infos[0].name = "node-3a7e1d"
+        # Simulate k8s metrics: 3 pods on the same node at the same timestamp
+        t = _ts()
+        metrics = [
+            _make_metric(pod_name="pod-a", node="node-3a7e1d", cpu_usage_millicores=160, timestamp=t),
+            _make_metric(pod_name="pod-b", node="node-3a7e1d", cpu_usage_millicores=161, timestamp=t),
+            _make_metric(pod_name="pod-c", node="node-3a7e1d", cpu_usage_millicores=244, timestamp=t),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        # Total = 565m / 4000m = ~14% — still below threshold, recommendation is expected
+        assert len(node_recs) == 1
+        # The reported utilization must NOT be 0% — it must reflect the summed total (~14%)
+        # Use a word-boundary check: "(0%)" is what the old bug produced
+        assert "(0%)" not in node_recs[0].reason
+        assert "14%" in node_recs[0].reason
+
 
 # ---------------------------------------------------------------------------
 # Test: UNDERUTILIZED_NODE

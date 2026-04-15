@@ -610,24 +610,26 @@ class Recommender:
             if hasattr(ni, "name") and hasattr(ni, "cpu_capacity_cores"):
                 node_capacity[ni.name] = ni.cpu_capacity_cores or 0
 
-        node_usage: Dict[str, List[float]] = defaultdict(list)
+        # Group pod CPU usage per node per timestamp, so we can sum across pods
+        node_usage_by_ts: Dict[str, Dict] = defaultdict(lambda: defaultdict(float))
         node_pods: Dict[str, set] = defaultdict(set)
 
         for m in metrics:
             if m.node and m.cpu_usage_millicores is not None:
-                node_usage[m.node].append(m.cpu_usage_millicores)
+                ts_key = m.timestamp if m.timestamp is not None else 0
+                node_usage_by_ts[m.node][ts_key] += m.cpu_usage_millicores
                 node_pods[m.node].add(m.pod_name)
 
         for node_name, capacity_cores in node_capacity.items():
             if capacity_cores <= 0:
                 continue
 
-            usages = node_usage.get(node_name, [])
-            if not usages:
+            ts_totals = list(node_usage_by_ts.get(node_name, {}).values())
+            if not ts_totals:
                 continue
 
             capacity_millicores = capacity_cores * 1000
-            avg_total_usage = sum(usages) / len(usages)
+            avg_total_usage = sum(ts_totals) / len(ts_totals)
             utilization = avg_total_usage / capacity_millicores
             unique_pods = len(node_pods.get(node_name, set()))
 
