@@ -93,6 +93,7 @@ class SQLiteSummaryRepository(SummaryRepository):
                             namespace=row["namespace"],
                             total_co2e_grams=row["total_co2e_grams"],
                             total_embodied_co2e_grams=row["total_embodied_co2e_grams"],
+                            total_co2e_all_scopes=row["total_co2e_grams"] + row["total_embodied_co2e_grams"],
                             total_cost=row["total_cost"],
                             total_energy_joules=row["total_energy_joules"],
                             pod_count=row["pod_count"],
