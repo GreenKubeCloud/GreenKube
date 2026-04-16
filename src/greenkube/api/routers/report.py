@@ -83,6 +83,7 @@ async def report_summary(
         total_rows=total_rows,
         total_co2e_grams=total_co2e_grams,
         total_embodied_co2e_grams=total_embodied_co2e_grams,
+        total_co2e_all_scopes=total_co2e_grams + total_embodied_co2e_grams,
         total_cost=total_cost,
         total_energy_joules=total_energy_joules,
         unique_pods=unique_pods,

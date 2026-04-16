@@ -34,6 +34,7 @@ data:
   
   # --- Boavizta Config ---
   BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
+  DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
 
   # --- Prometheus Collector Config ---
   {{- if .Values.config.prometheus.url }}

@@ -46,6 +46,7 @@ class Config:
         self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "unknown")
         self.DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
         self.DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
+        self.DEFAULT_EMBODIED_EMISSIONS_KG = float(os.getenv("DEFAULT_EMBODIED_EMISSIONS_KG", "350"))
 
         # --- Network variables ---
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

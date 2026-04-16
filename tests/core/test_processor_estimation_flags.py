@@ -59,6 +59,9 @@ def mock_components():
 
 @pytest.fixture
 def processor(mock_components):
+    embodied_repo = AsyncMock()
+    # Return a proper dict so that .get("is_fallback") behaves correctly (not a MagicMock)
+    embodied_repo.get_profile.return_value = {"gwp_manufacture": 500.0, "lifespan_hours": 35040}
     return DataProcessor(
         prometheus_collector=mock_components["prom"],
         opencost_collector=mock_components["opencost"],
@@ -68,7 +71,7 @@ def processor(mock_components):
         repository=mock_components["repo"],
         combined_metrics_repository=AsyncMock(),
         node_repository=mock_components["node_repo"],
-        embodied_repository=AsyncMock(),
+        embodied_repository=embodied_repo,
         boavizta_collector=AsyncMock(),
         calculator=mock_components["calc"],
         estimator=mock_components["est"],

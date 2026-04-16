@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **GHG Scope 2 / Scope 3 carbon classification:** Emissions are now formally categorised per the GHG Protocol Corporate Standard.
+- **Pre-computed dashboard cache (`metrics_summary` + `metrics_timeseries_cache`):** Two new database tables (migrations `0004` and `0005` for PostgreSQL and SQLite) store pre-aggregated KPI scalars and time-series buckets for five fixed windows (`24h`, `7d`, `30d`, `1y`, `ytd`). Tables are refreshed hourly by the background scheduler, eliminating full-table scans on every dashboard load and preventing OOM errors on large datasets.
+- **`SummaryRefresher`:** New `src/greenkube/core/summary_refresher.py` service that computes cluster-wide and per-namespace KPI totals and time-series buckets, then upserts them into the two cache tables. Supports adaptive granularity per window (hourly / daily / weekly / monthly buckets).
+- **`SummaryRepository` and `TimeseriesCacheRepository`:** New abstract base classes in `storage/base_repository.py` with PostgreSQL and SQLite implementations.
+- **Dashboard API endpoints:** Three new FastAPI routes for the pre-computed tables:
+  - `GET /api/v1/metrics/dashboard-summary` — cached KPI scalars, optionally filtered by namespace.
+  - `GET /api/v1/metrics/dashboard-timeseries/{window_slug}` — cached time-series buckets for `24h`, `7d`, `30d`, `1y`, or `ytd`.
+  - `POST /api/v1/metrics/dashboard-summary/refresh` — trigger an on-demand background refresh (HTTP 202 Accepted).
+- **`MetricsSummaryRow` and `TimeseriesCachePoint` Pydantic models:** New DTOs in `src/greenkube/models/metrics.py` representing rows from the two cache tables.
+- **Adaptive chart granularity (frontend):** Dashboard charts now select the optimal time bucket per window — hourly for `24h`, daily for `7d`/`30d`, weekly for `1y`, monthly for `ytd` — resulting in consistently readable x-axes regardless of the selected range.
+- **Boavizta fallback with configurable default:** When the Boavizta API does not recognise a cloud provider or instance type (returns no data), `EmbodiedEmissionsService` now injects a fallback embodied-emissions profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **350 kg CO2e**) instead of silently using 0 g, which was incorrect. The resulting `CombinedMetric` is flagged `is_estimated=True` with a descriptive `estimation_reasons` entry. Exposed as `config.boavizta.defaultEmbodiedEmissionsKg` in `values.yaml` and `DEFAULT_EMBODIED_EMISSIONS_KG` in `configmap.yaml`.
+- **`EmbodiedEmissionsService.is_embodied_fallback()`:** New helper method returns `True` when a node's cached profile was produced by the fallback rather than a real Boavizta response, enabling the metric assembler to set estimation flags accurately.
+
+### Fixed
+- **Race condition in collection orchestrator:** `CollectionOrchestrator` no longer collects nodes internally. Node collection is now an explicit Phase 1 in `DataProcessor.run()` that runs alone before any concurrent collection, preventing shared Kubernetes API client races and the cascade of Electricity Maps API errors they caused.
+- **`DEFAULT_ZONE` spurious warning:** The `NodeZoneMapper` no longer emits a warning when the zone was actually resolved correctly — the warning was incorrectly triggered even when a valid `DEFAULT_ZONE` was set.
+- **Pod CPU utilisation aggregation per node:** `CollectionOrchestrator` was averaging pod CPU usage per node across timestamps instead of summing, causing underestimated energy figures on nodes with multiple measured pods.
+- **Chart legends overlapping (frontend):** ECharts legend layout fixed to prevent label overlap on small viewports.
+
+### Changed
+- **`DataProcessor.run()` pipeline restructured into four explicit phases:** Phase 1 (node discovery, sequential), Phase 2 (zone resolution), Phase 3 (parallel metrics + Boavizta), Phase 4 (carbon-intensity prefetch + assembly). This eliminates the previous race condition and removes the redundant second `collect_instance_types()` K8s call that used to happen at the end of the pipeline.
+- **`CollectionOrchestrator` simplified:** `NodeCollector` dependency removed; node enrichment for Prometheus instance-type labels now uses the `nodes_info` dict passed in from Phase 1, avoiding any duplicate K8s API calls.
+
 ## [0.2.8] — 2026-04-11
 
 ### Security

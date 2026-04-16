@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class EnergyMetric(BaseModel):
@@ -205,8 +205,18 @@ class MetricsSummaryRow(BaseModel):
         None,
         description="Kubernetes namespace, or None for cluster-wide aggregation.",
     )
-    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
-    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_co2e_grams: float = Field(
+        0.0,
+        description="GHG Scope 2 — operational electricity emissions in grams CO₂e.",
+    )
+    total_embodied_co2e_grams: float = Field(
+        0.0,
+        description="GHG Scope 3 (Cat. 1) — hardware manufacturing emissions in grams CO₂e.",
+    )
+    total_co2e_all_scopes: float = Field(
+        0.0,
+        description="GHG Scope 2 + Scope 3 — total carbon footprint in grams CO₂e.",
+    )
     total_cost: float = Field(0.0, description="Total cost in dollars.")
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     pod_count: int = Field(0, description="Number of unique pods.")
@@ -229,8 +239,15 @@ class TimeseriesCachePoint(BaseModel):
     window_slug: str = Field(..., description="The parent time window slug (e.g. '7d', 'ytd').")
     namespace: Optional[str] = Field(None, description="Namespace, or None for cluster-wide.")
     bucket_ts: str = Field(..., description="ISO-8601 bucket timestamp (UTC).")
-    co2e_grams: float = Field(0.0, description="Operational CO2e in grams for this bucket.")
-    embodied_co2e_grams: float = Field(0.0, description="Embodied CO2e in grams for this bucket.")
+    co2e_grams: float = Field(0.0, description="GHG Scope 2 — electricity emissions in grams CO₂e for this bucket.")
+    embodied_co2e_grams: float = Field(
+        0.0,
+        description="GHG Scope 3 (Cat. 1) — hardware manufacturing emissions in grams CO₂e for this bucket.",
+    )
+    total_co2e_all_scopes: float = Field(
+        0.0,
+        description="GHG Scope 2 + Scope 3 — total carbon footprint in grams CO₂e for this bucket.",
+    )
     total_cost: float = Field(0.0, description="Total cost for this bucket.")
     joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
 
@@ -257,7 +274,13 @@ class CombinedMetric(BaseModel):
     total_cost: float = 0.0
 
     # From CarbonEmissionMetric
-    co2e_grams: float = 0.0
+    co2e_grams: float = Field(
+        0.0,
+        description=(
+            "GHG Scope 2 — indirect emissions from purchased electricity "
+            "(grid carbon intensity × energy consumed × PUE), in grams CO₂e."
+        ),
+    )
 
     # From EnvironmentalMetric
     pue: float = 1.0
@@ -307,8 +330,19 @@ class CombinedMetric(BaseModel):
     is_estimated: Optional[bool] = Field(False, description="Whether the metric relies on estimated values.")
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
     embodied_co2e_grams: Optional[float] = Field(
-        0.0, description="The allocated embodied carbon emissions in grams of CO2 equivalent."
+        0.0,
+        description=(
+            "GHG Scope 3 (Category 1: Purchased Goods & Services) — upstream hardware "
+            "manufacturing emissions allocated to this pod by CPU share, in grams CO₂e."
+        ),
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_co2e_grams(self) -> float:
+        """GHG Scope 2 + Scope 3 — total carbon footprint for this pod in grams CO₂e."""
+        return (self.co2e_grams or 0.0) + (self.embodied_co2e_grams or 0.0)
+
     # Calculation methodology version — allows detecting stale data after algorithm changes
     calculation_version: Optional[str] = Field(
         None, description="Version of the calculation algorithm that produced this metric."

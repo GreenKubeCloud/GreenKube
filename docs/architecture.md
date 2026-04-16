@@ -34,7 +34,8 @@ flowchart TB
             NZM["NodeZoneMapper<br/>(Cloud → eMaps Zone)"]
             PRM["PrometheusResourceMapper<br/>(Per-Pod Resources)"]
             CN["CostNormalizer<br/>(Per-Step Cost)"]
-            ESvc["EmbodiedEmissionsService<br/>(Boavizta Cache)"]
+            ESvc["EmbodiedEmissionsService<br/>(Boavizta Cache + Fallback)"]
+            SR["SummaryRefresher<br/>(Pre-computed Cache)"]
             HRP["HistoricalRangeProcessor<br/>(Chunked Range)"]
             Rec["Recommender<br/>(9 Types)"]
         end
@@ -61,8 +62,8 @@ flowchart TB
 
     PC --> CO
     OCC --> CO
-    NC --> CO
     PodC --> CO
+    NC --> DP
 
     CO --> DP
     EMC --> DP
@@ -74,10 +75,12 @@ flowchart TB
     DP --> CN
     DP --> MA
     DP --> HRP
+    DP --> SR
 
     MA --> Calc
     MA --> ESvc
     MA --> Storage
+    SR --> Storage
 
     Storage --> API
     Storage --> CLI
@@ -184,6 +187,7 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Purpose:** Fetch hardware embodied emissions data
 - **API:** Boavizta API
 - **Caching:** Stores server impact profiles in `EmbodiedRepository`
+- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 350 kg CO₂e) and marks the metric as estimated
 - **Emits:** Server impact data (GWP manufacture, lifespan)
 
 ### Estimator (Business Logic)
@@ -215,7 +219,11 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 6. **Embodied Emissions:** Integrates hardware manufacturing emissions
 
 **Pipeline Stages:**
-- **Instant Mode (`run()`):** Real-time collection using Prometheus instant queries
+- **Instant Mode (`run()`):** Real-time collection using Prometheus instant queries, structured into four explicit phases:
+  - **Phase 1** — Node discovery (sequential, single K8s API call)
+  - **Phase 2** — Zone resolution (NodeZoneMapper, depends on Phase 1)
+  - **Phase 3** — Parallel metrics collection + Boavizta profiles (Prometheus, OpenCost, Pods, embodied emissions — all concurrent, safe because nodes are already resolved)
+  - **Phase 4** — Carbon-intensity prefetch and CombinedMetric assembly
 - **Range Mode (`run_range()`):** Historical analysis with day-sized chunking for memory efficiency
 
 **Implementation Pattern:** 
@@ -234,6 +242,16 @@ The main orchestrator that coordinates the data pipeline from collection to metr
   - Normalization-aware (hour/day/none)
   - Async cache lookups with fallback to default intensity
 - **Output:** `CarbonResult` (CO2e grams, grid intensity, timestamp)
+
+### SummaryRefresher (Business Logic)
+
+#### **SummaryRefresher**
+- **Purpose:** Compute and persist pre-aggregated KPI scalars and time-series buckets for the five dashboard windows (`24h`, `7d`, `30d`, `1y`, `ytd`)
+- **Persistence:** Upserts into `metrics_summary` (scalar totals per window) and `metrics_timeseries_cache` (ordered time buckets per window)
+- **Granularity:** Adaptive per window — hourly (24h), daily (7d/30d), weekly (1y), monthly (ytd)
+- **Scope:** Cluster-wide rows plus one row per active namespace
+- **Scheduling:** Invoked hourly by the background scheduler; on-demand via `POST /api/v1/metrics/dashboard-summary/refresh`
+- **Benefit:** Eliminates full-table scans on every dashboard load, preventing OOM errors on large datasets
 
 ### Recommender (Business Logic)
 
@@ -314,7 +332,10 @@ Schema (33 columns):
   - GPU: gpu_usage_millicores
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
-- Estimation: is_estimated, estimation_reasons, embodied_co2e_grams
+- Estimation: is_estimated, estimation_reasons
+- **GHG Scope 2:** `co2e_grams` — indirect emissions from purchased electricity (grid intensity × energy × PUE)
+- **GHG Scope 3 Cat. 1:** `embodied_co2e_grams` — upstream hardware manufacturing emissions (Boavizta, allocated by CPU share)
+- **Total (Scope 2 + 3):** `total_co2e_grams` — computed field, full pod carbon footprint
 
 Migrations: All backends support automatic schema evolution (ADD COLUMN IF NOT EXISTS)
 
@@ -322,6 +343,16 @@ Migrations: All backends support automatic schema evolution (ADD COLUMN IF NOT E
 Caches Boavizta API responses for hardware embodied emissions.
 
 Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
+
+#### **SummaryRepository**
+Stores pre-computed KPI scalar totals per window.
+
+Schema: window_slug, namespace, total_co2e_grams, total_embodied_co2e_grams, total_cost, total_energy_joules, pod_count, namespace_count, updated_at
+
+#### **TimeseriesCacheRepository**
+Stores pre-computed time-series buckets per window and granularity.
+
+Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, total_cost, joules
 
 ### API & Presentation Layer
 
@@ -342,8 +373,11 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 - `POST /api/v1/config/services` — Update service URLs or tokens at runtime
 - `GET /api/v1/config` — Current configuration (sanitized secrets)
 - `GET /api/v1/metrics` — Per-pod metrics with filtering
-- `GET /api/v1/metrics/summary` — Aggregated totals
-- `GET /api/v1/metrics/timeseries` — Time-series data with granularity
+- `GET /api/v1/metrics/summary` — Aggregated totals (on-demand, full scan)
+- `GET /api/v1/metrics/timeseries` — Time-series data with granularity (on-demand, full scan)
+- `GET /api/v1/metrics/dashboard-summary` — Pre-computed KPI scalars from cache (fast, no full scan)
+- `GET /api/v1/metrics/dashboard-timeseries/{window_slug}` — Pre-computed time-series buckets from cache (`24h`, `7d`, `30d`, `1y`, `ytd`)
+- `POST /api/v1/metrics/dashboard-summary/refresh` — Trigger on-demand background refresh of all cache tables (HTTP 202)
 - `GET /api/v1/namespaces` — Active namespaces list
 - `GET /api/v1/nodes` — Node inventory
 - `GET /api/v1/recommendations` — Optimization suggestions
@@ -405,77 +439,67 @@ Schema: provider, instance_type, gwp_manufacture, lifespan_hours, last_updated
 ### Instant Collection (run())
 Used for real-time monitoring and scheduled collection.
 
-1. **Parallel Collection Phase** (asyncio.gather):
+1. **Phase 1 — Node Discovery** (sequential, single K8s API call):
    ```
-   ┌─ PrometheusCollector.collect()
-   │   ├─ CPU usage (8 concurrent queries)
-   │   ├─ Memory usage
-   │   ├─ Network I/O (rx + tx)
-   │   ├─ Disk I/O (read + write)
-   │   ├─ Restart counts
-   │   └─ Node labels
-   ├─ NodeCollector.collect()
-   │   └─ Node metadata (instance type, zone, capacity)
-   ├─ PodCollector.collect()
-   │   └─ Resource requests (CPU, memory, storage)
-   └─ OpenCostCollector.collect()
-       └─ Cost allocation data
+   NodeCollector.collect()
+   └─ Node metadata (instance type, zone, capacity, provider)
+   └─ Build node_instance_map directly from Phase-1 data
    ```
 
-2. **Aggregation Phase:**
+2. **Phase 2 — Zone Resolution** (depends on Phase-1 data):
    ```
-   Build per-pod maps:
-   - CPU usage (actual)
-   - Memory usage (actual)
-   - Network rx/tx (bytes)
-   - Disk read/write (bytes)
-   - Restart count
-   - CPU/memory/storage requests
+   NodeZoneMapper.map_nodes(nodes_info)
+   └─ Map cloud region → Electricity Maps zone per node
    ```
 
-3. **Energy Estimation:**
+3. **Phase 3 — Parallel Collection + Boavizta** (concurrent, Phase-1/2 data used for enrichment):
    ```
-   BasicEstimator.calculate_node_energy()
-   ├─ Get instance power profile
-   ├─ Calculate dynamic power (CPU-based)
-   ├─ Add idle power
-   └─ Distribute to pods → EnergyMetric (Joules)
-   ```
-
-4. **Zone Mapping & Intensity Prefetch:**
-   ```
-   DataProcessor._get_node_emaps_map()
-   ├─ Map cloud region → carbon zone
-   ├─ Group pods by zone
-   └─ Prefetch intensity data for (zone, timestamp) tuples
-       ├─ Check cache
-       ├─ Query repository
-       └─ Fallback to Electricity Maps API
-   ```
-
-5. **Carbon Calculation:**
-   ```
-   CarbonCalculator.calculate_emissions()
-   ├─ Convert Joules → kWh
-   ├─ Lookup intensity from cache
-   ├─ Apply PUE factor
-   └─ Calculate CO2e grams
+   asyncio.gather(
+     ┌─ CollectionOrchestrator.collect_all(nodes_info):
+     │   ├─ PrometheusCollector.collect()
+     │   │   ├─ CPU usage (8 concurrent queries)
+     │   │   ├─ Memory usage
+     │   │   ├─ Network I/O (rx + tx)
+     │   │   ├─ Disk I/O (read + write)
+     │   │   ├─ Restart counts
+     │   │   └─ Node labels (enriched with Phase-1 data)
+     │   ├─ OpenCostCollector.collect()
+     │   │   └─ Cost allocation data
+     │   └─ PodCollector.collect()
+     │       └─ Resource requests (CPU, memory, storage)
+     └─ EmbodiedEmissionsService.prepare_embodied_data(nodes_info):
+         ├─ Check EmbodiedRepository cache
+         ├─ Fetch missing profiles from Boavizta API
+         └─ Inject fallback profile (DEFAULT_EMBODIED_EMISSIONS_KG) for unknowns
+   )
    ```
 
-6. **CombinedMetric Assembly:**
+4. **Phase 4 — Assembly:**
    ```
-   Merge all data sources:
-   ├─ Energy (Joules, CO2e)
-   ├─ Cost (total_cost)
-   ├─ Resources (CPU, mem, net, disk, storage, restarts)
-   ├─ Metadata (node, zone, instance type)
-   └─ Estimation flags/reasons
+   ├─ BasicEstimator.estimate() → EnergyMetric per pod (Joules)
+   ├─ MetricAssembler.prefetch_intensities()
+   │   ├─ Group pods by zone
+   │   └─ Prefetch intensity for (zone, timestamp) pairs
+   └─ MetricAssembler.assemble()
+       ├─ CarbonCalculator.calculate_emissions()
+       ├─ EmbodiedEmissionsService.calculate_pod_embodied()
+       │   └─ Mark metric is_estimated=True if fallback used
+       └─ Build CombinedMetric (energy + carbon + cost + resources + metadata)
    ```
 
-7. **Persistence:**
+5. **Persistence:**
    ```
    Repository.write_combined_metrics()
-   └─ Batch insert to database (Postgres/SQLite/ES)
+   └─ Batch insert to database (Postgres/SQLite)
+   ```
+
+6. **Background (hourly scheduler):**
+   ```
+   SummaryRefresher.run()
+   ├─ For each window (24h, 7d, 30d, 1y, ytd):
+   │   ├─ aggregate_summary() → MetricsSummaryRow → upsert metrics_summary
+   │   └─ aggregate_timeseries() → TimeseriesCachePoint[] → upsert metrics_timeseries_cache
+   └─ Repeated for each namespace
    ```
 
 ### Historical Analysis (run_range())
@@ -570,6 +594,7 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `DEFAULT_ZONE` — Fallback carbon zone
 - `DEFAULT_INTENSITY` — Fallback intensity (gCO2e/kWh)
 - `NORMALIZATION_GRANULARITY` — hour|day|none
+- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 350 kg CO₂e)
 
 **Recommendations:**
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 7
@@ -649,6 +674,13 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 - Scope: Long-term (instance profiles rarely change)
 - Key: (provider, instance_type)
 - Purpose: Minimize external API calls for embodied emissions
+- Fallback: When API returns no data, a profile with `is_fallback=True` is injected using `DEFAULT_EMBODIED_EMISSIONS_KG`; the resulting metric is flagged `is_estimated=True`
+
+**Dashboard Summary Cache:**
+- Type: Persistent database (`metrics_summary` + `metrics_timeseries_cache`)
+- Scope: Refreshed hourly by `SummaryRefresher`
+- Key: (window_slug, namespace)
+- Purpose: Serve KPI cards and charts instantly without full-table scans; prevents OOM on large datasets
 
 ## Performance Considerations
 

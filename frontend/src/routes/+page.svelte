@@ -181,8 +181,8 @@
 		<!-- KPI Row -->
 		<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
 			<StatCard
-				label="Total CO₂"
-				value={formatCO2(summary?.total_co2e_grams ?? 0)}
+				label="Total CO₂ (Scope 2+3)"
+				value={formatCO2(summary?.total_co2e_all_scopes ?? summary?.total_co2e_grams ?? 0)}
 				icon="🌿"
 				color="green"
 			/>
@@ -216,7 +216,11 @@
 		<!-- Additional Stats -->
 		<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
 			<div class="card-compact text-center">
-				<p class="stat-label">Embodied CO₂</p>
+				<p class="stat-label">Scope 2 CO₂ (electricity)</p>
+				<p class="stat-value text-lg">{formatCO2(summary?.total_co2e_grams ?? 0)}</p>
+			</div>
+			<div class="card-compact text-center">
+				<p class="stat-label">Scope 3 CO₂ (hardware)</p>
 				<p class="stat-value text-lg">{formatCO2(summary?.total_embodied_co2e_grams ?? 0)}</p>
 			</div>
 			<div class="card-compact text-center">
@@ -224,9 +228,9 @@
 				<p class="stat-value text-lg">{formatNumber(summary?.namespace_count ?? 0)}</p>
 			</div>
 			<div class="card-compact text-center">
-				<p class="stat-label">Avg CO₂/Pod</p>
+				<p class="stat-label">Avg CO₂/Pod (Scope 2+3)</p>
 				<p class="stat-value text-lg">
-					{summary?.pod_count ? formatCO2((summary.total_co2e_grams ?? 0) / summary.pod_count) : '—'}
+					{summary?.pod_count ? formatCO2((summary.total_co2e_all_scopes ?? summary.total_co2e_grams ?? 0) / summary.pod_count) : '—'}
 				</p>
 			</div>
 			<div class="card-compact text-center">

@@ -60,7 +60,9 @@ async def metrics_summary(
     # Use SQL-level aggregation when available (e.g. SQLite) to avoid loading
     # all rows into Python objects — typically 10–20x faster for demo mode.
     summary = await repo.aggregate_summary(start_time=start, end_time=end, namespace=namespace)
-    return MetricsSummaryResponse(**summary)
+    scope2 = summary.get("total_co2e_grams", 0.0)
+    scope3 = summary.get("total_embodied_co2e_grams", 0.0)
+    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3)
 
 
 _GRANULARITY_FORMATS = {
@@ -94,6 +96,7 @@ async def metrics_timeseries(
             timestamp=row["timestamp"],
             co2e_grams=row["co2e_grams"],
             embodied_co2e_grams=row["embodied_co2e_grams"],
+            total_co2e_all_scopes=row["co2e_grams"] + row.get("embodied_co2e_grams", 0.0),
             total_cost=row["total_cost"],
             joules=row["energy_joules"],
             pod_count=0,  # not aggregated at timeseries level
