@@ -109,7 +109,11 @@ export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 			data: ['CO₂e (g)', 'Cost ($)', 'Energy (kJ)'],
 			textStyle: { color: COLORS.dark.text, fontSize: 11 },
 			top: '2%',
-			right: '3%'
+			left: 'center'
+		},
+		grid: {
+			top: '18%',
+			right: '12%'
 		},
 		xAxis: {
 			type: 'category',
@@ -130,6 +134,8 @@ export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 			{
 				type: 'value',
 				name: 'Energy (kJ)',
+				nameLocation: 'end',
+				nameGap: 10,
 				nameTextStyle: { color: COLORS.dark.text, fontSize: 11 },
 				axisLine: { show: false },
 				axisLabel: { color: COLORS.dark.text, fontSize: 10 },
