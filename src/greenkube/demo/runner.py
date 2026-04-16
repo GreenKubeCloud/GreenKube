@@ -99,7 +99,7 @@ async def _populate_database(days: int) -> dict[str, int]:
     return counts
 
 
-async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) -> None:
+async def run_demo(port: int = 8000, days: int = 30, no_browser: bool = False) -> None:
     """Run GreenKube in demo mode with pre-populated sample data.
 
     Args:
