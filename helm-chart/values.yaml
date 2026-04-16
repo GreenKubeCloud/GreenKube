@@ -64,6 +64,10 @@ config:
   # Boavizta configuration
   boavizta:
     url: https://api.boavizta.org
+    # Default embodied emissions (kg CO2e) used when Boavizta API does not
+    # recognize a cloud provider or instance type. 350 kg is a reasonable
+    # average for a typical cloud server over its full lifecycle.
+    defaultEmbodiedEmissionsKg: 350
 
   # Database configuration
   db:

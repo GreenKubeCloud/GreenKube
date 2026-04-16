@@ -180,7 +180,8 @@ async def test_processor_fallback_gracefully_when_both_fail(
     mock_basic_estimator,
 ):
     """
-    Verify that if Boavizta API fails AND cache misses, we proceed without crashing, with 0 embodied emissions.
+    Verify that if Boavizta API fails AND cache misses.
+    We use fallback default embodied emissions and flag the metric as estimated.
     """
 
     # 1. Setup Mocks
@@ -255,8 +256,13 @@ async def test_processor_fallback_gracefully_when_both_fail(
     assert len(metrics) == 1
     metric = metrics[0]
 
-    # Embodied emissions should be 0.0 because profile wasn't found
-    assert metric.embodied_co2e_grams == 0.0
+    # Embodied emissions should use the fallback default (not 0.0)
+    # since the API failed and cache missed, a fallback profile is injected.
+    assert metric.embodied_co2e_grams > 0.0
+
+    # The metric should be flagged as estimated with a fallback reason
+    assert metric.is_estimated is True
+    assert any("fallback" in r.lower() for r in metric.estimation_reasons)
 
     # Verify API WAS called (because cache missed)
     mock_boavizta_collector.get_server_impact.assert_called()
