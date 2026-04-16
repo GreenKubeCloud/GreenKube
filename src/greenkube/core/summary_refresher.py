@@ -154,11 +154,14 @@ class SummaryRefresher:
             end_time=now,
             namespace=namespace,
         )
+        scope2 = agg.get("total_co2e_grams", 0.0)
+        scope3 = agg.get("total_embodied_co2e_grams", 0.0)
         row = MetricsSummaryRow(
             window_slug=slug,
             namespace=namespace,
-            total_co2e_grams=agg.get("total_co2e_grams", 0.0),
-            total_embodied_co2e_grams=agg.get("total_embodied_co2e_grams", 0.0),
+            total_co2e_grams=scope2,
+            total_embodied_co2e_grams=scope3,
+            total_co2e_all_scopes=scope2 + scope3,
             total_cost=agg.get("total_cost", 0.0),
             total_energy_joules=agg.get("total_energy_joules", 0.0),
             pod_count=agg.get("pod_count", 0),
@@ -190,6 +193,7 @@ class SummaryRefresher:
                 bucket_ts=row["timestamp"],
                 co2e_grams=row.get("co2e_grams", 0.0),
                 embodied_co2e_grams=row.get("embodied_co2e_grams", 0.0),
+                total_co2e_all_scopes=row.get("co2e_grams", 0.0) + row.get("embodied_co2e_grams", 0.0),
                 total_cost=row.get("total_cost", 0.0),
                 joules=row.get("energy_joules", 0.0),
             )

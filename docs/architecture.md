@@ -332,7 +332,10 @@ Schema (33 columns):
   - GPU: gpu_usage_millicores
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
-- Estimation: is_estimated, estimation_reasons, embodied_co2e_grams
+- Estimation: is_estimated, estimation_reasons
+- **GHG Scope 2:** `co2e_grams` — indirect emissions from purchased electricity (grid intensity × energy × PUE)
+- **GHG Scope 3 Cat. 1:** `embodied_co2e_grams` — upstream hardware manufacturing emissions (Boavizta, allocated by CPU share)
+- **Total (Scope 2 + 3):** `total_co2e_grams` — computed field, full pod carbon footprint
 
 Migrations: All backends support automatic schema evolution (ADD COLUMN IF NOT EXISTS)
 

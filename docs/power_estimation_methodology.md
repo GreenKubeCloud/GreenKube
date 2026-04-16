@@ -54,3 +54,17 @@ We applied this approach by:
 
 ## Usage
 These values are stored in `provider_power_estimates.csv` and are used to estimate energy consumption for any instance belonging to these providers, scaled by the number of vCPUs.
+
+## GHG Protocol Scope Classification
+
+GreenKube classifies carbon emissions according to the [GHG Protocol Corporate Accounting and Reporting Standard](https://ghgprotocol.org/corporate-standard):
+
+| GHG Scope | GreenKube field | Description |
+|---|---|---|
+| **Scope 2** (market-based) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (real-time) or the configurable `DEFAULT_INTENSITY` fallback. |
+| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU share — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 350 kg CO₂e) when Boavizta does not recognise the provider or instance type. |
+| **Scope 2 + Scope 3** | `total_co2e_grams` | Full pod carbon footprint — computed field on `CombinedMetric`, also exposed as `total_co2e_all_scopes` in API summary and timeseries responses. |
+
+**Scope 1** (direct combustion) is not applicable for cloud/virtualised Kubernetes workloads and is therefore not tracked.
+
+> **CSRD/ESRS E1 note:** For annual reporting under ESRS E1, `total_co2e_all_scopes` provides the combined Scope 2 + Scope 3 figure. Use `co2e_grams` for Scope 2-only reporting and `embodied_co2e_grams` for Scope 3 Category 1 disclosure. The data export (`GET /api/v1/report/export`) includes both fields in every row to support disaggregated reporting.
