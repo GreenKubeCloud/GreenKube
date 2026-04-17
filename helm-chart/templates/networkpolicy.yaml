@@ -24,4 +24,13 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.config.api.port }}
+    # Allow the post-install/post-upgrade ready-check hook to reach the API
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "greenkube.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: ready-check
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.api.port }}
 {{- end }}
