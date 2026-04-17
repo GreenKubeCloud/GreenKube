@@ -81,6 +81,27 @@ class PaginatedMetricsResponse(BaseModel):
     items: List[CombinedMetric] = Field(default_factory=list, description="The metrics in this page.")
 
 
+class NamespaceBreakdownItem(BaseModel):
+    """Aggregated metrics for a single namespace."""
+
+    namespace: str
+    co2e_grams: float = 0.0
+    embodied_co2e_grams: float = 0.0
+    total_cost: float = 0.0
+    energy_joules: float = 0.0
+
+
+class TopPodItem(BaseModel):
+    """Aggregated metrics for a single pod."""
+
+    namespace: str
+    pod_name: str
+    co2e_grams: float = 0.0
+    embodied_co2e_grams: float = 0.0
+    total_cost: float = 0.0
+    energy_joules: float = 0.0
+
+
 class ReportSummaryResponse(BaseModel):
     """Preview summary for a report before export."""
 

@@ -113,6 +113,29 @@ export function getTimeseries({ namespace, last, granularity } = {}) {
 	return request(`${BASE}/metrics/timeseries`, { namespace, last, granularity });
 }
 
+/**
+ * Lightweight SQL-level aggregation of metrics by namespace.
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @returns {Promise<Object[]>}
+ */
+export function getMetricsByNamespace({ namespace, last } = {}) {
+	return request(`${BASE}/metrics/by-namespace`, { namespace, last });
+}
+
+/**
+ * Lightweight SQL-level aggregation of top pods by CO₂.
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @param {number} [opts.limit]
+ * @returns {Promise<Object[]>}
+ */
+export function getTopPods({ namespace, last, limit } = {}) {
+	return request(`${BASE}/metrics/top-pods`, { namespace, last, limit });
+}
+
 /** @returns {Promise<Object[]>} */
 export function getNodes() {
 	return request(`${BASE}/nodes`);

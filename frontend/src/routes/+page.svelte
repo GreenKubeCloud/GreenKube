@@ -4,7 +4,8 @@
 	import {
 		getMetricsSummary,
 		getTimeseries,
-		getMetrics,
+		getMetricsByNamespace,
+		getTopPods,
 		getRecommendations,
 		getDashboardSummary,
 		getDashboardTimeseries,
@@ -23,7 +24,8 @@
 
 	let summary = null;
 	let timeseries = [];
-	let metrics = [];
+	let nsBreakdown = [];
+	let topPods = [];
 	let recommendations = [];
 	let loading = true;
 	let recoLoading = true;
@@ -75,18 +77,20 @@
 				});
 			}
 
-			// getMetrics (for donut + top-pods) still uses on-demand API.
-			// For 'ytd' the API doesn't understand that slug, so map to '1y'.
+			// Use lightweight SQL-aggregated endpoints for donut + top-pods
+			// instead of loading all raw metrics into memory.
 			const apiLast = last === 'ytd' ? '1y' : last;
 
-			const [s, ts, m] = await Promise.all([
+			const [s, ts, nsData, topData] = await Promise.all([
 				summaryPromise,
 				timeseriesPromise,
-				getMetrics({ namespace: ns, last: apiLast })
+				getMetricsByNamespace({ namespace: ns, last: apiLast }),
+				getTopPods({ namespace: ns, last: apiLast, limit: 10 })
 			]);
 			summary = s;
 			timeseries = ts;
-			metrics = m;
+			nsBreakdown = nsData;
+			topPods = topData;
 		} catch (e) {
 			error = e.message;
 		} finally {
@@ -128,12 +132,12 @@
 
 	$: multiOption = timeseries.length ? buildMultiSeriesOption(timeseries, { windowSlug: $selectedTimeRange }) : null;
 
-	$: nsDonutOption = metrics.length
-		? buildNamespaceDonutOption(metrics, { label: 'CO₂ by Namespace' })
+	$: nsDonutOption = nsBreakdown.length
+		? buildNamespaceDonutOption(nsBreakdown, { label: 'CO₂ by Namespace' })
 		: null;
 
-	$: topPodsOption = metrics.length
-		? buildTopPodsOption(metrics, { label: 'Top Pods by CO₂', topN: 8 })
+	$: topPodsOption = topPods.length
+		? buildTopPodsOption(topPods, { label: 'Top Pods by CO₂', topN: 8 })
 		: null;
 
 	onMount(() => loadData());

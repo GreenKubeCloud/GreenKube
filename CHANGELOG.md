@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`GET /api/v1/metrics/by-namespace`:** New lightweight endpoint returning CO2e, embodied emissions, energy, and cost aggregated by namespace over a time window. Queries both `combined_metrics` (raw) and `combined_metrics_hourly` (archived) tables via a single `UNION ALL + GROUP BY` — avoids loading full row sets into memory.
+- **`GET /api/v1/metrics/top-pods`:** New lightweight endpoint returning the top-N pods by CO2e over a time window, also using the dual-table `UNION ALL + GROUP BY` pattern. Dashboard donut and top-pods charts now call these two endpoints instead of the expensive `GET /metrics` route, eliminating OOM restarts when browsing large time ranges.
 - **GHG Scope 2 / Scope 3 carbon classification:** Emissions are now formally categorised per the GHG Protocol Corporate Standard.
 - **Pre-computed dashboard cache (`metrics_summary` + `metrics_timeseries_cache`):** Two new database tables (migrations `0004` and `0005` for PostgreSQL and SQLite) store pre-aggregated KPI scalars and time-series buckets for five fixed windows (`24h`, `7d`, `30d`, `1y`, `ytd`). Tables are refreshed hourly by the background scheduler, eliminating full-table scans on every dashboard load and preventing OOM errors on large datasets.
 - **`SummaryRefresher`:** New `src/greenkube/core/summary_refresher.py` service that computes cluster-wide and per-namespace KPI totals and time-series buckets, then upserts them into the two cache tables. Supports adaptive granularity per window (hourly / daily / weekly / monthly buckets).
@@ -22,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`EmbodiedEmissionsService.is_embodied_fallback()`:** New helper method returns `True` when a node's cached profile was produced by the fallback rather than a real Boavizta response, enabling the metric assembler to set estimation flags accurately.
 
 ### Fixed
+- **Electricity Maps API not called for OpenStack-based providers (zone = `nova`):** The scheduler's carbon-intensity collection loop now falls back to the node's geographic region when the provider-specific zone identifier is not a recognised Electricity Maps zone code. This restores carbon-intensity data collection on OVH, Infomaniak, and similar OpenStack-based clouds where the K8s node zone label is set to `nova` rather than a country/region code.
 - **Race condition in collection orchestrator:** `CollectionOrchestrator` no longer collects nodes internally. Node collection is now an explicit Phase 1 in `DataProcessor.run()` that runs alone before any concurrent collection, preventing shared Kubernetes API client races and the cascade of Electricity Maps API errors they caused.
 - **`DEFAULT_ZONE` spurious warning:** The `NodeZoneMapper` no longer emits a warning when the zone was actually resolved correctly — the warning was incorrectly triggered even when a valid `DEFAULT_ZONE` was set.
 - **Pod CPU utilisation aggregation per node:** `CollectionOrchestrator` was averaging pod CPU usage per node across timestamps instead of summing, causing underestimated energy figures on nodes with multiple measured pods.

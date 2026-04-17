@@ -10,7 +10,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
-from greenkube.api.schemas import MetricsSummaryResponse, PaginatedMetricsResponse, TimeseriesPoint
+from greenkube.api.schemas import (
+    MetricsSummaryResponse,
+    NamespaceBreakdownItem,
+    PaginatedMetricsResponse,
+    TimeseriesPoint,
+    TopPodItem,
+)
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import parse_duration
 
@@ -104,3 +110,28 @@ async def metrics_timeseries(
         )
         for row in rows
     ]
+
+
+@router.get("/metrics/by-namespace", response_model=List[NamespaceBreakdownItem])
+async def metrics_by_namespace(
+    namespace: Optional[str] = Depends(validate_namespace),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
+):
+    """Return metrics aggregated by namespace (lightweight, SQL-level)."""
+    start, end = _get_time_range(last)
+    rows = await repo.aggregate_by_namespace(start_time=start, end_time=end, namespace=namespace)
+    return [NamespaceBreakdownItem(**row) for row in rows]
+
+
+@router.get("/metrics/top-pods", response_model=List[TopPodItem])
+async def metrics_top_pods(
+    namespace: Optional[str] = Depends(validate_namespace),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    limit: int = Query(10, ge=1, le=50, description="Number of top pods to return."),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
+):
+    """Return top pods by CO2 emissions (lightweight, SQL-level)."""
+    start, end = _get_time_range(last)
+    rows = await repo.aggregate_top_pods(start_time=start, end_time=end, namespace=namespace, limit=limit)
+    return [TopPodItem(**row) for row in rows]

@@ -280,6 +280,58 @@ class CombinedMetricsRepository(ABC):
             )
         return result
 
+    async def aggregate_by_namespace(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[dict]:
+        """Aggregate metrics grouped by namespace. Subclasses may override with SQL."""
+        from collections import defaultdict
+
+        metrics = await self.read_combined_metrics_smart(start_time=start_time, end_time=end_time, namespace=namespace)
+        by_ns: dict[str, dict] = defaultdict(
+            lambda: {"co2e_grams": 0.0, "embodied_co2e_grams": 0.0, "total_cost": 0.0, "energy_joules": 0.0}
+        )
+        for m in metrics:
+            b = by_ns[m.namespace]
+            b["co2e_grams"] += m.co2e_grams
+            b["embodied_co2e_grams"] += m.embodied_co2e_grams or 0.0
+            b["total_cost"] += m.total_cost
+            b["energy_joules"] += m.joules
+        return sorted(
+            [{"namespace": ns, **vals} for ns, vals in by_ns.items()],
+            key=lambda x: x["co2e_grams"],
+            reverse=True,
+        )
+
+    async def aggregate_top_pods(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[dict]:
+        """Aggregate top pods by CO2. Subclasses may override with SQL."""
+        from collections import defaultdict
+
+        metrics = await self.read_combined_metrics_smart(start_time=start_time, end_time=end_time, namespace=namespace)
+        by_pod: dict[tuple, dict] = defaultdict(
+            lambda: {"co2e_grams": 0.0, "embodied_co2e_grams": 0.0, "total_cost": 0.0, "energy_joules": 0.0}
+        )
+        for m in metrics:
+            b = by_pod[(m.namespace, m.pod_name)]
+            b["co2e_grams"] += m.co2e_grams
+            b["embodied_co2e_grams"] += m.embodied_co2e_grams or 0.0
+            b["total_cost"] += m.total_cost
+            b["energy_joules"] += m.joules
+        results = sorted(
+            [{"namespace": ns, "pod_name": pod, **vals} for (ns, pod), vals in by_pod.items()],
+            key=lambda x: x["co2e_grams"],
+            reverse=True,
+        )
+        return results[:limit]
+
 
 class RecommendationRepository(ABC):
     """

@@ -638,3 +638,143 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                     return [row["namespace"] for row in rows]
         except sqlite3.Error:
             return []
+
+    async def aggregate_by_namespace(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[dict]:
+        """SQL-level aggregation grouped by namespace — raw + hourly tables."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                parts: list[str] = []
+                params: list = []
+
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        namespace,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)           AS total_cost,
+                        COALESCE(SUM(joules), 0)               AS energy_joules
+                    FROM ({union_query})
+                    GROUP BY namespace
+                    ORDER BY co2e_grams DESC
+                """
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except sqlite3.Error as e:
+            logging.error("aggregate_by_namespace failed: %s", e)
+            raise QueryError(f"aggregate_by_namespace failed: {e}") from e
+
+    async def aggregate_top_pods(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[dict]:
+        """SQL-level aggregation of top pods by CO2 — raw + hourly tables."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                parts: list[str] = []
+                params: list = []
+
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        namespace,
+                        pod_name,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)           AS total_cost,
+                        COALESCE(SUM(joules), 0)               AS energy_joules
+                    FROM ({union_query})
+                    GROUP BY namespace, pod_name
+                    ORDER BY co2e_grams DESC
+                    LIMIT ?
+                """
+                params.append(limit)
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except sqlite3.Error as e:
+            logging.error("aggregate_top_pods failed: %s", e)
+            raise QueryError(f"aggregate_top_pods failed: {e}") from e
