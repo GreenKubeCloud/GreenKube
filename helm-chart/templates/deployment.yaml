@@ -27,12 +27,33 @@ spec:
       {{- end }}
       {{- if eq .Values.config.db.type "sqlite" }}
       securityContext:
-        fsGroup: 1000
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- else }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
           
           # This runs the 'start' command from cli.py to launch the scheduler
           command: ["greenkube"]
@@ -43,7 +64,7 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             - secretRef:
-                name: {{ include "greenkube.fullname" . }}
+                name: {{ include "greenkube.secretName" . }}
                 optional: true
 
 
@@ -69,7 +90,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
+                  name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
                 
@@ -80,6 +101,8 @@ spec:
             - name: secrets
               mountPath: /etc/greenkube/secrets
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
             {{- if eq .Values.config.db.type "sqlite" }}
             - name: data
               mountPath: /data
@@ -88,12 +111,21 @@ spec:
         - name: {{ .Chart.Name }}-api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
           command: ["greenkube-api"]
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
             - secretRef:
-                name: {{ include "greenkube.fullname" . }}
+                name: {{ include "greenkube.secretName" . }}
                 optional: true
           env:
             {{- if eq .Values.config.db.type "postgres" }}
@@ -102,7 +134,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
+                  name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
           ports:
@@ -119,6 +151,8 @@ spec:
             - name: secrets
               mountPath: /etc/greenkube/secrets
               readOnly: true
+            - name: tmp-api
+              mountPath: /tmp
             {{- if eq .Values.config.db.type "sqlite" }}
             - name: data
               mountPath: /data
@@ -146,17 +180,18 @@ spec:
             successThreshold: {{ .Values.config.api.readinessProbe.successThreshold }}
           {{- end }}
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
+            {{- toYaml .Values.apiResources | nindent 12 }}
         {{- end }}
       volumes:
         - name: secrets
           secret:
-            secretName: {{ include "greenkube.fullname" . }}
+            secretName: {{ include "greenkube.secretName" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp-api
+          emptyDir:
+            sizeLimit: 64Mi
         {{- if eq .Values.config.db.type "sqlite" }}
         - name: data
           {{- if .Values.config.persistence.enabled }}

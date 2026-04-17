@@ -7,8 +7,8 @@ import pytest
 
 from greenkube.core.db import db_manager
 from greenkube.models.metrics import CombinedMetric
-from greenkube.storage.elasticsearch_repository import ElasticsearchCombinedMetricsRepository
-from greenkube.storage.sqlite_repository import SQLiteCombinedMetricsRepository
+from greenkube.storage.elastic.repository import ElasticsearchCombinedMetricsRepository
+from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
 
 # Fixture to initialize and clean up the SQLite database

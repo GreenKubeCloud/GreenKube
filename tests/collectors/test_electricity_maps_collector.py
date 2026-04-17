@@ -24,7 +24,7 @@ MOCK_API_RESPONSE = {
 @patch("greenkube.collectors.electricity_maps_collector.config")
 async def test_collect_success(mock_config):
     """
-    Tests that the collector correctly calls the API and returns the data.
+    Tests that the collector correctly calls the history API and returns the data.
     """
     # Arrange
     # Simulate the presence of the API token

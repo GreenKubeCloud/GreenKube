@@ -11,6 +11,9 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── Gate: run the full test suite before building anything ──
   test:
@@ -143,7 +146,7 @@ jobs:
             echo "No changes to publish"
           else
             git commit -m "chore: publish helm chart ${GITHUB_REF_NAME}"
-            git push --force origin gh-pages
+            git push origin gh-pages
           fi
 
   # ── Create a GitHub Release with changelog extract ──

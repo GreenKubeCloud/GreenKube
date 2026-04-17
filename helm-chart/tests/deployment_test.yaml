@@ -172,7 +172,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.securityContext.fsGroup
-          value: 1000
+          value: 10001
 
   - it: should mount data volume from emptyDir in sqlite mode without persistence
     set:
@@ -201,12 +201,52 @@ tests:
             persistentVolumeClaim:
               claimName: RELEASE-NAME-greenkube
 
-  - it: should not set fsGroup in postgres mode
+  - it: should set pod securityContext with runAsNonRoot in postgres mode
     templates:
       - templates/deployment.yaml
     asserts:
-      - isNull:
-          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+
+  - it: should set container securityContext on collector container
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  - it: should set container securityContext on API container
+    set:
+      config.api.enabled: true
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[1].securityContext.capabilities.drop
+          content: ALL
 
   # --------------------------------------------------------------------------
   # Service account binding
@@ -255,3 +295,30 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 1Gi
+
+  # --------------------------------------------------------------------------
+  # existingSecret — use a pre-created Secret
+  # --------------------------------------------------------------------------
+  - it: should reference the chart-managed secret by default
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: RELEASE-NAME-greenkube
+
+  - it: should reference an external secret when existingSecret is set
+    set:
+      secrets.existingSecret: "my-external-secret"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].secret.secretName
+          value: my-external-secret
+      - contains:
+          path: spec.template.spec.containers[0].envFrom
+          content:
+            secretRef:
+              name: my-external-secret
+              optional: true

@@ -9,8 +9,8 @@ import aiosqlite
 from greenkube.models.metrics import CombinedMetric
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
-from ..core.exceptions import QueryError
-from .base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ...core.exceptions import QueryError
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -357,40 +357,72 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         namespace: Optional[str] = None,
     ) -> dict:
         """
-        Aggregates summary metrics directly in SQLite (no Python-side row scan).
-        Significantly faster than loading all rows into CombinedMetric objects.
+        Aggregates summary metrics from both raw and hourly SQLite tables.
         """
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                if namespace:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                          AND namespace = ?
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
-                else:
-                    query = """
-                        SELECT
-                            COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS total_energy,
-                            COUNT(DISTINCT pod_name)               AS pod_count,
-                            COUNT(DISTINCT namespace)              AS namespace_count
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat())
+                parts: list[str] = []
+                params: list = []
 
+                # Raw table — recent data
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                # Hourly table — old data
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
+                               pod_name, namespace
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return {
+                        "total_co2e_grams": 0.0,
+                        "total_embodied_co2e_grams": 0.0,
+                        "total_cost": 0.0,
+                        "total_energy_joules": 0.0,
+                        "pod_count": 0,
+                        "namespace_count": 0,
+                    }
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        COALESCE(SUM(co2e_grams), 0)          AS total_co2e,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS total_embodied,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS total_energy,
+                        COUNT(DISTINCT pod_name)               AS pod_count,
+                        COUNT(DISTINCT namespace)              AS namespace_count
+                    FROM ({union_query})
+                """
                 async with conn.execute(query, params) as cursor:
                     row = await cursor.fetchone()
                     return {
@@ -413,55 +445,83 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         namespace: Optional[str] = None,
     ) -> List[dict]:
         """
-        Groups time-series data by granularity directly in SQLite.
-        Significantly faster than loading all rows into CombinedMetric objects.
+        Groups time-series data by granularity from both raw and hourly SQLite tables.
         """
-        # SQLite strftime format strings for each granularity
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
         _SQLITE_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
             "day": "%Y-%m-%dT00:00:00Z",
-            "week": "%Y-W%W",
+            "week": None,  # handled separately: floor to Monday via date modifier
             "month": "%Y-%m-01T00:00:00Z",
         }
         ts_format = _SQLITE_FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
 
+        # For weekly buckets SQLite has no date_trunc; compute Monday of each week.
+        if granularity == "week":
+            ts_bucket_expr = "strftime('%Y-%m-%dT00:00:00Z', ts, 'weekday 1', '-6 days')"
+        else:
+            ts_bucket_expr = f"strftime('{ts_format}', ts)"
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                if namespace:
-                    query = f"""
-                        SELECT
-                            strftime('{ts_format}', "timestamp") AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                          AND namespace = ?
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
-                else:
-                    query = f"""
-                        SELECT
-                            strftime('{ts_format}', "timestamp") AS ts_bucket,
-                            COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
-                            COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
-                            COALESCE(SUM(total_cost), 0)          AS total_cost,
-                            COALESCE(SUM(joules), 0)              AS energy_joules,
-                            COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                            COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
-                        FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?
-                        GROUP BY ts_bucket
-                        ORDER BY ts_bucket
-                    """
-                    params = (start_time.isoformat(), end_time.isoformat())
+                parts: list[str] = []
+                params: list = []
 
+                # Raw table — recent data
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT "timestamp" AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_millicores, memory_usage_bytes
+                        FROM combined_metrics
+                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                # Hourly table — old data
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(f"""
+                        SELECT hour_bucket AS ts, co2e_grams, embodied_co2e_grams,
+                               total_cost, joules, cpu_usage_avg AS cpu_usage_millicores,
+                               memory_usage_avg AS memory_usage_bytes
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                    """)
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        {ts_bucket_expr} AS ts_bucket,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)          AS total_cost,
+                        COALESCE(SUM(joules), 0)              AS energy_joules,
+                        COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
+                        COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                    FROM ({union_query})
+                    GROUP BY ts_bucket
+                    ORDER BY ts_bucket
+                """
                 async with conn.execute(query, params) as cursor:
                     rows = await cursor.fetchall()
                     return [
@@ -479,3 +539,102 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except sqlite3.Error as e:
             logging.error("aggregate_timeseries failed: %s", e)
             raise QueryError(f"aggregate_timeseries failed: {e}") from e
+
+    async def read_hourly_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Read pre-aggregated hourly metrics from the hourly table."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                          AND namespace = ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
+                else:
+                    query = """
+                        SELECT * FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (start_time.isoformat(), end_time.isoformat())
+
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    metrics = []
+                    for row in rows:
+                        estimation_reasons = []
+                        if row["estimation_reasons"]:
+                            try:
+                                estimation_reasons = json.loads(row["estimation_reasons"])
+                            except json.JSONDecodeError:
+                                pass
+                        metrics.append(
+                            CombinedMetric(
+                                pod_name=row["pod_name"],
+                                namespace=row["namespace"],
+                                total_cost=row["total_cost"],
+                                co2e_grams=row["co2e_grams"],
+                                embodied_co2e_grams=row["embodied_co2e_grams"],
+                                pue=row["pue"],
+                                grid_intensity=row["grid_intensity"],
+                                joules=row["joules"],
+                                cpu_request=row["cpu_request"],
+                                memory_request=row["memory_request"],
+                                cpu_usage_millicores=row["cpu_usage_avg"],
+                                memory_usage_bytes=row["memory_usage_avg"],
+                                network_receive_bytes=row["network_receive_bytes"],
+                                network_transmit_bytes=row["network_transmit_bytes"],
+                                disk_read_bytes=row["disk_read_bytes"],
+                                disk_write_bytes=row["disk_write_bytes"],
+                                storage_request_bytes=row["storage_request_bytes"],
+                                storage_usage_bytes=row["storage_usage_bytes"],
+                                gpu_usage_millicores=row["gpu_usage_millicores"],
+                                restart_count=row["restart_count"],
+                                owner_kind=row["owner_kind"],
+                                owner_name=row["owner_name"],
+                                timestamp=datetime.fromisoformat(row["hour_bucket"]) if row["hour_bucket"] else None,
+                                duration_seconds=row["duration_seconds"],
+                                node=row["node"],
+                                node_instance_type=row["node_instance_type"],
+                                node_zone=row["node_zone"],
+                                emaps_zone=row["emaps_zone"],
+                                is_estimated=bool(row["is_estimated"]),
+                                estimation_reasons=estimation_reasons,
+                                calculation_version=row["calculation_version"],
+                            )
+                        )
+                    return metrics
+        except sqlite3.Error as e:
+            logging.error("Could not read hourly metrics: %s", e)
+            raise QueryError(f"Could not read hourly metrics: {e}") from e
+
+    async def list_namespaces(self) -> List[str]:
+        """Return namespaces from the cache table (fast, no table scan)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute("SELECT namespace FROM namespace_cache ORDER BY namespace") as cursor:
+                    rows = await cursor.fetchall()
+                    if rows:
+                        return [row["namespace"] for row in rows]
+
+                # Fallback: scan recent combined_metrics if cache is empty
+                async with conn.execute(
+                    """
+                    SELECT DISTINCT namespace FROM combined_metrics
+                    WHERE "timestamp" > datetime('now', '-7 days')
+                    ORDER BY namespace
+                    """
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [row["namespace"] for row in rows]
+        except sqlite3.Error:
+            return []

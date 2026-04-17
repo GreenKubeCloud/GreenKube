@@ -276,20 +276,22 @@ class SustainabilityScorer:
         if not node_capacity:
             return _NEUTRAL
 
-        node_usage: Dict[str, List[float]] = defaultdict(list)
+        # Group pod CPU usage per node per timestamp, so we can sum across pods
+        node_usage_by_ts: Dict[str, Dict] = defaultdict(lambda: defaultdict(float))
         for m in metrics:
             if m.node and m.cpu_usage_millicores is not None:
-                node_usage[m.node].append(m.cpu_usage_millicores)
+                ts_key = m.timestamp if m.timestamp is not None else 0
+                node_usage_by_ts[m.node][ts_key] += m.cpu_usage_millicores
 
         scores = []
         for node_name, cap_cores in node_capacity.items():
-            usages = node_usage.get(node_name, [])
-            if not usages:
+            ts_totals = list(node_usage_by_ts.get(node_name, {}).values())
+            if not ts_totals:
                 scores.append(0.0)
                 continue
 
             cap_milli = cap_cores * 1000
-            avg_usage = sum(usages) / len(usages)
+            avg_usage = sum(ts_totals) / len(ts_totals)
             utilization = avg_usage / cap_milli
             # Score: linear 0–100 up to 70% utilization, then stays at 100
             node_score = min(utilization / 0.7, 1.0) * 100.0

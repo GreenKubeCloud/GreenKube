@@ -190,6 +190,33 @@ class TestCheckElectricityMaps:
         assert result.status == ServiceStatus.HEALTHY
 
     @pytest.mark.asyncio
+    async def test_probe_uses_fallback_zone_when_default_is_unknown(self, monkeypatch):
+        """When DEFAULT_ZONE is 'unknown', the probe uses 'FR' as fallback zone."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "valid-token")
+        monkeypatch.setenv("DEFAULT_ZONE", "unknown")
+        config.reload()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_electricity_maps(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+        # Verify the probe URL used the fallback zone, not 'unknown'
+        call_args = mock_client.get.call_args
+        probe_url = call_args[0][0]
+        assert "zone=FR" in probe_url
+        assert "zone=unknown" not in probe_url
+
+    @pytest.mark.asyncio
     async def test_invalid_token_401(self, monkeypatch):
         """When API returns 401, status is DEGRADED (bad token)."""
         from greenkube.core.config import config

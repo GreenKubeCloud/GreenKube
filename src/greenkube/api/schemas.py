@@ -4,11 +4,11 @@ Pydantic response schemas for the API.
 Keeps API-specific response shapes separate from internal domain models.
 """
 
-from typing import List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from greenkube.models.metrics import CombinedMetric
+from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 
 
 class HealthResponse(BaseModel):
@@ -27,8 +27,13 @@ class VersionResponse(BaseModel):
 class MetricsSummaryResponse(BaseModel):
     """Aggregated summary of metrics over a time range."""
 
-    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
-    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_co2e_grams: float = Field(0.0, description="GHG Scope 2 — electricity emissions in grams CO₂e.")
+    total_embodied_co2e_grams: float = Field(
+        0.0, description="GHG Scope 3 (Cat. 1) — hardware manufacturing emissions in grams CO₂e."
+    )
+    total_co2e_all_scopes: float = Field(
+        0.0, description="GHG Scope 2 + Scope 3 — total carbon footprint in grams CO₂e."
+    )
     total_cost: float = Field(0.0, description="Total cost in dollars.")
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     pod_count: int = Field(0, description="Number of unique pods.")
@@ -39,8 +44,13 @@ class TimeseriesPoint(BaseModel):
     """A single data point in a time-series aggregation."""
 
     timestamp: str = Field(..., description="The bucket timestamp (ISO 8601 or week format).")
-    co2e_grams: float = Field(0.0, description="Total operational CO2e in grams for this bucket.")
-    embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams for this bucket.")
+    co2e_grams: float = Field(0.0, description="GHG Scope 2 — electricity emissions in grams CO₂e for this bucket.")
+    embodied_co2e_grams: float = Field(
+        0.0, description="GHG Scope 3 (Cat. 1) — hardware manufacturing emissions in grams CO₂e for this bucket."
+    )
+    total_co2e_all_scopes: float = Field(
+        0.0, description="GHG Scope 2 + Scope 3 — total carbon footprint in grams CO₂e for this bucket."
+    )
     total_cost: float = Field(0.0, description="Total cost in dollars for this bucket.")
     joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
     pod_count: int = Field(0, description="Number of unique pods in this bucket.")
@@ -75,9 +85,48 @@ class ReportSummaryResponse(BaseModel):
     """Preview summary for a report before export."""
 
     total_rows: int = Field(0, description="Total number of rows in the report.")
-    total_co2e_grams: float = Field(0.0, description="Total operational CO2e in grams.")
-    total_embodied_co2e_grams: float = Field(0.0, description="Total embodied CO2e in grams.")
+    total_co2e_grams: float = Field(0.0, description="GHG Scope 2 — electricity emissions in grams CO₂e.")
+    total_embodied_co2e_grams: float = Field(
+        0.0, description="GHG Scope 3 (Cat. 1) — hardware manufacturing emissions in grams CO₂e."
+    )
+    total_co2e_all_scopes: float = Field(
+        0.0, description="GHG Scope 2 + Scope 3 — total carbon footprint in grams CO₂e."
+    )
     total_cost: float = Field(0.0, description="Total cost in dollars.")
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     unique_pods: int = Field(0, description="Number of unique pods.")
     unique_namespaces: int = Field(0, description="Number of unique namespaces.")
+
+
+class DashboardSummaryResponse(BaseModel):
+    """Pre-computed KPI summaries for the frontend dashboard.
+
+    Each key in *windows* is a window slug (e.g. ``'24h'``, ``'7d'``) and
+    the value is the corresponding :class:`MetricsSummaryRow`.  The response
+    is intentionally flat so the frontend can look up any window by slug
+    without iterating a list.
+    """
+
+    windows: Dict[str, MetricsSummaryRow] = Field(
+        default_factory=dict,
+        description="Map of window slug → pre-computed summary row.",
+    )
+    namespace: Optional[str] = Field(
+        None,
+        description="The namespace filter applied, or None for cluster-wide.",
+    )
+
+
+class DashboardTimeseriesResponse(BaseModel):
+    """Pre-computed time-series chart data for the frontend dashboard.
+
+    ``points`` is an ordered list of buckets for the requested window,
+    ready to be passed directly to the chart builders.
+    """
+
+    window_slug: str = Field(..., description="The requested time window slug.")
+    namespace: Optional[str] = Field(None, description="Namespace filter applied, or None.")
+    points: List[TimeseriesCachePoint] = Field(
+        default_factory=list,
+        description="Ordered time-series buckets for this window.",
+    )

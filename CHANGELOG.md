@@ -8,15 +8,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Artifact Hub listing:** `helm-chart/Chart.yaml` enriched with full Artifact Hub annotations — `artifacthub.io/category`, `artifacthub.io/screenshots` (6 screenshots), `artifacthub.io/links` (docs, GitHub, Docker Hub, support), `artifacthub.io/recommendations` (kube-prometheus-stack, opencost), `artifacthub.io/changes`, `artifacthub.io/images` (linux/amd64 + linux/arm64), `artifacthub.io/maintainers`. Chart now includes `keywords`, `home`, `sources`, and `maintainers` fields for richer search indexing.
+- **GHG Scope 2 / Scope 3 carbon classification:** Emissions are now formally categorised per the GHG Protocol Corporate Standard.
+- **Pre-computed dashboard cache (`metrics_summary` + `metrics_timeseries_cache`):** Two new database tables (migrations `0004` and `0005` for PostgreSQL and SQLite) store pre-aggregated KPI scalars and time-series buckets for five fixed windows (`24h`, `7d`, `30d`, `1y`, `ytd`). Tables are refreshed hourly by the background scheduler, eliminating full-table scans on every dashboard load and preventing OOM errors on large datasets.
+- **`SummaryRefresher`:** New `src/greenkube/core/summary_refresher.py` service that computes cluster-wide and per-namespace KPI totals and time-series buckets, then upserts them into the two cache tables. Supports adaptive granularity per window (hourly / daily / weekly / monthly buckets).
+- **`SummaryRepository` and `TimeseriesCacheRepository`:** New abstract base classes in `storage/base_repository.py` with PostgreSQL and SQLite implementations.
+- **Dashboard API endpoints:** Three new FastAPI routes for the pre-computed tables:
+  - `GET /api/v1/metrics/dashboard-summary` — cached KPI scalars, optionally filtered by namespace.
+  - `GET /api/v1/metrics/dashboard-timeseries/{window_slug}` — cached time-series buckets for `24h`, `7d`, `30d`, `1y`, or `ytd`.
+  - `POST /api/v1/metrics/dashboard-summary/refresh` — trigger an on-demand background refresh (HTTP 202 Accepted).
+- **`MetricsSummaryRow` and `TimeseriesCachePoint` Pydantic models:** New DTOs in `src/greenkube/models/metrics.py` representing rows from the two cache tables.
+- **Adaptive chart granularity (frontend):** Dashboard charts now select the optimal time bucket per window — hourly for `24h`, daily for `7d`/`30d`, weekly for `1y`, monthly for `ytd` — resulting in consistently readable x-axes regardless of the selected range.
+- **Boavizta fallback with configurable default:** When the Boavizta API does not recognise a cloud provider or instance type (returns no data), `EmbodiedEmissionsService` now injects a fallback embodied-emissions profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **350 kg CO2e**) instead of silently using 0 g, which was incorrect. The resulting `CombinedMetric` is flagged `is_estimated=True` with a descriptive `estimation_reasons` entry. Exposed as `config.boavizta.defaultEmbodiedEmissionsKg` in `values.yaml` and `DEFAULT_EMBODIED_EMISSIONS_KG` in `configmap.yaml`.
+- **`EmbodiedEmissionsService.is_embodied_fallback()`:** New helper method returns `True` when a node's cached profile was produced by the fallback rather than a real Boavizta response, enabling the metric assembler to set estimation flags accurately.
+
+### Fixed
+- **Race condition in collection orchestrator:** `CollectionOrchestrator` no longer collects nodes internally. Node collection is now an explicit Phase 1 in `DataProcessor.run()` that runs alone before any concurrent collection, preventing shared Kubernetes API client races and the cascade of Electricity Maps API errors they caused.
+- **`DEFAULT_ZONE` spurious warning:** The `NodeZoneMapper` no longer emits a warning when the zone was actually resolved correctly — the warning was incorrectly triggered even when a valid `DEFAULT_ZONE` was set.
+- **Pod CPU utilisation aggregation per node:** `CollectionOrchestrator` was averaging pod CPU usage per node across timestamps instead of summing, causing underestimated energy figures on nodes with multiple measured pods.
+- **Chart legends overlapping (frontend):** ECharts legend layout fixed to prevent label overlap on small viewports.
+
+### Changed
+- **`DataProcessor.run()` pipeline restructured into four explicit phases:** Phase 1 (node discovery, sequential), Phase 2 (zone resolution), Phase 3 (parallel metrics + Boavizta), Phase 4 (carbon-intensity prefetch + assembly). This eliminates the previous race condition and removes the redundant second `collect_instance_types()` K8s call that used to happen at the end of the pipeline.
+- **`CollectionOrchestrator` simplified:** `NodeCollector` dependency removed; node enrichment for Prometheus instance-type labels now uses the `nodes_info` dict passed in from Phase 1, avoiding any duplicate K8s API calls.
+
+## [0.2.8] — 2026-04-11
+
+### Security
+- **Dockerfile hardening:** Base image for the frontend build stage upgraded from `node:20-alpine` to `node:22-alpine`. Both the builder and final runtime stages now run `apt-get upgrade` at build time to patch known OS CVEs (libssl3, zlib1g, ncurses, libc). The final image user (`greenkube`, UID/GID 10001) is created with an explicit `groupadd`/`useradd` and `/sbin/nologin` shell.
+- **Helm deployment securityContext:** Full pod-level and per-container security hardening on both the collector and API containers — `runAsNonRoot: true`, `runAsUser/Group: 10001`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, and `seccompProfile.type: RuntimeDefault`. `/tmp` directories served by `emptyDir` volumes (64 MiB each) to satisfy Python's runtime tmp needs under a read-only root.
+- **Helm PostgreSQL securityContext:** Pod and container security hardening on the PostgreSQL StatefulSet — `runAsUser/Group: 70` (upstream requirement), `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile.type: RuntimeDefault`. `/var/run/postgresql` and `/tmp` mounted as `emptyDir` volumes. PostgreSQL upgraded from `17-alpine` to `18-alpine` for longer upstream lifecycle.
+- **PostgreSQL scram-sha-256:** `POSTGRES_INITDB_ARGS` set to `--auth-host=scram-sha-256 --auth-local=scram-sha-256` — replaces the default md5 password hashing with the stronger SCRAM-SHA-256 protocol. Liveness and readiness probes added via `pg_isready`.
+- **ClusterRole secrets removal:** Removed `secrets` from the ClusterRole resource list, eliminating the critical RBAC over-permission (KSV-0041) that allowed the service account to read cluster-wide secrets.
+- **API security headers:** New `SecurityHeadersMiddleware` (Starlette `BaseHTTPMiddleware`) added to the FastAPI app, injecting seven OWASP-recommended headers on every response: `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`, `Permissions-Policy`, `Cache-Control`, and a strict `Content-Security-Policy`. CORS is now restricted to `GET`, `POST`, `OPTIONS` methods and `Authorization`/`Content-Type` headers (previously wildcard).
+- **Automated vulnerability scanning (CI):** New `.github/workflows/security.yml` workflow running on every push/PR to `main`/`dev` and weekly (Monday 06:00 UTC) — five jobs: Trivy image scan for the GreenKube image (exit 1 on CRITICAL/HIGH), Trivy image scan for PostgreSQL (informational), Trivy IaC config scan for Dockerfile + Helm chart, Trivy filesystem scan for Python dependencies, and `npm audit` for the frontend. SARIF results uploaded to GitHub Security.
+- **`.trivyignore`:** Documents eight upstream-unfixable CVEs (gosu/Go-stdlib CVEs in the Alpine postgres image, one OpenSSL CMS CVE, and one zlib utility CVE) with justifications and a quarterly review date.
+
+### Added
+- **Helm `secrets.existingSecret`:** New `secrets.existingSecret` value allows passing the name of a pre-created Kubernetes Secret instead of letting the chart manage one. When set, the chart skips Secret creation entirely and all `secrets.*` inline values are ignored — recommended for production to avoid storing credentials in `values.yaml`.
+- **SQLite SCD2 node snapshots:** `SQLiteNodeRepository` now implements a Slowly Changing Dimensions Type 2 pattern to deduplicate node records across collection cycles. A separate `node_snapshots_scd` table stores only rows where tracked columns (`instance_type`, `vcpu`, `memory_gb`, `region`, `provider`, `zone`) actually changed, avoiding write amplification on stable clusters. Migration `0003` creates this table and the associated indexes.
+- **Recommendation `scope` column:** `recommendation_history` table now includes a `scope` TEXT column (values: `pod`, `namespace`, `node`) to allow filtering recommendations by granularity. `pod_name` and `namespace` columns are nullable for node-scope and cluster-scope recommendations. Applied in migration `0003` for both PostgreSQL and SQLite.
+- **Configurable PostgreSQL connection pool:** New `DB_POOL_MIN_SIZE` (default: `2`) and `DB_POOL_MAX_SIZE` (default: `10`) environment variables control `asyncpg`'s connection pool bounds. Exposed as `db.poolMinSize` / `db.poolMaxSize` in `helm-chart/values.yaml` and propagated via `configmap.yaml`.
+- **Configurable statement timeout:** New `DB_STATEMENT_TIMEOUT_MS` environment variable (default: `30000` ms) sets a per-statement timeout on the PostgreSQL connection pool via `server_settings`. Exposed as `db.statementTimeoutMs` in `helm-chart/values.yaml`.
+- **Database migration indexes (0003):** Compound indexes added on `combined_metrics(namespace, timestamp)`, `namespace_cache(last_seen)`, and `carbon_intensity_history(datetime)` to accelerate the most frequent query patterns.
+- **Artifact Hub listing:** `helm-chart/Chart.yaml` enriched with full Artifact Hub annotations — `artifacthub.io/category`, `artifacthub.io/screenshots` (6 screenshots), `artifacthub.io/links`, `artifacthub.io/recommendations`, `artifacthub.io/changes`, `artifacthub.io/images` (linux/amd64 + linux/arm64), `artifacthub.io/maintainers`, and `artifacthub.io/readme` (fixes "no README" on the listing page). Chart now includes `keywords`, `home`, `sources`, and `maintainers` fields for richer search indexing.
 - **`artifacthub-repo.yml`:** Artifact Hub repository metadata file with `repositoryID` for Verified Publisher badge. Automatically copied to `gh-pages` by the release workflow alongside `index.yaml`.
 - **`llms.txt`** (`greenkube-website/public/`): LLM/AI crawler guidance file following the [llms.txt](https://llmstxt.org/) convention — enables AI assistants (Claude, ChatGPT, Perplexity) to understand GreenKube when crawling the website.
 - **New dashboard screenshots:** `assets/demo-report.png` and `assets/demo-settings.png` added to README, `Chart.yaml` Artifact Hub screenshots, and `llms.txt`.
+- **`scripts/pg_upgrade_17_to_18.sh`:** New maintenance script to upgrade an existing PostgreSQL 17 data directory to version 18 in-place using a Kubernetes Job and `pg_upgrade --link`, preserving all data with an automatic backup.
+
+### Fixed
+- **Aggregate queries from both raw and hourly tables:** `aggregate_summary` and `aggregate_timeseries` now correctly query both the raw `combined_metrics` table and the pre-aggregated `hourly_metrics` table, ensuring historical reports cover the full retention window without gaps at the boundary between live and archived data.
+- **Infinite aggregated retention by default:** `METRICS_AGGREGATED_RETENTION_DAYS` now defaults to `-1` (infinite retention), preserving all historical data by default. This is the correct default for CSRD/ESRS E1 compliance, which requires multi-year reporting. Set an explicit positive integer to enforce a rolling window.
+- **Trivy KSV-0014 on `init-pgrun-perms`:** Added `readOnlyRootFilesystem: true` to the PostgreSQL init container's securityContext, resolving the HIGH misconfiguration finding.
+- **Frontend npm audit (HIGH):** Updated `svelte`, `vite`, `rollup`, `picomatch`, `devalue`, and `@sveltejs/kit` to their latest compatible versions, resolving all HIGH-severity advisories.
+- **CI Trivy image scan:** Split the GreenKube image scan into a `table`-format step (exit-code 1, visible in log) and a separate `sarif` step (exit-code 0, uploaded to GitHub Security tab). Added `pull: true` to the Docker build step so the base image layers are always pulled fresh from the registry, preventing stale GHA cache from hiding unfixed CVEs.
 
 ### Changed
+- **`artifacthub-repo.yml`:** Owner `name` and `email` corrected to match the actual GitHub account (`Hugo Lelievre` / `hugo@greenkube.cloud`).
+- **Storage layer refactoring:** The `src/greenkube/storage/` package is split into three sub-packages — `storage/postgres/`, `storage/sqlite/`, and `storage/elastic/` — each with its own `__init__.py`. All cross-package imports updated. Test suite reorganized to mirror the new structure with dedicated `tests/core/`, `tests/grafana/`, and `tests/helm/` directories.
 - **`pyproject.toml`:** Added 20 SEO keywords, 5 new PyPI classifiers, and 4 additional project URLs (Documentation, Changelog, Docker Hub, Repository).
 - **`release.yml`:** Release workflow now copies `artifacthub-repo.yml` to `gh-pages` on every release so Artifact Hub always picks up the latest metadata.
 - **`scripts/sync_version.py`:** `update_helm_chart_yaml()` now also keeps the `artifacthub.io/images` annotation in sync with the new version on each release.
+
+
 
 ## [0.2.7] — 2026-04-05
 

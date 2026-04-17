@@ -91,6 +91,32 @@ def test_ovh_zone_mapping(cloud_zone, provider, expected):
     assert result == expected, f"Expected {expected!r} for ({cloud_zone!r}, {provider!r}), got {result!r}"
 
 
+# --- Direct Electricity Maps zone code passthrough ---
+# On bare-metal, minikube, or on-prem clusters operators may label nodes
+# directly with an Electricity Maps zone code (e.g. topology.kubernetes.io/zone=FR).
+# The mapper must recognise these and return them as-is.
+
+
+@pytest.mark.parametrize(
+    "cloud_zone, provider, expected",
+    [
+        # Two-letter country codes already in the EM zone set
+        ("FR", "unknown", "FR"),
+        ("DE", "unknown", "DE"),
+        ("FR", None, "FR"),
+        # Compound EM zone codes
+        ("US-CAL-CISO", None, "US-CAL-CISO"),
+        ("AU-NSW", "unknown", "AU-NSW"),
+        ("CA-QC", None, "CA-QC"),
+        ("SE-SE3", "unknown", "SE-SE3"),
+    ],
+)
+def test_direct_em_zone_passthrough(cloud_zone, provider, expected):
+    """Zone labels that are already valid EM zone codes must pass through unchanged."""
+    result = get_emaps_zone_from_cloud_zone(cloud_zone, provider=provider)
+    assert result == expected, f"Expected {expected!r} for ({cloud_zone!r}, {provider!r}), got {result!r}"
+
+
 # --- OVH provider detection via node labels ---
 
 

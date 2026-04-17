@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.2.7
+  tag: 0.2.8
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -44,6 +44,18 @@ config:
   # Max age for historical node data in days
   nodeDataMaxAgeDays: 30
 
+  # --- Metrics Retention & Compression ---
+  # Age threshold (hours) after which raw 5-min metrics are compressed
+  # into hourly aggregates. Aligns with Electricity Maps hourly granularity.
+  metricsCompressionAgeHours: 24
+  # Maximum number of days to retain raw (uncompressed) 5-min metrics.
+  # Older raw rows are deleted after compression. Set -1 to disable deletion.
+  metricsRawRetentionDays: 7
+  # Maximum number of days to retain hourly aggregated metrics.
+  # Set -1 (default) to keep data indefinitely — required for multi-year
+  # comparison and CSRD/ESRS E1 yearly reporting.
+  metricsAggregatedRetentionDays: -1
+
   # Timeout in seconds for Kubernetes API calls (list_node, list_pod, etc.).
   # Prevents greenkube start from hanging indefinitely if the API server is slow.
   # Set to 0 to disable the timeout.
@@ -52,6 +64,10 @@ config:
   # Boavizta configuration
   boavizta:
     url: https://api.boavizta.org
+    # Default embodied emissions (kg CO2e) used when Boavizta API does not
+    # recognize a cloud provider or instance type. 350 kg is a reasonable
+    # average for a typical cloud server over its full lifecycle.
+    defaultEmbodiedEmissionsKg: 350
 
   # Database configuration
   db:
@@ -62,6 +78,11 @@ config:
     path: /data/greenkube_data.db
     # Database schema (only used if db.type is "postgres")
     schema: public
+    # Connection pool sizing (PostgreSQL only)
+    poolMinSize: 1
+    poolMaxSize: 10
+    # Statement timeout in milliseconds (prevents runaway queries)
+    statementTimeoutMs: 30000
 
   # Persistence configuration for SQLite
   persistence:
@@ -69,7 +90,7 @@ config:
     # Storage Class Name (leave empty for default)
     storageClassName: ''
     accessMode: ReadWriteOnce
-    size: 1Gi
+    size: 10Gi
 
   # Prometheus collector configuration
   prometheus:
@@ -158,36 +179,63 @@ elasticsearch:
   indexName: carbon_intensity
   verifyCerts: true
 
-# Sensitive values that will be stored in a Kubernetes Secret.
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+# Option A (default): leave existingSecret empty and fill in the values below.
+# The chart creates a Secret named "<release>". Not recommended when
+# values.yaml is committed to Git (credentials would be stored in plain text).
+#
+# Option B (recommended for production): create the Secret manually, then
+# set secrets.existingSecret to its name. The chart will skip Secret
+# creation and all other secrets.* values are ignored.
+#
+#   kubectl create secret generic greenkube-secrets -n greenkube \
+#     --from-literal=GREENKUBE_API_KEY="..." \
+#     --from-literal=ELECTRICITY_MAPS_TOKEN="..." \
+#     --from-literal=POSTGRES_PASSWORD="..." \
+#     --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<password>@greenkube-postgres:5432/greenkube"
+#
+#   helm install greenkube ./helm-chart -n greenkube \
+#     --set secrets.existingSecret=greenkube-secrets
+#
+# Optional keys: BOAVIZTA_TOKEN, PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD,
+#   PROMETHEUS_BEARER_TOKEN, ELASTICSEARCH_USER, ELASTICSEARCH_PASSWORD
 secrets:
-  # Electricity Maps API Token (Optional)
-  # Without it, GreenKube uses the default carbon intensity value (config.defaultIntensity).
-  # Get yours at: https://www.electricitymaps.com/
+  # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
+  existingSecret: ''
+
+  # Electricity Maps API Token — get yours at https://www.electricitymaps.com/
+  # Without it, GreenKube uses the default carbon intensity (config.defaultIntensity).
   electricityMapsToken: ''
 
-  # Boavizta API Token (Optional)
+  # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API Key for GreenKube API authentication (Optional).
-  # If empty, no authentication is required.
+  # API Key for GreenKube API authentication (optional — no auth if empty)
   apiKey: ''
 
-  # Connection string for PostgreSQL (only used if db.type is "postgres")
+  # PostgreSQL connection string (only used when db.type is "postgres" and
+  # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)
   # Example: "postgresql://user:password@host:port/dbname"
   dbConnectionString: ''
 
-  # Prometheus authentication
+  # Prometheus authentication (optional)
   prometheus:
     username: ''
     password: ''
     bearerToken: ''
 
-  # Elasticsearch authentication
+  # Elasticsearch authentication (optional)
   elasticsearch:
     user: ''
     password: ''
 
 # Pod resource requests and limits
+# -- Collector/scheduler container resources
+# This container runs periodic data collection (Prometheus, OpenCost, K8s API)
+# and writes to the database. Memory usage is proportional to the number of
+# pods in the cluster. For clusters with >200 pods, consider increasing limits.
 resources:
   limits:
     cpu: 500m
@@ -196,12 +244,28 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# -- API container resources
+# This container serves the FastAPI REST API and the SPA frontend.
+# Memory usage is dominated by query result sets; the hourly aggregation
+# table keeps this bounded. For clusters with >500 pods, increase memory.
+apiResources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
 # PostgreSQL configuration (custom statefulset)
 postgres:
   enabled: true
   image:
     repository: postgres
-    tag: 17-alpine
+    # postgres:18-alpine — latest major with active security support.
+    # Remaining CVEs (libcrypto3 CVE-2026-28390, zlib CVE-2026-22184, gosu Go stdlib)
+    # are upstream-only: not yet patched in Alpine 3.23.3 or gosu binary.
+    # Tracked in .trivyignore; will auto-resolve on next Alpine package update.
+    tag: 18-alpine
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
@@ -212,8 +276,19 @@ postgres:
     database: greenkube
   persistence:
     enabled: true
-    size: 1Gi
+    size: 10Gi
     storageClassName: ''
+  # Resource requests and limits for the PostgreSQL container.
+  # These defaults are appropriate for small-to-medium clusters (<500 pods).
+  # For larger clusters, increase memory to accommodate shared_buffers and
+  # query working memory.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
 
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.

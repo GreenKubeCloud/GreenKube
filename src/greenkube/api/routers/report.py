@@ -63,10 +63,9 @@ async def report_summary(
         )
 
     start, end = _get_time_range(last)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
 
-    if namespace:
-        metrics = [m for m in metrics if m.namespace == namespace]
+    # Use smart reading to avoid OOM on large time ranges
+    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
     if aggregate:
         granularity_flags = _granularity_flags(granularity)
@@ -84,6 +83,7 @@ async def report_summary(
         total_rows=total_rows,
         total_co2e_grams=total_co2e_grams,
         total_embodied_co2e_grams=total_embodied_co2e_grams,
+        total_co2e_all_scopes=total_co2e_grams + total_embodied_co2e_grams,
         total_cost=total_cost,
         total_energy_joules=total_energy_joules,
         unique_pods=unique_pods,
@@ -119,10 +119,9 @@ async def report_export(
         )
 
     start, end = _get_time_range(last)
-    metrics = await repo.read_combined_metrics(start_time=start, end_time=end)
 
-    if namespace:
-        metrics = [m for m in metrics if m.namespace == namespace]
+    # Use smart reading to avoid OOM on large time ranges
+    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
     if aggregate:
         granularity_flags = _granularity_flags(granularity)

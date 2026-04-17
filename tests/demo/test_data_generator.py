@@ -23,10 +23,10 @@ class TestGenerateNodeSnapshots:
     """Tests for generate_node_snapshots."""
 
     def test_generates_correct_count(self):
-        """Node snapshots count = nodes × days."""
+        """Node snapshots count is at least nodes × days (may include YTD sparse data)."""
         days = 3
         nodes = generate_node_snapshots(days=days)
-        assert len(nodes) == len(DEMO_NODES) * days
+        assert len(nodes) >= len(DEMO_NODES) * days
 
     def test_returns_node_info_objects(self):
         """All returned items are NodeInfo instances."""
@@ -60,10 +60,10 @@ class TestGenerateCarbonIntensityHistory:
     """Tests for generate_carbon_intensity_history."""
 
     def test_generates_hourly_records(self):
-        """One record per hour for the specified days."""
+        """At least one record per hour for the specified dense days, plus sparse YTD records."""
         days = 3
         records = generate_carbon_intensity_history(days=days)
-        assert len(records) == days * 24
+        assert len(records) >= days * 24
 
     def test_records_have_required_fields(self):
         """Each record has the ElectricityMaps-compatible fields."""
@@ -95,11 +95,11 @@ class TestGenerateCombinedMetrics:
     """Tests for generate_combined_metrics."""
 
     def test_generates_metrics_for_all_workloads(self):
-        """Metrics are generated for every pod in every namespace."""
+        """Metrics are generated for every pod in every namespace, plus sparse YTD records."""
         metrics = generate_combined_metrics(days=1)
         total_pods = sum(len(pods) for pods in DEMO_WORKLOADS.values())
-        # 1 day = 24 hours, one record per pod per hour
-        assert len(metrics) == total_pods * 24
+        # Dense: 1 day = 24 hours, one record per pod per hour; sparse YTD data is also included
+        assert len(metrics) >= total_pods * 24
 
     def test_all_metrics_are_combined_metric(self):
         """All returned items are CombinedMetric instances."""

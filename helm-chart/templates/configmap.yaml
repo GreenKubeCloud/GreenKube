@@ -17,17 +17,24 @@ data:
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
   NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
   NODE_DATA_MAX_AGE_DAYS: {{ .Values.config.nodeDataMaxAgeDays | quote }}
+  METRICS_COMPRESSION_AGE_HOURS: {{ .Values.config.metricsCompressionAgeHours | quote }}
+  METRICS_RAW_RETENTION_DAYS: {{ .Values.config.metricsRawRetentionDays | quote }}
+  METRICS_AGGREGATED_RETENTION_DAYS: {{ .Values.config.metricsAggregatedRetentionDays | quote }}
   K8S_REQUEST_TIMEOUT: {{ .Values.config.k8sRequestTimeout | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}
   DB_PATH: {{ .Values.config.db.path | quote }}
+  DB_POOL_MIN_SIZE: {{ .Values.config.db.poolMinSize | quote }}
+  DB_POOL_MAX_SIZE: {{ .Values.config.db.poolMaxSize | quote }}
+  DB_STATEMENT_TIMEOUT_MS: {{ .Values.config.db.statementTimeoutMs | quote }}
   ELASTICSEARCH_HOSTS: {{ .Values.elasticsearch.hosts | quote }}
   ELASTICSEARCH_INDEX_NAME: {{ .Values.elasticsearch.indexName | quote }}
   ELASTICSEARCH_VERIFY_CERTS: {{ .Values.elasticsearch.verifyCerts | quote }}
   
   # --- Boavizta Config ---
   BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
+  DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
 
   # --- Prometheus Collector Config ---
   {{- if .Values.config.prometheus.url }}

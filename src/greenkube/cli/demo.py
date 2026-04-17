@@ -33,7 +33,7 @@ def demo(
     days: Annotated[
         int,
         typer.Option("--days", "-d", help="Number of days of sample data to generate."),
-    ] = 7,
+    ] = 30,
     no_browser: Annotated[
         bool,
         typer.Option("--no-browser", help="Do not open the browser automatically."),

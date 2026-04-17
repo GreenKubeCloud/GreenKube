@@ -7,14 +7,27 @@ from ..data.region_mapping import CLOUD_REGION_TO_ELECTRICITY_MAPS_ZONE, PROVIDE
 
 logger = logging.getLogger(__name__)
 
+# Pre-compute the set of valid Electricity Maps zone codes from the mapping
+# values so we can recognise when the input is already an EM zone (e.g. on
+# bare-metal, minikube, or on-prem clusters where operators label nodes with
+# Electricity Maps zone codes directly like "FR", "DE", "US-CAL-CISO").
+_KNOWN_EM_ZONES: set[str] = set(CLOUD_REGION_TO_ELECTRICITY_MAPS_ZONE.values()) | {
+    v for v in PROVIDER_REGION_TO_EM_ZONE.values()
+}
+
 
 def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str | None:
     """
     Translate a cloud zone (e.g. 'europe-west9-a') to an Electricity Maps
     zone code (e.g. 'FR') using the region mapping table.
 
+    If the input is already a valid Electricity Maps zone code (e.g. 'FR'),
+    it is returned as-is.  This supports bare-metal / on-prem clusters
+    where the topology label is set directly to an EM zone.
+
     Args:
         cloud_zone: The zone string from the cloud provider (e.g. 'us-east-1a')
+                    or an Electricity Maps zone code (e.g. 'FR').
         provider: Optional cloud provider name (e.g. 'aws', 'gcp', 'ovh')
 
     Returns:
@@ -25,6 +38,16 @@ def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str
     # geographic meaning and must never be treated as a valid region.
     if cloud_zone == "nova":
         return None
+
+    # If the input is already a valid Electricity Maps zone code, return it
+    # directly.  This covers bare-metal / minikube / on-prem nodes labelled
+    # with EM zones (e.g. topology.kubernetes.io/zone=FR).
+    if cloud_zone in _KNOWN_EM_ZONES:
+        logger.debug(
+            "Cloud zone '%s' is already a valid Electricity Maps zone code.",
+            cloud_zone,
+        )
+        return cloud_zone
 
     # Try to find an exact match first (e.g. if the input is already a region)
     if provider and (provider, cloud_zone) in PROVIDER_REGION_TO_EM_ZONE:

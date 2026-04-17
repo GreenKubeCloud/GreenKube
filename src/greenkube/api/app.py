@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from greenkube import __version__
 from greenkube.api.dependencies import (
@@ -30,6 +31,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import config as config_router
+from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
 from greenkube.core.config import get_config
@@ -37,6 +39,39 @@ from greenkube.core.config import get_config
 logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path("/app/frontend")
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add standard security headers to every HTTP response.
+
+    These headers mitigate common web attacks (clickjacking, MIME-sniffing,
+    XSS via content-type confusion, etc.) and are recommended by OWASP.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
+        response.headers["Cache-Control"] = "no-store"
+        # Content-Security-Policy: restrict resource loading for the SPA.
+        # 'unsafe-inline' is required for SvelteKit's inline bootstrap script
+        # and style injection. Without it the page is blank because the browser
+        # blocks the <script> tag that bootstraps the SPA.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        return response
 
 
 @asynccontextmanager
@@ -96,12 +131,16 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
+
+    # Security headers (OWASP recommended)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Register API routers
     app.include_router(metrics.router, prefix="/api/v1", tags=["Metrics"])
+    app.include_router(dashboard_router.router, prefix="/api/v1", tags=["Metrics"])
     app.include_router(namespaces.router, prefix="/api/v1", tags=["Namespaces"])
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])

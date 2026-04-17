@@ -56,9 +56,12 @@ class DatabaseManager:
                     try:
                         self.pool = await asyncpg.create_pool(
                             dsn=self.config.DB_CONNECTION_STRING,
-                            min_size=1,
-                            max_size=10,
-                            server_settings={"search_path": self.config.DB_SCHEMA},
+                            min_size=self.config.DB_POOL_MIN_SIZE,
+                            max_size=self.config.DB_POOL_MAX_SIZE,
+                            server_settings={
+                                "search_path": self.config.DB_SCHEMA,
+                                "statement_timeout": str(self.config.DB_STATEMENT_TIMEOUT_MS),
+                            },
                         )
                         logger.info("Successfully initialized PostgreSQL connection pool.")
                         await self.setup_postgres()

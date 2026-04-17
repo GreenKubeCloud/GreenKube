@@ -237,13 +237,13 @@
 							<p class="text-xl font-bold text-dark-100">{summary?.unique_namespaces ?? 0}</p>
 						</div>
 						<div class="bg-dark-800/60 rounded-lg p-3 text-center col-span-2 sm:col-span-1">
-							<p class="text-xs text-dark-500 uppercase tracking-wider mb-1">CO₂ (operational)</p>
+							<p class="text-xs text-dark-500 uppercase tracking-wider mb-1">Scope 2 CO₂ (electricity)</p>
 							<p class="text-lg font-semibold text-green-400">
 								{formatCO2(summary?.total_co2e_grams ?? 0)}
 							</p>
 						</div>
 						<div class="bg-dark-800/60 rounded-lg p-3 text-center">
-							<p class="text-xs text-dark-500 uppercase tracking-wider mb-1">CO₂ (embodied)</p>
+							<p class="text-xs text-dark-500 uppercase tracking-wider mb-1">Scope 3 CO₂ (hardware)</p>
 							<p class="text-lg font-semibold text-emerald-400">
 								{formatCO2(summary?.total_embodied_co2e_grams ?? 0)}
 							</p>
@@ -346,8 +346,8 @@
 					<span>pod_name</span>
 					<span>namespace</span>
 					<span>timestamp</span>
-					<span>co2e_grams</span>
-					<span>embodied_co2e_grams</span>
+					<span>co2e_grams (Scope 2)</span>
+					<span>embodied_co2e_grams (Scope 3)</span>
 					<span>joules</span>
 					<span>total_cost</span>
 					<span>cpu_request</span>

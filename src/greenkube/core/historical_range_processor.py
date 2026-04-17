@@ -218,8 +218,17 @@ class HistoricalRangeProcessor:
             pod_mem_map = {}
             pod_ephemeral_storage_map = {}
 
-        # Node contexts for zone mapping
-        node_contexts = await self.zone_mapper.map_nodes()
+        # Current node metadata — collected once here for zone mapping and
+        # assembly.  Historical snapshots (node_timeline) cover the past;
+        # this provides a best-effort fallback for nodes not yet in the DB.
+        try:
+            nodes_info = await self.node_collector.collect() or {}
+        except Exception:
+            nodes_info = {}
+
+        # Node contexts for zone mapping — pass already-collected nodes_info
+        # so the zone mapper never triggers an extra K8s API call.
+        node_contexts = await self.zone_mapper.map_nodes(nodes_info)
 
         # Cost data
         range_seconds = (end_dt - start_dt).total_seconds()
@@ -229,12 +238,6 @@ class HistoricalRangeProcessor:
             cost_map = {c.pod_name: c for c in cost_metrics}
         except Exception:
             cost_map = {}
-
-        # Node info
-        try:
-            nodes_info = await self.node_collector.collect() or {}
-        except Exception:
-            nodes_info = {}
 
         # --- Chunked processing ---
         CHUNK_SIZE = timedelta(days=1)

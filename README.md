@@ -23,11 +23,11 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 2.  **Visualize** these metrics in a real-time dashboard for actionable carbon visibility.
 3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-## ✨ Features (Version 0.2.7)
+## ✨ Features (Version 0.2.8)
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
-* **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included at `/api/v1/docs`.
+* **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, pre-computed dashboard data, and configuration. OpenAPI docs included at `/api/v1/docs`.
 
 ### 📈 Comprehensive Resource Monitoring
 * **Multi-Resource Metrics Collection:** GreenKube collects the following metrics per pod:
@@ -39,6 +39,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
   - **Pod restarts** (restart count per container)
 * **Energy Estimation:** Calculates pod-level energy consumption (Joules) based on **CPU usage** and a built-in library of cloud instance power profiles. Memory, network, disk, and GPU are collected as metrics but are **not yet included in the energy model** — this is planned for a future release.
 * **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data. GPU workloads are currently **not supported** in the carbon model.
+* **Embodied Emissions with Boavizta fallback:** Hardware manufacturing emissions are fetched from the Boavizta API and cached in the database. When Boavizta does not recognise a provider or instance type, a configurable default (`DEFAULT_EMBODIED_EMISSIONS_KG`, default 350 kg CO₂e) is used and the metric is flagged as estimated — ensuring embodied emissions are never silently zeroed out.
 
 ### 🎯 Optimization & Reporting
 * **9-Type Recommendation Engine:** Identifies optimization opportunities:
@@ -60,9 +61,10 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 * **Grafana Dashboard:** Pre-built JSON dashboard with CO₂e, cost, energy, resource, sustainability score, and recommendation panels — import in one click.
 * **Prometheus Integration:** ServiceMonitor and NetworkPolicy for automatic scraping by kube-prometheus-stack.
 * **Database Migration System:** Automated, versioned schema migrations for PostgreSQL and SQLite.
-* **Flexible Data Backends:** Supports PostgreSQL (default/recommended), SQLite (local/dev), and Elasticsearch (production scale) for storing metrics and carbon intensity data.
+* **Flexible Data Backends:** Supports PostgreSQL (default/recommended) and SQLite (local/dev) for storing metrics and carbon intensity data.
 * **Service Auto-Discovery:** Automatically discovers in-cluster Prometheus and OpenCost services to simplify setup (manually configurable via Helm values).
 * **Helm Chart Deployment:** Production-ready Helm chart with PostgreSQL StatefulSet, configurable persistence, RBAC, and health probes.
+* **Security Hardening:** All containers run as non-root (UID 10001), with `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, dropped capabilities, and `seccompProfile: RuntimeDefault`. PostgreSQL uses scram-sha-256 authentication. OWASP security headers (CSP, X-Frame-Options, Referrer-Policy) on every API response. Automated Trivy vulnerability scanning in CI. Secrets can be managed externally via `secrets.existingSecret` to avoid storing credentials in `values.yaml`.
 * **Cloud Provider Support:** Built-in profiles for AWS, GCP, Azure, OVH, and Scaleway with automatic region-to-carbon-zone mapping.
 * **On-Premises Support:** Manual zone labeling for bare-metal clusters without cloud provider metadata.
 
@@ -101,7 +103,7 @@ Explore GreenKube with realistic sample data in under 30 seconds — no Promethe
 **With Docker (no Kubernetes needed):**
 
 ```bash
-docker run --rm -p 9000:9000 greenkube/greenkube:0.2.7 demo --no-browser --port 9000
+docker run --rm -p 9000:9000 greenkube/greenkube:0.2.8 demo --no-browser --port 9000
 # → Open http://localhost:9000
 ```
 
@@ -109,7 +111,7 @@ docker run --rm -p 9000:9000 greenkube/greenkube:0.2.7 demo --no-browser --port 
 
 ```bash
 kubectl run greenkube-demo \
-  --image=greenkube/greenkube:0.2.7 \
+  --image=greenkube/greenkube:0.2.8 \
   --restart=Never \
   --command -- greenkube demo --no-browser --port 9000
 
@@ -322,7 +324,7 @@ Interactive API docs are available at `/api/v1/docs` (Swagger UI).
 ```bash
 # Get a health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.7"}
+# {"status":"ok","version":"0.2.8"}
 
 # Get metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"
@@ -416,7 +418,6 @@ GreenKube follows a clean, hexagonal architecture with strict separation between
 - **Repositories:** Abstract interfaces implemented for multiple backends:
   - **PostgresRepository:** Production-grade persistent storage (asyncpg driver)
   - **SQLiteRepository:** Local development and testing (aiosqlite driver)
-  - **ElasticsearchRepository:** High-scale time-series storage and analytics
 - **NodeRepository:** Historical node state snapshots for accurate time-range reporting
 - **EmbodiedRepository:** Boavizta API integration for hardware embodied emissions
 

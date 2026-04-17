@@ -16,6 +16,8 @@ class TestReportSummaryEndpoint:
         data = response.json()
         assert data["total_rows"] == 0
         assert data["total_co2e_grams"] == 0.0
+        assert data["total_embodied_co2e_grams"] == 0.0
+        assert data["total_co2e_all_scopes"] == 0.0
         assert data["total_cost"] == 0.0
         assert data["total_energy_joules"] == 0.0
         assert data["unique_pods"] == 0
@@ -29,6 +31,8 @@ class TestReportSummaryEndpoint:
         data = response.json()
         assert data["total_rows"] == 2
         assert abs(data["total_co2e_grams"] - 5.7) < 0.01
+        assert abs(data["total_embodied_co2e_grams"] - 0.17) < 0.01
+        assert abs(data["total_co2e_all_scopes"] - (5.7 + 0.17)) < 0.01
         assert abs(data["total_cost"] - 0.017) < 0.001
         assert abs(data["total_energy_joules"] - 20000.0) < 0.01
         assert data["unique_pods"] == 2

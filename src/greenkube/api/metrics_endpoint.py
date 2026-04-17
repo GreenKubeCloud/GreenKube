@@ -44,13 +44,13 @@ POD_LABELS = ["cluster", "namespace", "pod", "node", "region"]
 
 POD_CO2 = Gauge(
     "greenkube_pod_co2e_grams",
-    "Operational CO2e emissions per pod in grams",
+    "GHG Scope 2 — indirect CO2e emissions from purchased electricity per pod, in grams",
     POD_LABELS,
     registry=REGISTRY,
 )
 POD_EMBODIED_CO2 = Gauge(
     "greenkube_pod_embodied_co2e_grams",
-    "Embodied CO2e emissions per pod in grams",
+    "GHG Scope 3 (Cat. 1) — upstream hardware manufacturing CO2e per pod, in grams",
     POD_LABELS,
     registry=REGISTRY,
 )
@@ -134,13 +134,13 @@ NS_LABELS = ["cluster", "namespace"]
 
 NS_CO2_TOTAL = Gauge(
     "greenkube_namespace_co2e_grams_total",
-    "Total operational CO2e per namespace in grams",
+    "GHG Scope 2 — total electricity CO2e per namespace in grams",
     NS_LABELS,
     registry=REGISTRY,
 )
 NS_EMBODIED_CO2_TOTAL = Gauge(
     "greenkube_namespace_embodied_co2e_grams_total",
-    "Total embodied CO2e per namespace in grams",
+    "GHG Scope 3 (Cat. 1) — total hardware manufacturing CO2e per namespace in grams",
     NS_LABELS,
     registry=REGISTRY,
 )
@@ -170,13 +170,13 @@ CLUSTER_LABELS = ["cluster"]
 
 CLUSTER_CO2_TOTAL = Gauge(
     "greenkube_cluster_co2e_grams_total",
-    "Total operational CO2e across all pods in grams",
+    "GHG Scope 2 — total electricity CO2e across all pods in grams",
     CLUSTER_LABELS,
     registry=REGISTRY,
 )
 CLUSTER_EMBODIED_CO2_TOTAL = Gauge(
     "greenkube_cluster_embodied_co2e_grams_total",
-    "Total embodied CO2e across all pods in grams",
+    "GHG Scope 3 (Cat. 1) — total hardware manufacturing CO2e across all pods in grams",
     CLUSTER_LABELS,
     registry=REGISTRY,
 )
@@ -274,7 +274,7 @@ NODE_MEMORY_CAPACITY = Gauge(
 )
 NODE_EMBODIED = Gauge(
     "greenkube_node_embodied_emissions_kg",
-    "Embodied emissions per node in kgCO2eq",
+    "GHG Scope 3 (Cat. 1) — hardware manufacturing embodied emissions per node in kgCO2e",
     NODE_LABELS,
     registry=REGISTRY,
 )

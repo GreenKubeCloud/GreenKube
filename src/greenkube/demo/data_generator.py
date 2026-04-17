@@ -118,11 +118,15 @@ def _generate_intensity_for_hour(hour: int) -> float:
     return max(10.0, base + random.uniform(-DEMO_INTENSITY_VARIATION / 2, DEMO_INTENSITY_VARIATION / 2))
 
 
-def generate_node_snapshots(days: int = 7) -> List[NodeInfo]:
+def generate_node_snapshots(days: int = 30) -> List[NodeInfo]:
     """Generate node snapshot data for the demo period.
 
+    Produces daily snapshots for the full ``days`` window, plus one snapshot
+    per week going back to the start of the current year so that YTD graphs
+    have coverage.
+
     Args:
-        days: Number of days of history to generate.
+        days: Number of days of dense (daily) history to generate.
 
     Returns:
         A list of NodeInfo objects.
@@ -130,8 +134,19 @@ def generate_node_snapshots(days: int = 7) -> List[NodeInfo]:
     nodes = []
     now = datetime.now(timezone.utc)
 
+    year_start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    ytd_days = (now - year_start).days
+
+    # Dense: one snapshot per day for the last `days` days
+    dense_offsets = list(range(days))
+
+    # Sparse: one snapshot per week for the period before `days` up to year start
+    sparse_offsets = list(range(days, ytd_days, 7))
+
+    all_offsets = dense_offsets + sparse_offsets
+
     for node_def in DEMO_NODES:
-        for day_offset in range(days):
+        for day_offset in all_offsets:
             ts = now - timedelta(days=day_offset, hours=random.randint(0, 3))
             nodes.append(
                 NodeInfo(
@@ -153,11 +168,14 @@ def generate_node_snapshots(days: int = 7) -> List[NodeInfo]:
     return nodes
 
 
-def generate_carbon_intensity_history(days: int = 7) -> list[dict]:
+def generate_carbon_intensity_history(days: int = 30) -> list[dict]:
     """Generate hourly carbon intensity history for the demo period.
 
+    Produces hourly records for the last ``days`` days, plus one record
+    per day going back to the start of the current year for YTD coverage.
+
     Args:
-        days: Number of days of history to generate.
+        days: Number of days of dense (hourly) history to generate.
 
     Returns:
         A list of dicts matching the ElectricityMaps history format.
@@ -165,6 +183,7 @@ def generate_carbon_intensity_history(days: int = 7) -> list[dict]:
     records = []
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
+    # Dense: hourly records for the last `days` days
     for hours_ago in range(days * 24):
         ts = now - timedelta(hours=hours_ago)
         intensity = _generate_intensity_for_hour(ts.hour)
@@ -181,16 +200,35 @@ def generate_carbon_intensity_history(days: int = 7) -> list[dict]:
             }
         )
 
+    # Sparse: one record per day from `days` ago back to start of year
+    year_start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    ytd_days = (now - year_start).days
+    for day_offset in range(days, ytd_days):
+        ts = (now - timedelta(days=day_offset)).replace(hour=12)
+        intensity = _generate_intensity_for_hour(ts.hour)
+        records.append(
+            {
+                "zone": DEMO_ZONE,
+                "carbonIntensity": round(intensity, 2),
+                "datetime": ts.isoformat(),
+                "updatedAt": ts.isoformat(),
+                "createdAt": ts.isoformat(),
+                "emissionFactorType": "lifecycle",
+                "isEstimated": True,
+                "estimationMethod": "historical_average",
+            }
+        )
+
     logger.info("Generated %d carbon intensity records.", len(records))
     return records
 
 
-def generate_combined_metrics(days: int = 7) -> List[CombinedMetric]:
+def generate_combined_metrics(days: int = 30) -> List[CombinedMetric]:
     """Generate realistic combined metrics for all demo workloads.
 
-    Produces one metric record per pod per hour for the demo period,
-    simulating day/night traffic patterns, over-provisioned pods, and
-    idle workloads.
+    Produces one metric record per pod per hour for the last ``days`` days,
+    plus one record per day going back to the start of the current year so
+    that all graph scales (7d, 30d, YTD) are populated.
 
     Args:
         days: Number of days of history to generate.
@@ -202,32 +240,22 @@ def generate_combined_metrics(days: int = 7) -> List[CombinedMetric]:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     node_names = [n["name"] for n in DEMO_NODES]
 
-    for hours_ago in range(days * 24):
-        ts = now - timedelta(hours=hours_ago)
+    year_start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    ytd_days = (now - year_start).days
+
+    def _build_metrics_for_ts(ts: datetime, traffic_mult: float, intensity: float) -> None:
+        """Append one CombinedMetric per pod for the given timestamp."""
         hour = ts.hour
-        intensity = _generate_intensity_for_hour(hour)
-
-        # Traffic multiplier: peak during business hours, low at night
-        if 9 <= hour <= 18:
-            traffic_mult = 1.0 + random.uniform(-0.1, 0.2)
-        elif 6 <= hour <= 22:
-            traffic_mult = 0.6 + random.uniform(-0.1, 0.1)
-        else:
-            traffic_mult = 0.15 + random.uniform(-0.05, 0.1)
-
         for namespace, workloads in DEMO_WORKLOADS.items():
             for pod_name, owner_kind, owner_name, base_cpu, base_mem in workloads:
-                # Determine usage based on pod type
                 if "spark" in pod_name or "load-test" in pod_name:
-                    # Batch jobs: high usage when running, zero otherwise
-                    if random.random() < 0.3:  # 30% chance of being active
+                    if random.random() < 0.3:
                         cpu_usage = int(base_cpu * random.uniform(0.7, 0.95))
                         mem_usage = int(base_mem * random.uniform(0.6, 0.9))
                     else:
                         cpu_usage = int(base_cpu * 0.01)
                         mem_usage = int(base_mem * 0.05)
                 elif "jenkins" in pod_name or "artifact" in pod_name:
-                    # CI/CD: intermittent usage
                     if 9 <= hour <= 18 and random.random() < 0.5:
                         cpu_usage = int(base_cpu * random.uniform(0.4, 0.8))
                         mem_usage = int(base_mem * random.uniform(0.3, 0.7))
@@ -235,7 +263,6 @@ def generate_combined_metrics(days: int = 7) -> List[CombinedMetric]:
                         cpu_usage = int(base_cpu * 0.02)
                         mem_usage = int(base_mem * 0.05)
                 elif namespace == "staging":
-                    # Staging: mostly idle, occasional bursts
                     if 10 <= hour <= 16 and random.random() < 0.4:
                         cpu_usage = int(base_cpu * random.uniform(0.3, 0.6))
                         mem_usage = int(base_mem * random.uniform(0.2, 0.5))
@@ -243,31 +270,21 @@ def generate_combined_metrics(days: int = 7) -> List[CombinedMetric]:
                         cpu_usage = int(base_cpu * 0.02)
                         mem_usage = int(base_mem * 0.05)
                 else:
-                    # Production services: follow traffic pattern
                     cpu_usage = int(base_cpu * traffic_mult * random.uniform(0.15, 0.5))
                     mem_usage = int(base_mem * traffic_mult * random.uniform(0.3, 0.7))
 
-                # Ensure minimum values
                 cpu_usage = max(1, cpu_usage)
                 mem_usage = max(1024, mem_usage)
 
-                # Energy: derived from CPU usage (simplified model)
                 power_watts = (cpu_usage / 1000.0) * random.uniform(8.0, 15.0)
-                joules = power_watts * 3600  # 1 hour in seconds
+                joules = power_watts * 3600
 
-                # PUE varies by node
                 pue = 1.1 + random.uniform(0, 0.15)
-
-                # CO2 = (energy_kwh * pue * grid_intensity)
                 energy_kwh = joules / 3.6e6
                 co2e = energy_kwh * pue * intensity
-
-                # Embodied: allocated proportionally to CPU usage from node total
-                embodied_co2e = (cpu_usage / 4000.0) * (320.0 * 1000 / (4 * 365 * 24))  # grams per hour
-
-                # Cost: simplified (CPU + memory)
-                cpu_cost_hour = (cpu_usage / 1000.0) * 0.048  # ~$0.048/vCPU-hour (m5.xlarge)
-                mem_cost_hour = (mem_usage / (1024**3)) * 0.006  # ~$0.006/GB-hour
+                embodied_co2e = (cpu_usage / 4000.0) * (320.0 * 1000 / (4 * 365 * 24))
+                cpu_cost_hour = (cpu_usage / 1000.0) * 0.048
+                mem_cost_hour = (mem_usage / (1024**3)) * 0.006
                 total_cost = cpu_cost_hour + mem_cost_hour
 
                 node = random.choice(node_names)
@@ -306,9 +323,29 @@ def generate_combined_metrics(days: int = 7) -> List[CombinedMetric]:
                         is_estimated=False,
                         estimation_reasons=[],
                         embodied_co2e_grams=round(embodied_co2e, 4),
-                        calculation_version="0.2.7-demo",
+                        calculation_version="0.2.8-demo",
                     )
                 )
+
+    # Dense: one record per pod per hour for the last `days` days
+    for hours_ago in range(days * 24):
+        ts = now - timedelta(hours=hours_ago)
+        hour = ts.hour
+        intensity = _generate_intensity_for_hour(hour)
+        if 9 <= hour <= 18:
+            traffic_mult = 1.0 + random.uniform(-0.1, 0.2)
+        elif 6 <= hour <= 22:
+            traffic_mult = 0.6 + random.uniform(-0.1, 0.1)
+        else:
+            traffic_mult = 0.15 + random.uniform(-0.05, 0.1)
+        _build_metrics_for_ts(ts, traffic_mult, intensity)
+
+    # Sparse: one record per pod per day from `days` ago back to start of year
+    for day_offset in range(days, ytd_days):
+        ts = (now - timedelta(days=day_offset)).replace(hour=12)
+        intensity = _generate_intensity_for_hour(ts.hour)
+        traffic_mult = 0.7 + random.uniform(-0.1, 0.2)
+        _build_metrics_for_ts(ts, traffic_mult, intensity)
 
     logger.info("Generated %d combined metric records.", len(metrics))
     return metrics
@@ -331,7 +368,7 @@ def generate_recommendations() -> List[RecommendationRecord]:
             type=RecommendationType.ZOMBIE_POD,
             description="Pod 'load-test-runner-jkl78' in 'staging' has near-zero resource usage. "
             "Consider removing it to save $2.40/day and 12.5g CO2/day.",
-            reason="Average CPU usage is 0.02 cores (1% of 2000m request) over the last 7 days.",
+            reason="Average CPU usage is 0.02 cores (1% of 2000m request) over the last 30 days.",
             priority="high",
             scope="pod",
             potential_savings_cost=2.40,
@@ -347,7 +384,7 @@ def generate_recommendations() -> List[RecommendationRecord]:
             type=RecommendationType.RIGHTSIZING_CPU,
             description="Pod 'search-engine' requests 1000m CPU but peak usage is 450m. "
             "Reduce to 550m (with 1.2x headroom) to save $1.08/day.",
-            reason="P95 CPU usage over 7 days is 375m (37.5% of request).",
+            reason="P95 CPU usage over 30 days is 375m (37.5% of request).",
             priority="medium",
             scope="pod",
             potential_savings_cost=1.08,
@@ -363,7 +400,7 @@ def generate_recommendations() -> List[RecommendationRecord]:
             type=RecommendationType.RIGHTSIZING_MEMORY,
             description="Pod 'user-service' requests 256Mi memory but peak usage is 89Mi. "
             "Reduce to 110Mi to free cluster resources.",
-            reason="P95 memory usage over 7 days is 89Mi (34.7% of request).",
+            reason="P95 memory usage over 30 days is 89Mi (34.7% of request).",
             priority="low",
             scope="pod",
             potential_savings_cost=0.24,
@@ -436,7 +473,7 @@ def generate_recommendations() -> List[RecommendationRecord]:
             type=RecommendationType.UNDERUTILIZED_NODE,
             description="Node 'node-prod-03' (m6g.large) is underutilized at 18% average CPU. "
             "Consider consolidating workloads or downsizing.",
-            reason="Average CPU utilization is 18% over the last 7 days.",
+            reason="Average CPU utilization is 18% over the last 30 days.",
             priority="medium",
             scope="node",
             potential_savings_cost=2.16,

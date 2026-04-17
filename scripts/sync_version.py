@@ -30,7 +30,7 @@ def update_readme(version):
 
 
 def update_helm_chart_yaml(version):
-    """Updates the version in helm-chart/Chart.yaml, including ArtifactHub image annotation."""
+    """Updates the version in helm-chart/Chart.yaml, including ArtifactHub annotations."""
     yaml = YAML()
     with open("helm-chart/Chart.yaml", "r") as f:
         chart = yaml.load(f)
@@ -38,12 +38,20 @@ def update_helm_chart_yaml(version):
     chart["version"] = version
     chart["appVersion"] = version
 
+    if "annotations" not in chart:
+        chart["annotations"] = {}
+
     # Keep the artifacthub.io/images annotation in sync with the new version
-    if "annotations" in chart and "artifacthub.io/images" in chart["annotations"]:
-        chart["annotations"]["artifacthub.io/images"] = (
-            f"- name: greenkube\n  image: greenkube/greenkube:{version}\n"
-            "  platforms:\n    - linux/amd64\n    - linux/arm64\n"
-        )
+    chart["annotations"]["artifacthub.io/images"] = (
+        f"- name: greenkube\n  image: greenkube/greenkube:{version}\n"
+        "  platforms:\n    - linux/amd64\n    - linux/arm64\n"
+    )
+
+    # Embed the README content so Artifact Hub displays it on the package page.
+    # The annotation value must be the Markdown text itself, not a URL.
+    with open("README.md", "r") as f:
+        readme_content = f.read()
+    chart["annotations"]["artifacthub.io/readme"] = readme_content
 
     with open("helm-chart/Chart.yaml", "w") as f:
         yaml.dump(chart, f)

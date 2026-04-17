@@ -98,6 +98,24 @@ class EmbodiedEmissionsService:
                     key, val = res
                     boavizta_cache[key] = val
 
+            # Inject fallback profiles for nodes still missing after API fetch
+            for provider, itype in missing_in_db:
+                key = (provider, itype)
+                if key not in boavizta_cache:
+                    fallback_gwp = self._config.DEFAULT_EMBODIED_EMISSIONS_KG
+                    fallback_lifespan = self._config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760
+                    boavizta_cache[key] = {
+                        "gwp_manufacture": fallback_gwp,
+                        "lifespan_hours": fallback_lifespan,
+                        "is_fallback": True,
+                    }
+                    logger.warning(
+                        "Boavizta profile unavailable for %s/%s. Using fallback embodied emissions: %.1f kg CO2e.",
+                        provider,
+                        itype,
+                        fallback_gwp,
+                    )
+
         # Update NodeInfo with embodied emissions and save snapshots
         if nodes_info:
             for _node_name, info in nodes_info.items():
@@ -114,6 +132,18 @@ class EmbodiedEmissionsService:
                 logger.warning("Failed to save node snapshots: %s", e)
 
         return boavizta_cache
+
+    def is_embodied_fallback(
+        self,
+        node_info: Optional[NodeInfo],
+        boavizta_cache: Dict[tuple, dict],
+    ) -> bool:
+        """Return True if the embodied profile for this node is a fallback estimate."""
+        if not node_info or not node_info.cloud_provider or not node_info.instance_type:
+            return False
+        key = (node_info.cloud_provider, node_info.instance_type)
+        profile = boavizta_cache.get(key)
+        return bool(profile and profile.get("is_fallback"))
 
     def calculate_pod_embodied(
         self,

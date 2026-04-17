@@ -194,7 +194,8 @@ async def check_electricity_maps(cfg: Config) -> ServiceHealth:
             last_check=datetime.now(timezone.utc),
         )
 
-    probe_url = f"https://api.electricitymaps.com/v3/carbon-intensity/latest?zone={cfg.DEFAULT_ZONE}"
+    probe_zone = cfg.DEFAULT_ZONE if cfg.DEFAULT_ZONE != "unknown" else "FR"
+    probe_url = f"https://api.electricitymaps.com/v3/carbon-intensity/latest?zone={probe_zone}"
     headers = {"auth-token": cfg.ELECTRICITY_MAPS_TOKEN}
     start = time.monotonic()
     try:
