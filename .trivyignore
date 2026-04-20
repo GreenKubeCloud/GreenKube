@@ -34,3 +34,21 @@ CVE-2026-28390  # HIGH — openssl: NULL pointer dereference in CMS (not used by
 # Fix: will auto-resolve on next `docker pull postgres:18-alpine` once Alpine
 #      promotes zlib 1.3.2-r0.
 CVE-2026-22184  # HIGH — zlib: buffer overflow in untgz utility (not used at runtime)
+
+# ─── Helm chart misconfigurations ─────────────────────────────────────────────
+# KSV-0109: ConfigMap stores secrets in key GREENKUBE_SECRET_NAME
+# False positive: GREENKUBE_SECRET_NAME holds the *name* of the K8s Secret
+# resource that the API uses to persist runtime config overrides (e.g. URLs,
+# tokens set from the UI). It is a plain resource reference — "greenkube" —
+# not a secret value. No sensitive data is stored in this ConfigMap key.
+KSV-0109
+
+# KSV-0113: Role 'greenkube-secret-writer' has access to manage secrets
+# Expected and intentional: this namespaced Role (not ClusterRole) grants
+# the GreenKube service account the minimum permissions needed to patch
+# exactly one Secret — its own Helm-managed Secret — so runtime config
+# overrides set from the UI (tokens, URLs) survive pod restarts.
+# Scope is tightly limited: resourceNames restricts access to the single
+# greenkube Secret; verbs are restricted to 'get' and 'patch' only.
+# See: helm-chart/templates/role.yaml
+KSV-0113

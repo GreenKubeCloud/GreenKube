@@ -3,8 +3,15 @@ import logging
 from datetime import datetime
 from typing import List
 
-from elasticsearch import AsyncElasticsearch
-from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Text
+try:
+    from elasticsearch import AsyncElasticsearch
+    from elasticsearch.exceptions import ConnectionError, TransportError
+    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Text
+except ImportError as _es_import_error:
+    raise ImportError(
+        "The 'elasticsearch' extra is required to use the Elasticsearch backend. "
+        "Install it with: pip install greenkube[elasticsearch]"
+    ) from _es_import_error
 
 # Import connections conditionally
 if "connections" not in globals():
@@ -18,11 +25,6 @@ try:
     from elasticsearch.helpers import async_bulk
 except ImportError:
     async_bulk = None
-
-from elasticsearch.exceptions import (
-    ConnectionError,
-    TransportError,
-)
 
 from ...core.config import get_config
 from ...models.metrics import CombinedMetric

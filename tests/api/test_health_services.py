@@ -154,10 +154,13 @@ class TestUpdateServiceConfig:
     def test_update_prometheus_url(self, client, monkeypatch):
         """Should update PROMETHEUS_URL and return fresh health check."""
 
-        with patch(
-            "greenkube.api.routers.health.run_health_checks",
-            new_callable=AsyncMock,
-            return_value=_mock_health_response(),
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -170,10 +173,13 @@ class TestUpdateServiceConfig:
 
     def test_update_opencost_url(self, client, monkeypatch):
         """Should update OPENCOST_API_URL and return fresh health check."""
-        with patch(
-            "greenkube.api.routers.health.run_health_checks",
-            new_callable=AsyncMock,
-            return_value=_mock_health_response(),
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -184,10 +190,13 @@ class TestUpdateServiceConfig:
 
     def test_update_electricity_maps_token(self, client, monkeypatch):
         """Should update ELECTRICITY_MAPS_TOKEN and return fresh health check."""
-        with patch(
-            "greenkube.api.routers.health.run_health_checks",
-            new_callable=AsyncMock,
-            return_value=_mock_health_response(),
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -198,10 +207,13 @@ class TestUpdateServiceConfig:
 
     def test_update_multiple_fields(self, client, monkeypatch):
         """Should accept multiple fields in a single request."""
-        with patch(
-            "greenkube.api.routers.health.run_health_checks",
-            new_callable=AsyncMock,
-            return_value=_mock_health_response(),
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -216,11 +228,31 @@ class TestUpdateServiceConfig:
 
     def test_empty_update_returns_cached(self, client):
         """An empty body should still return health without errors."""
-        with patch(
-            "greenkube.api.routers.health.run_health_checks",
-            new_callable=AsyncMock,
-            return_value=_mock_health_response(),
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
         ):
             response = client.post("/api/v1/config/services", json={})
+
+        assert response.status_code == 200
+
+    def test_k8s_patch_failure_does_not_break_response(self, client):
+        """A K8s secret patch failure must not affect the API response."""
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=False),
+        ):
+            response = client.post(
+                "/api/v1/config/services",
+                json={"electricity_maps_token": "tok"},
+            )
 
         assert response.status_code == 200

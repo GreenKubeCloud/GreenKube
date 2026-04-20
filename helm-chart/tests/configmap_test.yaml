@@ -62,12 +62,6 @@ tests:
           path: data.DEFAULT_INTENSITY
           value: "500"
 
-  - it: should set Boavizta URL
-    asserts:
-      - equal:
-          path: data.BOAVIZTA_API_URL
-          value: "https://api.boavizta.org"
-
   - it: should set NORMALIZATION_GRANULARITY
     asserts:
       - equal:
@@ -77,19 +71,8 @@ tests:
   # --------------------------------------------------------------------------
   # Prometheus config
   # --------------------------------------------------------------------------
-  - it: should NOT include PROMETHEUS_URL when url is empty
-    asserts:
-      - isNull:
-          path: data.PROMETHEUS_URL
-
-  - it: should set PROMETHEUS_URL when provided
-    set:
-      config.prometheus.url: "http://prometheus:9090"
-    asserts:
-      - equal:
-          path: data.PROMETHEUS_URL
-          value: "http://prometheus:9090"
-
+  # NOTE: PROMETHEUS_URL is now stored in the Secret (supports UI-set overrides).
+  # Tests for PROMETHEUS_URL live in secret_test.yaml.
   - it: should set PROMETHEUS_QUERY_RANGE_STEP
     asserts:
       - equal:
@@ -105,18 +88,8 @@ tests:
   # --------------------------------------------------------------------------
   # OpenCost config
   # --------------------------------------------------------------------------
-  - it: should NOT include OPENCOST_API_URL when url is empty
-    asserts:
-      - isNull:
-          path: data.OPENCOST_API_URL
-
-  - it: should set OPENCOST_API_URL when provided
-    set:
-      config.opencost.url: "http://opencost:9003"
-    asserts:
-      - equal:
-          path: data.OPENCOST_API_URL
-          value: "http://opencost:9003"
+  # NOTE: OPENCOST_API_URL is now stored in the Secret (supports UI-set overrides).
+  # Tests for OPENCOST_API_URL live in secret_test.yaml.
 
   # --------------------------------------------------------------------------
   # API config

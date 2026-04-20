@@ -71,7 +71,9 @@ config:
 
   # Database configuration
   db:
-    # Supported: "elasticsearch", "postgres", "sqlite"
+    # Supported: "postgres" (recommended), "sqlite" (standalone/dev)
+    # NOTE: "elasticsearch" is implemented but not production-ready and requires
+    #       installing the optional extra: pip install greenkube[elasticsearch]
     # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
     type: postgres
     # Path for the sqlite database file (only used if db.type is "sqlite")
@@ -173,9 +175,15 @@ config:
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
 
-# Configuration for Elasticsearch (if db.type is "elasticsearch")
+# ---------------------------------------------------------------------------
+# Elasticsearch (experimental — not production-ready)
+# ---------------------------------------------------------------------------
+# Only relevant when db.type is "elasticsearch". The Elasticsearch backend is
+# not actively maintained and requires the optional Python extra:
+#   pip install greenkube[elasticsearch]
+# It will be revisited in a future release.
 elasticsearch:
-  hosts: http://elasticsearch-master:9200 # K8s service name for Elasticsearch
+  hosts: http://elasticsearch-master:9200
   indexName: carbon_intensity
   verifyCerts: true
 
@@ -200,7 +208,8 @@ elasticsearch:
 #     --set secrets.existingSecret=greenkube-secrets
 #
 # Optional keys: BOAVIZTA_TOKEN, PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD,
-#   PROMETHEUS_BEARER_TOKEN, ELASTICSEARCH_USER, ELASTICSEARCH_PASSWORD
+#   PROMETHEUS_BEARER_TOKEN
+#   (ELASTICSEARCH_USER and ELASTICSEARCH_PASSWORD if using the experimental ES backend)
 secrets:
   # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
   existingSecret: ''

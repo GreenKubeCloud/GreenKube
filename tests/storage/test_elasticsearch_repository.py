@@ -2,6 +2,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytest.importorskip("elasticsearch", reason="elasticsearch extra not installed — skipping ES tests")
+
 # Import exceptions and config needed for tests
 # Make sure ApiError is imported if needed for RequestError construction
 from elasticsearch.exceptions import (
