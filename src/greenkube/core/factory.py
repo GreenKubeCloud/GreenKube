@@ -33,10 +33,6 @@ from ..storage.base_repository import (
     SummaryRepository,
     TimeseriesCacheRepository,
 )
-from ..storage.elastic.repository import (
-    ElasticsearchCarbonIntensityRepository,
-    ElasticsearchCombinedMetricsRepository,
-)
 from ..storage.embodied_repository import EmbodiedRepository
 from ..storage.postgres.node_repository import PostgresNodeRepository
 from ..storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
@@ -61,6 +57,8 @@ def get_repository() -> CarbonIntensityRepository:
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch repository.")
+        from ..storage.elastic.repository import ElasticsearchCarbonIntensityRepository
+
         return ElasticsearchCarbonIntensityRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite repository.")
@@ -87,6 +85,8 @@ def get_combined_metrics_repository() -> CombinedMetricsRepository:
 
     if db_type == "elasticsearch":
         logger.info("Using Elasticsearch combined metrics repository.")
+        from ..storage.elastic.repository import ElasticsearchCombinedMetricsRepository
+
         return ElasticsearchCombinedMetricsRepository()
     elif db_type == "sqlite":
         logger.info("Using SQLite combined metrics repository.")

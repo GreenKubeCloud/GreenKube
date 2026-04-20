@@ -71,8 +71,6 @@ dependencies = [
     "aiosqlite>=0.19.0", # Async SQLite driver
     "kubernetes_asyncio>=28.0.0", # Async Kubernetes client
     "anyio>=4.0.0", # High level async library
-    "elasticsearch>=8.10.0", # Elasticsearch client
-    "elasticsearch-dsl>=8.10.0",
     "aiofiles>=23.2.0", # Async file I/O
     "fastapi>=0.109.0", # Web API framework
     "uvicorn[standard]>=0.25.0", # ASGI server for FastAPI
@@ -82,6 +80,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Elasticsearch storage backend (not yet production-ready; use postgres or sqlite).
+# Install with: pip install greenkube[elasticsearch]
+elasticsearch = [
+    "elasticsearch>=8.10.0",
+    "elasticsearch-dsl>=8.10.0",
+]
 test = [
     "respx",
     "pytest-asyncio",
