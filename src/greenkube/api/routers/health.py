@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 
 from greenkube.core.config import get_config
 from greenkube.core.health import invalidate_health_cache, run_health_checks
+from greenkube.core.k8s_secret_store import patch_k8s_secret
 from greenkube.models.health import (
     HealthCheckResponse,
     ServiceConfigUpdate,
@@ -87,5 +88,19 @@ async def update_service_config(update: ServiceConfigUpdate):
         cfg.reload()
         invalidate_health_cache()
         logger.info("Configuration reloaded after service config update.")
+
+        # Persist overrides to the K8s Secret so they survive pod restarts.
+        # This is best-effort: out-of-cluster or RBAC failures are logged and
+        # the in-memory update is not rolled back.
+        k8s_updates: dict[str, str] = {}
+        if update.prometheus_url is not None:
+            k8s_updates["PROMETHEUS_URL"] = update.prometheus_url
+        if update.opencost_url is not None:
+            k8s_updates["OPENCOST_API_URL"] = update.opencost_url
+        if update.electricity_maps_token is not None:
+            k8s_updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
+        if update.boavizta_url is not None:
+            k8s_updates["BOAVIZTA_API_URL"] = update.boavizta_url
+        patch_k8s_secret(k8s_updates)
 
     return await run_health_checks(force=True)

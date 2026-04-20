@@ -7,6 +7,9 @@ metadata:
 data:
   # --- General Config ---
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  # Name of the Helm-managed Secret — used by the API to persist runtime
+  # configuration overrides (UI-set tokens/URLs) back into the Secret.
+  GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
@@ -37,18 +40,14 @@ data:
   DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
 
   # --- Prometheus Collector Config ---
-  {{- if .Values.config.prometheus.url }}
-  PROMETHEUS_URL: {{ .Values.config.prometheus.url | quote }}
-  {{- end }}
+  # Note: PROMETHEUS_URL is managed in the Secret (supports UI-set overrides via lookup).
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
   PROMETHEUS_QUERY_RANGE_STEP: {{ .Values.config.prometheus.queryRangeStep | quote }}
   PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: {{ .Values.config.prometheus.queryRangeMaxSamples | quote }}
   PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
 
   # --- OpenCost Collector Config ---
-  {{- if .Values.config.opencost.url }}
-  OPENCOST_API_URL: {{ .Values.config.opencost.url | quote }}
-  {{- end }}
+  # Note: OPENCOST_API_URL is managed in the Secret (supports UI-set overrides via lookup).
   OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
   
   LOW_NODE_CPU_THRESHOLD: {{ .Values.config.lowNodeCpuThreshold | quote }}

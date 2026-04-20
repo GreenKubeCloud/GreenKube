@@ -1,0 +1,23 @@
+{{- if and .Values.rbac.create (not .Values.secrets.existingSecret) }}
+# Namespaced Role (not ClusterRole) that grants the GreenKube service account
+# permission to read and patch only the one Secret it owns in this namespace.
+# This is required so the API server can persist runtime configuration overrides
+# (URLs, tokens set from the UI) into the Secret without a pod restart.
+#
+# Scope is intentionally limited:
+#   - resourceNames restricts access to the single greenkube Secret
+#   - verbs are the minimum required: get (read current data) + patch (merge update)
+#   - This is a namespaced Role, not a ClusterRole, so it cannot access Secrets
+#     in any other namespace (mitigates KSV-0041 at cluster scope).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "greenkube.fullname" . }}-secret-writer
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ include "greenkube.secretName" . }}"]
+    verbs: ["get", "patch"]
+{{- end }}

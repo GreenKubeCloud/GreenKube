@@ -72,18 +72,6 @@ spec:
           # using valueFrom. These explicit env entries take precedence over
           # envFrom and avoid any chance of multi-line rendering issues.
           env:
-            - name: PROMETHEUS_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
-                  key: PROMETHEUS_URL
-                  optional: true
-            - name: PROMETHEUS_VERIFY_CERTS
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ include "greenkube.fullname" . }}
-                  key: PROMETHEUS_VERIFY_CERTS
-                  optional: true
             {{- if eq .Values.config.db.type "postgres" }}
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
