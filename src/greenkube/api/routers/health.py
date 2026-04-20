@@ -101,6 +101,5 @@ async def update_service_config(update: ServiceConfigUpdate):
             k8s_updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
         if update.boavizta_url is not None:
             k8s_updates["BOAVIZTA_API_URL"] = update.boavizta_url
-        patch_k8s_secret(k8s_updates)
-
+        await patch_k8s_secret(k8s_updates)
     return await run_health_checks(force=True)

@@ -15,6 +15,9 @@ default (empty) values from wiping tokens that were set through the UI.
 All errors are caught and logged — if the pod runs outside a cluster or
 lacks RBAC permissions the in-memory update is still applied and the
 caller is not interrupted.
+
+Uses ``kubernetes_asyncio`` (already a GreenKube dependency) so the
+patch is non-blocking inside FastAPI's async event loop.
 """
 
 import base64
@@ -42,8 +45,11 @@ def _get_secret_name() -> str:
     return os.getenv("GREENKUBE_SECRET_NAME", "greenkube")
 
 
-def patch_k8s_secret(updates: dict[str, str]) -> bool:
+async def patch_k8s_secret(updates: dict[str, str]) -> bool:
     """Patch the GreenKube K8s Secret with *updates* (plain-text values).
+
+    This is a coroutine so it integrates cleanly with FastAPI's async event
+    loop without blocking.
 
     Args:
         updates: Mapping of environment variable name → plain-text value.
@@ -67,22 +73,20 @@ def patch_k8s_secret(updates: dict[str, str]) -> bool:
     secret_name = _get_secret_name()
 
     try:
-        from kubernetes import client as k8s_client
-        from kubernetes import config as k8s_config
+        from kubernetes_asyncio import client as k8s_client
+        from kubernetes_asyncio import config as k8s_config
 
-        try:
-            k8s_config.load_incluster_config()
-        except k8s_client.exceptions.ConfigException:
-            logger.debug("In-cluster K8s config not available — skipping Secret patch.")
-            return False
+        # load_incluster_config is synchronous (reads mounted SA token files)
+        k8s_config.load_incluster_config()
 
-        v1 = k8s_client.CoreV1Api()
+        async with k8s_client.ApiClient() as api_client:
+            v1 = k8s_client.CoreV1Api(api_client)
 
-        # Build a strategic-merge patch: only update the keys we care about.
-        encoded_data = {key: base64.b64encode(val.encode()).decode() for key, val in updates.items()}
+            # Build a strategic-merge patch: only update the keys we care about.
+            encoded_data = {key: base64.b64encode(val.encode()).decode() for key, val in updates.items()}
+            body = {"data": encoded_data}
 
-        body = {"data": encoded_data}
-        v1.patch_namespaced_secret(name=secret_name, namespace=namespace, body=body)
+            await v1.patch_namespaced_secret(name=secret_name, namespace=namespace, body=body)
 
         logger.info(
             "Persisted runtime config override(s) to K8s Secret '%s/%s': %s",

@@ -160,7 +160,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -179,7 +179,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -196,7 +196,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -213,7 +213,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
         ):
             response = client.post(
                 "/api/v1/config/services",
@@ -234,7 +234,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=True),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
         ):
             response = client.post("/api/v1/config/services", json={})
 
@@ -248,7 +248,7 @@ class TestUpdateServiceConfig:
                 new_callable=AsyncMock,
                 return_value=_mock_health_response(),
             ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", return_value=False),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=False),
         ):
             response = client.post(
                 "/api/v1/config/services",
