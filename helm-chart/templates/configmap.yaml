@@ -28,6 +28,7 @@ data:
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}
   DB_PATH: {{ .Values.config.db.path | quote }}
+  DB_SSL_MODE: {{ .Values.config.db.sslMode | quote }}
   DB_POOL_MIN_SIZE: {{ .Values.config.db.poolMinSize | quote }}
   DB_POOL_MAX_SIZE: {{ .Values.config.db.poolMaxSize | quote }}
   DB_STATEMENT_TIMEOUT_MS: {{ .Values.config.db.statementTimeoutMs | quote }}

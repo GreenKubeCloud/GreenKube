@@ -80,6 +80,9 @@ config:
     path: /data/greenkube_data.db
     # Database schema (only used if db.type is "postgres")
     schema: public
+    # SSL mode for PostgreSQL connections. Set to "disable" for in-cluster traffic
+    # (default). Use "require" or "verify-full" when SSL certs are configured.
+    sslMode: disable
     # Connection pool sizing (PostgreSQL only)
     poolMinSize: 1
     poolMaxSize: 10

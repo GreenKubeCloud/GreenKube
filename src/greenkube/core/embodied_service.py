@@ -150,8 +150,17 @@ class EmbodiedEmissionsService:
         node_info: Optional[NodeInfo],
         boavizta_cache: Dict[tuple, dict],
         pod_requests: dict,
+        cpu_usage_millicores: Optional[float] = None,
     ) -> float:
-        """Calculate embodied emissions share for a single pod."""
+        """Calculate embodied emissions share for a single pod.
+
+        The share is computed from ``max(cpu_requests, cpu_usage)`` in millicores:
+        - CPU requests represent the permanently reserved hardware slice (standard
+          Scope 3 methodology — Boavizta / Cloud Carbon Footprint).
+        - When requests are unset (0), actual CPU usage is used instead so that
+          pods without resource requests (common in dev/Minikube) still receive
+          a non-zero embodied allocation.
+        """
         if not node_info or not node_info.cloud_provider or not node_info.instance_type:
             return 0.0
 
@@ -172,10 +181,19 @@ class EmbodiedEmissionsService:
                 if prof:
                     node_capacity = prof["vcores"]
 
+            # Embodied share is based on the larger of CPU requests or actual usage.
+            # CPU requests represent the reserved hardware slice (standard methodology).
+            # When requests are not set (e.g., dev/Minikube), actual usage serves as
+            # the allocation basis so that embodied emissions are not silently zeroed.
+            effective_cpu_millicores = max(pod_requests["cpu"] or 0.0, cpu_usage_millicores or 0.0)
+
             cpu_share = 0.0
-            if node_capacity > 0 and pod_requests["cpu"] > 0:
-                cpu_share = (pod_requests["cpu"] / 1000.0) / node_capacity
+            if node_capacity > 0 and effective_cpu_millicores > 0:
+                cpu_share = (effective_cpu_millicores / 1000.0) / node_capacity
                 cpu_share = min(cpu_share, 1.0)
+
+            if cpu_share == 0.0:
+                return 0.0
 
             duration = self.estimator.query_range_step_sec
 

@@ -210,6 +210,52 @@ def test_calculate_pod_embodied_uses_fallback_profile(service):
     service.calculator.calculate_embodied_emissions.assert_called_once()
 
 
+def test_calculate_pod_embodied_uses_cpu_usage_when_no_requests(service):
+    """When cpu request is 0 but CPU usage is provided, embodied should be non-zero."""
+    node = NodeInfo(
+        name="n1",
+        cloud_provider="unknown",
+        instance_type="minikube",
+        zone="z",
+        cpu_capacity_cores=4,
+    )
+    cache = {
+        ("unknown", "minikube"): {
+            "gwp_manufacture": 350,
+            "lifespan_hours": 35040,
+            "is_fallback": True,
+        }
+    }
+    # No CPU request set (common in local/dev environments)
+    pod_requests = {"cpu": 0, "memory": 0}
+
+    result = service.calculate_pod_embodied(node, cache, pod_requests, cpu_usage_millicores=200.0)
+    assert result == 5.0, "Should use CPU usage as fallback for share calculation"
+    service.calculator.calculate_embodied_emissions.assert_called_once()
+
+
+def test_calculate_pod_embodied_returns_zero_when_no_cpu_at_all(service):
+    """When both cpu request and cpu usage are 0, embodied should still be 0."""
+    node = NodeInfo(
+        name="n1",
+        cloud_provider="unknown",
+        instance_type="minikube",
+        zone="z",
+        cpu_capacity_cores=4,
+    )
+    cache = {
+        ("unknown", "minikube"): {
+            "gwp_manufacture": 350,
+            "lifespan_hours": 35040,
+            "is_fallback": True,
+        }
+    }
+    pod_requests = {"cpu": 0, "memory": 0}
+
+    result = service.calculate_pod_embodied(node, cache, pod_requests, cpu_usage_millicores=0.0)
+    assert result == 0.0
+
+
 # ------------------------------------------------------------------
 # Config default value
 # ------------------------------------------------------------------
