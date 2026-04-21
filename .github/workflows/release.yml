@@ -120,10 +120,12 @@ jobs:
           set -e
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          if git show-ref --verify --quiet refs/heads/gh-pages; then
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            git fetch origin gh-pages
+            git branch gh-pages origin/gh-pages
             git worktree add /tmp/gh-pages gh-pages
           else
-            git worktree add --checkout -b gh-pages /tmp/gh-pages
+            git worktree add --orphan -b gh-pages /tmp/gh-pages
           fi
 
           mkdir -p /tmp/gh-pages/
