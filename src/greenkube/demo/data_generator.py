@@ -323,7 +323,7 @@ def generate_combined_metrics(days: int = 30) -> List[CombinedMetric]:
                         is_estimated=False,
                         estimation_reasons=[],
                         embodied_co2e_grams=round(embodied_co2e, 4),
-                        calculation_version="0.2.8-demo",
+                        calculation_version="0.2.9-demo",
                     )
                 )
 

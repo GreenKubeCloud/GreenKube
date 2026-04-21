@@ -9,8 +9,8 @@ description: >-
 type: application
 icon: 
   https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.2.8
-appVersion: 0.2.8
+version: 0.2.9
+appVersion: 0.2.9
 keywords:
 - greenkube
 - finops
@@ -57,7 +57,7 @@ annotations:
       email: hugo.lelievre@greenkube.cloud
   artifacthub.io/images: |
     - name: greenkube
-      image: greenkube/greenkube:0.2.8
+      image: greenkube/greenkube:0.2.9
       platforms:
         - linux/amd64
         - linux/arm64
@@ -100,11 +100,11 @@ annotations:
     2.  **Visualize** these metrics in a real-time dashboard for actionable carbon visibility.
     3.  **Optimize** infrastructure to simultaneously reduce cloud bills and environmental impact.
 
-    ## ✨ Features (Version 0.2.8)
+    ## ✨ Features (Version 0.2.9)
 
     ### 📊 Dashboard & Visualization
     * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
-    * **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included at `/api/v1/docs`.
+    * **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, pre-computed dashboard data, and configuration. OpenAPI docs included at `/api/v1/docs`.
 
     ### 📈 Comprehensive Resource Monitoring
     * **Multi-Resource Metrics Collection:** GreenKube collects the following metrics per pod:
@@ -116,6 +116,7 @@ annotations:
       - **Pod restarts** (restart count per container)
     * **Energy Estimation:** Calculates pod-level energy consumption (Joules) based on **CPU usage** and a built-in library of cloud instance power profiles. Memory, network, disk, and GPU are collected as metrics but are **not yet included in the energy model** — this is planned for a future release.
     * **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data. GPU workloads are currently **not supported** in the carbon model.
+    * **Embodied Emissions with Boavizta fallback:** Hardware manufacturing emissions are fetched from the Boavizta API and cached in the database. When Boavizta does not recognise a provider or instance type, a configurable default (`DEFAULT_EMBODIED_EMISSIONS_KG`, default 350 kg CO₂e) is used and the metric is flagged as estimated — ensuring embodied emissions are never silently zeroed out.
 
     ### 🎯 Optimization & Reporting
     * **9-Type Recommendation Engine:** Identifies optimization opportunities:
@@ -179,7 +180,7 @@ annotations:
     **With Docker (no Kubernetes needed):**
 
     ```bash
-    docker run --rm -p 9000:9000 greenkube/greenkube:0.2.8 demo --no-browser --port 9000
+    docker run --rm -p 9000:9000 greenkube/greenkube:0.2.9 demo --no-browser --port 9000
     # → Open http://localhost:9000
     ```
 
@@ -187,7 +188,7 @@ annotations:
 
     ```bash
     kubectl run greenkube-demo \
-      --image=greenkube/greenkube:0.2.8 \
+      --image=greenkube/greenkube:0.2.9 \
       --restart=Never \
       --command -- greenkube demo --no-browser --port 9000
 
@@ -400,7 +401,7 @@ annotations:
     ```bash
     # Get a health check
     curl http://localhost:8000/api/v1/health
-    # {"status":"ok","version":"0.2.8"}
+    # {"status":"ok","version":"0.2.9"}
 
     # Get metrics for the last 24 hours
     curl "http://localhost:8000/api/v1/metrics?last=24h"
