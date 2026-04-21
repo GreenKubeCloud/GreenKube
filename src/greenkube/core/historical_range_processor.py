@@ -230,6 +230,13 @@ class HistoricalRangeProcessor:
         # so the zone mapper never triggers an extra K8s API call.
         node_contexts = await self.zone_mapper.map_nodes(nodes_info)
 
+        # Fetch / cache Boavizta embodied-emissions profiles once for the whole range.
+        try:
+            boavizta_cache = await self.assembler.embodied_service.prepare_embodied_data(nodes_info)
+        except Exception as e:
+            logger.warning("Failed to prepare embodied data: %s. Embodied emissions will be 0.", e)
+            boavizta_cache = {}
+
         # Cost data
         range_seconds = (end_dt - start_dt).total_seconds()
         steps_in_range = max(range_seconds / chosen_step_sec, 1)
@@ -468,6 +475,13 @@ class HistoricalRangeProcessor:
                 cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
                 mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
                 pod_key = (em_namespace, pod_name)
+                node_info_at_ts = get_node_info_at(node_name, ts)
+                embodied_emissions_grams = self.assembler.embodied_service.calculate_pod_embodied(
+                    node_info=node_info_at_ts or nodes_info.get(node_name),
+                    boavizta_cache=boavizta_cache,
+                    pod_requests={"cpu": cpu_req, "memory": mem_req},
+                    cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
+                )
                 if carbon_result:
                     combined.append(
                         CombinedMetric(
@@ -494,6 +508,7 @@ class HistoricalRangeProcessor:
                             emaps_zone=zone,
                             is_estimated=is_estimated,
                             estimation_reasons=estimation_reasons,
+                            embodied_co2e_grams=embodied_emissions_grams,
                             cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
                             memory_usage_bytes=(
                                 int(range_memory_map[pod_key]) if pod_key in range_memory_map else None

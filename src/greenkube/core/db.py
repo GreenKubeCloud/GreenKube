@@ -54,8 +54,10 @@ class DatabaseManager:
                     await self.setup_sqlite()
                 elif self.db_type == "postgres":
                     try:
+                        ssl_arg = None if self.config.DB_SSL_MODE == "disable" else self.config.DB_SSL_MODE
                         self.pool = await asyncpg.create_pool(
                             dsn=self.config.DB_CONNECTION_STRING,
+                            ssl=ssl_arg,
                             min_size=self.config.DB_POOL_MIN_SIZE,
                             max_size=self.config.DB_POOL_MAX_SIZE,
                             server_settings={

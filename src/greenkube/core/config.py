@@ -61,6 +61,7 @@ class Config:
             "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
         )
         self.DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
+        self.DB_SSL_MODE = os.getenv("DB_SSL_MODE", "disable")
         self.DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
         self.DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
         self.DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "30000"))

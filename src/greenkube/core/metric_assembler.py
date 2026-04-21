@@ -240,6 +240,7 @@ class MetricAssembler:
                 node_info=nodes_info.get(node_name),
                 boavizta_cache=boavizta_cache,
                 pod_requests=pod_requests,
+                cpu_usage_millicores=resource_maps.cpu_usage_map.get(pod_key),
             )
 
             # Flag fallback embodied emissions
