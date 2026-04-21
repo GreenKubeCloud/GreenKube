@@ -240,7 +240,20 @@ class MetricAssembler:
                 node_info=nodes_info.get(node_name),
                 boavizta_cache=boavizta_cache,
                 pod_requests=pod_requests,
+                cpu_usage_millicores=resource_maps.cpu_usage_map.get(pod_key),
             )
+
+            # Flag fallback embodied emissions
+            if self.embodied_service.is_embodied_fallback(
+                node_info=nodes_info.get(node_name),
+                boavizta_cache=boavizta_cache,
+            ):
+                is_estimated = True
+                estimation_reasons.append(
+                    f"Embodied emissions for node '{node_name}' use fallback default "
+                    f"({self._config.DEFAULT_EMBODIED_EMISSIONS_KG} kg CO2e). "
+                    f"Boavizta API did not recognize the provider/instance."
+                )
 
             # Carbon calculation
             try:

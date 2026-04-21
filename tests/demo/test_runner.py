@@ -90,12 +90,20 @@ class TestPopulateDatabase:
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
 
+        mock_compressor = AsyncMock()
+        mock_compressor.run = AsyncMock(return_value={"rows_compressed": 400, "hours_compressed": 400})
+
+        mock_refresher = AsyncMock()
+        mock_refresher.run = AsyncMock(return_value=30)
+
         with (
             patch("greenkube.core.factory.get_repository", return_value=mock_repo),
             patch("greenkube.core.factory.get_node_repository", return_value=mock_node_repo),
             patch("greenkube.core.factory.get_combined_metrics_repository", return_value=mock_combined_repo),
             patch("greenkube.core.factory.get_recommendation_repository", return_value=mock_reco_repo),
             patch("greenkube.core.db.db_manager", mock_db_manager),
+            patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
+            patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
         ):
             counts = await _populate_database(days=2)
 
@@ -103,6 +111,8 @@ class TestPopulateDatabase:
         assert "node_snapshots" in counts
         assert "combined_metrics" in counts
         assert "recommendations" in counts
+        assert "hourly_compressed" in counts
+        assert "timeseries_cache_rows" in counts
 
     @pytest.mark.asyncio
     async def test_populates_with_positive_counts(self, monkeypatch):
@@ -131,12 +141,20 @@ class TestPopulateDatabase:
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
 
+        mock_compressor = AsyncMock()
+        mock_compressor.run = AsyncMock(return_value={"rows_compressed": 400, "hours_compressed": 400})
+
+        mock_refresher = AsyncMock()
+        mock_refresher.run = AsyncMock(return_value=30)
+
         with (
             patch("greenkube.core.factory.get_repository", return_value=mock_repo),
             patch("greenkube.core.factory.get_node_repository", return_value=mock_node_repo),
             patch("greenkube.core.factory.get_combined_metrics_repository", return_value=mock_combined_repo),
             patch("greenkube.core.factory.get_recommendation_repository", return_value=mock_reco_repo),
             patch("greenkube.core.db.db_manager", mock_db_manager),
+            patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
+            patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
         ):
             counts = await _populate_database(days=2)
 

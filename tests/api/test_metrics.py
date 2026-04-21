@@ -88,6 +88,7 @@ class TestMetricsSummaryEndpoint:
         assert data["total_cost"] == 0.0
         assert data["total_energy_joules"] == 0.0
         assert data["total_embodied_co2e_grams"] == 0.0
+        assert data["total_co2e_all_scopes"] == 0.0
         assert data["pod_count"] == 0
         assert data["namespace_count"] == 0
 
@@ -100,6 +101,7 @@ class TestMetricsSummaryEndpoint:
         assert data["total_cost"] == pytest.approx(0.017)
         assert data["total_energy_joules"] == pytest.approx(20000.0)
         assert data["total_embodied_co2e_grams"] == pytest.approx(0.17)
+        assert data["total_co2e_all_scopes"] == pytest.approx(5.7 + 0.17)
         assert data["pod_count"] == 2
         assert data["namespace_count"] == 2
 

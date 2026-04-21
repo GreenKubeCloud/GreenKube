@@ -146,7 +146,7 @@ jobs:
             echo "No changes to publish"
           else
             git commit -m "chore: publish helm chart ${GITHUB_REF_NAME}"
-            git push --force origin gh-pages
+            git push origin gh-pages
           fi
 
   # ── Create a GitHub Release with changelog extract ──

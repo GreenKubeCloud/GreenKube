@@ -492,7 +492,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                 _FORMATS = {
                     "hour": "%Y-%m-%dT%H:00:00Z",
                     "day": "%Y-%m-%dT00:00:00Z",
-                    "week": "%Y-W%V",
+                    "week": "%Y-%m-%dT00:00:00Z",  # date_trunc('week') → Monday
                     "month": "%Y-%m-01T00:00:00Z",
                 }
                 fmt = _FORMATS.get(granularity, "%Y-%m-%dT%H:00:00Z")
@@ -532,3 +532,157 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logger.warning("list_namespaces failed, returning empty list: %s", e)
             return []
+
+    async def aggregate_by_namespace(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> list:
+        """SQL-level aggregation of metrics grouped by namespace."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        namespace,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)           AS total_cost,
+                        COALESCE(SUM(joules), 0)               AS energy_joules
+                    FROM ({union_query}) AS combined
+                    GROUP BY namespace
+                    ORDER BY co2e_grams DESC
+                """
+                rows = await conn.fetch(query, *params)
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("Error in aggregate_by_namespace: %s", e)
+            raise QueryError(f"aggregate_by_namespace failed: {e}") from e
+
+    async def aggregate_top_pods(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        limit: int = 10,
+    ) -> list:
+        """SQL-level aggregation of top pods by CO2 emissions."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                if end_time >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if start_time < cutoff:
+                    hourly_end = min(end_time, cutoff)
+                    ns_clause = ""
+                    if namespace:
+                        ns_clause = f" AND namespace = ${idx + 2}"
+                    parts.append(f"""
+                        SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return []
+
+                union_query = " UNION ALL ".join(parts)
+                query = f"""
+                    SELECT
+                        namespace,
+                        pod_name,
+                        COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
+                        COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
+                        COALESCE(SUM(total_cost), 0)           AS total_cost,
+                        COALESCE(SUM(joules), 0)               AS energy_joules
+                    FROM ({union_query}) AS combined
+                    GROUP BY namespace, pod_name
+                    ORDER BY co2e_grams DESC
+                    LIMIT ${idx}
+                """
+                params.append(limit)
+                rows = await conn.fetch(query, *params)
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("Error in aggregate_top_pods: %s", e)
+            raise QueryError(f"aggregate_top_pods failed: {e}") from e

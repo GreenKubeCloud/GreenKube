@@ -96,10 +96,32 @@ async def _populate_database(days: int) -> dict[str, int]:
     recommendations = generate_recommendations()
     counts["recommendations"] = await reco_repo.save_recommendations(recommendations)
 
+    # 5. Compress older raw metrics into hourly buckets so aggregate_timeseries
+    #    can query both the raw and hourly tables consistently across all windows.
+    logger.info("🗜️  Compressing historical metrics into hourly buckets...")
+    from greenkube.core.db import get_db_manager
+    from greenkube.core.metrics_compressor import MetricsCompressor
+
+    compressor = MetricsCompressor(get_db_manager())
+    compression_stats = await compressor.run()
+    counts["hourly_compressed"] = compression_stats.get("rows_compressed", 0)
+
+    # 6. Pre-compute dashboard summary and timeseries cache for all windows
+    logger.info("⚡ Pre-computing dashboard summary and timeseries cache...")
+    from greenkube.core.factory import get_summary_repository, get_timeseries_cache_repository
+    from greenkube.core.summary_refresher import SummaryRefresher
+
+    refresher = SummaryRefresher(
+        metrics_repo=combined_repo,
+        summary_repo=get_summary_repository(),
+        timeseries_cache_repo=get_timeseries_cache_repository(),
+    )
+    counts["timeseries_cache_rows"] = await refresher.run()
+
     return counts
 
 
-async def run_demo(port: int = 8000, days: int = 7, no_browser: bool = False) -> None:
+async def run_demo(port: int = 8000, days: int = 30, no_browser: bool = False) -> None:
     """Run GreenKube in demo mode with pre-populated sample data.
 
     Args:

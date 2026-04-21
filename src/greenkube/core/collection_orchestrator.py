@@ -1,5 +1,12 @@
 # src/greenkube/core/collection_orchestrator.py
-"""Orchestrates parallel data collection from all external sources."""
+"""Orchestrates parallel data collection from Prometheus, OpenCost, and Pods.
+
+Node collection is intentionally excluded from this orchestrator.  Nodes must
+be collected first (Phase 1 in DataProcessor.run), so that zone mapping,
+Boavizta, and Prometheus instance-type enrichment all operate on already-
+resolved node data.  Passing ``nodes_info`` here avoids any duplicate K8s API
+calls and race conditions on the shared Kubernetes client.
+"""
 
 import asyncio
 import logging
@@ -7,13 +14,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..models.metrics import CostMetric, PodMetric
 from ..models.node import NodeInfo
-from ..models.prometheus_metrics import PrometheusMetric
+from ..models.prometheus_metrics import NodeInstanceType, PrometheusMetric
 
 logger = logging.getLogger(__name__)
 
@@ -28,53 +34,65 @@ class CollectionResult:
     pod_metrics_list: List[PodMetric] = field(default_factory=list)
     pod_request_map_simple: Dict[tuple, float] = field(default_factory=dict)
     pod_request_map_agg: dict = field(default_factory=dict)
-    nodes_info: Dict[str, NodeInfo] = field(default_factory=dict)
 
 
 class CollectionOrchestrator:
-    """Fetches data in parallel from Prometheus, OpenCost, Pods, and Nodes."""
+    """Fetches data in parallel from Prometheus, OpenCost, and Pods.
+
+    Node information (``nodes_info``) must be supplied by the caller — it is
+    collected in Phase 1 of :meth:`DataProcessor.run` before this orchestrator
+    is invoked, ensuring zone resolution and instance-type enrichment always
+    use up-to-date K8s data without triggering redundant API calls.
+    """
 
     def __init__(
         self,
         prometheus_collector: PrometheusCollector,
         opencost_collector: OpenCostCollector,
-        node_collector: NodeCollector,
         pod_collector: PodCollector,
     ):
         self.prometheus_collector = prometheus_collector
         self.opencost_collector = opencost_collector
-        self.node_collector = node_collector
         self.pod_collector = pod_collector
 
-    async def collect_all(self) -> CollectionResult:
-        """Execute all collectors in parallel and return aggregated results."""
+    async def collect_all(self, nodes_info: Optional[Dict[str, NodeInfo]] = None) -> CollectionResult:
+        """Execute Prometheus, OpenCost, and Pod collectors in parallel.
+
+        Args:
+            nodes_info: Node data already collected in Phase 1.  Used to
+                enrich the PrometheusMetric with instance-type information
+                when Prometheus labels are absent, without making a new K8s
+                API call.
+        """
+        nodes_info = nodes_info or {}
 
         async def fetch_prometheus():
             try:
                 prom_metrics = await self.prometheus_collector.collect()
-                node_instance_map = {}
+                node_instance_map: Dict[str, str] = {}
+
                 node_types = getattr(prom_metrics, "node_instance_types", None)
                 if not node_types:
-                    try:
-                        node_instances = await self.node_collector.collect_instance_types()
+                    # Enrich from already-collected nodes_info (no extra K8s call).
+                    if nodes_info:
                         if getattr(prom_metrics, "node_instance_types", None) is None:
                             try:
                                 prom_metrics.node_instance_types = []
                             except Exception:
-                                prom_metrics.node_instance_types = []
+                                pass
 
-                        from ..models.prometheus_metrics import NodeInstanceType
+                        for node_name, info in nodes_info.items():
+                            if info.instance_type:
+                                prom_metrics.node_instance_types.append(
+                                    NodeInstanceType(node=node_name, instance_type=info.instance_type)
+                                )
+                                node_instance_map[node_name] = info.instance_type
 
-                        for node, itype in node_instances.items():
-                            prom_metrics.node_instance_types.append(NodeInstanceType(node=node, instance_type=itype))
-                        if node_instances:
-                            node_instance_map = node_instances
+                        if node_instance_map:
                             logger.info(
-                                "Used NodeCollector to populate %d instance-type(s) as fallback.",
-                                len(node_instances),
+                                "Enriched PrometheusMetric with %d instance-type(s) from Phase-1 node data.",
+                                len(node_instance_map),
                             )
-                    except Exception as e:
-                        logger.debug("NodeCollector instance-type fallback failed: %s", e)
                 else:
                     for item in node_types:
                         node_instance_map[item.node] = item.instance_type
@@ -121,14 +139,8 @@ class CollectionOrchestrator:
                 logger.error("Failed to collect data from PodCollector: %s", e)
                 return [], {}, {}
 
-        async def fetch_nodes():
-            try:
-                return await self.node_collector.collect() or {}
-            except Exception:
-                return {}
-
-        (prom_result, opencost_result, pod_result, nodes_info) = await asyncio.gather(
-            fetch_prometheus(), fetch_opencost(), fetch_pods(), fetch_nodes()
+        prom_result, opencost_result, pod_result = await asyncio.gather(
+            fetch_prometheus(), fetch_opencost(), fetch_pods()
         )
 
         prom_metrics, node_instance_map = prom_result
@@ -142,13 +154,11 @@ class CollectionOrchestrator:
             pod_metrics_list=pod_metrics_list,
             pod_request_map_simple=pod_request_map_simple,
             pod_request_map_agg=pod_request_map_agg,
-            nodes_info=nodes_info,
         )
 
     async def close(self):
         """Close all collectors to release resources."""
         await self.prometheus_collector.close()
         await self.opencost_collector.close()
-        await self.node_collector.close()
         await self.pod_collector.close()
         logger.debug("CollectionOrchestrator closed all collectors.")

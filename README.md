@@ -27,7 +27,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
 
 ### 📊 Dashboard & Visualization
 * **Modern Web Dashboard:** Built-in SvelteKit SPA with real-time charts (ECharts), interactive per-pod metrics table, node inventory, and optimization recommendations — all served from the same container as the API.
-* **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, and configuration. OpenAPI docs included at `/api/v1/docs`.
+* **REST API:** Full-featured FastAPI backend with comprehensive endpoints for metrics, nodes, namespaces, recommendations, timeseries, pre-computed dashboard data, and configuration. OpenAPI docs included at `/api/v1/docs`.
 
 ### 📈 Comprehensive Resource Monitoring
 * **Multi-Resource Metrics Collection:** GreenKube collects the following metrics per pod:
@@ -39,6 +39,7 @@ Cloud computing generates significant carbon emissions, yet most engineering tea
   - **Pod restarts** (restart count per container)
 * **Energy Estimation:** Calculates pod-level energy consumption (Joules) based on **CPU usage** and a built-in library of cloud instance power profiles. Memory, network, disk, and GPU are collected as metrics but are **not yet included in the energy model** — this is planned for a future release.
 * **Carbon Footprint Tracking:** Converts energy to CO₂e emissions using real-time or default grid carbon intensity data. GPU workloads are currently **not supported** in the carbon model.
+* **Embodied Emissions with Boavizta fallback:** Hardware manufacturing emissions are fetched from the Boavizta API and cached in the database. When Boavizta does not recognise a provider or instance type, a configurable default (`DEFAULT_EMBODIED_EMISSIONS_KG`, default 350 kg CO₂e) is used and the metric is flagged as estimated — ensuring embodied emissions are never silently zeroed out.
 
 ### 🎯 Optimization & Reporting
 * **9-Type Recommendation Engine:** Identifies optimization opportunities:

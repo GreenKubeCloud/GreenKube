@@ -12,7 +12,7 @@ def helm_template(set_values: list[str] | None = None) -> list[dict]:
     cmd = ["helm", "template", "greenkube", CHART_PATH, "--namespace", "greenkube"]
     for sv in set_values or []:
         cmd.extend(["--set", sv])
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=True)
     docs = []
     for doc in result.stdout.split("---"):
         doc = doc.strip()

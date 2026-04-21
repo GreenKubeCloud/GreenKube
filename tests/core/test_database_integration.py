@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("elasticsearch_dsl", reason="elasticsearch extra not installed — skipping ES integration tests")
+
 from greenkube.core.db import db_manager
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.elastic.repository import ElasticsearchCombinedMetricsRepository

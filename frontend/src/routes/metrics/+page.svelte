@@ -1,13 +1,15 @@
 <script>
 	import { onMount } from 'svelte';
 	import { selectedNamespace, selectedTimeRange } from '$lib/stores.js';
-	import { getMetrics, getTimeseries } from '$lib/api.js';
+	import { getMetrics, getTimeseries, getDashboardTimeseries } from '$lib/api.js';
 	import { formatCO2, formatCost, formatEnergy, formatDate, formatCPU, formatBytes } from '$lib/utils/format.js';
 	import { buildTimeseriesOption } from '$lib/charts.js';
 	import DataState from '$lib/components/DataState.svelte';
 	import Filters from '$lib/components/Filters.svelte';
 	import Card from '$lib/components/Card.svelte';
 	import Chart from '$lib/components/Chart.svelte';
+
+	const PRECOMPUTED_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);
 
 	let metrics = [];
 	let timeseries = [];
@@ -29,9 +31,26 @@
 		try {
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
+
+			// Use pre-computed timeseries for large ranges, on-demand for short ones
+			let timeseriesPromise;
+			if (PRECOMPUTED_SLUGS.has(last)) {
+				timeseriesPromise = getDashboardTimeseries({ windowSlug: last, namespace: ns }).then(
+					(r) => (r.points ?? []).map((p) => ({
+						timestamp: p.bucket_ts,
+						co2e_grams: p.co2e_grams,
+						embodied_co2e_grams: p.embodied_co2e_grams,
+						total_cost: p.total_cost,
+						joules: p.joules
+					}))
+				);
+			} else {
+				timeseriesPromise = getTimeseries({ namespace: ns, last, granularity: 'hour' });
+			}
+
 			const [m, ts] = await Promise.all([
 				getMetrics({ namespace: ns, last }),
-				getTimeseries({ namespace: ns, last, granularity: last === '1h' ? 'hour' : 'day' })
+				timeseriesPromise
 			]);
 			metrics = m;
 			timeseries = ts;

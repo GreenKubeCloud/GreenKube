@@ -53,17 +53,29 @@ async def collect_carbon_intensity_for_all_zones() -> None:
             logger.warning("No node zones discovered.")
             return
 
-        unique_zone_providers = {
-            (node_info.zone, node_info.cloud_provider) for node_info in nodes_info.values() if node_info.zone
+        # Collect unique (zone, region, provider) tuples for mapping.
+        unique_zone_region_providers = {
+            (node_info.zone, node_info.region, node_info.cloud_provider)
+            for node_info in nodes_info.values()
+            if node_info.zone or node_info.region
         }
         emaps_zones: Set[str] = set()
-        for cz, provider in unique_zone_providers:
-            emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
+        for cz, region, provider in unique_zone_region_providers:
+            emz = None
+            # Try zone first
+            if cz:
+                emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
+            # Fallback to region (mirrors NodeZoneMapper logic)
+            if not emz and region:
+                emz = get_emaps_zone_from_cloud_zone(region, provider=provider)
             if emz and emz != "unknown":
                 emaps_zones.add(emz)
             else:
                 logger.warning(
-                    "Could not map cloud zone '%s' (provider: %s) to an Electricity Maps zone.", cz, provider
+                    "Could not map cloud zone '%s' or region '%s' (provider: %s) to an Electricity Maps zone.",
+                    cz,
+                    region,
+                    provider,
                 )
 
         if not emaps_zones:
@@ -162,6 +174,29 @@ async def compress_metrics() -> None:
     logger.info("--- Finished metrics compression task ---")
 
 
+async def refresh_dashboard_summary() -> None:
+    """Refresh the pre-computed dashboard summary table."""
+    logger.info("--- Starting dashboard summary refresh task ---")
+    try:
+        from ..core.factory import (
+            get_combined_metrics_repository,
+            get_summary_repository,
+            get_timeseries_cache_repository,
+        )
+        from ..core.summary_refresher import SummaryRefresher
+
+        refresher = SummaryRefresher(
+            metrics_repo=get_combined_metrics_repository(),
+            summary_repo=get_summary_repository(),
+            timeseries_cache_repo=get_timeseries_cache_repository(),
+        )
+        count = await refresher.run()
+        logger.info("Dashboard summary refresh complete: %d rows upserted.", count)
+    except Exception as e:
+        logger.error("Dashboard summary refresh failed: %s", e)
+    logger.info("--- Finished dashboard summary refresh task ---")
+
+
 async def _async_start(last: Optional[str]):
     cfg = get_config()
     logging.basicConfig(
@@ -182,12 +217,14 @@ async def _async_start(last: Optional[str]):
     logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
 
     scheduler = Scheduler()
-    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1)
+    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1, skip_initial=True)
 
-    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP)
-    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL)
+    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
+    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL, skip_initial=True)
     # Compress old raw metrics into hourly aggregates every hour
     scheduler.add_job(compress_metrics, interval_hours=1)
+    # Refresh pre-computed dashboard summary every hour (after compression)
+    scheduler.add_job(refresh_dashboard_summary, interval_hours=1)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")
@@ -199,6 +236,7 @@ async def _async_start(last: Optional[str]):
     # pass 'last' only to the initial run
     await async_write_combined_metrics_to_database(last=last)
     await compress_metrics()
+    await refresh_dashboard_summary()
     logger.info("Initial collection complete.")
 
     stop_event = asyncio.Event()

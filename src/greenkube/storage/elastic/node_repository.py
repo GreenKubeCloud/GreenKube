@@ -8,7 +8,13 @@ import logging
 from datetime import datetime, timezone
 from typing import List
 
-from elasticsearch_dsl import Date, Document, Float, Keyword, Long
+try:
+    from elasticsearch_dsl import Date, Document, Float, Keyword, Long
+except ImportError as _es_import_error:
+    raise ImportError(
+        "The 'elasticsearch' extra is required to use the Elasticsearch backend. "
+        "Install it with: pip install greenkube[elasticsearch]"
+    ) from _es_import_error
 
 # Import connections conditionally
 if "connections" not in globals():

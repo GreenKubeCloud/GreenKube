@@ -4,13 +4,15 @@ import { writable } from 'svelte/store';
 export const selectedNamespace = writable('');
 export const selectedTimeRange = writable('24h');
 
-/** Available time ranges */
+/** Available time ranges — these slugs align with the pre-computed summary windows */
 export const timeRanges = [
 	{ value: '1h', label: '1 hour' },
 	{ value: '6h', label: '6 hours' },
 	{ value: '24h', label: '24 hours' },
 	{ value: '7d', label: '7 days' },
-	{ value: '30d', label: '30 days' }
+	{ value: '30d', label: '30 days' },
+	{ value: '1y', label: '1 year' },
+	{ value: 'ytd', label: 'Year to date' }
 ];
 
 /** Sidebar state */
