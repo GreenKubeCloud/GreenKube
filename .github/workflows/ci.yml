@@ -14,6 +14,8 @@ jobs:
     name: Lint, Gitleaks & Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
 
     steps:
       - name: Check out code (full history for Gitleaks)
