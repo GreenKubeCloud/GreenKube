@@ -45,7 +45,35 @@ jobs:
           ruff format --check .
 
       - name: Run tests with pytest
-        run: pytest
+        run: pytest --cov=greenkube --cov-report=term-missing --cov-report=json
+
+      - name: Update README badges
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+        run: |
+          # Extract total coverage percentage from coverage.json
+          COV=$(python -c "import json; d=json.load(open('coverage.json')); print(int(d['totals']['percent_covered_display'].rstrip('%')))")
+
+          # Extract total test count from pytest exit (re-run with --tb=no -q to count)
+          TEST_COUNT=$(pytest --tb=no -q 2>&1 | grep -oP '^\d+(?= passed)' || echo "0")
+
+          # Determine badge colour by coverage level
+          if   [ "$COV" -ge 90 ]; then COLOR="brightgreen"
+          elif [ "$COV" -ge 80 ]; then COLOR="green"
+          elif [ "$COV" -ge 70 ]; then COLOR="yellowgreen"
+          elif [ "$COV" -ge 60 ]; then COLOR="yellow"
+          else                         COLOR="red"
+          fi
+
+          # Rewrite the two badge lines in README.md in-place
+          sed -i "s|!\[Python Coverage\]([^)]*)|![Python Coverage](https://img.shields.io/badge/coverage%20python-${COV}%25-${COLOR})|g" README.md
+          sed -i "s|!\[Tests\]([^)]*)|![Tests](https://img.shields.io/badge/tests-${TEST_COUNT}%20passed-brightgreen)|g" README.md
+
+      - name: Commit updated README badges
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: update coverage and test-count badges [skip ci]"
+          file_pattern: README.md
 
   frontend-test:
     name: Frontend Tests

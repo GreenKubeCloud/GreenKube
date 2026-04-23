@@ -688,3 +688,248 @@ class TestEdgeCases:
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
         pod_names = [r.pod_name for r in cpu_recs]
         assert len(pod_names) == len(set(pod_names)), "Duplicate recommendations found"
+
+
+# ---------------------------------------------------------------------------
+# Test: Missing usage data edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestMissingUsageData:
+    """Tests for graceful handling of missing usage data in rightsizing recommendations."""
+
+    def test_no_memory_rightsizing_when_memory_usage_bytes_is_none(self, recommender):
+        """Pods with memory_usage_bytes=None in all metrics should not trigger memory rightsizing."""
+        metrics = _make_timeseries(
+            pod_name="no-mem-data",
+            memory_request=1024 * 1024 * 1024,  # 1 GiB request
+            # memory_usages defaults to 256 MiB — override with None via direct construction
+        )
+        # Override all metrics so memory_usage_bytes is None
+        for m in metrics:
+            object.__setattr__(m, "memory_usage_bytes", None)
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
+        assert len(mem_recs) == 0, "Should not recommend memory rightsizing with no usage data"
+
+    def test_no_cpu_rightsizing_when_all_usage_none(self, recommender):
+        """Pods with cpu_usage_millicores=None in all metrics should not trigger CPU rightsizing."""
+        metrics = _make_timeseries(
+            pod_name="no-cpu-data",
+            cpu_request=2000,
+        )
+        for m in metrics:
+            object.__setattr__(m, "cpu_usage_millicores", None)
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+        assert len(cpu_recs) == 0, "Should not recommend CPU rightsizing with no usage data"
+
+    def test_memory_rightsizing_uses_available_data_when_some_none(self, recommender):
+        """Partially missing memory usage data should still produce a recommendation based on available points."""
+        mem_req = 1024 * 1024 * 1024  # 1 GiB
+        low_usage = 100 * 1024 * 1024  # 100 MiB
+        # Half the metrics have data, half have None
+        metrics = _make_timeseries(
+            pod_name="partial-mem",
+            memory_request=mem_req,
+            memory_usages=[low_usage] * 48,
+            usages=[500] * 48,
+        )
+        # Set half to None
+        for m in metrics[24:]:
+            object.__setattr__(m, "memory_usage_bytes", None)
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
+        # Should still trigger — 24 valid data points are enough
+        assert len(mem_recs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: System namespace exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestSystemNamespaceExclusion:
+    """Tests for system namespace exclusion in idle namespace detection."""
+
+    def test_kube_system_excluded_from_idle_detection_by_default(self, recommender):
+        """kube-system namespace must not be flagged as idle when recommend_system_namespaces=False (default)."""
+        assert not recommender.recommend_system_namespaces, "Default config must exclude system namespaces"
+
+        metrics = [
+            _make_metric(
+                pod_name="coredns",
+                namespace="kube-system",
+                joules=50,  # Very low — would normally trigger idle
+                total_cost=0.01,
+                co2e_grams=0.01,
+            )
+        ]
+        recs = recommender.generate_recommendations(metrics)
+        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
+        assert len(idle_recs) == 0, "kube-system should be excluded from idle namespace detection"
+
+    def test_all_system_namespaces_excluded_by_default(self, recommender):
+        """All well-known system namespaces must not be flagged as idle by default."""
+        system_namespaces = [
+            "kube-system",
+            "kube-public",
+            "kube-node-lease",
+            "coredns",
+            "istio-system",
+            "kubernetes-dashboard",
+        ]
+        metrics = [
+            _make_metric(
+                pod_name=f"pod-{ns}",
+                namespace=ns,
+                joules=50,
+                total_cost=0.01,
+            )
+            for ns in system_namespaces
+        ]
+        recs = recommender.generate_recommendations(metrics)
+        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
+        flagged_ns = {r.namespace for r in idle_recs}
+        overlap = flagged_ns & set(system_namespaces)
+        assert len(overlap) == 0, f"System namespaces should be excluded, but got: {overlap}"
+
+    def test_custom_namespace_still_flagged_as_idle(self, recommender):
+        """Non-system namespaces are still flagged as idle even when system exclusion is active."""
+        metrics = [
+            _make_metric(
+                pod_name="pod-a",
+                namespace="my-custom-ns",
+                joules=50,
+                total_cost=0.01,
+            )
+        ]
+        recs = recommender.generate_recommendations(metrics)
+        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
+        assert len(idle_recs) == 1
+        assert idle_recs[0].namespace == "my-custom-ns"
+
+    def test_system_namespace_included_when_flag_enabled(self):
+        """When recommend_system_namespaces=True, system namespaces CAN be flagged."""
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.RECOMMEND_SYSTEM_NAMESPACES = True
+        recommender_with_sys = Recommender(config=cfg)
+
+        metrics = [
+            _make_metric(
+                pod_name="coredns",
+                namespace="kube-system",
+                joules=50,
+                total_cost=0.05,
+            )
+        ]
+        recs = recommender_with_sys.generate_recommendations(metrics)
+        idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
+        assert len(idle_recs) == 1
+        assert idle_recs[0].namespace == "kube-system"
+
+
+# ---------------------------------------------------------------------------
+# Test: Node overprovisioning - memory capacity edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestNodeMemoryCapacityEdgeCases:
+    """Tests for node overprovisioning when memory capacity data is missing or ambiguous."""
+
+    def test_no_overprovisioned_when_only_memory_capacity_missing(self, recommender):
+        """When memory_capacity_bytes is not set on node_infos, overprovisioning check falls back to CPU only."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "cpu-only-node"
+        node_infos[0].cpu_capacity_cores = 16.0
+        # memory_capacity_bytes is an auto-created MagicMock attribute (not int/float)
+        # → the code's isinstance(..., (int, float)) check should exclude it
+
+        metrics = [
+            # Very low CPU: should trigger overprovisioning (no memory data to save it)
+            _make_metric(pod_name="pod-a", node="cpu-only-node", cpu_usage_millicores=50),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        # Without memory capacity, the check is CPU-only → should still flag if CPU is very low
+        assert len(node_recs) == 1
+
+    def test_overprovisioned_description_omits_memory_when_no_capacity(self, recommender):
+        """When memory capacity is unknown, the description must NOT mention memory utilization."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "no-mem-cap-node"
+        node_infos[0].cpu_capacity_cores = 16.0
+        # MagicMock auto-creates memory_capacity_bytes as a Mock — not int → excluded
+
+        metrics = [
+            _make_metric(pod_name="pod-a", node="no-mem-cap-node", cpu_usage_millicores=50),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        assert len(node_recs) == 1
+        # The description should NOT mention GiB memory figures since capacity is unknown
+        assert "GiB" not in node_recs[0].description
+
+    def test_overprovisioned_description_includes_memory_when_both_low(self, recommender):
+        """When both CPU and memory are low and memory capacity is known, description mentions memory."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "low-both-node"
+        node_infos[0].cpu_capacity_cores = 16.0
+        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
+
+        metrics = [
+            _make_metric(
+                pod_name="pod-a",
+                node="low-both-node",
+                cpu_usage_millicores=100,
+                memory_usage_bytes=1 * 1024**3,  # 1 GiB / 64 GiB = ~1.6%
+            ),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        assert len(node_recs) == 1
+        assert "memory" in node_recs[0].description.lower()
+
+
+# ---------------------------------------------------------------------------
+# Test: Underutilized node reason field
+# ---------------------------------------------------------------------------
+
+
+class TestUnderutilizedNodeReason:
+    """Tests for the reason field in UNDERUTILIZED_NODE recommendations."""
+
+    def test_underutilized_reason_mentions_pod_count(self, recommender):
+        """UNDERUTILIZED_NODE reason must mention the number of pods."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "lonely-node"
+        node_infos[0].cpu_capacity_cores = 8.0
+
+        metrics = [
+            _make_metric(pod_name="solo", node="lonely-node", cpu_usage_millicores=50),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
+
+        assert len(node_recs) == 1
+        assert "pod" in node_recs[0].reason.lower(), "Reason should mention pod count"
+
+    def test_underutilized_reason_mentions_utilization_percentage(self, recommender):
+        """UNDERUTILIZED_NODE reason must contain a CPU utilization percentage."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "idle-node"
+        node_infos[0].cpu_capacity_cores = 8.0
+
+        metrics = [
+            _make_metric(pod_name="solo", node="idle-node", cpu_usage_millicores=50),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
+
+        assert len(node_recs) == 1
+        assert "%" in node_recs[0].reason, "Reason should contain a utilization percentage"
