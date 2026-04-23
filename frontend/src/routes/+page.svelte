@@ -6,7 +6,8 @@
 		getTimeseries,
 		getMetricsByNamespace,
 		getTopPods,
-		getRecommendations,
+		getActiveRecommendations,
+		getRecommendationSavings,
 		getDashboardSummary,
 		getDashboardTimeseries,
 		refreshDashboardSummary
@@ -27,6 +28,7 @@
 	let nsBreakdown = [];
 	let topPods = [];
 	let recommendations = [];
+	let savings = null;
 	let loading = true;
 	let recoLoading = true;
 	let refreshing = false;
@@ -97,13 +99,16 @@
 			loading = false;
 		}
 
-		// Fetch recommendations in the background — they are slower and not
-		// required for the initial render of KPI cards and charts.
+		// Fetch recommendations + savings in the background
 		try {
 			const ns = $selectedNamespace || undefined;
-			recommendations = await getRecommendations({ namespace: ns });
+			[recommendations, savings] = await Promise.all([
+				getActiveRecommendations({ namespace: ns }),
+				getRecommendationSavings()
+			]);
 		} catch {
 			recommendations = [];
+			savings = null;
 		} finally {
 			recoLoading = false;
 		}
@@ -238,12 +243,42 @@
 				</p>
 			</div>
 			<div class="card-compact text-center">
-				<p class="stat-label">Recommendations</p>
-				<p class="stat-value text-lg {recommendations.length > 0 ? 'text-yellow-400' : ''}">
+				<p class="stat-label">Active Recommendations</p>
+				<p class="stat-value text-lg {!recoLoading && recommendations.length > 0 ? 'text-yellow-400' : ''}">
 					{#if recoLoading}
 						<span class="text-dark-500 text-sm">…</span>
 					{:else}
 						{recommendations.length}
+					{/if}
+				</p>
+			</div>
+			<div class="card-compact text-center">
+				<p class="stat-label">Applied Recommendations</p>
+				<p class="stat-value text-lg {!recoLoading && savings?.applied_count > 0 ? 'text-blue-400' : ''}">
+					{#if recoLoading}
+						<span class="text-dark-500 text-sm">…</span>
+					{:else}
+						{savings?.applied_count ?? 0}
+					{/if}
+				</p>
+			</div>
+			<div class="card-compact text-center">
+				<p class="stat-label">CO₂ Avoided</p>
+				<p class="stat-value text-lg {!recoLoading && savings?.total_carbon_saved_co2e_grams > 0 ? 'text-green-400' : ''}">
+					{#if recoLoading}
+						<span class="text-dark-500 text-sm">…</span>
+					{:else}
+						{formatCO2(savings?.total_carbon_saved_co2e_grams ?? 0)}
+					{/if}
+				</p>
+			</div>
+			<div class="card-compact text-center">
+				<p class="stat-label">Cost Saved</p>
+				<p class="stat-value text-lg {!recoLoading && savings?.total_cost_saved > 0 ? 'text-blue-400' : ''}">
+					{#if recoLoading}
+						<span class="text-dark-500 text-sm">…</span>
+					{:else}
+						{formatCost(savings?.total_cost_saved ?? 0)}
 					{/if}
 				</p>
 			</div>
@@ -288,8 +323,8 @@
 		</div>
 
 		<!-- Recommendations preview -->
-		{#if recommendations.length > 0}
-			<Card title="Recent Recommendations" icon="💡">
+		{#if !recoLoading && recommendations.length > 0}
+			<Card title="Active Recommendations" icon="💡">
 				<div slot="actions">
 					<a href="/recommendations" class="text-sm text-green-400 hover:text-green-300 transition-colors">
 						View all →
@@ -302,7 +337,7 @@
 								{rec.type === 'ZOMBIE_POD' ? '💀' : '📐'}
 							</span>
 							<div class="flex-1 min-w-0">
-								<p class="text-sm text-dark-200 font-medium truncate">{rec.pod_name}</p>
+								<p class="text-sm text-dark-200 font-medium truncate">{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}</p>
 								<p class="text-xs text-dark-500 mt-0.5">{rec.reason}</p>
 							</div>
 							{#if rec.potential_savings_co2e_grams}

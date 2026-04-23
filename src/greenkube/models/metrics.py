@@ -93,6 +93,14 @@ class RecommendationType(str, Enum):
     UNDERUTILIZED_NODE = "UNDERUTILIZED_NODE"
 
 
+class RecommendationStatus(str, Enum):
+    """Lifecycle status of a persisted recommendation."""
+
+    ACTIVE = "active"
+    APPLIED = "applied"
+    IGNORED = "ignored"
+
+
 class Recommendation(BaseModel):
     """Represents a single actionable optimization recommendation."""
 
@@ -114,10 +122,12 @@ class Recommendation(BaseModel):
     potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
     current_cpu_request_millicores: Optional[int] = Field(None, description="Current CPU request in millicores.")
     recommended_cpu_request_millicores: Optional[int] = Field(
-        None, description="Recommended CPU request in millicores."
+        None, description="Recommended CPU request in millicores (floored to the configured minimum)."
     )
     current_memory_request_bytes: Optional[int] = Field(None, description="Current memory request in bytes.")
-    recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
+    recommended_memory_request_bytes: Optional[int] = Field(
+        None, description="Recommended memory request in bytes (floored to the configured minimum)."
+    )
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
 
@@ -133,6 +143,7 @@ class RecommendationRecord(BaseModel):
     reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
     scope: str = Field("pod", description="Recommendation scope: 'pod', 'namespace', or 'node'.")
+    status: RecommendationStatus = Field(RecommendationStatus.ACTIVE, description="Lifecycle status.")
     potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
     potential_savings_co2e_grams: Optional[float] = Field(
         None, description="Estimated CO2e savings in grams if implemented."
@@ -145,10 +156,26 @@ class RecommendationRecord(BaseModel):
     recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
+    # Applied lifecycle fields
+    applied_at: Optional[datetime] = Field(None, description="When the recommendation was applied.")
+    actual_cpu_request_millicores: Optional[int] = Field(
+        None, description="Actual CPU value applied (may differ from recommended)."
+    )
+    actual_memory_request_bytes: Optional[int] = Field(
+        None, description="Actual memory value applied (may differ from recommended)."
+    )
+    carbon_saved_co2e_grams: Optional[float] = Field(
+        None, description="Actual CO2e savings realised after applying the recommendation."
+    )
+    cost_saved: Optional[float] = Field(None, description="Actual cost savings realised after applying.")
+    # Ignore lifecycle fields
+    ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
+    ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="When the recommendation was generated.",
     )
+    updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
 
     @classmethod
     def from_recommendation(
@@ -171,6 +198,7 @@ class RecommendationRecord(BaseModel):
             reason=rec.reason,
             priority=rec.priority,
             scope=rec.scope,
+            status=RecommendationStatus.ACTIVE,
             potential_savings_cost=rec.potential_savings_cost,
             potential_savings_co2e_grams=rec.potential_savings_co2e_grams,
             current_cpu_request_millicores=rec.current_cpu_request_millicores,
@@ -181,6 +209,38 @@ class RecommendationRecord(BaseModel):
             target_node=rec.target_node,
             created_at=created_at or datetime.now(timezone.utc),
         )
+
+
+class ApplyRecommendationRequest(BaseModel):
+    """Request body for marking a recommendation as applied."""
+
+    actual_cpu_request_millicores: Optional[int] = Field(
+        None, description="Actual CPU value applied (may differ from recommended)."
+    )
+    actual_memory_request_bytes: Optional[int] = Field(
+        None, description="Actual memory value applied (may differ from recommended)."
+    )
+    carbon_saved_co2e_grams: Optional[float] = Field(
+        None, description="Actual CO2e savings realised (computed server-side if omitted)."
+    )
+    cost_saved: Optional[float] = Field(
+        None, description="Actual cost savings realised (computed server-side if omitted)."
+    )
+
+
+class IgnoreRecommendationRequest(BaseModel):
+    """Request body for permanently ignoring a recommendation."""
+
+    reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+
+
+class RecommendationSavingsSummary(BaseModel):
+    """Aggregate savings from all applied recommendations."""
+
+    total_carbon_saved_co2e_grams: float = Field(0.0, description="Total CO2e saved in grams.")
+    total_cost_saved: float = Field(0.0, description="Total cost saved.")
+    applied_count: int = Field(0, description="Number of recommendations marked as applied.")
+    namespace_breakdown: List[dict] = Field(default_factory=list, description="Savings breakdown per namespace.")
 
 
 class MetricsSummaryRow(BaseModel):
