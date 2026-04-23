@@ -97,6 +97,7 @@ def mock_reco_repo():
     repo.get_recommendations = AsyncMock(return_value=[])
     repo.get_active_recommendations = AsyncMock(return_value=[])
     repo.get_ignored_recommendations = AsyncMock(return_value=[])
+    repo.get_applied_recommendations = AsyncMock(return_value=[])
     repo.get_savings_summary = AsyncMock(return_value=None)
     return repo
 

@@ -427,6 +427,21 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_applied_recommendations(
+        self,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns all applied recommendations ordered by most recently applied.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of applied RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
         """Returns a single recommendation by its database ID.
 

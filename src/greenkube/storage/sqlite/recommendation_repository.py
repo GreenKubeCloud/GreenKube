@@ -304,6 +304,32 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             rows = await cursor.fetchall()
             return [_row_to_record(r) for r in rows]
 
+    async def get_applied_recommendations(
+        self,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns all applied recommendations, ordered by most recently applied.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of applied RecommendationRecord objects.
+        """
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            params: list = []
+            query = "SELECT * FROM recommendation_history WHERE status = 'applied'"
+
+            if namespace:
+                query += " AND namespace = ?"
+                params.append(namespace)
+
+            query += " ORDER BY applied_at DESC"
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [_row_to_record(r) for r in rows]
+
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
         """Returns a single recommendation by its database ID.
 

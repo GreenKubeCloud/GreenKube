@@ -142,6 +142,19 @@ async def list_recommendation_history(
     )
 
 
+@router.get("/recommendations/applied", response_model=List[RecommendationRecord])
+async def list_applied_recommendations(
+    namespace: Optional[str] = Depends(validate_namespace),
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Return all applied recommendations, ordered by most recently applied.
+
+    Used by the Realized Savings section to show the details of each
+    implemented optimization.
+    """
+    return await reco_repo.get_applied_recommendations(namespace=namespace)
+
+
 @router.get("/recommendations/savings", response_model=RecommendationSavingsSummary)
 async def get_savings_summary(
     namespace: Optional[str] = Depends(validate_namespace),

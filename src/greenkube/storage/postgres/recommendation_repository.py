@@ -120,6 +120,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
         """Inserts or updates active recommendations using (pod_name, namespace, type) as the key.
 
+        Uses IS NOT DISTINCT FROM for NULL-safe matching so that cluster-level
+        recommendations (pod_name=NULL, namespace=NULL) are correctly deduplicated.
         Ignored and applied recommendations are left untouched.
 
         Args:
@@ -133,7 +135,26 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
         now = datetime.now(timezone.utc)
         async with self.db_manager.connection_scope() as conn:
-            query = """
+            update_query = """
+                UPDATE recommendation_history SET
+                    description = $1,
+                    reason = $2,
+                    priority = $3,
+                    potential_savings_cost = $4,
+                    potential_savings_co2e_grams = $5,
+                    current_cpu_request_millicores = $6,
+                    recommended_cpu_request_millicores = $7,
+                    current_memory_request_bytes = $8,
+                    recommended_memory_request_bytes = $9,
+                    cron_schedule = $10,
+                    target_node = $11,
+                    updated_at = $12
+                WHERE pod_name IS NOT DISTINCT FROM $13
+                  AND namespace IS NOT DISTINCT FROM $14
+                  AND type = $15
+                  AND status = 'active'
+            """
+            insert_query = """
                 INSERT INTO recommendation_history (
                     pod_name, namespace, type, description, reason,
                     priority, scope, status,
@@ -145,32 +166,17 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     $1, $2, $3, $4, $5, $6, $7, $8,
                     $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
                 )
-                ON CONFLICT (pod_name, namespace, type)
-                WHERE status = 'active'
-                DO UPDATE SET
-                    description = EXCLUDED.description,
-                    reason = EXCLUDED.reason,
-                    priority = EXCLUDED.priority,
-                    potential_savings_cost = EXCLUDED.potential_savings_cost,
-                    potential_savings_co2e_grams = EXCLUDED.potential_savings_co2e_grams,
-                    current_cpu_request_millicores = EXCLUDED.current_cpu_request_millicores,
-                    recommended_cpu_request_millicores = EXCLUDED.recommended_cpu_request_millicores,
-                    current_memory_request_bytes = EXCLUDED.current_memory_request_bytes,
-                    recommended_memory_request_bytes = EXCLUDED.recommended_memory_request_bytes,
-                    cron_schedule = EXCLUDED.cron_schedule,
-                    target_node = EXCLUDED.target_node,
-                    updated_at = $18
             """
-            data = [
-                (
-                    r.pod_name,
-                    r.namespace,
-                    r.type.value if isinstance(r.type, RecommendationType) else r.type,
+            count = 0
+            for r in records:
+                type_val = r.type.value if isinstance(r.type, RecommendationType) else r.type
+                status_val = r.status.value if isinstance(r.status, RecommendationStatus) else r.status
+
+                result = await conn.execute(
+                    update_query,
                     r.description,
                     r.reason,
                     r.priority,
-                    r.scope,
-                    r.status.value if isinstance(r.status, RecommendationStatus) else r.status,
                     r.potential_savings_cost,
                     r.potential_savings_co2e_grams,
                     r.current_cpu_request_millicores,
@@ -179,14 +185,37 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.recommended_memory_request_bytes,
                     r.cron_schedule,
                     r.target_node,
-                    r.created_at,
                     now,
+                    r.pod_name,
+                    r.namespace,
+                    type_val,
                 )
-                for r in records
-            ]
-            await conn.executemany(query, data)
-            logger.info("Upserted %d recommendation records in PostgreSQL.", len(records))
-            return len(records)
+                if result == "UPDATE 0":
+                    await conn.execute(
+                        insert_query,
+                        r.pod_name,
+                        r.namespace,
+                        type_val,
+                        r.description,
+                        r.reason,
+                        r.priority,
+                        r.scope,
+                        status_val,
+                        r.potential_savings_cost,
+                        r.potential_savings_co2e_grams,
+                        r.current_cpu_request_millicores,
+                        r.recommended_cpu_request_millicores,
+                        r.current_memory_request_bytes,
+                        r.recommended_memory_request_bytes,
+                        r.cron_schedule,
+                        r.target_node,
+                        r.created_at,
+                        now,
+                    )
+                count += 1
+
+            logger.info("Upserted %d recommendation records in PostgreSQL.", count)
+            return count
 
     async def get_recommendations(
         self,
@@ -271,6 +300,30 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 params.append(namespace)
 
             query += " ORDER BY ignored_at DESC"
+            rows = await conn.fetch(query, *params)
+            return [_row_to_record(r) for r in rows]
+
+    async def get_applied_recommendations(
+        self,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns all applied recommendations, ordered by most recently applied.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of applied RecommendationRecord objects.
+        """
+        async with self.db_manager.connection_scope() as conn:
+            params: list = []
+            query = "SELECT * FROM recommendation_history WHERE status = 'applied'"
+
+            if namespace:
+                query += " AND namespace = $1"
+                params.append(namespace)
+
+            query += " ORDER BY applied_at DESC"
             rows = await conn.fetch(query, *params)
             return [_row_to_record(r) for r in rows]
 
