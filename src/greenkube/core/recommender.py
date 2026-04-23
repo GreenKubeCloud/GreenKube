@@ -47,6 +47,8 @@ class Recommender:
         self.default_instance_min_watts = cfg.DEFAULT_INSTANCE_MIN_WATTS
         self.default_instance_max_watts = cfg.DEFAULT_INSTANCE_MAX_WATTS
         self.default_instance_vcores = cfg.DEFAULT_INSTANCE_VCORES
+        self.min_cpu_millicores = cfg.RECOMMENDATION_MIN_CPU_MILLICORES
+        self.min_memory_bytes = cfg.RECOMMENDATION_MIN_MEMORY_BYTES
 
     def generate_recommendations(
         self,
@@ -81,7 +83,8 @@ class Recommender:
         recs.extend(self._analyze_carbon_aware(metrics))
         recs.extend(self._analyze_nodes(metrics, node_infos))
 
-        return self._deduplicate(recs)
+        deduped = self._deduplicate(recs)
+        return [self._apply_minimum_thresholds(r) for r in deduped]
 
     # ------------------------------------------------------------------
     # Legacy API compatibility
@@ -131,6 +134,50 @@ class Recommender:
                 seen.add(key)
                 result.append(rec)
         return result
+
+    def _apply_minimum_thresholds(self, rec: Recommendation) -> Recommendation:
+        """Clamps recommended resource values to configured minimum thresholds.
+
+        Ensures that no recommendation asks for an impractically small resource
+        request (e.g. 3m CPU). The description is updated to mention the floor
+        when clamping occurs.
+
+        Args:
+            rec: The recommendation to validate and possibly clamp.
+
+        Returns:
+            The recommendation with values floored to configured minimums.
+        """
+        updates: dict = {}
+
+        if (
+            rec.recommended_cpu_request_millicores is not None
+            and rec.recommended_cpu_request_millicores < self.min_cpu_millicores
+        ):
+            updates["recommended_cpu_request_millicores"] = self.min_cpu_millicores
+            updates["description"] = rec.description + f" (Floored to minimum: {self.min_cpu_millicores}m CPU.)"
+            updates["reason"] = rec.reason + (
+                f" Recommended value was below the minimum of {self.min_cpu_millicores}m; "
+                "floored to avoid impractically small requests."
+            )
+
+        if (
+            rec.recommended_memory_request_bytes is not None
+            and rec.recommended_memory_request_bytes < self.min_memory_bytes
+        ):
+            mb = self.min_memory_bytes // (1024 * 1024)
+            updates["recommended_memory_request_bytes"] = self.min_memory_bytes
+            desc = updates.get("description", rec.description)
+            updates["description"] = desc + f" (Floored to minimum: {mb}MiB memory.)"
+            reason = updates.get("reason", rec.reason)
+            updates["reason"] = reason + (
+                f" Recommended memory was below the minimum of {mb}MiB; floored to avoid impractically small requests."
+            )
+
+        if updates:
+            rec = rec.model_copy(update=updates)
+
+        return rec
 
     # ------------------------------------------------------------------
     # ZOMBIE_POD

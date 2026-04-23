@@ -177,6 +177,11 @@ config:
     nodeUtilizationThreshold: 0.2
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
+    # Minimum realistic thresholds — recommendations below these are flagged as unrealistic
+    minCpuMillicores: 10
+    minMemoryBytes: "16777216"  # 16 MiB — quoted to prevent YAML float serialization
+    # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
+    applyTolerance: 0.25
 
 # ---------------------------------------------------------------------------
 # Elasticsearch (experimental — not production-ready)

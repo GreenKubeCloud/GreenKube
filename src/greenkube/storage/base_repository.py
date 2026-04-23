@@ -3,7 +3,15 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Optional
 
-from ..models.metrics import CombinedMetric, MetricsSummaryRow, RecommendationRecord, TimeseriesCachePoint
+from ..models.metrics import (
+    ApplyRecommendationRequest,
+    CombinedMetric,
+    IgnoreRecommendationRequest,
+    MetricsSummaryRow,
+    RecommendationRecord,
+    RecommendationSavingsSummary,
+    TimeseriesCachePoint,
+)
 from ..models.node import NodeInfo
 
 
@@ -371,6 +379,115 @@ class RecommendationRepository(ABC):
 
         Returns:
             A list of RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
+    async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
+        """Inserts or updates active recommendations using (pod_name, namespace, type) as the upsert key.
+
+        Active recommendations are refreshed in place; ignored recommendations are left untouched.
+
+        Args:
+            records: A list of RecommendationRecord objects to upsert.
+
+        Returns:
+            The number of records inserted or updated.
+        """
+        pass
+
+    @abstractmethod
+    async def get_active_recommendations(
+        self,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns all currently active recommendations from the database.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of active RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
+    async def get_ignored_recommendations(
+        self,
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns all permanently ignored recommendations.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of ignored RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
+    async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
+        """Returns a single recommendation by its database ID.
+
+        Args:
+            rec_id: The database primary key.
+
+        Returns:
+            The RecommendationRecord, or None if not found.
+        """
+        pass
+
+    @abstractmethod
+    async def apply_recommendation(self, rec_id: int, request: ApplyRecommendationRequest) -> RecommendationRecord:
+        """Marks a recommendation as applied and records the actual applied values.
+
+        Args:
+            rec_id: The database primary key.
+            request: The apply request with actual values.
+
+        Returns:
+            The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def ignore_recommendation(self, rec_id: int, request: IgnoreRecommendationRequest) -> RecommendationRecord:
+        """Permanently ignores a recommendation.
+
+        Args:
+            rec_id: The database primary key.
+            request: The ignore request with an optional reason.
+
+        Returns:
+            The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def unignore_recommendation(self, rec_id: int) -> RecommendationRecord:
+        """Reverts an ignored recommendation back to active status.
+
+        Args:
+            rec_id: The database primary key.
+
+        Returns:
+            The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def get_savings_summary(
+        self,
+        namespace: Optional[str] = None,
+    ) -> RecommendationSavingsSummary:
+        """Returns aggregate savings from all applied recommendations.
+
+        Args:
+            namespace: Optional namespace filter.
+
+        Returns:
+            A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         pass
 

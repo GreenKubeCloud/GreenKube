@@ -166,6 +166,11 @@ class Config:
         self.IDLE_NAMESPACE_ENERGY_THRESHOLD = float(os.getenv("IDLE_NAMESPACE_ENERGY_THRESHOLD", "1000"))
         self.CARBON_AWARE_THRESHOLD = float(os.getenv("CARBON_AWARE_THRESHOLD", "1.5"))
         self.NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
+        # Minimum realistic values — recommendations below these are flagged as unrealistic
+        self.RECOMMENDATION_MIN_CPU_MILLICORES = int(os.getenv("RECOMMENDATION_MIN_CPU_MILLICORES", "10"))
+        self.RECOMMENDATION_MIN_MEMORY_BYTES = int(os.getenv("RECOMMENDATION_MIN_MEMORY_BYTES", str(16 * 1024 * 1024)))
+        # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
+        self.RECOMMENDATION_APPLY_TOLERANCE = float(os.getenv("RECOMMENDATION_APPLY_TOLERANCE", "0.25"))
 
     @staticmethod
     def _get_version() -> str:
