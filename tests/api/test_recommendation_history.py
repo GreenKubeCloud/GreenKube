@@ -86,7 +86,7 @@ class TestRecommendationsPersistence:
     """Tests that recommendations are persisted when generated."""
 
     def test_recommendations_are_saved_on_generation(self, client, mock_combined_metrics_repo, mock_reco_repo):
-        """Generating recommendations should also persist them in history."""
+        """Generating recommendations should also persist them via upsert."""
         zombie_metric = CombinedMetric(
             pod_name="zombie-pod",
             namespace="default",
@@ -103,8 +103,8 @@ class TestRecommendationsPersistence:
         assert response.status_code == 200
         data = response.json()
         assert len(data) >= 1
-        # The save_recommendations method should have been called
-        mock_reco_repo.save_recommendations.assert_called_once()
-        saved_records = mock_reco_repo.save_recommendations.call_args[0][0]
+        # The upsert_recommendations method should have been called
+        mock_reco_repo.upsert_recommendations.assert_called_once()
+        saved_records = mock_reco_repo.upsert_recommendations.call_args[0][0]
         assert len(saved_records) >= 1
         assert all(isinstance(r, RecommendationRecord) for r in saved_records)

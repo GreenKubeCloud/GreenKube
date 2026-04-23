@@ -135,17 +135,10 @@ class TestSQLiteRecommendationRepository:
     @pytest.mark.asyncio
     async def test_get_recommendations_with_filters(self, repo, mock_db_manager):
         """Should apply type and namespace filters."""
-        from contextlib import asynccontextmanager
-
         mock_conn = mock_db_manager._mock_conn
         mock_cursor = AsyncMock()
         mock_cursor.fetchall = AsyncMock(return_value=[])
-
-        @asynccontextmanager
-        async def fake_execute(*args, **kwargs):
-            yield mock_cursor
-
-        mock_conn.execute = fake_execute
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
         mock_conn.row_factory = None
 
         start = datetime(2026, 2, 1, tzinfo=timezone.utc)

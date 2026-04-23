@@ -150,6 +150,78 @@ export function getRecommendations({ namespace } = {}) {
 	return request(`${BASE}/recommendations`, { namespace });
 }
 
+/** @returns {Promise<Object[]>} */
+export function getActiveRecommendations({ namespace } = {}) {
+	return request(`${BASE}/recommendations/active`, { namespace });
+}
+
+/** @returns {Promise<Object[]>} */
+export function getIgnoredRecommendations() {
+	return request(`${BASE}/recommendations/ignored`);
+}
+
+/** @returns {Promise<Object[]>} */
+export function getAppliedRecommendations() {
+	return request(`${BASE}/recommendations/applied`);
+}
+
+/** @returns {Promise<Object>} */
+export function getRecommendationSavings() {
+	return request(`${BASE}/recommendations/savings`);
+}
+
+/**
+ * @param {number} id
+ * @param {{ carbon_saved_co2e_grams?: number, cost_saved?: number }} [body]
+ * @returns {Promise<Object>}
+ */
+export async function applyRecommendation(id, body = {}) {
+	const url = new URL(`${BASE}/recommendations/${id}/apply`, window.location.origin);
+	const res = await fetch(url.toString(), {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		const b = await res.json().catch(() => ({}));
+		throw new Error(b.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
+/**
+ * @param {number} id
+ * @param {{ reason: string }} body
+ * @returns {Promise<Object>}
+ */
+export async function ignoreRecommendation(id, body) {
+	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
+	const res = await fetch(url.toString(), {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		const b = await res.json().catch(() => ({}));
+		throw new Error(b.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object>}
+ */
+export async function unignoreRecommendation(id) {
+	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
+	const res = await fetch(url.toString(), { method: 'DELETE' });
+	if (!res.ok) {
+		const b = await res.json().catch(() => ({}));
+		throw new Error(b.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
 /**
  * @param {Object} opts
  * @param {string} [opts.namespace]
