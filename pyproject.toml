@@ -149,10 +149,12 @@ select = ["E", "F", "W", "I", "G"] # Basic rules + flake8-logging-format (lazy %
 "src/greenkube/data/*.py" = ["G"]
 
 [tool.coverage.run]
-source = ["src/greenkube"]
+# Use the package name so coverage works both locally (editable install)
+# and in CI (regular install into site-packages).
+source = ["greenkube"]
 omit = [
-    "src/greenkube/demo/*",
-    "src/greenkube/data/*",
+    "*/greenkube/demo/*",
+    "*/greenkube/data/*",
 ]
 
 [tool.coverage.report]

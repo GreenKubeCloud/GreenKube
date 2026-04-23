@@ -45,7 +45,7 @@ jobs:
           ruff format --check .
 
       - name: Run tests with pytest
-        run: pytest --cov=src/greenkube --cov-report=term-missing --cov-report=json
+        run: pytest --cov=greenkube --cov-report=term-missing --cov-report=json
 
       - name: Update README badges
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
