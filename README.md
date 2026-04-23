@@ -8,9 +8,9 @@ GreenKube is an open-source tool designed to help DevOps, SRE, and FinOps teams 
 [![GitHub Stars](https://img.shields.io/github/stars/GreenKubeCloud/greenkube?style=social)](https://github.com/GreenKubeCloud/greenkube/stargazers)
 [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
 [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
-[![Python Coverage](https://img.shields.io/badge/coverage%20python-73%25-yellowgreen)](tests/)
+[![Python Coverage](https://img.shields.io/badge/coverage%20python-74%25-yellowgreen)](tests/)
 [![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-[![Tests](https://img.shields.io/badge/tests-788%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-0%20passed-brightgreen)](tests/)
 
 > **🌐 Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the dashboard with realistic sample data, no install required.
 
