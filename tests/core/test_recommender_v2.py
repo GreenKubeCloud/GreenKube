@@ -547,6 +547,48 @@ class TestOverprovisionedNode:
         assert "(0%)" not in node_recs[0].reason
         assert "14%" in node_recs[0].reason
 
+    def test_no_overprovisioned_when_memory_is_high(self, recommender):
+        """Node with low CPU but high memory usage must NOT be flagged as overprovisioned."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "mem-heavy-node"
+        node_infos[0].cpu_capacity_cores = 16.0
+        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
+        # Low CPU: 300m / 16000m = ~2%
+        # High memory: 54 GiB / 64 GiB = ~84%
+        metrics = [
+            _make_metric(
+                pod_name="mem-pod",
+                node="mem-heavy-node",
+                cpu_usage_millicores=300,
+                memory_usage_bytes=54 * 1024**3,
+            ),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        assert len(node_recs) == 0, "Node with high memory usage must not be flagged as overprovisioned"
+
+    def test_overprovisioned_when_both_cpu_and_memory_are_low(self, recommender):
+        """Node with low CPU AND low memory must be flagged, with both metrics in the description."""
+        node_infos = [MagicMock()]
+        node_infos[0].name = "idle-node"
+        node_infos[0].cpu_capacity_cores = 16.0
+        node_infos[0].memory_capacity_bytes = 64 * 1024**3  # 64 GiB
+        # Low CPU: 200m / 16000m = ~1%
+        # Low memory: 2 GiB / 64 GiB = ~3%
+        metrics = [
+            _make_metric(
+                pod_name="tiny-pod",
+                node="idle-node",
+                cpu_usage_millicores=200,
+                memory_usage_bytes=2 * 1024**3,
+            ),
+        ]
+        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        assert len(node_recs) == 1
+        assert node_recs[0].target_node == "idle-node"
+        assert "memory" in node_recs[0].description.lower(), "Description must mention memory utilization"
+
 
 # ---------------------------------------------------------------------------
 # Test: UNDERUTILIZED_NODE
