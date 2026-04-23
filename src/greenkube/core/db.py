@@ -270,8 +270,8 @@ class DatabaseManager:
             await self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS recommendation_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pod_name TEXT NOT NULL,
-                    namespace TEXT NOT NULL,
+                    pod_name TEXT,
+                    namespace TEXT,
                     type TEXT NOT NULL,
                     description TEXT NOT NULL,
                     reason TEXT,
@@ -454,8 +454,8 @@ class DatabaseManager:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS recommendation_history (
                     id SERIAL PRIMARY KEY,
-                    pod_name TEXT NOT NULL,
-                    namespace TEXT NOT NULL,
+                    pod_name TEXT,
+                    namespace TEXT,
                     type TEXT NOT NULL,
                     description TEXT NOT NULL,
                     reason TEXT,
