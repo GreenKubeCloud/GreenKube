@@ -47,7 +47,7 @@ jobs:
           ruff format --check .
 
       - name: Run tests with pytest
-        run: pytest --cov=greenkube --cov-report=term-missing --cov-report=json
+        run: pytest --cov=greenkube --cov-report=term-missing --cov-report=json --tb=short --no-header --color=no 2>&1 | tee pytest_output.txt; exit ${PIPESTATUS[0]}
 
       - name: Update README badges
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
@@ -55,8 +55,8 @@ jobs:
           # Extract total coverage percentage from coverage.json
           COV=$(python -c "import json; d=json.load(open('coverage.json')); print(int(d['totals']['percent_covered_display'].rstrip('%')))")
 
-          # Extract total test count from pytest exit (re-run with --tb=no -q to count)
-          TEST_COUNT=$(pytest --tb=no -q 2>&1 | grep -oP '^\d+(?= passed)' || echo "0")
+          # Extract total test count from saved pytest output
+          TEST_COUNT=$(python -c "import re; txt=open('pytest_output.txt').read(); m=re.search(r'(\d+) passed', txt); print(m.group(1) if m else '0')")
 
           # Determine badge colour by coverage level
           if   [ "$COV" -ge 90 ]; then COLOR="brightgreen"
