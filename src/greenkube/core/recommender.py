@@ -47,6 +47,8 @@ class Recommender:
         self.default_instance_min_watts = cfg.DEFAULT_INSTANCE_MIN_WATTS
         self.default_instance_max_watts = cfg.DEFAULT_INSTANCE_MAX_WATTS
         self.default_instance_vcores = cfg.DEFAULT_INSTANCE_VCORES
+        self.min_cpu_millicores = cfg.RECOMMENDATION_MIN_CPU_MILLICORES
+        self.min_memory_bytes = cfg.RECOMMENDATION_MIN_MEMORY_BYTES
 
     def generate_recommendations(
         self,
@@ -81,7 +83,8 @@ class Recommender:
         recs.extend(self._analyze_carbon_aware(metrics))
         recs.extend(self._analyze_nodes(metrics, node_infos))
 
-        return self._deduplicate(recs)
+        deduped = self._deduplicate(recs)
+        return [self._apply_minimum_thresholds(r) for r in deduped]
 
     # ------------------------------------------------------------------
     # Legacy API compatibility
@@ -131,6 +134,50 @@ class Recommender:
                 seen.add(key)
                 result.append(rec)
         return result
+
+    def _apply_minimum_thresholds(self, rec: Recommendation) -> Recommendation:
+        """Clamps recommended resource values to configured minimum thresholds.
+
+        Ensures that no recommendation asks for an impractically small resource
+        request (e.g. 3m CPU). The description is updated to mention the floor
+        when clamping occurs.
+
+        Args:
+            rec: The recommendation to validate and possibly clamp.
+
+        Returns:
+            The recommendation with values floored to configured minimums.
+        """
+        updates: dict = {}
+
+        if (
+            rec.recommended_cpu_request_millicores is not None
+            and rec.recommended_cpu_request_millicores < self.min_cpu_millicores
+        ):
+            updates["recommended_cpu_request_millicores"] = self.min_cpu_millicores
+            updates["description"] = rec.description + f" (Floored to minimum: {self.min_cpu_millicores}m CPU.)"
+            updates["reason"] = rec.reason + (
+                f" Recommended value was below the minimum of {self.min_cpu_millicores}m; "
+                "floored to avoid impractically small requests."
+            )
+
+        if (
+            rec.recommended_memory_request_bytes is not None
+            and rec.recommended_memory_request_bytes < self.min_memory_bytes
+        ):
+            mb = self.min_memory_bytes // (1024 * 1024)
+            updates["recommended_memory_request_bytes"] = self.min_memory_bytes
+            desc = updates.get("description", rec.description)
+            updates["description"] = desc + f" (Floored to minimum: {mb}MiB memory.)"
+            reason = updates.get("reason", rec.reason)
+            updates["reason"] = reason + (
+                f" Recommended memory was below the minimum of {mb}MiB; floored to avoid impractically small requests."
+            )
+
+        if updates:
+            rec = rec.model_copy(update=updates)
+
+        return rec
 
     # ------------------------------------------------------------------
     # ZOMBIE_POD
@@ -606,18 +653,27 @@ class Recommender:
             return recs
 
         node_capacity: Dict[str, float] = {}
+        node_mem_capacity: Dict[str, int] = {}
         for ni in node_infos:
             if hasattr(ni, "name") and hasattr(ni, "cpu_capacity_cores"):
                 node_capacity[ni.name] = ni.cpu_capacity_cores or 0
+            if hasattr(ni, "name") and hasattr(ni, "memory_capacity_bytes"):
+                mem_cap = ni.memory_capacity_bytes
+                if isinstance(mem_cap, (int, float)) and mem_cap > 0:
+                    node_mem_capacity[ni.name] = int(mem_cap)
 
-        # Group pod CPU usage per node per timestamp, so we can sum across pods
+        # Group pod CPU and memory usage per node per timestamp, so we can sum across pods
         node_usage_by_ts: Dict[str, Dict] = defaultdict(lambda: defaultdict(float))
+        node_mem_usage_by_ts: Dict[str, Dict] = defaultdict(lambda: defaultdict(float))
         node_pods: Dict[str, set] = defaultdict(set)
 
         for m in metrics:
-            if m.node and m.cpu_usage_millicores is not None:
+            if m.node:
                 ts_key = m.timestamp if m.timestamp is not None else 0
-                node_usage_by_ts[m.node][ts_key] += m.cpu_usage_millicores
+                if m.cpu_usage_millicores is not None:
+                    node_usage_by_ts[m.node][ts_key] += m.cpu_usage_millicores
+                if m.memory_usage_bytes is not None:
+                    node_mem_usage_by_ts[m.node][ts_key] += m.memory_usage_bytes
                 node_pods[m.node].add(m.pod_name)
 
         for node_name, capacity_cores in node_capacity.items():
@@ -630,22 +686,41 @@ class Recommender:
 
             capacity_millicores = capacity_cores * 1000
             avg_total_usage = sum(ts_totals) / len(ts_totals)
-            utilization = avg_total_usage / capacity_millicores
+            cpu_utilization = avg_total_usage / capacity_millicores
             unique_pods = len(node_pods.get(node_name, set()))
 
-            # OVERPROVISIONED_NODE
-            if utilization < self.node_utilization_threshold:
+            # Compute memory utilization if capacity is available
+            mem_capacity = node_mem_capacity.get(node_name)
+            mem_utilization: Optional[float] = None
+            avg_mem_usage: float = 0.0
+            if mem_capacity:
+                mem_ts_totals = list(node_mem_usage_by_ts.get(node_name, {}).values())
+                if mem_ts_totals:
+                    avg_mem_usage = sum(mem_ts_totals) / len(mem_ts_totals)
+                    mem_utilization = avg_mem_usage / mem_capacity
+
+            # OVERPROVISIONED_NODE: both CPU and memory (when available) must be low
+            cpu_is_low = cpu_utilization < self.node_utilization_threshold
+            mem_is_low = mem_utilization is None or mem_utilization < self.node_utilization_threshold
+
+            if cpu_is_low and mem_is_low:
+                mem_detail = (
+                    f", memory {mem_utilization:.0%} ({avg_mem_usage / (1024**3):.1f} GiB / "
+                    f"{mem_capacity / (1024**3):.1f} GiB)"
+                    if mem_utilization is not None
+                    else ""
+                )
                 recs.append(
                     Recommendation(
                         type=RecommendationType.OVERPROVISIONED_NODE,
                         scope="node",
                         description=(
-                            f"Node '{node_name}' has {utilization:.0%} average CPU utilization "
-                            f"({avg_total_usage:.0f}m / {capacity_millicores:.0f}m). "
+                            f"Node '{node_name}' has {cpu_utilization:.0%} average CPU utilization "
+                            f"({avg_total_usage:.0f}m / {capacity_millicores:.0f}m){mem_detail}. "
                             f"Consider consolidating workloads or downsizing."
                         ),
                         reason=(
-                            f"Node utilization ({utilization:.0%}) is below "
+                            f"Node CPU utilization ({cpu_utilization:.0%}) is below "
                             f"threshold ({self.node_utilization_threshold:.0%})."
                         ),
                         priority="medium",
@@ -654,16 +729,18 @@ class Recommender:
                 )
 
             # UNDERUTILIZED_NODE: few pods + low utilization
-            if unique_pods < 3 and utilization < 0.15:
+            if unique_pods < 3 and cpu_utilization < 0.15:
                 recs.append(
                     Recommendation(
                         type=RecommendationType.UNDERUTILIZED_NODE,
                         scope="node",
                         description=(
                             f"Node '{node_name}' has only {unique_pods} pod(s) and "
-                            f"{utilization:.0%} utilization. Consider draining and removing."
+                            f"{cpu_utilization:.0%} CPU utilization. Consider draining and removing."
                         ),
-                        reason=(f"Node has {unique_pods} pods (< 3) and {utilization:.0%} utilization (< 15%)."),
+                        reason=(
+                            f"Node has {unique_pods} pods (< 3) and {cpu_utilization:.0%} CPU utilization (< 15%)."
+                        ),
                         priority="low",
                         target_node=node_name,
                     )

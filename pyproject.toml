@@ -91,6 +91,7 @@ test = [
     "pytest-asyncio",
     "pytest>=7.0",
     "pytest-mock",
+    "pytest-cov",
 ]
 dev = [
     "pre-commit", 
@@ -146,3 +147,18 @@ select = ["E", "F", "W", "I", "G"] # Basic rules + flake8-logging-format (lazy %
 [tool.ruff.lint.per-file-ignores]
 # Allow f-string logging in data loaders (one-time startup, not perf-sensitive)
 "src/greenkube/data/*.py" = ["G"]
+
+[tool.coverage.run]
+# Use the package name so coverage works both locally (editable install)
+# and in CI (regular install into site-packages).
+source = ["greenkube"]
+omit = [
+    "*/greenkube/demo/*",
+    "*/greenkube/data/*",
+]
+
+[tool.coverage.report]
+# Fail if total coverage drops below this percentage
+fail_under = 70
+show_missing = true
+skip_covered = false
