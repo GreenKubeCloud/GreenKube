@@ -171,6 +171,22 @@ def get_recommendation_repository() -> RecommendationRepository:
 
 
 @lru_cache(maxsize=1)
+def get_savings_ledger_repository():
+    """Factory for the SavingsLedgerRepository singleton."""
+    from ..core.db import get_db_manager as _get_db
+
+    cfg = get_config()
+    if cfg.DB_TYPE == "postgres":
+        from ..storage.postgres.savings_repository import PostgresSavingsLedgerRepository
+
+        return PostgresSavingsLedgerRepository(_get_db())
+    else:
+        from ..storage.sqlite.savings_repository import SQLiteSavingsLedgerRepository
+
+        return SQLiteSavingsLedgerRepository(_get_db())
+
+
+@lru_cache(maxsize=1)
 def get_summary_repository() -> SummaryRepository:
     """Factory function to get the pre-computed summary repository.
 
@@ -288,6 +304,7 @@ def clear_caches():
     get_node_repository.cache_clear()
     get_embodied_repository.cache_clear()
     get_recommendation_repository.cache_clear()
+    get_savings_ledger_repository.cache_clear()
     get_summary_repository.cache_clear()
     get_timeseries_cache_repository.cache_clear()
     get_processor.cache_clear()

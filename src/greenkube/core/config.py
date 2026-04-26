@@ -39,7 +39,7 @@ class Config:
         self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
 
         # --- Cluster identification ---
-        self.CLUSTER_NAME = os.getenv("CLUSTER_NAME", "")
+        self.CLUSTER_NAME = os.getenv("CLUSTER_NAME", "") or self._auto_detect_cluster_name()
 
         # --- Default variables ---
         self.DEFAULT_COST = 0.0
@@ -181,6 +181,63 @@ class Config:
             return __version__
         except Exception:
             return "0.0.0"
+
+    @staticmethod
+    def _auto_detect_cluster_name() -> str:
+        """Auto-detect the cluster name without requiring extra dependencies.
+
+        Detection order:
+        1. ``K8S_NODE_NAME`` env var (injected via the Helm Downward API).
+           For single-node clusters (minikube, kind, k3s) the node name equals
+           the cluster name, which is the most readable identifier.
+        2. Well-known cloud-provider node labels via the Kubernetes Python client
+           (only attempted when the ``kubernetes`` package is available).
+        3. Hard fallback: ``"default"``.
+
+        Never raises — detection failures are logged at DEBUG level.
+        """
+        logger = logging.getLogger(__name__)
+
+        # Fast path: Downward API env var injected by the Helm chart.
+        node_name = os.getenv("K8S_NODE_NAME", "")
+        if node_name:
+            logger.debug("Auto-detected cluster name from K8S_NODE_NAME: %s", node_name)
+            return node_name
+
+        # Slow path: use the Kubernetes Python client when available.
+        try:
+            from kubernetes import client as k8s_client
+            from kubernetes import config as k8s_config
+
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                k8s_config.load_kube_config()
+
+            v1 = k8s_client.CoreV1Api()
+            nodes = v1.list_node(limit=1, _request_timeout=5)
+            if nodes.items:
+                node = nodes.items[0]
+                labels = node.metadata.labels or {}
+                for label in [
+                    "alpha.eksctl.io/cluster-name",
+                    "eks.amazonaws.com/cluster-name",
+                    "cluster.x-k8s.io/cluster-name",
+                    "cloud.google.com/gke-cluster-name",
+                    "aks.azure.com/cluster-name",
+                    "minikube.k8s.io/name",
+                ]:
+                    if labels.get(label):
+                        logger.debug("Auto-detected cluster name from label %s: %s", label, labels[label])
+                        return labels[label]
+                name = node.metadata.name
+                if name:
+                    logger.debug("Auto-detected cluster name from first node name: %s", name)
+                    return name
+        except Exception as exc:
+            logger.debug("Could not auto-detect cluster name via k8s client: %s", exc)
+
+        return "default"
 
     @staticmethod
     def _get_secret(key: str, default: str = None) -> str:

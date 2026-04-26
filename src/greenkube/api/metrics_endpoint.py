@@ -18,7 +18,7 @@ from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
 from greenkube.core.sustainability_score import SustainabilityScorer
-from greenkube.models.metrics import CombinedMetric, Recommendation
+from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationRecord
 from greenkube.models.node import NodeInfo
 
 logger = logging.getLogger(__name__)
@@ -291,21 +291,128 @@ NODE_INFO = Gauge(
 RECOMMENDATION_COUNT = Gauge(
     "greenkube_recommendations_total",
     "Number of active recommendations by type and priority",
-    ["type", "priority"],
+    ["cluster", "type", "priority"],
     registry=REGISTRY,
 )
 RECOMMENDATION_SAVINGS_COST = Gauge(
     "greenkube_recommendations_savings_cost_dollars",
     "Total potential cost savings from recommendations by type",
-    ["type"],
+    ["cluster", "type"],
     registry=REGISTRY,
 )
 RECOMMENDATION_SAVINGS_CO2 = Gauge(
     "greenkube_recommendations_savings_co2e_grams",
     "Total potential CO2e savings from recommendations by type",
-    ["type"],
+    ["cluster", "type"],
     registry=REGISTRY,
 )
+
+
+# ---------------------------------------------------------------------------
+# Per-namespace recommendation savings gauges
+# ---------------------------------------------------------------------------
+NS_REC_SAVINGS_CO2 = Gauge(
+    "greenkube_namespace_recommendation_savings_co2e_grams_total",
+    "Total potential CO2e savings from active recommendations targeting this namespace",
+    ["cluster", "namespace"],
+    registry=REGISTRY,
+)
+NS_REC_SAVINGS_COST = Gauge(
+    "greenkube_namespace_recommendation_savings_cost_dollars_total",
+    "Total potential cost savings from active recommendations targeting this namespace",
+    ["cluster", "namespace"],
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Realized savings gauges (DB-backed cumulative totals — window-aware)
+#
+# These gauges hold the CUMULATIVE total savings attributed to each
+# recommendation type since GreenKube installation.  Because Prometheus
+# stores all scraped values as a time-series, Grafana can use
+#   increase(greenkube_co2e_savings_attributed_grams_total[$__range])
+# to display the actual savings for any selected time window.
+# ---------------------------------------------------------------------------
+SAVINGS_CO2_ATTRIBUTED = Gauge(
+    "greenkube_co2e_savings_attributed_grams_total",
+    "Cumulative CO2e (grams) avoided, prorated from applied recommendations. "
+    "Use increase($__range) in Grafana to get window-level savings.",
+    ["cluster", "recommendation_type"],
+    registry=REGISTRY,
+)
+SAVINGS_COST_ATTRIBUTED = Gauge(
+    "greenkube_cost_savings_attributed_dollars_total",
+    "Cumulative cloud cost (dollars) avoided, prorated from applied recommendations. "
+    "Use increase($__range) in Grafana to get window-level savings.",
+    ["cluster", "recommendation_type"],
+    registry=REGISTRY,
+)
+# Legacy gauges kept for backward compatibility — show the total annual
+# projection from applied recommendations (not window-aware).
+CLUSTER_CO2_SAVED = Gauge(
+    "greenkube_cluster_co2e_saved_grams_total",
+    "Annual projected CO2e savings (grams/year) from all applied recommendations.",
+    ["cluster"],
+    registry=REGISTRY,
+)
+CLUSTER_COST_SAVED = Gauge(
+    "greenkube_cluster_cost_saved_dollars_total",
+    "Annual projected cost savings (dollars/year) from all applied recommendations.",
+    ["cluster"],
+    registry=REGISTRY,
+)
+RECOMMENDATIONS_IMPLEMENTED = Gauge(
+    "greenkube_recommendations_implemented_total",
+    "Number of recommendations marked as applied, by recommendation type",
+    ["cluster", "type"],
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Pod efficiency ratios
+# ---------------------------------------------------------------------------
+POD_CPU_EFFICIENCY = Gauge(
+    "greenkube_pod_cpu_efficiency_ratio",
+    "CPU usage / CPU request ratio per pod (0.0–1.0, capped). Low values indicate overprovisioning.",
+    POD_LABELS,
+    registry=REGISTRY,
+)
+POD_MEMORY_EFFICIENCY = Gauge(
+    "greenkube_pod_memory_efficiency_ratio",
+    "Memory usage / memory request ratio per pod (0.0–1.0, capped). Low values indicate overprovisioning.",
+    POD_LABELS,
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Pod stability gauge
+# ---------------------------------------------------------------------------
+POD_RESTART_COUNT = Gauge(
+    "greenkube_pod_restart_count",
+    "Total container restart count for the pod",
+    POD_LABELS,
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Node allocation gauges (sum of pod requests per node)
+# ---------------------------------------------------------------------------
+NODE_CPU_ALLOCATED = Gauge(
+    "greenkube_node_cpu_allocated_millicores",
+    "Sum of CPU requests (millicores) of all pods scheduled on the node",
+    NODE_LABELS,
+    registry=REGISTRY,
+)
+NODE_MEMORY_ALLOCATED = Gauge(
+    "greenkube_node_memory_allocated_bytes",
+    "Sum of memory requests (bytes) of all pods scheduled on the node",
+    NODE_LABELS,
+    registry=REGISTRY,
+)
+
+# Module-level cache: populated by update_cluster_metrics(), consumed by update_node_metrics()
+_node_cpu_allocated: dict[str, int] = {}
+_node_memory_allocated: dict[str, int] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +449,9 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         POD_DISK_WRITE,
         POD_PUE,
         POD_GRID_INTENSITY,
+        POD_RESTART_COUNT,
+        POD_CPU_EFFICIENCY,
+        POD_MEMORY_EFFICIENCY,
         NS_CO2_TOTAL,
         NS_EMBODIED_CO2_TOTAL,
         NS_COST_TOTAL,
@@ -365,6 +475,8 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         GREENKUBE_METRICS_TOTAL.set(0)
         CARBON_INTENSITY_SCORE.labels(cluster=cluster).set(0)
         SUSTAINABILITY_SCORE.labels(cluster=cluster).set(50)
+        _node_cpu_allocated.clear()
+        _node_memory_allocated.clear()
         return
 
     # Namespace aggregations
@@ -373,6 +485,10 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     ns_cost: dict[str, float] = defaultdict(float)
     ns_energy: dict[str, float] = defaultdict(float)
     ns_pods: dict[str, set] = defaultdict(set)
+
+    # Node allocation aggregations
+    node_cpu_alloc: dict[str, int] = defaultdict(int)
+    node_mem_alloc: dict[str, int] = defaultdict(int)
 
     # For sustainability golden signal: energy-weighted intensity
     total_weighted_intensity = 0.0
@@ -404,6 +520,21 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         POD_PUE.labels(**labels).set(m.pue)
         POD_GRID_INTENSITY.labels(**labels).set(m.grid_intensity)
 
+        # Restart count
+        if m.restart_count is not None:
+            POD_RESTART_COUNT.labels(**labels).set(m.restart_count)
+
+        # Efficiency ratios (cpu_usage / cpu_request, memory_usage / memory_request)
+        if m.cpu_request and m.cpu_request > 0 and m.cpu_usage_millicores is not None:
+            POD_CPU_EFFICIENCY.labels(**labels).set(min(1.0, m.cpu_usage_millicores / m.cpu_request))
+        if m.memory_request and m.memory_request > 0 and m.memory_usage_bytes is not None:
+            POD_MEMORY_EFFICIENCY.labels(**labels).set(min(1.0, m.memory_usage_bytes / m.memory_request))
+
+        # Node allocation accumulation
+        node_key = m.node or "unknown"
+        node_cpu_alloc[node_key] += m.cpu_request
+        node_mem_alloc[node_key] += m.memory_request
+
         # Accumulate namespace totals
         ns = m.namespace
         ns_co2[ns] += m.co2e_grams
@@ -428,6 +559,12 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         NS_COST_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_cost[ns])
         NS_ENERGY_TOTAL.labels(cluster=cluster, namespace=ns).set(ns_energy[ns])
         NS_POD_COUNT.labels(cluster=cluster, namespace=ns).set(len(ns_pods[ns]))
+
+    # Publish node allocation maps for update_node_metrics() to consume
+    _node_cpu_allocated.clear()
+    _node_cpu_allocated.update(node_cpu_alloc)
+    _node_memory_allocated.clear()
+    _node_memory_allocated.update(node_mem_alloc)
 
     # Cluster totals
     CLUSTER_CO2_TOTAL.labels(cluster=cluster).set(sum(ns_co2.values()))
@@ -470,7 +607,14 @@ def update_node_metrics(nodes: List[NodeInfo]) -> None:
     Args:
         nodes: The latest list of NodeInfo objects.
     """
-    for g in (NODE_CPU_CAPACITY, NODE_MEMORY_CAPACITY, NODE_EMBODIED, NODE_INFO):
+    for g in (
+        NODE_CPU_CAPACITY,
+        NODE_MEMORY_CAPACITY,
+        NODE_EMBODIED,
+        NODE_INFO,
+        NODE_CPU_ALLOCATED,
+        NODE_MEMORY_ALLOCATED,
+    ):
         _clear_gauge(g)
 
     for node in nodes:
@@ -490,6 +634,12 @@ def update_node_metrics(nodes: List[NodeInfo]) -> None:
         if node.embodied_emissions_kg is not None:
             NODE_EMBODIED.labels(**labels).set(node.embodied_emissions_kg)
 
+        # Pod allocation totals (populated by the most recent update_cluster_metrics call)
+        if node.name in _node_cpu_allocated:
+            NODE_CPU_ALLOCATED.labels(**labels).set(_node_cpu_allocated[node.name])
+        if node.name in _node_memory_allocated:
+            NODE_MEMORY_ALLOCATED.labels(**labels).set(_node_memory_allocated[node.name])
+
     logger.debug("Updated Prometheus node metrics with %d nodes.", len(nodes))
 
 
@@ -504,30 +654,116 @@ def update_recommendation_metrics(recommendations: List[Recommendation]) -> None
     _clear_gauge(RECOMMENDATION_COUNT)
     _clear_gauge(RECOMMENDATION_SAVINGS_COST)
     _clear_gauge(RECOMMENDATION_SAVINGS_CO2)
+    _clear_gauge(NS_REC_SAVINGS_CO2)
+    _clear_gauge(NS_REC_SAVINGS_COST)
 
     if not recommendations:
         return
 
+    cluster = _get_cluster_name()
     count_by_type_priority: dict[tuple[str, str], int] = defaultdict(int)
     savings_cost_by_type: dict[str, float] = defaultdict(float)
     savings_co2_by_type: dict[str, float] = defaultdict(float)
+    ns_savings_co2: dict[str, float] = defaultdict(float)
+    ns_savings_cost: dict[str, float] = defaultdict(float)
 
     for rec in recommendations:
         rec_type = rec.type.value if hasattr(rec.type, "value") else str(rec.type)
         count_by_type_priority[(rec_type, rec.priority)] += 1
         savings_cost_by_type[rec_type] += rec.potential_savings_cost or 0.0
         savings_co2_by_type[rec_type] += rec.potential_savings_co2e_grams or 0.0
+        ns = getattr(rec, "namespace", None) or "_cluster"
+        ns_savings_co2[ns] += rec.potential_savings_co2e_grams or 0.0
+        ns_savings_cost[ns] += rec.potential_savings_cost or 0.0
 
     for (rec_type, priority), count in count_by_type_priority.items():
-        RECOMMENDATION_COUNT.labels(type=rec_type, priority=priority).set(count)
+        RECOMMENDATION_COUNT.labels(cluster=cluster, type=rec_type, priority=priority).set(count)
 
     for rec_type, cost in savings_cost_by_type.items():
-        RECOMMENDATION_SAVINGS_COST.labels(type=rec_type).set(cost)
+        RECOMMENDATION_SAVINGS_COST.labels(cluster=cluster, type=rec_type).set(cost)
 
     for rec_type, co2 in savings_co2_by_type.items():
-        RECOMMENDATION_SAVINGS_CO2.labels(type=rec_type).set(co2)
+        RECOMMENDATION_SAVINGS_CO2.labels(cluster=cluster, type=rec_type).set(co2)
+
+    for ns, co2 in ns_savings_co2.items():
+        NS_REC_SAVINGS_CO2.labels(cluster=cluster, namespace=ns).set(co2)
+
+    for ns, cost in ns_savings_cost.items():
+        NS_REC_SAVINGS_COST.labels(cluster=cluster, namespace=ns).set(cost)
 
     logger.debug("Updated Prometheus metrics with %d recommendations.", len(recommendations))
+
+
+def update_attributed_savings_metrics(
+    cumulative_totals: dict,
+    cluster: str,
+) -> None:
+    """Update the DB-backed cumulative savings gauges.
+
+    Called by ``refresh_metrics_from_db`` with the output of
+    ``SavingsAttributor.get_cumulative_totals()``.
+
+    Args:
+        cumulative_totals: ``{rec_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
+        cluster:           Cluster name label value.
+    """
+    _clear_gauge(SAVINGS_CO2_ATTRIBUTED)
+    _clear_gauge(SAVINGS_COST_ATTRIBUTED)
+
+    if not cumulative_totals:
+        return
+
+    for rec_type, totals in cumulative_totals.items():
+        SAVINGS_CO2_ATTRIBUTED.labels(cluster=cluster, recommendation_type=rec_type).set(
+            totals.get("co2e_saved_grams", 0.0)
+        )
+        SAVINGS_COST_ATTRIBUTED.labels(cluster=cluster, recommendation_type=rec_type).set(
+            totals.get("cost_saved_dollars", 0.0)
+        )
+
+    logger.debug("Updated attributed savings gauges for cluster=%s: %d types.", cluster, len(cumulative_totals))
+
+
+def update_realized_savings_metrics(applied_records: List[RecommendationRecord]) -> None:
+    """Update Prometheus gauges for realized (already achieved) savings.
+
+    Reads applied recommendation records and exposes cumulative CO2e and cost
+    savings, plus a count of implemented recommendations by type.
+
+    Args:
+        applied_records: List of RecommendationRecord objects with status='applied'.
+    """
+    _clear_gauge(CLUSTER_CO2_SAVED)
+    _clear_gauge(CLUSTER_COST_SAVED)
+    _clear_gauge(RECOMMENDATIONS_IMPLEMENTED)
+
+    cluster = _get_cluster_name()
+
+    if not applied_records:
+        CLUSTER_CO2_SAVED.labels(cluster=cluster).set(0)
+        CLUSTER_COST_SAVED.labels(cluster=cluster).set(0)
+        return
+
+    total_co2_saved = sum(r.carbon_saved_co2e_grams or 0.0 for r in applied_records)
+    total_cost_saved = sum(r.cost_saved or 0.0 for r in applied_records)
+
+    CLUSTER_CO2_SAVED.labels(cluster=cluster).set(total_co2_saved)
+    CLUSTER_COST_SAVED.labels(cluster=cluster).set(total_cost_saved)
+
+    implemented_by_type: dict[str, int] = defaultdict(int)
+    for r in applied_records:
+        rec_type = r.type.value if hasattr(r.type, "value") else str(r.type)
+        implemented_by_type[rec_type] += 1
+
+    for rec_type, count in implemented_by_type.items():
+        RECOMMENDATIONS_IMPLEMENTED.labels(cluster=cluster, type=rec_type).set(count)
+
+    logger.debug(
+        "Updated realized savings metrics: %.2f g CO2e saved, $%.2f saved, %d recommendations applied.",
+        total_co2_saved,
+        total_cost_saved,
+        len(applied_records),
+    )
 
 
 def get_metrics_output() -> bytes:
@@ -539,7 +775,7 @@ def get_metrics_output() -> bytes:
     return generate_latest(REGISTRY)
 
 
-async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo) -> None:
+async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_repo=None) -> None:
     """Read the latest metrics from the database and refresh all Prometheus gauges.
 
     This is the critical bridge between the scheduler container (which writes
@@ -588,15 +824,28 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo) -> None:
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh node metrics: %s", exc)
 
-    # --- Recommendation metrics ---
+    # --- Recommendation metrics (all active, no time filter) ---
     try:
-        # Fetch the last 24h of recommendations
-        start_reco = now - timedelta(hours=24)
-        records = await reco_repo.get_recommendations(start=start_reco, end=now)
-        if records:
-            # RecommendationRecord has the same .type, .priority,
-            # .potential_savings_cost, .potential_savings_co2e_grams that
-            # update_recommendation_metrics() reads, so we can pass them directly.
-            update_recommendation_metrics(records)  # type: ignore[arg-type]
+        active_recs = await reco_repo.get_active_recommendations()
+        update_recommendation_metrics(active_recs)  # type: ignore[arg-type]
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh recommendation metrics: %s", exc)
+
+    # --- Realized savings metrics (applied recommendations, all time) ---
+    try:
+        applied = await reco_repo.get_applied_recommendations()
+        update_realized_savings_metrics(applied)
+    except Exception as exc:
+        logger.warning("refresh_metrics_from_db: failed to refresh realized savings metrics: %s", exc)
+
+    # --- Window-aware attributed savings (DB-backed cumulative totals) ---
+    if savings_repo is not None:
+        try:
+            from ..core.savings_attributor import SavingsAttributor
+
+            cluster = _get_cluster_name()
+            attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
+            totals = await attributor.get_cumulative_totals()
+            update_attributed_savings_metrics(totals, cluster=cluster)
+        except Exception as exc:
+            logger.warning("refresh_metrics_from_db: failed to refresh attributed savings metrics: %s", exc)

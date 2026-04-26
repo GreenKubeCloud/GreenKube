@@ -57,18 +57,12 @@
       "id": "gauge",
       "name": "Gauge",
       "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "state-timeline",
-      "name": "State timeline",
-      "version": ""
     }
   ],
   "id": null,
   "uid": "greenkube-fingreenops",
   "title": "GreenKube FinGreenOps Dashboard",
-  "description": "Comprehensive FinGreenOps dashboard for Kubernetes \u2014 CO2 emissions, cloud costs, energy, CPU/memory, network, nodes, grid intensity, and optimization recommendations.",
+  "description": "FinGreenOps dashboard for Kubernetes — sustainability score, CO₂ emissions (Scope 2 & 3), cloud costs, resource efficiency, node analysis, pod stability, recommendations, and realized savings.",
   "tags": [
     "greenkube",
     "fingreenops",
@@ -83,12 +77,12 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "time": {
-    "from": "now-6h",
+    "from": "now-7d",
     "to": "now"
   },
   "refresh": "5m",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "links": [
     {
       "title": "GreenKube Docs",
@@ -103,475 +97,150 @@
       {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
+        "pluginId": "prometheus",
         "query": "prometheus",
-        "current": {},
+        "label": "Prometheus",
         "hide": 0,
-        "includeAll": false,
-        "multi": false,
-        "options": [],
         "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "label": "Prometheus"
+        "current": {
+          "text": "prometheus",
+          "value": "P1809F7CD0C75ACF3"
+        }
       },
       {
         "name": "cluster",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
+          "type": "datasource",
           "uid": "${DS_PROMETHEUS}"
         },
+        "label": "Cluster",
         "query": "label_values(greenkube_cluster_co2e_grams_total, cluster)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
         "current": {
-          "selected": true,
           "text": "All",
           "value": "$__all"
-        },
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "options": [],
-        "refresh": 2,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "label": "Cluster"
-      },
-      {
-        "name": "region",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "query": "label_values(greenkube_pod_co2e_grams, region)",
-        "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
-        },
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "options": [],
-        "refresh": 2,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "label": "Region"
+        }
       },
       {
         "name": "namespace",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
+          "type": "datasource",
           "uid": "${DS_PROMETHEUS}"
         },
-        "query": "label_values(greenkube_namespace_co2e_grams_total, namespace)",
+        "label": "Namespace",
+        "query": "label_values(greenkube_namespace_co2e_grams_total{cluster=\"$cluster\"}, namespace)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
         "current": {
-          "selected": true,
           "text": "All",
           "value": "$__all"
-        },
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "options": [],
-        "refresh": 2,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "label": "Namespace"
+        }
       },
       {
         "name": "node",
         "type": "query",
         "datasource": {
-          "type": "prometheus",
+          "type": "datasource",
           "uid": "${DS_PROMETHEUS}"
         },
+        "label": "Node",
         "query": "label_values(greenkube_node_info, node)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
         "current": {
-          "selected": true,
           "text": "All",
           "value": "$__all"
+        }
+      },
+      {
+        "name": "region",
+        "type": "query",
+        "datasource": {
+          "type": "datasource",
+          "uid": "${DS_PROMETHEUS}"
         },
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "options": [],
+        "label": "Region",
+        "query": "label_values(greenkube_pod_co2e_grams, region)",
         "refresh": 2,
-        "regex": "",
-        "skipUrlSync": false,
         "sort": 1,
-        "label": "Node"
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
       }
     ]
   },
   "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
-      }
-    ]
+    "list": []
   },
   "panels": [
     {
+      "id": 100,
       "type": "row",
-      "title": "\ud83c\udfaf Sustainability Golden Signal",
+      "title": "Sustainability Command Center",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 0
+        "y": 0,
+        "w": 24,
+        "h": 1
       },
-      "id": 200,
       "panels": []
     },
     {
-      "type": "stat",
-      "title": "Carbon Intensity Score",
-      "description": "Energy-weighted average grid carbon intensity (gCO\u2082e/kWh). This is the Sustainability Golden Signal \u2014 lower is better. Green = clean grid, red = dirty grid.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 1
-      },
-      "id": 201,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "#73BF69",
-                "value": 50
-              },
-              {
-                "color": "yellow",
-                "value": 100
-              },
-              {
-                "color": "orange",
-                "value": 200
-              },
-              {
-                "color": "red",
-                "value": 300
-              },
-              {
-                "color": "dark-red",
-                "value": 500
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "displayName": "gCO\u2082e/kWh"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "greenkube_carbon_intensity_score{cluster=~\"$cluster\"}",
-          "legendFormat": "Intensity Score",
-          "refId": "A"
-        }
-      ]
-    },
-    {
+      "id": 101,
       "type": "gauge",
       "title": "Sustainability Score",
-      "description": "Comprehensive sustainability score (0\u2013100, higher is better). Aggregates resource efficiency, carbon intensity, waste elimination, node efficiency, scaling practices, carbon-aware scheduling, and stability.",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 12
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 6,
-        "w": 4,
-        "x": 6,
-        "y": 1
-      },
-      "id": 202,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "min": 0,
-          "max": 100,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "dark-red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 20
-              },
-              {
-                "color": "orange",
-                "value": 40
-              },
-              {
-                "color": "yellow",
-                "value": 60
-              },
-              {
-                "color": "#73BF69",
-                "value": 75
-              },
-              {
-                "color": "green",
-                "value": 90
-              }
-            ]
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
           },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "displayName": "Score"
-        },
-        "overrides": []
-      },
+          "expr": "avg(max by (cluster) (greenkube_sustainability_score{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+          ]
         },
         "orientation": "auto",
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "showThresholdLabels": false
       },
-      "targets": [
-        {
-          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
-          "legendFormat": "Score",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Carbon Intensity Score Timeline",
-      "description": "Track the sustainability golden signal over time. Identify low-intensity windows (green) ideal for scheduling batch workloads and carbon-aware scaling.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 14,
-        "x": 10,
-        "y": 1
-      },
-      "id": 203,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 30,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never",
-            "thresholdsStyle": {
-              "mode": "area"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 100
-              },
-              {
-                "color": "orange",
-                "value": 200
-              },
-              {
-                "color": "red",
-                "value": 300
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "displayName": "Score (gCO\u2082e/kWh)"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "min",
-            "max"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_carbon_intensity_score{cluster=~\"$cluster\"}",
-          "legendFormat": "Cluster Intensity Score",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Carbon Intensity by Zone Timeline",
-      "description": "Real-time carbon intensity per electricity zone. Highlights low-intensity windows across different regions for carbon-aware scheduling decisions.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 7
-      },
-      "id": 204,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never",
-            "thresholdsStyle": {
-              "mode": "dashed"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "transparent",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 300
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "displayName": "gCO\u2082e/kWh"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "mean",
-            "min",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_carbon_intensity_zone{cluster=~\"$cluster\"}",
-          "legendFormat": "{{ zone }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "bargauge",
-      "title": "Sustainability Dimensions",
-      "description": "Per-dimension sustainability scores (0\u2013100). Resource Efficiency, Carbon Efficiency (grid intensity \u00d7 PUE), Waste Elimination, Node Efficiency, Scaling Practices, Carbon-Aware Scheduling, Stability.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 14
-      },
-      "id": 205,
       "fieldConfig": {
         "defaults": {
           "unit": "none",
@@ -581,28 +250,16 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "dark-red",
-                "value": null
-              },
-              {
                 "color": "red",
-                "value": 20
+                "value": null
               },
               {
                 "color": "orange",
                 "value": 40
               },
               {
-                "color": "yellow",
-                "value": 60
-              },
-              {
-                "color": "#73BF69",
-                "value": 75
-              },
-              {
                 "color": "green",
-                "value": 90
+                "value": 70
               }
             ]
           },
@@ -612,179 +269,34 @@
         },
         "overrides": []
       },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "targets": [
-        {
-          "expr": "greenkube_sustainability_dimension_score{cluster=~\"$cluster\"}",
-          "legendFormat": "{{ dimension }}",
-          "refId": "A"
-        }
-      ]
+      "timeFrom": "5m"
     },
     {
-      "type": "timeseries",
-      "title": "Sustainability Score Timeline",
-      "description": "Track the overall sustainability score over time. Higher is better (100 = perfectly optimized cluster).",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 14
-      },
-      "id": 206,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "min": 0,
-          "max": 100,
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 30,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never",
-            "thresholdsStyle": {
-              "mode": "area"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "dark-red",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 20
-              },
-              {
-                "color": "orange",
-                "value": 40
-              },
-              {
-                "color": "yellow",
-                "value": 60
-              },
-              {
-                "color": "#73BF69",
-                "value": 75
-              },
-              {
-                "color": "green",
-                "value": 90
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "displayName": "Sustainability Score"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "min",
-            "max"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_sustainability_score{cluster=~\"$cluster\"}",
-          "legendFormat": "Score",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\ud83c\udf0d Cluster Overview",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 22
-      },
-      "id": 100,
-      "panels": []
-    },
-    {
+      "id": 102,
       "type": "stat",
-      "title": "Total CO2 Emissions (gCO\u2082e)",
-      "description": "Total operational carbon emissions across the entire cluster.",
+      "title": "Total CO₂e (Scope 2)",
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 7,
+        "h": 4
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 15
-      },
-      "id": 1,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "massg",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 100
-              },
-              {
-                "color": "orange",
-                "value": 500
-              },
-              {
-                "color": "red",
-                "value": 1000
-              }
-            ]
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
           },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
+          "expr": "sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -795,36 +307,15 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"})",
-          "legendFormat": "CO2e",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Embodied Carbon (gCO\u2082e)",
-      "description": "Total embodied carbon emissions from hardware manufacturing.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 15
-      },
-      "id": 2,
       "fieldConfig": {
         "defaults": {
-          "unit": "massg",
+          "unit": "g CO₂e",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -833,7 +324,139 @@
                 "value": null
               },
               {
-                "color": "yellow",
+                "color": "orange",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 200000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 103,
+      "type": "stat",
+      "title": "Total CO₂e (Scope 3 Embodied)",
+      "gridPos": {
+        "x": 11,
+        "y": 1,
+        "w": 7,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 200000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 104,
+      "type": "stat",
+      "title": "Total Cloud Cost",
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
                 "value": 50
               },
               {
@@ -841,14 +464,37 @@
                 "value": 200
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
+          }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 106,
+      "type": "stat",
+      "title": "CO₂e Avoided (selected window)",
+      "gridPos": {
+        "x": 4,
+        "y": 5,
+        "w": 7,
+        "h": 4
       },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(increase(greenkube_co2e_savings_attributed_grams_total{cluster=~\"$cluster\"}[$__range]))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -859,236 +505,58 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"})",
-          "legendFormat": "Embodied",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Total Cloud Cost ($)",
-      "description": "Total cloud cost across all pods.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 15
-      },
-      "id": 3,
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10
-              },
-              {
-                "color": "red",
-                "value": 100
-              }
-            ]
-          },
+          "unit": "g CO₂e",
           "color": {
             "mode": "thresholds"
           },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"})",
-          "legendFormat": "Cost",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Total Energy (Joules)",
-      "description": "Total energy consumption across all pods.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 15
-      },
-      "id": 4,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "joule",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10000
-              },
-              {
-                "color": "red",
-                "value": 100000
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_energy_joules_total{cluster=~\"$cluster\"})",
-          "legendFormat": "Energy",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Active Pods",
-      "description": "Number of unique pods currently tracked.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 15
-      },
-      "id": 5,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "blue",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
+          }
         },
         "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_pod_count{cluster=~\"$cluster\"})",
-          "legendFormat": "Pods",
-          "refId": "A"
-        }
-      ]
+      }
     },
     {
+      "id": 107,
       "type": "stat",
-      "title": "Active Namespaces",
-      "description": "Number of unique namespaces currently tracked.",
+      "title": "Cost Avoided (selected window)",
+      "gridPos": {
+        "x": 11,
+        "y": 5,
+        "w": 7,
+        "h": 4
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 15
-      },
-      "id": 6,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "purple",
-                "value": null
-              }
-            ]
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
           },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
+          "expr": "sum(increase(greenkube_cost_savings_attributed_dollars_total{cluster=~\"$cluster\"}[$__range]))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -1099,114 +567,58 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "targets": [
-        {
-          "expr": "sum(greenkube_cluster_namespace_count{cluster=~\"$cluster\"})",
-          "legendFormat": "Namespaces",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\ud83c\udf31 Carbon Emissions",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 19
-      },
-      "id": 101,
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "CO2 Emissions by Namespace (gCO\u2082e)",
-      "description": "Operational CO2e per namespace over time.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 20
-      },
-      "id": 10,
       "fieldConfig": {
         "defaults": {
-          "unit": "massg",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 20,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
+          "unit": "currencyUSD",
+          "color": {
+            "mode": "thresholds"
           },
-          "color": {
-            "mode": "palette-classic"
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 108,
+      "type": "stat",
+      "title": "Recommendations Implemented",
+      "gridPos": {
+        "x": 18,
+        "y": 5,
+        "w": 6,
+        "h": 4
       },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
-          "expr": "greenkube_namespace_co2e_grams_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false
         }
-      ]
-    },
-    {
-      "type": "piechart",
-      "title": "CO2 Distribution by Namespace",
-      "description": "Proportional CO2 contribution per namespace.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 20
-      },
-      "id": 11,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "massg",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -1215,498 +627,724 @@
           "fields": "",
           "values": false
         },
-        "pieType": "donut",
-        "tooltip": {
-          "mode": "single"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "percent",
-            "value"
-          ]
-        }
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_co2e_grams_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Embodied Carbon by Namespace (gCO\u2082e)",
-      "description": "Embodied CO2e per namespace.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 20
-      },
-      "id": 12,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "massg",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_embodied_co2e_grams_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "CO2 Emissions per Pod (Top 20)",
-      "description": "Top 20 highest CO2-emitting pods.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 28
-      },
-      "id": 13,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "massg",
-          "custom": {
-            "drawStyle": "bars",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 80,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(20, greenkube_pod_co2e_grams{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\ud83d\udcb0 Cloud Cost",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 36
-      },
-      "id": 102,
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Cost by Namespace ($)",
-      "description": "Cloud cost per namespace over time.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 37
-      },
-      "id": 20,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 20,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_cost_dollars_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "piechart",
-      "title": "Cost Distribution by Namespace",
-      "description": "Proportional cost contribution per namespace.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 37
-      },
-      "id": 21,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "pieType": "donut",
-        "tooltip": {
-          "mode": "single"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "percent",
-            "value"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_cost_dollars_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Cost per Pod (Top 20, $)",
-      "description": "Top 20 most expensive pods.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 37
-      },
-      "id": 22,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "bars",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 80,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(20, greenkube_pod_cost_dollars{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\u26a1 Energy Consumption",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 45
-      },
-      "id": 103,
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Energy by Namespace (Joules)",
-      "description": "Energy consumption per namespace over time.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 46
-      },
-      "id": 30,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "joule",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 20,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_energy_joules_total{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Grid Carbon Intensity (gCO\u2082/kWh)",
-      "description": "Real-time grid carbon intensity per pod/node.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 46
-      },
-      "id": 31,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 110,
+      "type": "stat",
+      "title": "Active Recommendations",
+      "gridPos": {
+        "x": 4,
+        "y": 9,
+        "w": 7,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 111,
+      "type": "stat",
+      "title": "Active Rec. Types",
+      "gridPos": {
+        "x": 11,
+        "y": 9,
+        "w": 7,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "count(max by (cluster, type) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 112,
+      "type": "stat",
+      "title": "#1 Namespace by CO₂e",
+      "gridPos": {
+        "x": 18,
+        "y": 9,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(1, sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{namespace}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 114,
+      "type": "bargauge",
+      "title": "Top 3 Namespaces — CO₂e",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sort_desc(topk(3, sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"})))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           }
         },
         "overrides": []
       },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 115,
+      "type": "bargauge",
+      "title": "Top 3 Namespaces — Cost",
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sort_desc(topk(3, sum by (namespace) (greenkube_namespace_cost_dollars_total{cluster=~\"$cluster\"})))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 116,
+      "type": "bargauge",
+      "title": "Top 3 Recommendation Types",
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(3, sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"})))",
+          "legendFormat": "{{type}}",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Carbon, Cost & Energy Trends",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 201,
+      "type": "timeseries",
+      "title": "CO₂e Over Time",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "cluster",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         },
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
+          "displayMode": "list",
+          "placement": "bottom"
         }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 202,
+      "type": "timeseries",
+      "title": "Cloud Cost Over Time",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
-          "expr": "greenkube_grid_intensity_gco2_kwh{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "cluster",
+          "refId": "A",
+          "range": true,
+          "instant": false
         }
-      ]
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
     },
     {
-      "type": "gauge",
-      "title": "PUE (Power Usage Effectiveness)",
-      "description": "Current PUE values across pods. Ideal PUE is 1.0.",
+      "id": 203,
+      "type": "timeseries",
+      "title": "Energy Over Time (kWh)",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 46
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_energy_joules_total{cluster=~\"$cluster\"})) / 3600000",
+          "legendFormat": "cluster",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
       },
-      "id": 32,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kWh",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 204,
+      "type": "timeseries",
+      "title": "Grid Carbon Intensity by Zone",
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg by (zone) (max by (cluster, zone) (greenkube_carbon_intensity_zone{cluster=~\"$cluster\"}))",
+          "legendFormat": "{{zone}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "gCO₂/kWh",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Sustainability Score Breakdown",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 301,
+      "type": "bargauge",
+      "title": "Score by Dimension",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg by (dimension) (max by (cluster, dimension) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\"}))",
+          "legendFormat": "{{dimension}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "min": 1,
-          "max": 3,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 1.4
-              },
-              {
                 "color": "orange",
-                "value": 1.8
+                "value": 40
               },
               {
-                "color": "red",
-                "value": 2.0
+                "color": "green",
+                "value": 70
               }
             ]
           },
@@ -1716,187 +1354,116 @@
         },
         "overrides": []
       },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 302,
+      "type": "timeseries",
+      "title": "Sustainability Score Over Time",
+      "gridPos": {
+        "x": 12,
+        "y": 37,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster) (greenkube_sustainability_score{cluster=~\"$cluster\"}))",
+          "legendFormat": "Average",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 303,
+      "type": "gauge",
+      "title": "Data Quality — Measured Coverage",
+      "gridPos": {
+        "x": 20,
+        "y": 37,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster) ((1 - greenkube_estimated_metrics_ratio{cluster=~\"$cluster\"}))) * 100",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
-            "mean"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "orientation": "auto"
-      },
-      "targets": [
-        {
-          "expr": "avg(greenkube_pue{namespace=~\"$namespace\"})",
-          "legendFormat": "Avg PUE",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\ud83d\udda5\ufe0f CPU & Memory Resources",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 54
-      },
-      "id": 104,
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "CPU Request vs Usage by Pod (millicores)",
-      "description": "Comparison of CPU requests vs actual usage.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 55
-      },
-      "id": 40,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
             "lastNotNull"
           ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(10, greenkube_pod_cpu_request_millicores{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ pod }} (request)",
-          "refId": "A"
         },
-        {
-          "expr": "topk(10, greenkube_pod_cpu_usage_millicores{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ pod }} (usage)",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Memory Request vs Usage by Pod (bytes)",
-      "description": "Comparison of memory requests vs actual usage.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "orientation": "auto",
+        "showThresholdLabels": false
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 55
-      },
-      "id": 41,
       "fieldConfig": {
         "defaults": {
-          "unit": "decbytes",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(10, greenkube_pod_memory_request_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ pod }} (request)",
-          "refId": "A"
-        },
-        {
-          "expr": "topk(10, greenkube_pod_memory_usage_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ pod }} (usage)",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "bargauge",
-      "title": "CPU Utilization Efficiency by Pod",
-      "description": "Ratio of CPU usage to request. Values close to 0 indicate waste.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 63
-      },
-      "id": 42,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
+          "unit": "percent",
           "min": 0,
-          "max": 1,
+          "max": 100,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1906,11 +1473,84 @@
               },
               {
                 "color": "orange",
-                "value": 0.2
+                "value": 50
               },
               {
-                "color": "yellow",
-                "value": 0.4
+                "color": "green",
+                "value": 80
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Resource Efficiency",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 401,
+      "type": "bargauge",
+      "title": "CPU Efficiency by Namespace",
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_pod_cpu_usage_millicores{cluster=~\"$cluster\", namespace=~\"$namespace\"}) / sum by (namespace) (greenkube_pod_cpu_request_millicores{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.3
               },
               {
                 "color": "green",
@@ -1924,46 +1564,68 @@
         },
         "overrides": []
       },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "targets": [
+      "transformations": [
         {
-          "expr": "greenkube_pod_cpu_usage_millicores{namespace=~\"$namespace\"} / greenkube_pod_cpu_request_millicores{namespace=~\"$namespace\"} > 0",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
         }
       ]
     },
     {
+      "id": 402,
       "type": "bargauge",
-      "title": "Memory Utilization Efficiency by Pod",
-      "description": "Ratio of memory usage to request. Values close to 0 indicate waste.",
+      "title": "Memory Efficiency by Namespace",
+      "gridPos": {
+        "x": 12,
+        "y": 46,
+        "w": 12,
+        "h": 8
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 63
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_pod_memory_usage_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"}) / sum by (namespace) (greenkube_pod_memory_request_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
       },
-      "id": 43,
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0,
-          "max": 1,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1973,11 +1635,7 @@
               },
               {
                 "color": "orange",
-                "value": 0.2
-              },
-              {
-                "color": "yellow",
-                "value": 0.4
+                "value": 0.3
               },
               {
                 "color": "green",
@@ -1991,537 +1649,825 @@
         },
         "overrides": []
       },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 403,
+      "type": "bargauge",
+      "title": "Top 20 Pods — CPU Efficiency Ratio (worst first)",
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sort_desc(max by (namespace, pod) (greenkube_pod_cpu_efficiency_ratio{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": [],
           "fields": "",
-          "values": false
+          "values": true
         },
         "orientation": "horizontal",
         "displayMode": "gradient",
-        "showUnfilled": true
+        "valueMode": "color"
       },
-      "targets": [
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
         {
-          "expr": "greenkube_pod_memory_usage_bytes{namespace=~\"$namespace\"} / greenkube_pod_memory_request_bytes{namespace=~\"$namespace\"} > 0",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
         }
       ]
     },
     {
+      "id": 404,
+      "type": "bargauge",
+      "title": "Top 20 Pods — Memory Efficiency Ratio (worst first)",
+      "gridPos": {
+        "x": 12,
+        "y": 54,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sort_desc(max by (namespace, pod) (greenkube_pod_memory_efficiency_ratio{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 500,
       "type": "row",
-      "title": "\ud83c\udf10 Network & Disk I/O",
+      "title": "Namespace Analysis",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 71
+        "y": 64,
+        "w": 24,
+        "h": 1
       },
-      "id": 105,
       "panels": []
     },
     {
-      "type": "timeseries",
-      "title": "Network Receive by Pod (bytes/s)",
-      "description": "Network receive rate per pod.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "id": 501,
+      "type": "piechart",
+      "title": "CO₂e by Namespace",
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 72
+        "y": 65,
+        "w": 8,
+        "h": 8
       },
-      "id": 50,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
-          "expr": "topk(10, greenkube_pod_network_receive_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Network Transmit by Pod (bytes/s)",
-      "description": "Network transmit rate per pod.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 72
-      },
-      "id": 51,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
           },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
+          "expr": "sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(10, greenkube_pod_network_transmit_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Disk Read by Pod (bytes/s)",
-      "description": "Disk read rate per pod.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 80
-      },
-      "id": 52,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(10, greenkube_pod_disk_read_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Disk Write by Pod (bytes/s)",
-      "description": "Disk write rate per pod.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 80
-      },
-      "id": 53,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "Bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "topk(10, greenkube_pod_disk_write_bytes{namespace=~\"$namespace\"})",
-          "legendFormat": "{{ namespace }}/{{ pod }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "\ud83d\udda7 Node Infrastructure",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 88
-      },
-      "id": 106,
-      "panels": []
-    },
-    {
-      "type": "table",
-      "title": "Node Inventory",
-      "description": "All Kubernetes nodes with instance type, capacity, zone, and embodied emissions.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 89
-      },
-      "id": 60,
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #CPU"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "CPU (millicores)"
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #MEM"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Memory"
-              },
-              {
-                "id": "unit",
-                "value": "decbytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #EMB"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Embodied CO2 (kg)"
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "node",
-            "desc": false
-          }
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
         ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 502,
+      "type": "piechart",
+      "title": "Cost by Namespace",
+      "gridPos": {
+        "x": 8,
+        "y": 65,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_cost_dollars_total{cluster=~\"$cluster\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 503,
+      "type": "piechart",
+      "title": "Energy by Namespace (kWh)",
+      "gridPos": {
+        "x": 16,
+        "y": 65,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_energy_joules_total{cluster=~\"$cluster\"}) / 3600000",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kWh"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 504,
+      "type": "table",
+      "title": "Namespace Summary",
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"})",
+          "legendFormat": "CO₂e (g)",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_embodied_co2e_grams_total{cluster=~\"$cluster\"})",
+          "legendFormat": "Embodied CO₂e (g)",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_cost_dollars_total{cluster=~\"$cluster\"})",
+          "legendFormat": "Cost ($)",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_namespace_energy_joules_total{cluster=~\"$cluster\"}) / 3600000",
+          "legendFormat": "Energy (kWh)",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (namespace) (greenkube_namespace_pod_count{cluster=~\"$cluster\"})",
+          "legendFormat": "Pods",
+          "refId": "E",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "Active Recommendations",
+          "refId": "F",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        }
+      ],
+      "options": {
+        "sortBy": [],
         "footer": {
           "show": false
         }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
       },
       "transformations": [
         {
           "id": "merge",
           "options": {}
         }
-      ],
-      "targets": [
-        {
-          "expr": "greenkube_node_cpu_capacity_millicores{node=~\"$node\"}",
-          "refId": "CPU",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "expr": "greenkube_node_memory_capacity_bytes{node=~\"$node\"}",
-          "refId": "MEM",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "expr": "greenkube_node_embodied_emissions_kg{node=~\"$node\"}",
-          "refId": "EMB",
-          "format": "table",
-          "instant": true
-        }
       ]
     },
     {
-      "type": "bargauge",
-      "title": "Node CPU Capacity (millicores)",
-      "description": "CPU capacity for each Kubernetes node.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 97
-      },
-      "id": 61,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "targets": [
-        {
-          "expr": "greenkube_node_cpu_capacity_millicores{node=~\"$node\"}",
-          "legendFormat": "{{ node }} ({{ instance_type }})",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "bargauge",
-      "title": "Node Memory Capacity",
-      "description": "Memory capacity for each Kubernetes node.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 97
-      },
-      "id": 62,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "targets": [
-        {
-          "expr": "greenkube_node_memory_capacity_bytes{node=~\"$node\"}",
-          "legendFormat": "{{ node }} ({{ instance_type }})",
-          "refId": "A"
-        }
-      ]
-    },
-    {
+      "id": 600,
       "type": "row",
-      "title": "\ud83d\udca1 Optimization Recommendations & Savings",
+      "title": "Top Emitters & Spenders",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 105
+        "y": 81,
+        "w": 24,
+        "h": 1
       },
-      "id": 107,
       "panels": []
     },
     {
-      "type": "stat",
-      "title": "Total Recommendations",
-      "description": "Total number of active optimization recommendations.",
+      "id": 601,
+      "type": "bargauge",
+      "title": "Top 15 Pods — CO₂e",
+      "gridPos": {
+        "x": 0,
+        "y": 82,
+        "w": 12,
+        "h": 10
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 106
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(15, max by (namespace, pod) (greenkube_pod_co2e_grams{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
       },
-      "id": 70,
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
+          "unit": "g CO₂e",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 602,
+      "type": "bargauge",
+      "title": "Top 15 Pods — Cloud Cost",
+      "gridPos": {
+        "x": 12,
+        "y": 82,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(15, max by (namespace, pod) (greenkube_pod_cost_dollars{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 603,
+      "type": "bargauge",
+      "title": "Top 15 Pods — Energy",
+      "gridPos": {
+        "x": 0,
+        "y": 92,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(15, max by (namespace, pod) (greenkube_pod_energy_joules{cluster=~\"$cluster\", namespace=~\"$namespace\"})) / 3600000",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kWh",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 604,
+      "type": "bargauge",
+      "title": "Top 15 Pods — Embodied CO₂e (Scope 3)",
+      "gridPos": {
+        "x": 12,
+        "y": 92,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(15, max by (namespace, pod) (greenkube_pod_embodied_co2e_grams{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 700,
+      "type": "row",
+      "title": "Node Analysis",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 102,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 701,
+      "type": "bargauge",
+      "title": "Node CPU Allocation Ratio",
+      "gridPos": {
+        "x": 0,
+        "y": 103,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (node) (greenkube_node_cpu_allocated_millicores{node=~\"$node\"}) / max by (node) (greenkube_node_cpu_capacity_millicores{node=~\"$node\"})",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2530,7 +2476,517 @@
                 "value": null
               },
               {
-                "color": "yellow",
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 702,
+      "type": "bargauge",
+      "title": "Node Memory Allocation Ratio",
+      "gridPos": {
+        "x": 8,
+        "y": 103,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (node) (greenkube_node_memory_allocated_bytes{node=~\"$node\"}) / max by (node) (greenkube_node_memory_capacity_bytes{node=~\"$node\"})",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 703,
+      "type": "bargauge",
+      "title": "Node Embodied Emissions (kg CO₂e)",
+      "gridPos": {
+        "x": 16,
+        "y": 103,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (node) (greenkube_node_embodied_emissions_kg{node=~\"$node\"})",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kg CO₂e",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 704,
+      "type": "table",
+      "title": "Node Inventory",
+      "gridPos": {
+        "x": 0,
+        "y": 111,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max by (node, cluster, architecture, cloud_provider, instance_type, region, zone) (greenkube_node_info{node=~\"$node\"})",
+          "legendFormat": "",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "table"
+        }
+      ],
+      "options": {
+        "sortBy": [],
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ]
+    },
+    {
+      "id": 800,
+      "type": "row",
+      "title": "Network & Storage I/O",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 119,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 801,
+      "type": "timeseries",
+      "title": "Top 10 Pods — Network Receive (B/s)",
+      "gridPos": {
+        "x": 0,
+        "y": 120,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, max by (namespace, pod) (greenkube_pod_network_receive_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 802,
+      "type": "timeseries",
+      "title": "Top 10 Pods — Network Transmit (B/s)",
+      "gridPos": {
+        "x": 12,
+        "y": 120,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, max by (namespace, pod) (greenkube_pod_network_transmit_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 803,
+      "type": "timeseries",
+      "title": "Top 10 Pods — Disk Read (B/s)",
+      "gridPos": {
+        "x": 0,
+        "y": 128,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, max by (namespace, pod) (greenkube_pod_disk_read_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 804,
+      "type": "timeseries",
+      "title": "Top 10 Pods — Disk Write (B/s)",
+      "gridPos": {
+        "x": 12,
+        "y": 128,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(10, max by (namespace, pod) (greenkube_pod_disk_write_bytes{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 900,
+      "type": "row",
+      "title": "Pod Stability",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 136,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 901,
+      "type": "bargauge",
+      "title": "Top 15 Restarting Pods",
+      "gridPos": {
+        "x": 0,
+        "y": 137,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(15, max by (namespace, pod) (greenkube_pod_restart_count{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{namespace}}/{{pod}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
                 "value": 5
               },
               {
@@ -2541,312 +2997,721 @@
           },
           "color": {
             "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_recommendations_total)",
-          "legendFormat": "Total",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Potential Cost Savings ($)",
-      "description": "Total potential cost savings from all active recommendations.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 106
-      },
-      "id": 71,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10
-              },
-              {
-                "color": "red",
-                "value": 100
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_recommendations_savings_cost_dollars)",
-          "legendFormat": "Savings",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Potential CO2 Savings (gCO\u2082e)",
-      "description": "Total potential CO2e savings from all active recommendations.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 106
-      },
-      "id": 72,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "massg",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 200
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sum(greenkube_recommendations_savings_co2e_grams)",
-          "legendFormat": "CO2 Savings",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "bargauge",
-      "title": "Recommendation Count by Type & Priority",
-      "description": "Breakdown of active recommendations.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 110
-      },
-      "id": 73,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 3
-              },
-              {
-                "color": "red",
-                "value": 10
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         },
         "overrides": []
       },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 902,
+      "type": "bargauge",
+      "title": "Restarts by Namespace",
+      "gridPos": {
+        "x": 12,
+        "y": 137,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (namespace) (greenkube_pod_restart_count{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": [],
           "fields": "",
-          "values": false
+          "values": true
         },
         "orientation": "horizontal",
         "displayMode": "gradient",
-        "showUnfilled": true
+        "valueMode": "color"
       },
-      "targets": [
-        {
-          "expr": "greenkube_recommendations_total",
-          "legendFormat": "{{ type }} ({{ priority }})",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Recommendation Cost Savings by Type ($)",
-      "description": "Potential cost savings per recommendation type.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 110
-      },
-      "id": 74,
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "bars",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 80,
-            "gradientMode": "scheme",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "axisCenteredZero": false,
-            "showPoints": "never"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
           },
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           }
         },
         "overrides": []
       },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "sum",
-            "mean",
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
+      "transformations": [
         {
-          "expr": "greenkube_recommendations_savings_cost_dollars",
-          "legendFormat": "{{ type }}",
-          "refId": "A"
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
         }
       ]
     },
     {
+      "id": 1000,
       "type": "row",
-      "title": "\ud83d\udcca Namespace Deep-Dive",
+      "title": "Recommendations & Savings",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
-        "w": 24,
         "x": 0,
-        "y": 118
+        "y": 147,
+        "w": 24,
+        "h": 1
       },
-      "id": 108,
       "panels": []
     },
     {
-      "type": "bargauge",
-      "title": "Pods per Namespace",
-      "description": "Number of tracked pods in each namespace.",
+      "id": 1001,
+      "type": "stat",
+      "title": "Active Recommendations",
+      "gridPos": {
+        "x": 0,
+        "y": 148,
+        "w": 4,
+        "h": 4
+      },
       "datasource": {
-        "type": "prometheus",
+        "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 119
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "id": 80,
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "timeFrom": "5m"
+    },
+    {
+      "id": 1002,
+      "type": "stat",
+      "title": "CO₂e Avoided (selected window)",
+      "gridPos": {
+        "x": 4,
+        "y": 148,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(increase(greenkube_co2e_savings_attributed_grams_total{cluster=~\"$cluster\"}[$__range]))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1003,
+      "type": "stat",
+      "title": "Cost Avoided (selected window)",
+      "gridPos": {
+        "x": 8,
+        "y": 148,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(increase(greenkube_cost_savings_attributed_dollars_total{cluster=~\"$cluster\"}[$__range]))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1004,
+      "type": "stat",
+      "title": "Recommendations Implemented",
+      "gridPos": {
+        "x": 12,
+        "y": 148,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "timeFrom": "5m"
+    },
+    {
+      "id": 1005,
+      "type": "stat",
+      "title": "Open Recommendations",
+      "gridPos": {
+        "x": 16,
+        "y": 148,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "timeFrom": "5m"
+    },
+    {
+      "id": 1010,
+      "type": "bargauge",
+      "title": "Recommendations by Type",
+      "gridPos": {
+        "x": 0,
+        "y": 152,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "{{type}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 1011,
+      "type": "bargauge",
+      "title": "CO₂e Avoided by Recommendation Type (projected/year)",
+      "gridPos": {
+        "x": 12,
+        "y": 152,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (type) (max by (cluster, type) (greenkube_cluster_co2e_saved_grams_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "{{type}}",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "g CO₂e",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Last *",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 1100,
+      "type": "row",
+      "title": "GreenKube Self-Monitoring",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 160,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 1101,
+      "type": "stat",
+      "title": "Last Collection (s ago)",
+      "gridPos": {
+        "x": 0,
+        "y": 161,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - max(max by (cluster) (greenkube_last_collection_timestamp_seconds{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1102,
+      "type": "stat",
+      "title": "Metrics in Window",
+      "gridPos": {
+        "x": 4,
+        "y": 161,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_metrics_total{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2855,13 +3720,37 @@
                 "value": null
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 1103,
+      "type": "stat",
+      "title": "Estimated Metrics Ratio",
+      "gridPos": {
+        "x": 8,
+        "y": 161,
+        "w": 4,
+        "h": 4
       },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster) (greenkube_estimated_metrics_ratio{cluster=~\"$cluster\"})) * 100",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
       "options": {
         "reduceOptions": {
           "calcs": [
@@ -2870,155 +3759,227 @@
           "fields": "",
           "values": false
         },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
       },
-      "targets": [
-        {
-          "expr": "greenkube_namespace_pod_count{namespace=~\"$namespace\"}",
-          "legendFormat": "{{ namespace }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Namespace Summary Table",
-      "description": "CO2, cost, energy, and pod count per namespace at a glance.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 119
-      },
-      "id": 81,
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #CO2"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "CO2 (gCO\u2082e)"
-              },
-              {
-                "id": "unit",
-                "value": "massg"
-              }
-            ]
+          "unit": "percent",
+          "color": {
+            "mode": "thresholds"
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #COST"
-            },
-            "properties": [
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "displayName",
-                "value": "Cost ($)"
+                "color": "green",
+                "value": null
               },
               {
-                "id": "unit",
-                "value": "currencyUSD"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #ENERGY"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Energy (J)"
+                "color": "orange",
+                "value": 30
               },
               {
-                "id": "unit",
-                "value": "joule"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #PODS"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Pods"
-              },
-              {
-                "id": "unit",
-                "value": "none"
+                "color": "red",
+                "value": 60
               }
             ]
           }
-        ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1104,
+      "type": "stat",
+      "title": "Active Namespaces",
+      "gridPos": {
+        "x": 12,
+        "y": 161,
+        "w": 4,
+        "h": 4
       },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "CO2 (gCO\u2082e)",
-            "desc": true
-          }
-        ],
-        "footer": {
-          "show": true,
-          "reducer": [
-            "sum"
-          ],
-          "fields": ""
-        }
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
       },
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        }
-      ],
       "targets": [
         {
-          "expr": "greenkube_namespace_co2e_grams_total{namespace=~\"$namespace\"}",
-          "refId": "CO2",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "expr": "greenkube_namespace_cost_dollars_total{namespace=~\"$namespace\"}",
-          "refId": "COST",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "expr": "greenkube_namespace_energy_joules_total{namespace=~\"$namespace\"}",
-          "refId": "ENERGY",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "expr": "greenkube_namespace_pod_count{namespace=~\"$namespace\"}",
-          "refId": "PODS",
-          "format": "table",
-          "instant": true
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster) (greenkube_cluster_namespace_count{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
         }
-      ]
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1105,
+      "type": "stat",
+      "title": "Carbon Intensity Score (avg)",
+      "gridPos": {
+        "x": 16,
+        "y": 161,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster) (greenkube_carbon_intensity_score{cluster=~\"$cluster\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 400
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1106,
+      "type": "stat",
+      "title": "PUE (avg)",
+      "gridPos": {
+        "x": 20,
+        "y": 161,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_pue{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "refId": "A",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 2.0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }

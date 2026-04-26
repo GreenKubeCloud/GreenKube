@@ -27,8 +27,11 @@ rbac:
 config:
   logLevel: INFO
   cloudProvider: unknown
-  # Cluster name for multi-cluster environments. Used as the `cluster` label
-  # in Prometheus metrics so you can filter/join across clusters in Grafana.
+  # Cluster name used as the `cluster` label in Prometheus metrics for
+  # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
+  #   1. Node name from the Kubernetes Downward API (works for minikube/kind/k3s).
+  #   2. Well-known cloud-provider node labels (EKS, GKE, AKS).
+  #   3. Falls back to "default" when nothing is detectable.
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
                   # Leave empty to let GreenKube auto-discover the zone from node labels.
