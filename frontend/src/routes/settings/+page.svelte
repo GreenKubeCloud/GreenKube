@@ -209,8 +209,8 @@
 		<!-- Service Configuration -->
 		<Card title="Configure Services" icon="🛠️">
 			<p class="text-xs text-dark-500 mb-4">
-				Override service URLs or tokens at runtime. These changes apply to the current session only.
-				For permanent changes, update your Helm values or environment variables.
+				Override service URLs or tokens at runtime. For permanent changes, update your Helm values
+				or environment variables.
 			</p>
 
 			<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">

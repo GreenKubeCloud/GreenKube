@@ -83,7 +83,7 @@
 			<!-- Config Form -->
 			<div class="px-6 py-4 border-t border-dark-700/50 space-y-3">
 				<p class="text-xs text-dark-400">
-					You can configure service URLs below. Changes apply to the current session only.
+					You can configure service URLs below.
 				</p>
 
 				{#if services?.prometheus?.status === 'unconfigured' || services?.prometheus?.status === 'unreachable'}
