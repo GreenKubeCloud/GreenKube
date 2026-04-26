@@ -430,7 +430,8 @@ class TestRefreshMetricsFromDB:
         ]
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
         mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
-        mock_reco_repo.get_recommendations = AsyncMock(return_value=records)
+        mock_reco_repo.get_active_recommendations = AsyncMock(return_value=records)
+        mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
 
         app = create_app()
         app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
@@ -444,7 +445,7 @@ class TestRefreshMetricsFromDB:
         body = response.text
         assert "greenkube_recommendations_total" in body
         assert "ZOMBIE_POD" in body
-        mock_reco_repo.get_recommendations.assert_called_once()
+        mock_reco_repo.get_active_recommendations.assert_called_once()
         app.dependency_overrides.clear()
 
     def test_endpoint_survives_db_errors_gracefully(self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):

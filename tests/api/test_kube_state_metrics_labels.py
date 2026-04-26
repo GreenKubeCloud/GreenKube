@@ -186,10 +186,14 @@ class TestClusterLabelsIncludeCluster:
 class TestClusterNameConfig:
     """CLUSTER_NAME must be a configurable env var."""
 
-    def test_cluster_name_defaults_to_empty(self):
+    def test_cluster_name_defaults_to_empty(self, monkeypatch):
+        from unittest.mock import patch
+
         from greenkube.core.config import Config
 
-        cfg = Config()
+        with patch.object(Config, "_auto_detect_cluster_name", return_value=""):
+            monkeypatch.delenv("CLUSTER_NAME", raising=False)
+            cfg = Config()
         assert hasattr(cfg, "CLUSTER_NAME")
         assert cfg.CLUSTER_NAME == ""
 
