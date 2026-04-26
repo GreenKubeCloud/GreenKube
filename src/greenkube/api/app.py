@@ -35,6 +35,7 @@ from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
 from greenkube.core.config import get_config
+from greenkube.core.factory import get_savings_ledger_repository
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +159,12 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     ):
         """Expose Prometheus-compatible metrics for scraping."""
         # The scheduler writes data to the DB in a separate container/process,
-        # so we must refresh in-memory Prometheus gauges from the DB on each scrape.
-        await refresh_metrics_from_db(combined_repo, node_repo, reco_repo)
+        await refresh_metrics_from_db(
+            combined_repo,
+            node_repo,
+            reco_repo,
+            savings_repo=get_savings_ledger_repository(),
+        )
         return Response(
             content=get_metrics_output(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
