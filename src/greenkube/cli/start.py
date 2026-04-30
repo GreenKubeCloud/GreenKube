@@ -220,6 +220,7 @@ async def refresh_dashboard_summary() -> None:
     """Refresh the pre-computed dashboard summary table."""
     logger.info("--- Starting dashboard summary refresh task ---")
     try:
+        from ..api.metrics_endpoint import update_dashboard_summary_metrics
         from ..core.factory import (
             get_combined_metrics_repository,
             get_summary_repository,
@@ -227,12 +228,15 @@ async def refresh_dashboard_summary() -> None:
         )
         from ..core.summary_refresher import SummaryRefresher
 
+        summary_repo = get_summary_repository()
         refresher = SummaryRefresher(
             metrics_repo=get_combined_metrics_repository(),
-            summary_repo=get_summary_repository(),
+            summary_repo=summary_repo,
             timeseries_cache_repo=get_timeseries_cache_repository(),
         )
         count = await refresher.run()
+        rows = await summary_repo.get_rows(namespace=None)
+        update_dashboard_summary_metrics(rows, reset=True)
         logger.info("Dashboard summary refresh complete: %d rows upserted.", count)
     except Exception as e:
         logger.error("Dashboard summary refresh failed: %s", e)

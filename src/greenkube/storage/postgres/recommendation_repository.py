@@ -453,21 +453,33 @@ class PostgresRecommendationRepository(RecommendationRepository):
     async def get_savings_summary(
         self,
         namespace: Optional[str] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
         """Returns aggregate savings from all applied recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            start: Optional inclusive lower bound on applied_at.
+            end: Optional exclusive upper bound on applied_at.
 
         Returns:
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         async with self.db_manager.connection_scope() as conn:
             params: list = []
-            where = "WHERE status = 'applied'"
+            conditions = ["status = 'applied'"]
             if namespace:
-                where += " AND namespace = $1"
                 params.append(namespace)
+                conditions.append(f"namespace = ${len(params)}")
+            if start:
+                params.append(start)
+                conditions.append(f"applied_at >= ${len(params)}")
+            if end:
+                params.append(end)
+                conditions.append(f"applied_at < ${len(params)}")
+
+            where = "WHERE " + " AND ".join(conditions)
 
             rows = await conn.fetch(
                 f"SELECT namespace, carbon_saved_co2e_grams, cost_saved FROM recommendation_history {where}",

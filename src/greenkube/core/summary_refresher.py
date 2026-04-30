@@ -14,6 +14,8 @@ of raw metric rows, eliminating OOM errors.
 
 Windows and granularity
 -----------------------
+* ``1h``   – last 1 hour     → hourly  buckets  (≤ 1 row)
+* ``6h``   – last 6 hours    → hourly  buckets  (≤ 6 rows)
 * ``24h``  – last 24 hours   → hourly  buckets  (≤ 24 rows)
 * ``7d``   – last 7 days     → daily   buckets  (7 rows)
 * ``30d``  – last 30 days    → daily   buckets  (30 rows)
@@ -37,6 +39,8 @@ logger = logging.getLogger(__name__)
 # (slug, timedelta | None, granularity)
 # timedelta=None means "year-to-date" (start computed dynamically).
 _WINDOWS: List[tuple] = [
+    ("1h", timedelta(hours=1), "hour"),
+    ("6h", timedelta(hours=6), "hour"),
     ("24h", timedelta(hours=24), "hour"),
     ("7d", timedelta(days=7), "day"),
     ("30d", timedelta(days=30), "day"),

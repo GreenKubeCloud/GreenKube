@@ -472,11 +472,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def get_savings_summary(
         self,
         namespace: Optional[str] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
         """Returns aggregate savings from all applied recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            start: Optional inclusive lower bound on applied_at.
+            end: Optional exclusive upper bound on applied_at.
 
         Returns:
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
@@ -492,6 +496,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if namespace:
                 query += " AND namespace = ?"
                 params.append(namespace)
+            if start:
+                query += " AND applied_at >= ?"
+                params.append(to_iso_z(start))
+            if end:
+                query += " AND applied_at < ?"
+                params.append(to_iso_z(end))
 
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()

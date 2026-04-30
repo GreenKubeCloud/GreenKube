@@ -165,9 +165,14 @@ export function getAppliedRecommendations() {
 	return request(`${BASE}/recommendations/applied`);
 }
 
-/** @returns {Promise<Object>} */
-export function getRecommendationSavings() {
-	return request(`${BASE}/recommendations/savings`);
+/**
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @returns {Promise<Object>}
+ */
+export function getRecommendationSavings({ namespace, last } = {}) {
+	return request(`${BASE}/recommendations/savings`, { namespace, last });
 }
 
 /**

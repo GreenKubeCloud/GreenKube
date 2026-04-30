@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from ...models.savings import SavingsLedgerRecord
+from ...utils.date_utils import to_iso_z
 from ..base_savings_repository import SavingsLedgerRepository
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,58 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 result.setdefault(t, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
                 result[t]["co2e_saved_grams"] += row[1] or 0.0
                 result[t]["cost_saved_dollars"] += row[2] or 0.0
+
+        return result
+
+    async def get_window_totals(
+        self,
+        cluster_name: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Dict[str, Dict[str, float]]:
+        """Combine raw + hourly totals for an exact time window."""
+        start = to_iso_z(start_time)
+        end = to_iso_z(end_time)
+        result: Dict[str, Dict[str, float]] = {}
+
+        async with self._db.connection_scope() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT recommendation_type,
+                       COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
+                       COALESCE(SUM(cost_saved_dollars), 0) AS cost
+                FROM recommendation_savings_ledger
+                WHERE cluster_name = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                GROUP BY recommendation_type
+                """,
+                (cluster_name, start, end),
+            )
+            for row in await cursor.fetchall():
+                rec_type = row[0]
+                result.setdefault(rec_type, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+                result[rec_type]["co2e_saved_grams"] += row[1] or 0.0
+                result[rec_type]["cost_saved_dollars"] += row[2] or 0.0
+
+            cursor = await conn.execute(
+                """
+                SELECT recommendation_type,
+                       COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
+                       COALESCE(SUM(cost_saved_dollars), 0) AS cost
+                FROM recommendation_savings_ledger_hourly
+                WHERE cluster_name = ?
+                  AND hour_bucket >= ?
+                  AND hour_bucket <= ?
+                GROUP BY recommendation_type
+                """,
+                (cluster_name, start, end),
+            )
+            for row in await cursor.fetchall():
+                rec_type = row[0]
+                result.setdefault(rec_type, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+                result[rec_type]["co2e_saved_grams"] += row[1] or 0.0
+                result[rec_type]["cost_saved_dollars"] += row[2] or 0.0
 
         return result
 

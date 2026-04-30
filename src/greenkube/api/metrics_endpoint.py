@@ -12,13 +12,14 @@ and add `cluster` and `region` for multi-cluster / multi-region environments.
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
 from greenkube.core.sustainability_score import SustainabilityScorer
-from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationRecord
+from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, Recommendation, RecommendationRecord
 from greenkube.models.node import NodeInfo
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,66 @@ CLUSTER_NAMESPACE_COUNT = Gauge(
 )
 
 # ---------------------------------------------------------------------------
+# Dashboard summary gauges
+# ---------------------------------------------------------------------------
+DASHBOARD_NAMESPACE_ALL = "__all__"
+DASHBOARD_SUMMARY_LABELS = ["cluster", "window", "namespace"]
+DASHBOARD_SUMMARY_CO2_LABELS = ["cluster", "window", "namespace", "scope"]
+DASHBOARD_SAVINGS_LABELS = ["cluster", "window", "recommendation_type"]
+DASHBOARD_WINDOW_ALIASES = {
+    "1h": ("1h", "3600s"),
+    "6h": ("6h", "21600s"),
+    "24h": ("24h", "86400s"),
+    "7d": ("7d", "604800s"),
+    "30d": ("30d", "2592000s"),
+    "1y": ("1y", "31536000s"),
+    "ytd": ("ytd",),
+}
+
+DASHBOARD_SUMMARY_CO2 = Gauge(
+    "greenkube_dashboard_summary_co2e_grams_total",
+    "Pre-computed dashboard CO2e totals for a fixed time window. Scope is one of scope2, scope3, all.",
+    DASHBOARD_SUMMARY_CO2_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SUMMARY_COST = Gauge(
+    "greenkube_dashboard_summary_cost_dollars_total",
+    "Pre-computed dashboard cloud cost total for a fixed time window.",
+    DASHBOARD_SUMMARY_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SUMMARY_ENERGY = Gauge(
+    "greenkube_dashboard_summary_energy_joules_total",
+    "Pre-computed dashboard energy total for a fixed time window.",
+    DASHBOARD_SUMMARY_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SUMMARY_POD_COUNT = Gauge(
+    "greenkube_dashboard_summary_pod_count",
+    "Pre-computed dashboard pod count for a fixed time window.",
+    DASHBOARD_SUMMARY_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SUMMARY_NAMESPACE_COUNT = Gauge(
+    "greenkube_dashboard_summary_namespace_count",
+    "Pre-computed dashboard namespace count for a fixed time window.",
+    DASHBOARD_SUMMARY_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SAVINGS_CO2 = Gauge(
+    "greenkube_dashboard_savings_co2e_grams_total",
+    "DB-backed CO2e savings attributed during a fixed dashboard time window.",
+    DASHBOARD_SAVINGS_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SAVINGS_COST = Gauge(
+    "greenkube_dashboard_savings_cost_dollars_total",
+    "DB-backed cost savings attributed during a fixed dashboard time window.",
+    DASHBOARD_SAVINGS_LABELS,
+    registry=REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
 # GreenKube self-monitoring gauges
 # ---------------------------------------------------------------------------
 GREENKUBE_ESTIMATED_METRICS_RATIO = Gauge(
@@ -238,6 +299,12 @@ CARBON_INTENSITY_ZONE = Gauge(
     "greenkube_carbon_intensity_zone",
     "Current grid carbon intensity per electricity zone (gCO2e/kWh)",
     ["cluster", "zone"],
+    registry=REGISTRY,
+)
+ZONE_GRID_INTENSITY_MAP = Gauge(
+    "greenkube_zone_grid_intensity_gco2_kwh",
+    "Zone-level grid carbon intensity with node membership labels for Grafana map bubbles.",
+    ["cluster", "zone", "lookup", "nodes", "node_count", "map_label"],
     registry=REGISTRY,
 )
 SUSTAINABILITY_SCORE = Gauge(
@@ -325,25 +392,23 @@ NS_REC_SAVINGS_COST = Gauge(
 )
 
 # ---------------------------------------------------------------------------
-# Realized savings gauges (DB-backed cumulative totals — window-aware)
+# Realized savings gauges (DB-backed cumulative totals)
 #
 # These gauges hold the CUMULATIVE total savings attributed to each
-# recommendation type since GreenKube installation.  Because Prometheus
-# stores all scraped values as a time-series, Grafana can use
-#   increase(greenkube_co2e_savings_attributed_grams_total[$__range])
-# to display the actual savings for any selected time window.
+# recommendation type since GreenKube installation. Prefer the
+# greenkube_dashboard_savings_* gauges for exact dashboard time windows.
 # ---------------------------------------------------------------------------
 SAVINGS_CO2_ATTRIBUTED = Gauge(
     "greenkube_co2e_savings_attributed_grams_total",
     "Cumulative CO2e (grams) avoided, prorated from applied recommendations. "
-    "Use increase($__range) in Grafana to get window-level savings.",
+    "Prefer greenkube_dashboard_savings_co2e_grams_total for exact dashboard windows.",
     ["cluster", "recommendation_type"],
     registry=REGISTRY,
 )
 SAVINGS_COST_ATTRIBUTED = Gauge(
     "greenkube_cost_savings_attributed_dollars_total",
     "Cumulative cloud cost (dollars) avoided, prorated from applied recommendations. "
-    "Use increase($__range) in Grafana to get window-level savings.",
+    "Prefer greenkube_dashboard_savings_cost_dollars_total for exact dashboard windows.",
     ["cluster", "recommendation_type"],
     registry=REGISTRY,
 )
@@ -425,6 +490,91 @@ def _clear_gauge(gauge: Gauge) -> None:
     gauge._metrics.clear()
 
 
+def clear_dashboard_summary_metrics() -> None:
+    """Clear all pre-computed dashboard summary Prometheus gauges."""
+    for gauge in (
+        DASHBOARD_SUMMARY_CO2,
+        DASHBOARD_SUMMARY_COST,
+        DASHBOARD_SUMMARY_ENERGY,
+        DASHBOARD_SUMMARY_POD_COUNT,
+        DASHBOARD_SUMMARY_NAMESPACE_COUNT,
+    ):
+        _clear_gauge(gauge)
+
+
+def clear_dashboard_savings_metrics() -> None:
+    """Clear all DB-backed dashboard savings Prometheus gauges."""
+    _clear_gauge(DASHBOARD_SAVINGS_CO2)
+    _clear_gauge(DASHBOARD_SAVINGS_COST)
+
+
+def _dashboard_window_labels(window_slug: str) -> tuple[str, ...]:
+    """Return all Prometheus label values that should resolve to a summary window."""
+    return DASHBOARD_WINDOW_ALIASES.get(window_slug, (window_slug,))
+
+
+def _dashboard_window_ranges(now: datetime) -> tuple[tuple[str, datetime, datetime], ...]:
+    """Return canonical dashboard summary windows as exact UTC ranges."""
+    ytd_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return (
+        ("1h", now - timedelta(hours=1), now),
+        ("6h", now - timedelta(hours=6), now),
+        ("24h", now - timedelta(hours=24), now),
+        ("7d", now - timedelta(days=7), now),
+        ("30d", now - timedelta(days=30), now),
+        ("ytd", ytd_start, now),
+        ("1y", now - timedelta(days=365), now),
+    )
+
+
+def update_dashboard_summary_metrics(rows: List[MetricsSummaryRow], reset: bool = False) -> None:
+    """Expose pre-computed dashboard summary rows as Prometheus gauges."""
+    if reset:
+        clear_dashboard_summary_metrics()
+
+    cluster = _get_cluster_name()
+    for row in rows:
+        namespace = row.namespace or DASHBOARD_NAMESPACE_ALL
+        for window_label in _dashboard_window_labels(row.window_slug):
+            labels = {"cluster": cluster, "window": window_label, "namespace": namespace}
+
+            DASHBOARD_SUMMARY_CO2.labels(**labels, scope="scope2").set(row.total_co2e_grams)
+            DASHBOARD_SUMMARY_CO2.labels(**labels, scope="scope3").set(row.total_embodied_co2e_grams)
+            DASHBOARD_SUMMARY_CO2.labels(**labels, scope="all").set(row.total_co2e_all_scopes)
+            DASHBOARD_SUMMARY_COST.labels(**labels).set(row.total_cost)
+            DASHBOARD_SUMMARY_ENERGY.labels(**labels).set(row.total_energy_joules)
+            DASHBOARD_SUMMARY_POD_COUNT.labels(**labels).set(row.pod_count)
+            DASHBOARD_SUMMARY_NAMESPACE_COUNT.labels(**labels).set(row.namespace_count)
+
+
+def update_dashboard_savings_metrics(
+    window_slug: str,
+    totals_by_type: dict[str, dict[str, float]],
+    cluster: str | None = None,
+    reset: bool = False,
+) -> None:
+    """Expose exact DB-backed savings totals for a dashboard time window."""
+    if reset:
+        clear_dashboard_savings_metrics()
+
+    cluster = cluster if cluster is not None else _get_cluster_name()
+    total_co2e = sum(totals.get("co2e_saved_grams", 0.0) for totals in totals_by_type.values())
+    total_cost = sum(totals.get("cost_saved_dollars", 0.0) for totals in totals_by_type.values())
+
+    for window_label in _dashboard_window_labels(window_slug):
+        labels = {"cluster": cluster, "window": window_label}
+        DASHBOARD_SAVINGS_CO2.labels(**labels, recommendation_type="all").set(total_co2e)
+        DASHBOARD_SAVINGS_COST.labels(**labels, recommendation_type="all").set(total_cost)
+
+        for recommendation_type, totals in totals_by_type.items():
+            DASHBOARD_SAVINGS_CO2.labels(**labels, recommendation_type=recommendation_type).set(
+                totals.get("co2e_saved_grams", 0.0)
+            )
+            DASHBOARD_SAVINGS_COST.labels(**labels, recommendation_type=recommendation_type).set(
+                totals.get("cost_saved_dollars", 0.0)
+            )
+
+
 def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     """Update all pod-level, namespace-level, and cluster-level Prometheus gauges.
 
@@ -459,6 +609,7 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         NS_POD_COUNT,
         CARBON_INTENSITY_SCORE,
         CARBON_INTENSITY_ZONE,
+        ZONE_GRID_INTENSITY_MAP,
         SUSTAINABILITY_SCORE,
         SUSTAINABILITY_DIMENSION_SCORE,
     ):
@@ -494,6 +645,9 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     total_weighted_intensity = 0.0
     total_energy = 0.0
     zone_intensities: dict[str, float] = {}
+    zone_weighted_intensity: dict[str, float] = defaultdict(float)
+    zone_energy: dict[str, float] = defaultdict(float)
+    zone_nodes: dict[str, set[str]] = defaultdict(set)
 
     for m in metrics:
         region = m.emaps_zone or m.node_zone or ""
@@ -551,6 +705,10 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         zone = m.emaps_zone or m.node_zone
         if zone and m.grid_intensity > 0:
             zone_intensities[zone] = m.grid_intensity
+            if m.joules > 0:
+                zone_weighted_intensity[zone] += m.grid_intensity * m.joules
+                zone_energy[zone] += m.joules
+            zone_nodes[zone].add(m.node or "unknown")
 
     # Set namespace gauges
     for ns in ns_co2:
@@ -590,6 +748,22 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
     # Per-zone intensity
     for zone, intensity in zone_intensities.items():
         CARBON_INTENSITY_ZONE.labels(cluster=cluster, zone=zone).set(intensity)
+        node_names = sorted(zone_nodes.get(zone, {"unknown"}))
+        node_count = len(node_names)
+        weighted_intensity = zone_weighted_intensity[zone] / zone_energy[zone] if zone_energy[zone] > 0 else intensity
+        rounded_intensity = round(weighted_intensity)
+        nodes_label = ", ".join(node_names)
+        node_word = "node" if node_count == 1 else "nodes"
+        lookup = zone.split("-", 1)[0] if zone else "unknown"
+        map_label = f"{zone} · {rounded_intensity:g} gCO₂/kWh · {node_count} {node_word} · {nodes_label}"
+        ZONE_GRID_INTENSITY_MAP.labels(
+            cluster=cluster,
+            zone=zone,
+            lookup=lookup,
+            nodes=nodes_label,
+            node_count=str(node_count),
+            map_label=map_label,
+        ).set(round(weighted_intensity, 2))
 
     # Comprehensive sustainability score (0-100, 100 = best)
     scorer = SustainabilityScorer()
@@ -631,8 +805,7 @@ def update_node_metrics(nodes: List[NodeInfo]) -> None:
             NODE_CPU_CAPACITY.labels(**labels).set(node.cpu_capacity_millicores)
         if node.memory_capacity_bytes is not None:
             NODE_MEMORY_CAPACITY.labels(**labels).set(node.memory_capacity_bytes)
-        if node.embodied_emissions_kg is not None:
-            NODE_EMBODIED.labels(**labels).set(node.embodied_emissions_kg)
+        NODE_EMBODIED.labels(**labels).set(node.embodied_emissions_kg or 0.0)
 
         # Pod allocation totals (populated by the most recent update_cluster_metrics call)
         if node.name in _node_cpu_allocated:
@@ -775,7 +948,7 @@ def get_metrics_output() -> bytes:
     return generate_latest(REGISTRY)
 
 
-async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_repo=None) -> None:
+async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_repo=None, summary_repo=None) -> None:
     """Read the latest metrics from the database and refresh all Prometheus gauges.
 
     This is the critical bridge between the scheduler container (which writes
@@ -789,7 +962,7 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
         node_repo: NodeRepository instance.
         reco_repo: RecommendationRepository instance.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     now = datetime.now(timezone.utc)
 
@@ -847,5 +1020,31 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
             attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
             totals = await attributor.get_cumulative_totals()
             update_attributed_savings_metrics(totals, cluster=cluster)
+            clear_dashboard_savings_metrics()
+            for window_slug, start_time, end_time in _dashboard_window_ranges(now):
+                window_totals = await savings_repo.get_window_totals(
+                    cluster_name=cluster,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                update_dashboard_savings_metrics(window_slug, window_totals, cluster=cluster)
         except Exception as exc:
             logger.warning("refresh_metrics_from_db: failed to refresh attributed savings metrics: %s", exc)
+
+    # --- Pre-computed dashboard summary windows ---
+    if summary_repo is not None:
+        try:
+            rows = await summary_repo.get_rows(namespace=None)
+            update_dashboard_summary_metrics(rows, reset=True)
+            try:
+                namespaces = await combined_repo.list_namespaces()
+            except Exception as exc:
+                logger.warning(
+                    "refresh_metrics_from_db: failed to list namespaces for dashboard summary metrics: %s", exc
+                )
+                namespaces = []
+            for namespace in namespaces:
+                namespace_rows = await summary_repo.get_rows(namespace=namespace)
+                update_dashboard_summary_metrics(namespace_rows, reset=False)
+        except Exception as exc:
+            logger.warning("refresh_metrics_from_db: failed to refresh dashboard summary metrics: %s", exc)

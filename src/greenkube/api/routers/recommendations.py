@@ -37,10 +37,28 @@ from greenkube.models.metrics import (
     RecommendationSavingsSummary,
 )
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Compute an optional UTC time range from a dashboard window slug."""
+    if not last:
+        return None, None
+
+    end = datetime.now(timezone.utc)
+    if last.lower() == "ytd":
+        return datetime(end.year, 1, 1, tzinfo=timezone.utc), end
+
+    try:
+        delta = parse_duration(last)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return end - delta, end
 
 
 @router.get("/recommendations", response_model=List[Recommendation])
@@ -158,6 +176,7 @@ async def list_applied_recommendations(
 @router.get("/recommendations/savings", response_model=RecommendationSavingsSummary)
 async def get_savings_summary(
     namespace: Optional[str] = Depends(validate_namespace),
+    last: Optional[str] = Query(None, description="Time range (e.g., '24h', '7d', '30d', 'ytd')."),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
     """Return aggregate CO2e and cost savings from all applied recommendations.
@@ -165,7 +184,8 @@ async def get_savings_summary(
     This is GreenKube's core value metric: the total environmental and financial
     impact of the optimizations that have been implemented.
     """
-    return await reco_repo.get_savings_summary(namespace=namespace)
+    start, end = _get_optional_time_range(last)
+    return await reco_repo.get_savings_summary(namespace=namespace, start=start, end=end)
 
 
 @router.patch("/recommendations/{rec_id}/apply", response_model=RecommendationRecord)
