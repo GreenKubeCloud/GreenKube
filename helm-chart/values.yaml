@@ -67,10 +67,12 @@ config:
   # Boavizta configuration
   boavizta:
     url: https://api.boavizta.org
-    # Default embodied emissions (kg CO2e) used when Boavizta API does not
-    # recognize a cloud provider or instance type. 350 kg is a reasonable
-    # average for a typical cloud server over its full lifecycle.
-    defaultEmbodiedEmissionsKg: 350
+    # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
+    # recognize a cloud provider or instance type. Boavizta returns per-instance
+    # allocated values (typically 50–170 kg for common cloud VMs). 100 kg is a
+    # conservative midpoint. The former value of 350 kg represented a full physical
+    # server and over-estimated Scope 3 by 2–7× on low-carbon grids.
+    defaultEmbodiedEmissionsKg: 100
 
   # Database configuration
   db:

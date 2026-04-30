@@ -93,6 +93,54 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
 
         return result
 
+    async def get_window_totals(
+        self,
+        cluster_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: str | None = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Combine raw + hourly totals for an exact time window."""
+        params = [cluster_name, start_time, end_time]
+        namespace_filter = ""
+        if namespace == "":
+            namespace_filter = "\n                      AND (namespace IS NULL OR namespace = '')"
+        elif namespace is not None:
+            params.append(namespace)
+            namespace_filter = f"\n                      AND namespace = ${len(params)}"
+
+        async with self._db.connection_scope() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT recommendation_type,
+                       COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
+                       COALESCE(SUM(cost_saved_dollars), 0) AS cost
+                FROM (
+                    SELECT recommendation_type, co2e_saved_grams, cost_saved_dollars
+                    FROM recommendation_savings_ledger
+                    WHERE cluster_name = $1
+                      AND timestamp >= $2
+                                            AND timestamp <= $3{namespace_filter}
+                    UNION ALL
+                    SELECT recommendation_type, co2e_saved_grams, cost_saved_dollars
+                    FROM recommendation_savings_ledger_hourly
+                    WHERE cluster_name = $1
+                      AND hour_bucket >= $2
+                                            AND hour_bucket <= $3{namespace_filter}
+                ) AS savings
+                GROUP BY recommendation_type
+                """,
+                *params,
+            )
+
+        return {
+            row["recommendation_type"]: {
+                "co2e_saved_grams": row["co2e"] or 0.0,
+                "cost_saved_dollars": row["cost"] or 0.0,
+            }
+            for row in rows
+        }
+
     async def compress_to_hourly(self, cutoff_hours: int = 24) -> int:
         """Aggregate raw records older than cutoff_hours into hourly buckets."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=cutoff_hours)

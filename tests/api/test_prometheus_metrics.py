@@ -130,13 +130,17 @@ class TestUpdateRecommendationMetrics:
 
         # Check ZOMBIE_POD count
         zombie_count = RECOMMENDATION_COUNT.labels(
-            cluster="test-cluster", type="ZOMBIE_POD", priority="high"
+            cluster="test-cluster", namespace="__all__", type="ZOMBIE_POD", priority="high"
         )._value.get()
         assert zombie_count == 2
+        default_zombie_count = RECOMMENDATION_COUNT.labels(
+            cluster="test-cluster", namespace="default", type="ZOMBIE_POD", priority="high"
+        )._value.get()
+        assert default_zombie_count == 2
 
         # Check RIGHTSIZING_CPU count
         cpu_count = RECOMMENDATION_COUNT.labels(
-            cluster="test-cluster", type="RIGHTSIZING_CPU", priority="medium"
+            cluster="test-cluster", namespace="prod", type="RIGHTSIZING_CPU", priority="medium"
         )._value.get()
         assert cpu_count == 1
 

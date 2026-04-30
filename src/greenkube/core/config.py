@@ -46,7 +46,13 @@ class Config:
         self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "unknown")
         self.DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
         self.DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
-        self.DEFAULT_EMBODIED_EMISSIONS_KG = float(os.getenv("DEFAULT_EMBODIED_EMISSIONS_KG", "350"))
+        # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
+        # recognise the cloud provider/instance type.  Boavizta returns per-instance
+        # allocated values (typically 50–170 kg for common cloud VMs such as aws/m5.large).
+        # 100 kg is a conservative midpoint; 350 kg (the former default) represents a full
+        # physical server and would over-estimate Scope 3 by 2–7×, producing misleadingly
+        # high Scope 3/Scope 2 ratios on low-carbon grids (e.g. France ~20 g CO₂/kWh).
+        self.DEFAULT_EMBODIED_EMISSIONS_KG = float(os.getenv("DEFAULT_EMBODIED_EMISSIONS_KG", "100"))
 
         # --- Network variables ---
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -57,6 +57,18 @@
       "id": "gauge",
       "name": "Gauge",
       "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "volkovlabs-echarts-panel",
+      "name": "Business Charts",
+      "version": "7.2.2"
+    },
+    {
+      "type": "panel",
+      "id": "geomap",
+      "name": "Geomap",
+      "version": ""
     }
   ],
   "id": null,
@@ -135,7 +147,7 @@
           "uid": "${DS_PROMETHEUS}"
         },
         "label": "Namespace",
-        "query": "label_values(greenkube_namespace_co2e_grams_total{cluster=\"$cluster\"}, namespace)",
+        "query": "label_values(greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"}, namespace)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -146,6 +158,54 @@
           "text": "All",
           "value": "$__all"
         }
+      },
+      {
+        "name": "dashboard_window",
+        "type": "custom",
+        "label": "Reporting window",
+        "query": "1h : 3600s, 6h : 21600s, 24h : 86400s, 7d : 604800s, 30d : 2592000s, YTD : ytd, 1y : 31536000s",
+        "options": [
+          {
+            "text": "1h",
+            "value": "3600s",
+            "selected": false
+          },
+          {
+            "text": "6h",
+            "value": "21600s",
+            "selected": false
+          },
+          {
+            "text": "24h",
+            "value": "86400s",
+            "selected": false
+          },
+          {
+            "text": "7d",
+            "value": "604800s",
+            "selected": true
+          },
+          {
+            "text": "30d",
+            "value": "2592000s",
+            "selected": false
+          },
+          {
+            "text": "YTD",
+            "value": "ytd",
+            "selected": false
+          },
+          {
+            "text": "1y",
+            "value": "31536000s",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "7d",
+          "value": "604800s"
+        },
+        "hide": 0
       },
       {
         "name": "node",
@@ -196,7 +256,7 @@
     {
       "id": 100,
       "type": "row",
-      "title": "Sustainability Command Center",
+      "title": "GreenKube Impact Command Center",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -208,38 +268,139 @@
     },
     {
       "id": 101,
-      "type": "gauge",
-      "title": "Sustainability Score",
+      "type": "volkovlabs-echarts-panel",
+      "title": "Sustainability Score Radar",
+      "description": "Dynamic radar chart for the live GreenKube sustainability score dimensions.",
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 4,
+        "w": 8,
         "h": 12
       },
       "datasource": {
         "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
+      "transparent": true,
       "targets": [
         {
           "datasource": {
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_score{cluster=~\"$cluster\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"resource_efficiency\"}))",
+          "legendFormat": "Resource efficiency",
           "refId": "A",
-          "range": true,
-          "instant": false
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"carbon_efficiency\"}))",
+          "legendFormat": "Carbon efficiency",
+          "refId": "B",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"waste_elimination\"}))",
+          "legendFormat": "Waste elimination",
+          "refId": "C",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"node_efficiency\"}))",
+          "legendFormat": "Node efficiency",
+          "refId": "D",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"scaling_practices\"}))",
+          "legendFormat": "Scaling practices",
+          "refId": "E",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"carbon_aware_scheduling\"}))",
+          "legendFormat": "Carbon aware",
+          "refId": "F",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"stability\"}))",
+          "legendFormat": "Stability",
+          "refId": "G",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
+          "legendFormat": "Global score",
+          "refId": "H",
+          "range": false,
+          "instant": true
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+        "renderer": "canvas",
+        "map": "none",
+        "editorMode": "code",
+        "editor": {
+          "format": "auto"
         },
-        "orientation": "auto",
-        "showThresholdLabels": false
+        "themeEditor": {
+          "name": "default",
+          "config": "{}"
+        },
+        "baidu": {
+          "key": "",
+          "callback": "bmapReady"
+        },
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "google": {
+          "key": "",
+          "callback": "gmapReady"
+        },
+        "visualEditor": {
+          "dataset": [],
+          "series": [],
+          "code": "return {};"
+        },
+        "getOption": "\nconst palette = {\n    bg: '#020617',\n    panel: 'rgba(15, 23, 42, 0.74)',\n    panelSoft: 'rgba(15, 23, 42, 0.46)',\n    cyan: '#00FFD4',\n    teal: '#14B8A6',\n    blue: '#38BDF8',\n    green: '#34D399',\n    amber: '#F59E0B',\n    red: '#FB7185',\n    text: '#E5F6FF',\n    muted: '#94A3B8',\n    grid: 'rgba(148, 163, 184, 0.16)',\n};\n\nconst valuesOf = (field) => field?.values?.buffer || field?.values || [];\n\nconst matchesRefId = (series, refId) => series?.refId === refId\n    || series?.meta?.custom?.refId === refId\n    || series?.meta?.refId === refId\n    || series?.name === refId;\n\nconst seriesForRef = (refId) => {\n    const direct = context.panel.data.series.find((series) => matchesRefId(series, refId));\n    if (direct) {\n        return direct;\n    }\n\n    const fallbackIndex = refId.charCodeAt(0) - 'A'.charCodeAt(0);\n    return context.panel.data.series[fallbackIndex];\n};\n\nconst lastNumber = (series) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const values = valuesOf(numberField);\n    const rawValue = Number(values[values.length - 1] ?? 0);\n\n    return Number.isFinite(rawValue) ? rawValue : 0;\n};\n\nconst valueFor = (refId, clampToScore = false) => {\n    const series = seriesForRef(refId);\n    const value = lastNumber(series);\n\n    return clampToScore ? Math.max(0, Math.min(100, value)) : value;\n};\n\nconst pointsFor = (refId, labelKey, limit = 3) => context.panel.data.series\n    .filter((series) => matchesRefId(series, refId))\n    .map((series) => {\n        const numberField = series.fields.find((field) => field.type === 'number');\n        const label = numberField?.labels?.[labelKey] || series.name || labelKey;\n\n        return { name: label, value: lastNumber(series) };\n    })\n    .filter((point) => Number.isFinite(point.value))\n    .sort((a, b) => b.value - a.value)\n    .slice(0, limit);\n\nconst compactNumber = (value) => {\n    if (!Number.isFinite(value)) {\n        return '0';\n    }\n\n    const absolute = Math.abs(value);\n    if (absolute >= 1000000000) {\n        return `${(value / 1000000000).toFixed(1)}B`;\n    }\n    if (absolute >= 1000000) {\n        return `${(value / 1000000).toFixed(1)}M`;\n    }\n    if (absolute >= 1000) {\n        return `${(value / 1000).toFixed(1)}k`;\n    }\n\n    return absolute >= 10 ? value.toFixed(0) : value.toFixed(1);\n};\n\nconst formatValue = (value, unit) => {\n    if (unit === 'currencyUSD') {\n        const absolute = Math.abs(value);\n        if (absolute > 0 && absolute < 0.01) {\n            return '<$0.01';\n        }\n\n        const maximumFractionDigits = absolute >= 100 ? 0 : absolute >= 1 ? 2 : 3;\n        return `$${value.toLocaleString(undefined, { maximumFractionDigits })}`;\n    }\n    if (unit === 'percent') {\n        return `${value.toFixed(0)}%`;\n    }\n    if (unit === 'g CO₂e') {\n        const absolute = Math.abs(value);\n        if (absolute >= 1000000) {\n            return `${(value / 1000000).toFixed(1)} t CO₂e`;\n        }\n        if (absolute >= 1000) {\n            return `${(value / 1000).toFixed(1)} kg CO₂e`;\n        }\n        if (absolute >= 1) {\n            return `${value.toFixed(1)} g CO₂e`;\n        }\n        if (absolute > 0) {\n            return `${value.toFixed(3)} g CO₂e`;\n        }\n\n        return '0 g CO₂e';\n    }\n    if (unit === 'count') {\n        return value.toFixed(0);\n    }\n\n    return compactNumber(value);\n};\n\nconst dimensions = [\n    { refId: 'A', name: 'Resource efficiency', max: 100 },\n    { refId: 'B', name: 'Carbon efficiency', max: 100 },\n    { refId: 'C', name: 'Waste elimination', max: 100 },\n    { refId: 'D', name: 'Node efficiency', max: 100 },\n    { refId: 'E', name: 'Scaling practices', max: 100 },\n    { refId: 'F', name: 'Carbon aware', max: 100 },\n    { refId: 'G', name: 'Stability', max: 100 },\n];\n\nconst values = dimensions.map((dimension) => valueFor(dimension.refId, true));\n\nconst globalScore = valueFor('H', true);\nconst scoreColor = globalScore >= 80 ? palette.cyan : globalScore >= 60 ? palette.amber : palette.red;\nconst scoreTextColor = globalScore >= 80 ? '#D9FFF7' : globalScore >= 60 ? '#FFE6A6' : '#FFD6DE';\n\nreturn {\n    backgroundColor: 'transparent',\n    color: [palette.cyan],\n    tooltip: {\n        trigger: 'item',\n        confine: true,\n        position: (point, params, dom, rect, size) => [size.viewSize[0] - size.contentSize[0] - 12, 12],\n        backgroundColor: 'rgba(15, 23, 42, 0.96)',\n        borderColor: palette.cyan,\n        borderWidth: 1,\n        padding: [10, 12],\n        extraCssText: 'box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35); border-radius: 8px;',\n        textStyle: { color: palette.text, fontSize: 12 },\n        formatter: (params) => {\n            const lines = dimensions.map((dimension, index) => {\n                return `${dimension.name}: ${values[index].toFixed(0)}`;\n            });\n\n            return [`<strong>${params.name}</strong>`, ...lines].join('<br/>');\n        },\n    },\n    legend: { show: false },\n    radar: {\n        center: ['50%', '52%'],\n        radius: '68%',\n        splitNumber: 4,\n        shape: 'polygon',\n        axisName: {\n            color: palette.text,\n            fontSize: 12,\n            fontWeight: 600,\n            padding: [2, 4],\n        },\n        axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.24)' } },\n        splitLine: {\n            lineStyle: {\n                color: [\n                    'rgba(0, 255, 212, 0.34)',\n                    'rgba(148, 163, 184, 0.22)',\n                    'rgba(148, 163, 184, 0.16)',\n                    'rgba(148, 163, 184, 0.10)',\n                ],\n                width: 1,\n            },\n        },\n        splitArea: {\n            areaStyle: {\n                color: ['rgba(0, 255, 212, 0.05)', 'rgba(15, 23, 42, 0.14)'],\n            },\n        },\n        indicator: dimensions.map((dimension) => ({ name: dimension.name, max: dimension.max })),\n    },\n    series: [\n        {\n            name: 'Sustainability performance',\n            type: 'radar',\n            z: 4,\n            label: { show: false },\n            data: [\n                {\n                    name: 'Score',\n                    value: values,\n                    symbol: 'circle',\n                    symbolSize: 6,\n                    areaStyle: { color: 'rgba(0, 255, 212, 0.30)' },\n                    lineStyle: { color: palette.cyan, width: 3 },\n                    itemStyle: {\n                        color: palette.cyan,\n                        borderColor: 'rgba(255, 255, 255, 0.92)',\n                        borderWidth: 1,\n                    },\n                },\n            ],\n            emphasis: {\n                lineStyle: { width: 4 },\n                areaStyle: { opacity: 0.35 },\n                label: { show: false },\n            },\n        },\n    ],\n    graphic: [\n        {\n            type: 'text',\n            left: 'center',\n            top: 'middle',\n            zlevel: 1000,\n            z: 100000,\n            silent: true,\n            style: {\n                text: String(Math.round(globalScore)),\n                fill: scoreTextColor,\n                fontSize: 36,\n                fontWeight: 800,\n                textAlign: 'center',\n                textVerticalAlign: 'middle',\n                shadowBlur: 24,\n                shadowColor: scoreColor,\n            },\n        },\n        {\n            type: 'text',\n            left: 'center',\n            top: '55%',\n            zlevel: 1000,\n            z: 100000,\n            silent: true,\n            style: {\n                text: '/ 100',\n                fill: scoreTextColor,\n                fontSize: 12,\n                fontWeight: 700,\n                textAlign: 'center',\n                textVerticalAlign: 'top',\n                shadowBlur: 14,\n                shadowColor: scoreColor,\n            },\n        },\n    ],\n};\n"
       },
       "fieldConfig": {
         "defaults": {
@@ -250,16 +411,16 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 40
+                "color": "#F59E0B",
+                "value": 60
               },
               {
-                "color": "green",
-                "value": 70
+                "color": "#00FFD4",
+                "value": 80
               }
             ]
           },
@@ -269,665 +430,303 @@
         },
         "overrides": []
       },
-      "timeFrom": "5m"
+      "pluginVersion": "7.2.2"
     },
     {
       "id": 102,
-      "type": "stat",
-      "title": "Total CO₂e (Scope 2)",
+      "type": "volkovlabs-echarts-panel",
+      "title": "Footprint & Cost Mix",
+      "description": "Grouped ECharts bar chart for operational CO₂e, embodied CO₂e, and cloud cost.",
       "gridPos": {
-        "x": 4,
+        "x": 8,
         "y": 1,
-        "w": 7,
-        "h": 4
+        "w": 8,
+        "h": 6
       },
       "datasource": {
         "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
+      "transparent": true,
       "targets": [
         {
           "datasource": {
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"scope2\"})) or sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "Scope 2",
           "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"scope3\"})) or sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "Scope 3",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\"})) or sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
+          "legendFormat": "Cloud cost",
+          "refId": "C",
           "range": true,
           "instant": false
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "renderer": "canvas",
+        "map": "none",
+        "editorMode": "code",
+        "editor": {
+          "format": "auto"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
+        "themeEditor": {
+          "name": "default",
+          "config": "{}"
+        },
+        "baidu": {
+          "key": "",
+          "callback": "bmapReady"
+        },
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "google": {
+          "key": "",
+          "callback": "gmapReady"
+        },
+        "visualEditor": {
+          "dataset": [],
+          "series": [],
+          "code": "return {};"
+        },
+        "getOption": "\nconst palette = {\n    bg: '#020617',\n    panel: 'rgba(15, 23, 42, 0.74)',\n    panelSoft: 'rgba(15, 23, 42, 0.46)',\n    cyan: '#00FFD4',\n    teal: '#14B8A6',\n    blue: '#38BDF8',\n    green: '#34D399',\n    amber: '#F59E0B',\n    red: '#FB7185',\n    text: '#E5F6FF',\n    muted: '#94A3B8',\n    grid: 'rgba(148, 163, 184, 0.16)',\n};\n\nconst valuesOf = (field) => field?.values?.buffer || field?.values || [];\n\nconst matchesRefId = (series, refId) => series?.refId === refId\n    || series?.meta?.custom?.refId === refId\n    || series?.meta?.refId === refId\n    || series?.name === refId;\n\nconst seriesForRef = (refId) => {\n    const direct = context.panel.data.series.find((series) => matchesRefId(series, refId));\n    if (direct) {\n        return direct;\n    }\n\n    const fallbackIndex = refId.charCodeAt(0) - 'A'.charCodeAt(0);\n    return context.panel.data.series[fallbackIndex];\n};\n\nconst lastNumber = (series) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const values = valuesOf(numberField);\n    const rawValue = Number(values[values.length - 1] ?? 0);\n\n    return Number.isFinite(rawValue) ? rawValue : 0;\n};\n\nconst valueFor = (refId, clampToScore = false) => {\n    const series = seriesForRef(refId);\n    const value = lastNumber(series);\n\n    return clampToScore ? Math.max(0, Math.min(100, value)) : value;\n};\n\nconst pointsFor = (refId, labelKey, limit = 3) => context.panel.data.series\n    .filter((series) => matchesRefId(series, refId))\n    .map((series) => {\n        const numberField = series.fields.find((field) => field.type === 'number');\n        const label = numberField?.labels?.[labelKey] || series.name || labelKey;\n\n        return { name: label, value: lastNumber(series) };\n    })\n    .filter((point) => Number.isFinite(point.value))\n    .sort((a, b) => b.value - a.value)\n    .slice(0, limit);\n\nconst compactNumber = (value) => {\n    if (!Number.isFinite(value)) {\n        return '0';\n    }\n\n    const absolute = Math.abs(value);\n    if (absolute >= 1000000000) {\n        return `${(value / 1000000000).toFixed(1)}B`;\n    }\n    if (absolute >= 1000000) {\n        return `${(value / 1000000).toFixed(1)}M`;\n    }\n    if (absolute >= 1000) {\n        return `${(value / 1000).toFixed(1)}k`;\n    }\n\n    return absolute >= 10 ? value.toFixed(0) : value.toFixed(1);\n};\n\nconst formatValue = (value, unit) => {\n    if (unit === 'currencyUSD') {\n        const absolute = Math.abs(value);\n        if (absolute > 0 && absolute < 0.01) {\n            return '<$0.01';\n        }\n\n        const maximumFractionDigits = absolute >= 100 ? 0 : absolute >= 1 ? 2 : 3;\n        return `$${value.toLocaleString(undefined, { maximumFractionDigits })}`;\n    }\n    if (unit === 'percent') {\n        return `${value.toFixed(0)}%`;\n    }\n    if (unit === 'g CO₂e') {\n        const absolute = Math.abs(value);\n        if (absolute >= 1000000) {\n            return `${(value / 1000000).toFixed(1)} t CO₂e`;\n        }\n        if (absolute >= 1000) {\n            return `${(value / 1000).toFixed(1)} kg CO₂e`;\n        }\n        if (absolute >= 1) {\n            return `${value.toFixed(1)} g CO₂e`;\n        }\n        if (absolute > 0) {\n            return `${value.toFixed(3)} g CO₂e`;\n        }\n\n        return '0 g CO₂e';\n    }\n    if (unit === 'count') {\n        return value.toFixed(0);\n    }\n\n    return compactNumber(value);\n};\n\nconst rows = [\n    { refId: 'A', name: 'Scope 2', unit: 'g CO₂e', color: palette.cyan },\n    { refId: 'B', name: 'Scope 3', unit: 'g CO₂e', color: palette.blue },\n    { refId: 'C', name: 'Cloud cost', unit: 'currencyUSD', color: palette.amber },\n];\n\nconst data = rows.map((row) => {\n    const raw = Math.max(0, valueFor(row.refId));\n    return {\n        name: row.name,\n        value: Math.log10(raw + 1),\n        raw,\n        unit: row.unit,\n        itemStyle: {\n            color: {\n                type: 'linear',\n                x: 0,\n                y: 1,\n                x2: 0,\n                y2: 0,\n                colorStops: [\n                    { offset: 0, color: `${row.color}44` },\n                    { offset: 1, color: row.color },\n                ],\n            },\n            borderRadius: [7, 7, 0, 0],\n        },\n        label: { formatter: () => formatValue(raw, row.unit) },\n    };\n});\n\nreturn {\n    backgroundColor: 'transparent',\n    tooltip: {\n        trigger: 'item',\n        backgroundColor: 'rgba(15, 23, 42, 0.96)',\n        borderColor: palette.cyan,\n        borderWidth: 1,\n        textStyle: { color: palette.text },\n        formatter: (params) => `${params.name}<br/><strong>${formatValue(params.data.raw, params.data.unit)}</strong>`,\n    },\n    grid: { top: 26, right: 18, bottom: 36, left: 18 },\n    xAxis: {\n        type: 'category',\n        data: rows.map((row) => row.name),\n        axisTick: { show: false },\n        axisLine: { lineStyle: { color: palette.grid } },\n        axisLabel: { color: palette.text, fontSize: 12, fontWeight: 600 },\n    },\n    yAxis: { type: 'value', show: false },\n    series: [\n        {\n            name: 'Current footprint',\n            type: 'bar',\n            barWidth: '46%',\n            data,\n            label: {\n                show: true,\n                position: 'top',\n                color: palette.text,\n                fontSize: 12,\n                fontWeight: 700,\n            },\n        },\n    ],\n};\n"
       },
       "fieldConfig": {
-        "defaults": {
-          "unit": "g CO₂e",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 50000
-              },
-              {
-                "color": "red",
-                "value": 200000
-              }
-            ]
-          }
-        },
+        "defaults": {},
         "overrides": []
-      }
+      },
+      "pluginVersion": "7.2.2"
     },
     {
       "id": 103,
-      "type": "stat",
-      "title": "Total CO₂e (Scope 3 Embodied)",
+      "type": "volkovlabs-echarts-panel",
+      "title": "GreenKube Impact",
+      "description": "Grouped ECharts impact strip for realized savings, implemented recommendations, and coverage.",
       "gridPos": {
-        "x": 11,
+        "x": 16,
         "y": 1,
-        "w": 7,
-        "h": 4
+        "w": 8,
+        "h": 6
       },
       "datasource": {
         "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
+      "transparent": true,
       "targets": [
         {
           "datasource": {
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
+          "legendFormat": "CO₂e avoided",
           "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
+          "legendFormat": "Cost avoided",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(max by (cluster, namespace, type) (greenkube_recommendations_implemented_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
+          "legendFormat": "Implemented",
+          "refId": "C",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "avg(max by (cluster, namespace) ((1 - greenkube_estimated_metrics_ratio{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))) * 100",
+          "legendFormat": "Measured coverage",
+          "refId": "D",
           "range": true,
           "instant": false
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "renderer": "canvas",
+        "map": "none",
+        "editorMode": "code",
+        "editor": {
+          "format": "auto"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
+        "themeEditor": {
+          "name": "default",
+          "config": "{}"
+        },
+        "baidu": {
+          "key": "",
+          "callback": "bmapReady"
+        },
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "google": {
+          "key": "",
+          "callback": "gmapReady"
+        },
+        "visualEditor": {
+          "dataset": [],
+          "series": [],
+          "code": "return {};"
+        },
+        "getOption": "\nconst palette = {\n    bg: '#020617',\n    panel: 'rgba(15, 23, 42, 0.74)',\n    panelSoft: 'rgba(15, 23, 42, 0.46)',\n    cyan: '#00FFD4',\n    teal: '#14B8A6',\n    blue: '#38BDF8',\n    green: '#34D399',\n    amber: '#F59E0B',\n    red: '#FB7185',\n    text: '#E5F6FF',\n    muted: '#94A3B8',\n    grid: 'rgba(148, 163, 184, 0.16)',\n};\n\nconst valuesOf = (field) => field?.values?.buffer || field?.values || [];\n\nconst matchesRefId = (series, refId) => series?.refId === refId\n    || series?.meta?.custom?.refId === refId\n    || series?.meta?.refId === refId\n    || series?.name === refId;\n\nconst seriesForRef = (refId) => {\n    const direct = context.panel.data.series.find((series) => matchesRefId(series, refId));\n    if (direct) {\n        return direct;\n    }\n\n    const fallbackIndex = refId.charCodeAt(0) - 'A'.charCodeAt(0);\n    return context.panel.data.series[fallbackIndex];\n};\n\nconst lastNumber = (series) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const values = valuesOf(numberField);\n    const rawValue = Number(values[values.length - 1] ?? 0);\n\n    return Number.isFinite(rawValue) ? rawValue : 0;\n};\n\nconst valueFor = (refId, clampToScore = false) => {\n    const series = seriesForRef(refId);\n    const value = lastNumber(series);\n\n    return clampToScore ? Math.max(0, Math.min(100, value)) : value;\n};\n\nconst pointsFor = (refId, labelKey, limit = 3) => context.panel.data.series\n    .filter((series) => matchesRefId(series, refId))\n    .map((series) => {\n        const numberField = series.fields.find((field) => field.type === 'number');\n        const label = numberField?.labels?.[labelKey] || series.name || labelKey;\n\n        return { name: label, value: lastNumber(series) };\n    })\n    .filter((point) => Number.isFinite(point.value))\n    .sort((a, b) => b.value - a.value)\n    .slice(0, limit);\n\nconst compactNumber = (value) => {\n    if (!Number.isFinite(value)) {\n        return '0';\n    }\n\n    const absolute = Math.abs(value);\n    if (absolute >= 1000000000) {\n        return `${(value / 1000000000).toFixed(1)}B`;\n    }\n    if (absolute >= 1000000) {\n        return `${(value / 1000000).toFixed(1)}M`;\n    }\n    if (absolute >= 1000) {\n        return `${(value / 1000).toFixed(1)}k`;\n    }\n\n    return absolute >= 10 ? value.toFixed(0) : value.toFixed(1);\n};\n\nconst formatValue = (value, unit) => {\n    if (unit === 'currencyUSD') {\n        const absolute = Math.abs(value);\n        if (absolute > 0 && absolute < 0.01) {\n            return '<$0.01';\n        }\n\n        const maximumFractionDigits = absolute >= 100 ? 0 : absolute >= 1 ? 2 : 3;\n        return `$${value.toLocaleString(undefined, { maximumFractionDigits })}`;\n    }\n    if (unit === 'percent') {\n        return `${value.toFixed(0)}%`;\n    }\n    if (unit === 'g CO₂e') {\n        const absolute = Math.abs(value);\n        if (absolute >= 1000000) {\n            return `${(value / 1000000).toFixed(1)} t CO₂e`;\n        }\n        if (absolute >= 1000) {\n            return `${(value / 1000).toFixed(1)} kg CO₂e`;\n        }\n        if (absolute >= 1) {\n            return `${value.toFixed(1)} g CO₂e`;\n        }\n        if (absolute > 0) {\n            return `${value.toFixed(3)} g CO₂e`;\n        }\n\n        return '0 g CO₂e';\n    }\n    if (unit === 'count') {\n        return value.toFixed(0);\n    }\n\n    return compactNumber(value);\n};\n\nconst rows = [\n    { refId: 'A', name: 'CO₂e avoided', unit: 'g CO₂e', color: palette.cyan },\n    { refId: 'B', name: 'Cost avoided', unit: 'currencyUSD', color: palette.green },\n    { refId: 'C', name: 'Implemented', unit: 'count', color: palette.blue },\n    { refId: 'D', name: 'Measured coverage', unit: 'percent', color: palette.amber },\n];\n\nconst data = rows.map((row) => {\n    const raw = Math.max(0, valueFor(row.refId));\n    const value = row.unit === 'percent' ? Math.min(100, raw) : Math.log10(raw + 1) * 16;\n\n    return {\n        name: row.name,\n        value,\n        raw,\n        unit: row.unit,\n        itemStyle: { color: row.color, borderRadius: [0, 7, 7, 0] },\n        label: { formatter: () => formatValue(raw, row.unit) },\n    };\n});\n\nreturn {\n    backgroundColor: 'transparent',\n    tooltip: {\n        trigger: 'item',\n        backgroundColor: 'rgba(15, 23, 42, 0.96)',\n        borderColor: palette.cyan,\n        borderWidth: 1,\n        textStyle: { color: palette.text },\n        formatter: (params) => `${params.name}<br/><strong>${formatValue(params.data.raw, params.data.unit)}</strong>`,\n    },\n    grid: { top: 18, right: 88, bottom: 10, left: 118 },\n    xAxis: { type: 'value', show: false, max: (value) => Math.max(100, value.max * 1.08) },\n    yAxis: {\n        type: 'category',\n        data: rows.map((row) => row.name).reverse(),\n        axisTick: { show: false },\n        axisLine: { show: false },\n        axisLabel: { color: palette.text, fontSize: 12, fontWeight: 600 },\n    },\n    series: [\n        {\n            type: 'bar',\n            barWidth: 12,\n            data: data.reverse(),\n            label: {\n                show: true,\n                position: 'right',\n                color: palette.text,\n                fontSize: 12,\n                fontWeight: 700,\n            },\n        },\n    ],\n};\n"
       },
       "fieldConfig": {
-        "defaults": {
-          "unit": "g CO₂e",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 50000
-              },
-              {
-                "color": "red",
-                "value": 200000
-              }
-            ]
-          }
-        },
+        "defaults": {},
         "overrides": []
-      }
+      },
+      "pluginVersion": "7.2.2"
     },
     {
       "id": 104,
-      "type": "stat",
-      "title": "Total Cloud Cost",
+      "type": "volkovlabs-echarts-panel",
+      "title": "Action Priorities",
+      "description": "Grouped ECharts action panel for the top namespaces and recommendation types.",
       "gridPos": {
-        "x": 18,
-        "y": 1,
-        "w": 6,
-        "h": 4
+        "x": 8,
+        "y": 7,
+        "w": 16,
+        "h": 6
       },
       "datasource": {
         "type": "datasource",
         "uid": "${DS_PROMETHEUS}"
       },
+      "transparent": true,
       "targets": [
         {
           "datasource": {
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 200
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 106,
-      "type": "stat",
-      "title": "CO₂e Avoided (selected window)",
-      "gridPos": {
-        "x": 4,
-        "y": 5,
-        "w": 7,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(increase(greenkube_co2e_savings_attributed_grams_total{cluster=~\"$cluster\"}[$__range]))",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "g CO₂e",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 107,
-      "type": "stat",
-      "title": "Cost Avoided (selected window)",
-      "gridPos": {
-        "x": 11,
-        "y": 5,
-        "w": 7,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(increase(greenkube_cost_savings_attributed_dollars_total{cluster=~\"$cluster\"}[$__range]))",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 108,
-      "type": "stat",
-      "title": "Recommendations Implemented",
-      "gridPos": {
-        "x": 18,
-        "y": 5,
-        "w": 6,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 110,
-      "type": "stat",
-      "title": "Active Recommendations",
-      "gridPos": {
-        "x": 4,
-        "y": 9,
-        "w": 7,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 111,
-      "type": "stat",
-      "title": "Active Rec. Types",
-      "gridPos": {
-        "x": 11,
-        "y": 9,
-        "w": 7,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "count(max by (cluster, type) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
-          "refId": "A",
-          "range": true,
-          "instant": false
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 112,
-      "type": "stat",
-      "title": "#1 Namespace by CO₂e",
-      "gridPos": {
-        "x": 18,
-        "y": 9,
-        "w": 6,
-        "h": 4
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "topk(1, sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"all\"}))))",
+          "legendFormat": "{{namespace}}",
           "refId": "A",
           "range": false,
-          "instant": true,
-          "legendFormat": "{{namespace}}"
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\"}))))",
+          "legendFormat": "{{namespace}}",
+          "refId": "B",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(3, sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"})))",
+          "legendFormat": "{{type}}",
+          "refId": "C",
+          "range": false,
+          "instant": true
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "renderer": "canvas",
+        "map": "none",
+        "editorMode": "code",
+        "editor": {
+          "format": "auto"
         },
-        "orientation": "auto",
-        "textMode": "name",
-        "colorMode": "background",
-        "graphMode": "none"
+        "themeEditor": {
+          "name": "default",
+          "config": "{}"
+        },
+        "baidu": {
+          "key": "",
+          "callback": "bmapReady"
+        },
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "google": {
+          "key": "",
+          "callback": "gmapReady"
+        },
+        "visualEditor": {
+          "dataset": [],
+          "series": [],
+          "code": "return {};"
+        },
+        "getOption": "\nconst palette = {\n    bg: '#020617',\n    panel: 'rgba(15, 23, 42, 0.74)',\n    panelSoft: 'rgba(15, 23, 42, 0.46)',\n    cyan: '#00FFD4',\n    teal: '#14B8A6',\n    blue: '#38BDF8',\n    green: '#34D399',\n    amber: '#F59E0B',\n    red: '#FB7185',\n    text: '#E5F6FF',\n    muted: '#94A3B8',\n    grid: 'rgba(148, 163, 184, 0.16)',\n};\n\nconst valuesOf = (field) => field?.values?.buffer || field?.values || [];\n\nconst matchesRefId = (series, refId) => series?.refId === refId\n    || series?.meta?.custom?.refId === refId\n    || series?.meta?.refId === refId\n    || series?.name === refId;\n\nconst seriesForRef = (refId) => {\n    const direct = context.panel.data.series.find((series) => matchesRefId(series, refId));\n    if (direct) {\n        return direct;\n    }\n\n    const fallbackIndex = refId.charCodeAt(0) - 'A'.charCodeAt(0);\n    return context.panel.data.series[fallbackIndex];\n};\n\nconst lastNumber = (series) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const values = valuesOf(numberField);\n    const rawValue = Number(values[values.length - 1] ?? 0);\n\n    return Number.isFinite(rawValue) ? rawValue : 0;\n};\n\nconst valueFor = (refId, clampToScore = false) => {\n    const series = seriesForRef(refId);\n    const value = lastNumber(series);\n\n    return clampToScore ? Math.max(0, Math.min(100, value)) : value;\n};\n\nconst pointsFor = (refId, labelKey, limit = 3) => context.panel.data.series\n    .filter((series) => matchesRefId(series, refId))\n    .map((series) => {\n        const numberField = series.fields.find((field) => field.type === 'number');\n        const label = numberField?.labels?.[labelKey] || series.name || labelKey;\n\n        return { name: label, value: lastNumber(series) };\n    })\n    .filter((point) => Number.isFinite(point.value))\n    .sort((a, b) => b.value - a.value)\n    .slice(0, limit);\n\nconst compactNumber = (value) => {\n    if (!Number.isFinite(value)) {\n        return '0';\n    }\n\n    const absolute = Math.abs(value);\n    if (absolute >= 1000000000) {\n        return `${(value / 1000000000).toFixed(1)}B`;\n    }\n    if (absolute >= 1000000) {\n        return `${(value / 1000000).toFixed(1)}M`;\n    }\n    if (absolute >= 1000) {\n        return `${(value / 1000).toFixed(1)}k`;\n    }\n\n    return absolute >= 10 ? value.toFixed(0) : value.toFixed(1);\n};\n\nconst formatValue = (value, unit) => {\n    if (unit === 'currencyUSD') {\n        const absolute = Math.abs(value);\n        if (absolute > 0 && absolute < 0.01) {\n            return '<$0.01';\n        }\n\n        const maximumFractionDigits = absolute >= 100 ? 0 : absolute >= 1 ? 2 : 3;\n        return `$${value.toLocaleString(undefined, { maximumFractionDigits })}`;\n    }\n    if (unit === 'percent') {\n        return `${value.toFixed(0)}%`;\n    }\n    if (unit === 'g CO₂e') {\n        const absolute = Math.abs(value);\n        if (absolute >= 1000000) {\n            return `${(value / 1000000).toFixed(1)} t CO₂e`;\n        }\n        if (absolute >= 1000) {\n            return `${(value / 1000).toFixed(1)} kg CO₂e`;\n        }\n        if (absolute >= 1) {\n            return `${value.toFixed(1)} g CO₂e`;\n        }\n        if (absolute > 0) {\n            return `${value.toFixed(3)} g CO₂e`;\n        }\n\n        return '0 g CO₂e';\n    }\n    if (unit === 'count') {\n        return value.toFixed(0);\n    }\n\n    return compactNumber(value);\n};\n\nconst groups = [\n    { refId: 'A', title: 'CO₂e namespaces', labelKey: 'namespace', unit: 'g CO₂e', color: palette.cyan },\n    { refId: 'B', title: 'Cost namespaces', labelKey: 'namespace', unit: 'currencyUSD', color: palette.amber },\n    { refId: 'C', title: 'Recommendation types', labelKey: 'type', unit: 'count', color: palette.blue },\n];\n\nconst grids = groups.map((group, index) => ({\n    top: 36,\n    bottom: 22,\n    left: `${3 + index * 33}%`,\n    width: '28%',\n    containLabel: true,\n}));\n\nconst pointGroups = groups.map((group) => pointsFor(group.refId, group.labelKey, 3));\n\nreturn {\n    backgroundColor: 'transparent',\n    tooltip: {\n        trigger: 'item',\n        backgroundColor: 'rgba(15, 23, 42, 0.96)',\n        borderColor: palette.cyan,\n        borderWidth: 1,\n        textStyle: { color: palette.text },\n        formatter: (params) => `${params.seriesName}<br/>${params.name}: <strong>${params.data.display}</strong>`,\n    },\n    title: groups.map((group, index) => ({\n        text: group.title,\n        left: `${5 + index * 33}%`,\n        top: 6,\n        textStyle: { color: palette.text, fontSize: 12, fontWeight: 700 },\n    })),\n    grid: grids,\n    xAxis: groups.map((group, index) => ({\n        type: 'value',\n        gridIndex: index,\n        show: false,\n    })),\n    yAxis: groups.map((group, index) => ({\n        type: 'category',\n        gridIndex: index,\n        inverse: true,\n        data: pointGroups[index].map((point) => point.name),\n        axisTick: { show: false },\n        axisLine: { show: false },\n        axisLabel: { color: palette.muted, fontSize: 11, width: 82, overflow: 'truncate' },\n    })),\n    series: groups.map((group, index) => ({\n        name: group.title,\n        type: 'bar',\n        xAxisIndex: index,\n        yAxisIndex: index,\n        barWidth: 10,\n        data: pointGroups[index].map((point) => ({\n            name: point.name,\n            value: Math.max(0, Math.log10(point.value + 1)),\n            raw: point.value,\n            display: formatValue(point.value, group.unit),\n            itemStyle: { color: group.color, borderRadius: [0, 6, 6, 0] },\n        })),\n        label: {\n            show: true,\n            position: 'right',\n            color: palette.text,\n            fontSize: 11,\n            fontWeight: 700,\n            formatter: (params) => params.data.display,\n        },\n    })),\n};\n"
       },
       "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
+        "defaults": {},
         "overrides": []
-      }
+      },
+      "pluginVersion": "7.2.2"
     },
     {
-      "id": 114,
-      "type": "bargauge",
-      "title": "Top 3 Namespaces — CO₂e",
+      "id": 130,
+      "type": "row",
+      "title": "Regional Node Cleanliness",
+      "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 13,
-        "w": 8,
-        "h": 6
+        "w": 24,
+        "h": 1
       },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sort_desc(topk(3, sum by (namespace) (greenkube_namespace_co2e_grams_total{cluster=~\"$cluster\"})))",
-          "legendFormat": "{{namespace}}",
-          "refId": "A",
-          "range": false,
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [],
-          "fields": "",
-          "values": true
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "valueMode": "color"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "g CO₂e",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "reduce",
-          "options": {
-            "reducers": [
-              "lastNotNull"
-            ]
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": [
-              {
-                "displayName": "Last *",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ]
+      "panels": []
     },
     {
-      "id": 115,
-      "type": "bargauge",
-      "title": "Top 3 Namespaces — Cost",
+      "id": 131,
+      "type": "geomap",
+      "title": "Node Region Cleanliness Map",
+      "description": "Regional node map colored by Electricity Maps grid intensity. Marker placement uses the EM zone country lookup, while node labels carry Kubernetes topology zone and region metadata.",
       "gridPos": {
-        "x": 8,
-        "y": 13,
-        "w": 8,
-        "h": 6
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 9
       },
       "datasource": {
         "type": "datasource",
@@ -939,134 +738,127 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sort_desc(topk(3, sum by (namespace) (greenkube_namespace_cost_dollars_total{cluster=~\"$cluster\"})))",
-          "legendFormat": "{{namespace}}",
+          "expr": "avg by (cluster, zone, lookup, nodes, node_count, bubble_size, bubble_label, map_label) (greenkube_zone_grid_intensity_gco2_kwh{cluster=~\"$cluster\"})",
+          "legendFormat": "{{node}} · {{zone}} · {{region}} grid intensity",
           "refId": "A",
           "range": false,
-          "instant": true
+          "instant": true,
+          "format": "table"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [],
-          "fields": "",
-          "values": true
+        "view": {
+          "id": "fit",
+          "lat": 46,
+          "lon": 2,
+          "zoom": 3
         },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "valueMode": "color"
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": false,
+          "showAttribution": true,
+          "showScale": true
+        },
+        "tooltip": {
+          "mode": "details"
+        },
+        "basemap": {
+          "type": "carto",
+          "config": {
+            "theme": "dark",
+            "showLabels": true
+          }
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Nodes by region",
+            "location": {
+              "mode": "lookup",
+              "lookup": "lookup",
+              "gazetteer": "/public/build/gazetteer/countries.json"
+            },
+            "config": {
+              "showLegend": true,
+              "style": {
+                "color": {
+                  "field": "Value",
+                  "fixed": "green"
+                },
+                "opacity": 0.82,
+                "size": {
+                  "field": "bubble_size",
+                  "fixed": 18,
+                  "min": 14,
+                  "max": 56
+                },
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "build/img/icons/marker/circle.svg"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "text": {
+                  "mode": "field",
+                  "field": "bubble_label",
+                  "fixed": ""
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "textAlign": "center",
+                  "textBaseline": "middle",
+                  "offsetX": 0,
+                  "offsetY": 0
+                }
+              }
+            }
+          }
+        ]
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "gCO₂/kWh",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "orange",
+                "value": 250
+              },
+              {
+                "color": "red",
+                "value": 500
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         },
         "overrides": []
       },
       "transformations": [
         {
-          "id": "reduce",
+          "id": "convertFieldType",
           "options": {
-            "reducers": [
-              "lastNotNull"
-            ]
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": [
+            "conversions": [
               {
-                "displayName": "Last *",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "id": 116,
-      "type": "bargauge",
-      "title": "Top 3 Recommendation Types",
-      "gridPos": {
-        "x": 16,
-        "y": 13,
-        "w": 8,
-        "h": 6
-      },
-      "datasource": {
-        "type": "datasource",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "topk(3, sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"})))",
-          "legendFormat": "{{type}}",
-          "refId": "A",
-          "range": false,
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [],
-          "fields": "",
-          "values": true
-        },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "valueMode": "color"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+                "targetField": "node_count",
+                "destinationType": "number"
+              },
               {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "reduce",
-          "options": {
-            "reducers": [
-              "lastNotNull"
-            ]
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": [
-              {
-                "displayName": "Last *",
-                "desc": true
+                "targetField": "bubble_size",
+                "destinationType": "number"
               }
             ]
           }
@@ -1080,7 +872,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 23,
         "w": 24,
         "h": 1
       },
@@ -1092,7 +884,7 @@
       "title": "CO₂e Over Time",
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -1140,7 +932,7 @@
       "title": "Cloud Cost Over Time",
       "gridPos": {
         "x": 12,
-        "y": 20,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -1188,7 +980,7 @@
       "title": "Energy Over Time (kWh)",
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -1236,7 +1028,7 @@
       "title": "Grid Carbon Intensity by Zone",
       "gridPos": {
         "x": 12,
-        "y": 28,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -1285,7 +1077,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 36,
+        "y": 40,
         "w": 24,
         "h": 1
       },
@@ -1297,7 +1089,7 @@
       "title": "Score by Dimension",
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 41,
         "w": 12,
         "h": 8
       },
@@ -1335,16 +1127,16 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
-                "value": 40
+                "color": "#F59E0B",
+                "value": 60
               },
               {
-                "color": "green",
-                "value": 70
+                "color": "#00FFD4",
+                "value": 80
               }
             ]
           },
@@ -1382,7 +1174,7 @@
       "title": "Sustainability Score Over Time",
       "gridPos": {
         "x": 12,
-        "y": 37,
+        "y": 41,
         "w": 8,
         "h": 8
       },
@@ -1430,7 +1222,7 @@
       "title": "Data Quality — Measured Coverage",
       "gridPos": {
         "x": 20,
-        "y": 37,
+        "y": 41,
         "w": 4,
         "h": 8
       },
@@ -1495,7 +1287,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 49,
         "w": 24,
         "h": 1
       },
@@ -1507,7 +1299,7 @@
       "title": "CPU Efficiency by Namespace",
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -1545,15 +1337,15 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
+                "color": "#F59E0B",
                 "value": 0.3
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 0.6
               }
             ]
@@ -1592,7 +1384,7 @@
       "title": "Memory Efficiency by Namespace",
       "gridPos": {
         "x": 12,
-        "y": 46,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -1630,15 +1422,15 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
+                "color": "#F59E0B",
                 "value": 0.3
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 0.6
               }
             ]
@@ -1677,7 +1469,7 @@
       "title": "Top 20 Pods — CPU Efficiency Ratio (worst first)",
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 10
       },
@@ -1715,15 +1507,15 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
+                "color": "#F59E0B",
                 "value": 0.3
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 0.6
               }
             ]
@@ -1762,7 +1554,7 @@
       "title": "Top 20 Pods — Memory Efficiency Ratio (worst first)",
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 58,
         "w": 12,
         "h": 10
       },
@@ -1800,15 +1592,15 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "#FB7185",
                 "value": null
               },
               {
-                "color": "orange",
+                "color": "#F59E0B",
                 "value": 0.3
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 0.6
               }
             ]
@@ -1848,7 +1640,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 64,
+        "y": 68,
         "w": 24,
         "h": 1
       },
@@ -1860,7 +1652,7 @@
       "title": "CO₂e by Namespace",
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 69,
         "w": 8,
         "h": 8
       },
@@ -1905,7 +1697,7 @@
       "title": "Cost by Namespace",
       "gridPos": {
         "x": 8,
-        "y": 65,
+        "y": 69,
         "w": 8,
         "h": 8
       },
@@ -1950,7 +1742,7 @@
       "title": "Energy by Namespace (kWh)",
       "gridPos": {
         "x": 16,
-        "y": 65,
+        "y": 69,
         "w": 8,
         "h": 8
       },
@@ -1995,7 +1787,7 @@
       "title": "Namespace Summary",
       "gridPos": {
         "x": 0,
-        "y": 73,
+        "y": 77,
         "w": 24,
         "h": 8
       },
@@ -2069,7 +1861,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (namespace) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum by (namespace) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace!=\"__all__\"}))",
           "legendFormat": "Active Recommendations",
           "refId": "F",
           "range": true,
@@ -2101,7 +1893,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 81,
+        "y": 85,
         "w": 24,
         "h": 1
       },
@@ -2113,7 +1905,7 @@
       "title": "Top 15 Pods — CO₂e",
       "gridPos": {
         "x": 0,
-        "y": 82,
+        "y": 86,
         "w": 12,
         "h": 10
       },
@@ -2190,7 +1982,7 @@
       "title": "Top 15 Pods — Cloud Cost",
       "gridPos": {
         "x": 12,
-        "y": 82,
+        "y": 86,
         "w": 12,
         "h": 10
       },
@@ -2267,7 +2059,7 @@
       "title": "Top 15 Pods — Energy",
       "gridPos": {
         "x": 0,
-        "y": 92,
+        "y": 96,
         "w": 12,
         "h": 10
       },
@@ -2344,7 +2136,7 @@
       "title": "Top 15 Pods — Embodied CO₂e (Scope 3)",
       "gridPos": {
         "x": 12,
-        "y": 92,
+        "y": 96,
         "w": 12,
         "h": 10
       },
@@ -2422,7 +2214,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 102,
+        "y": 106,
         "w": 24,
         "h": 1
       },
@@ -2434,7 +2226,7 @@
       "title": "Node CPU Allocation Ratio",
       "gridPos": {
         "x": 0,
-        "y": 103,
+        "y": 107,
         "w": 8,
         "h": 8
       },
@@ -2519,7 +2311,7 @@
       "title": "Node Memory Allocation Ratio",
       "gridPos": {
         "x": 8,
-        "y": 103,
+        "y": 107,
         "w": 8,
         "h": 8
       },
@@ -2604,7 +2396,7 @@
       "title": "Node Embodied Emissions (kg CO₂e)",
       "gridPos": {
         "x": 16,
-        "y": 103,
+        "y": 107,
         "w": 8,
         "h": 8
       },
@@ -2681,7 +2473,7 @@
       "title": "Node Inventory",
       "gridPos": {
         "x": 0,
-        "y": 111,
+        "y": 115,
         "w": 24,
         "h": 8
       },
@@ -2727,7 +2519,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 119,
+        "y": 123,
         "w": 24,
         "h": 1
       },
@@ -2739,7 +2531,7 @@
       "title": "Top 10 Pods — Network Receive (B/s)",
       "gridPos": {
         "x": 0,
-        "y": 120,
+        "y": 124,
         "w": 12,
         "h": 8
       },
@@ -2787,7 +2579,7 @@
       "title": "Top 10 Pods — Network Transmit (B/s)",
       "gridPos": {
         "x": 12,
-        "y": 120,
+        "y": 124,
         "w": 12,
         "h": 8
       },
@@ -2835,7 +2627,7 @@
       "title": "Top 10 Pods — Disk Read (B/s)",
       "gridPos": {
         "x": 0,
-        "y": 128,
+        "y": 132,
         "w": 12,
         "h": 8
       },
@@ -2883,7 +2675,7 @@
       "title": "Top 10 Pods — Disk Write (B/s)",
       "gridPos": {
         "x": 12,
-        "y": 128,
+        "y": 132,
         "w": 12,
         "h": 8
       },
@@ -2932,7 +2724,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 136,
+        "y": 140,
         "w": 24,
         "h": 1
       },
@@ -2944,7 +2736,7 @@
       "title": "Top 15 Restarting Pods",
       "gridPos": {
         "x": 0,
-        "y": 137,
+        "y": 141,
         "w": 12,
         "h": 10
       },
@@ -3029,7 +2821,7 @@
       "title": "Restarts by Namespace",
       "gridPos": {
         "x": 12,
-        "y": 137,
+        "y": 141,
         "w": 12,
         "h": 10
       },
@@ -3115,7 +2907,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 147,
+        "y": 151,
         "w": 24,
         "h": 1
       },
@@ -3127,7 +2919,7 @@
       "title": "Active Recommendations",
       "gridPos": {
         "x": 0,
-        "y": 148,
+        "y": 152,
         "w": 4,
         "h": 4
       },
@@ -3141,7 +2933,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3158,7 +2950,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3170,11 +2963,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "#38BDF8",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 1
               }
             ]
@@ -3190,7 +2983,7 @@
       "title": "CO₂e Avoided (selected window)",
       "gridPos": {
         "x": 4,
-        "y": 148,
+        "y": 152,
         "w": 4,
         "h": 4
       },
@@ -3204,7 +2997,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(greenkube_co2e_savings_attributed_grams_total{cluster=~\"$cluster\"}[$__range]))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3221,7 +3014,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3233,11 +3027,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "#38BDF8",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 1
               }
             ]
@@ -3252,7 +3046,7 @@
       "title": "Cost Avoided (selected window)",
       "gridPos": {
         "x": 8,
-        "y": 148,
+        "y": 152,
         "w": 4,
         "h": 4
       },
@@ -3266,7 +3060,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(greenkube_cost_savings_attributed_dollars_total{cluster=~\"$cluster\"}[$__range]))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3283,7 +3077,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3295,11 +3090,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "#38BDF8",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 1
               }
             ]
@@ -3314,7 +3109,7 @@
       "title": "Recommendations Implemented",
       "gridPos": {
         "x": 12,
-        "y": 148,
+        "y": 152,
         "w": 4,
         "h": 4
       },
@@ -3328,7 +3123,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
+          "expr": "sum(max by (cluster, namespace, type) (greenkube_recommendations_implemented_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3345,7 +3140,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3357,11 +3153,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "#38BDF8",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 1
               }
             ]
@@ -3377,7 +3173,7 @@
       "title": "Open Recommendations",
       "gridPos": {
         "x": 16,
-        "y": 148,
+        "y": 152,
         "w": 4,
         "h": 4
       },
@@ -3391,7 +3187,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3408,7 +3204,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3420,11 +3217,11 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "#38BDF8",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "#00FFD4",
                 "value": 1
               }
             ]
@@ -3440,7 +3237,7 @@
       "title": "Recommendations by Type",
       "gridPos": {
         "x": 0,
-        "y": 152,
+        "y": 156,
         "w": 12,
         "h": 8
       },
@@ -3454,7 +3251,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "legendFormat": "{{type}}",
           "refId": "A",
           "range": true,
@@ -3517,7 +3314,7 @@
       "title": "CO₂e Avoided by Recommendation Type (projected/year)",
       "gridPos": {
         "x": 12,
-        "y": 152,
+        "y": 156,
         "w": 12,
         "h": 8
       },
@@ -3595,7 +3392,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 160,
+        "y": 164,
         "w": 24,
         "h": 1
       },
@@ -3607,7 +3404,7 @@
       "title": "Last Collection (s ago)",
       "gridPos": {
         "x": 0,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3638,7 +3435,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3673,7 +3471,7 @@
       "title": "Metrics in Window",
       "gridPos": {
         "x": 4,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3704,7 +3502,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3731,7 +3530,7 @@
       "title": "Estimated Metrics Ratio",
       "gridPos": {
         "x": 8,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3762,7 +3561,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3797,7 +3597,7 @@
       "title": "Active Namespaces",
       "gridPos": {
         "x": 12,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3828,7 +3628,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3855,7 +3656,7 @@
       "title": "Carbon Intensity Score (avg)",
       "gridPos": {
         "x": 16,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3886,7 +3687,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {
@@ -3921,7 +3723,7 @@
       "title": "PUE (avg)",
       "gridPos": {
         "x": 20,
-        "y": 161,
+        "y": 165,
         "w": 4,
         "h": 4
       },
@@ -3952,7 +3754,8 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "none"
+        "graphMode": "none",
+        "wideLayout": false
       },
       "fieldConfig": {
         "defaults": {

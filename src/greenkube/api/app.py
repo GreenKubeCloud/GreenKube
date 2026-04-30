@@ -35,7 +35,7 @@ from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
 from greenkube.core.config import get_config
-from greenkube.core.factory import get_savings_ledger_repository
+from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         combined_repo=Depends(get_combined_metrics_repository),
         node_repo=Depends(get_node_repository),
         reco_repo=Depends(get_recommendation_repository),
+        summary_repo=Depends(get_summary_repository),
     ):
         """Expose Prometheus-compatible metrics for scraping."""
         # The scheduler writes data to the DB in a separate container/process,
@@ -164,6 +165,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
             node_repo,
             reco_repo,
             savings_repo=get_savings_ledger_repository(),
+            summary_repo=summary_repo,
         )
         return Response(
             content=get_metrics_output(),

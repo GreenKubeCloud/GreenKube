@@ -495,11 +495,15 @@ class RecommendationRepository(ABC):
     async def get_savings_summary(
         self,
         namespace: Optional[str] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
         """Returns aggregate savings from all applied recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            start: Optional inclusive lower bound on when recommendations were applied.
+            end: Optional exclusive upper bound on when recommendations were applied.
 
         Returns:
             A RecommendationSavingsSummary with totals and per-namespace breakdown.

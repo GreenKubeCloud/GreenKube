@@ -102,9 +102,10 @@
 		// Fetch recommendations + savings in the background
 		try {
 			const ns = $selectedNamespace || undefined;
+			const last = $selectedTimeRange;
 			[recommendations, savings] = await Promise.all([
 				getActiveRecommendations({ namespace: ns }),
-				getRecommendationSavings()
+				getRecommendationSavings({ namespace: ns, last })
 			]);
 		} catch {
 			recommendations = [];

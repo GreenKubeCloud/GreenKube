@@ -17,6 +17,7 @@ import {
 	getTimeseries,
 	getNodes,
 	getRecommendations,
+	getRecommendationSavings,
 	getReportSummary,
 	buildReportExportUrl
 } from '$lib/api.js';
@@ -281,6 +282,22 @@ describe('getRecommendations', () => {
 
 		const url = fetch.mock.calls[0][0];
 		expect(url).not.toContain('namespace=');
+	});
+});
+
+
+// ---------------------------------------------------------------------------
+// getRecommendationSavings
+// ---------------------------------------------------------------------------
+describe('getRecommendationSavings', () => {
+	it('passes namespace and last as query params', async () => {
+		globalThis.fetch = mockFetchOk({ total_cost_saved: 0 });
+		await getRecommendationSavings({ namespace: 'prod', last: '7d' });
+
+		const url = fetch.mock.calls[0][0];
+		expect(url).toContain('/api/v1/recommendations/savings');
+		expect(url).toContain('namespace=prod');
+		expect(url).toContain('last=7d');
 	});
 });
 

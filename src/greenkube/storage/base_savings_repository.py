@@ -2,6 +2,7 @@
 """Abstract interface for the recommendation savings ledger repository."""
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Dict, List
 
 from ..models.savings import SavingsLedgerRecord
@@ -28,6 +29,26 @@ class SavingsLedgerRepository(ABC):
         Queries both the raw ledger and the hourly aggregates, combining
         their totals so the caller always sees the full picture regardless
         of compression state.
+
+        Returns:
+            ``{recommendation_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
+        """
+
+    @abstractmethod
+    async def get_window_totals(
+        self,
+        cluster_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: str | None = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Return exact savings grouped by recommendation_type for a time window.
+
+        Queries both raw ledger rows and hourly aggregates so callers get the
+        same totals regardless of whether older savings records were compressed.
+        When ``namespace`` is provided, only savings attributed to that namespace
+        are included. An empty namespace string selects cluster-scoped rows that
+        have no namespace attribution.
 
         Returns:
             ``{recommendation_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``

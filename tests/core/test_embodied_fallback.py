@@ -262,11 +262,35 @@ def test_calculate_pod_embodied_returns_zero_when_no_cpu_at_all(service):
 
 
 def test_default_embodied_emissions_kg_config():
-    """DEFAULT_EMBODIED_EMISSIONS_KG should default to 350 and be overridable."""
+    """DEFAULT_EMBODIED_EMISSIONS_KG should default to 100 (typical cloud instance
+    allocation per Boavizta data) and be overridable via env var.
+
+    350 kg was previously used but represents a full physical server's manufacturing
+    GWP. Boavizta already returns per-instance allocated values (50–170 kg for
+    common cloud VMs), so the fallback must be on the same scale to avoid
+    over-estimating Scope 3 by 2–7×.
+    """
     with patch.dict("os.environ", {}, clear=False):
         c = Config()
-        assert c.DEFAULT_EMBODIED_EMISSIONS_KG == 350.0
+        assert c.DEFAULT_EMBODIED_EMISSIONS_KG == 100.0
 
     with patch.dict("os.environ", {"DEFAULT_EMBODIED_EMISSIONS_KG": "700"}):
         c2 = Config()
         assert c2.DEFAULT_EMBODIED_EMISSIONS_KG == 700.0
+
+
+def test_default_embodied_emissions_kg_is_in_cloud_instance_range():
+    """DEFAULT_EMBODIED_EMISSIONS_KG must be <= 200 kg so the fallback stays within
+    the per-instance allocation range reported by Boavizta for common cloud VMs
+    (aws/m5.large ≈ 80 kg, aws/c5.xlarge ≈ 120 kg).
+
+    A fallback of 350 kg (full-server GWP) combined with a low-carbon grid
+    (~20 g CO₂/kWh for France/Sweden) produces Scope 3 values 20× higher than
+    Scope 2, which is misleading and over-conservative.
+    """
+    with patch.dict("os.environ", {}, clear=False):
+        c = Config()
+        assert c.DEFAULT_EMBODIED_EMISSIONS_KG <= 200.0, (
+            f"Default fallback {c.DEFAULT_EMBODIED_EMISSIONS_KG} kg exceeds the "
+            "per-instance allocation range. Use <= 200 kg to avoid over-estimating Scope 3."
+        )

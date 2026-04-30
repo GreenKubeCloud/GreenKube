@@ -12,12 +12,12 @@
 	let showHealthPopup = false;
 
 	const navItems = [
-		{ href: '/', label: 'Dashboard', icon: '📊' },
-		{ href: '/metrics', label: 'Metrics', icon: '📈' },
-		{ href: '/nodes', label: 'Nodes', icon: '🖥️' },
-		{ href: '/recommendations', label: 'Recommendations', icon: '💡' },
-		{ href: '/report', label: 'Report', icon: '📄' },
-		{ href: '/settings', label: 'Settings', icon: '⚙️' }
+		{ href: '/', label: 'Dashboard' },
+		{ href: '/metrics', label: 'Metrics' },
+		{ href: '/nodes', label: 'Nodes' },
+		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/report', label: 'Report' },
+		{ href: '/settings', label: 'Settings' }
 	];
 
 	onMount(async () => {

@@ -257,7 +257,7 @@ class MetricsSummaryRow(BaseModel):
         ...,
         description=(
             "Identifier for the time window. "
-            "Built-in slugs: '24h', '7d', '30d', '1y', 'ytd'. "
+            "Built-in slugs: '1h', '6h', '24h', '7d', '30d', '1y', 'ytd'. "
             "Prefixed with '<namespace>/' when scoped to a namespace."
         ),
     )
