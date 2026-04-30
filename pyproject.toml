@@ -122,6 +122,9 @@ testpaths = [
     "tests",
 ]
 asyncio_mode = "auto"
+markers = [
+    "database: real database integration tests shared by SQLite and PostgreSQL adapters",
+]
 filterwarnings = [
     # Ignore RuntimeWarning from AsyncMock internals (Python 3.11+ issue with coroutines)
     "ignore:coroutine 'AsyncMockMixin._execute_mock_call' was never awaited:RuntimeWarning",

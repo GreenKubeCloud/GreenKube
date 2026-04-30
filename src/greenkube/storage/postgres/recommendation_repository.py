@@ -24,33 +24,34 @@ logger = logging.getLogger(__name__)
 
 def _row_to_record(row) -> RecommendationRecord:
     """Converts a database row to a RecommendationRecord."""
+    data = dict(row)
     return RecommendationRecord(
-        id=row["id"],
-        pod_name=row["pod_name"],
-        namespace=row["namespace"],
-        type=RecommendationType(row["type"]),
-        description=row["description"],
-        reason=row.get("reason", ""),
-        priority=row.get("priority", "medium"),
-        scope=row.get("scope", "pod"),
-        status=RecommendationStatus(row.get("status", "active")),
-        potential_savings_cost=row.get("potential_savings_cost"),
-        potential_savings_co2e_grams=row.get("potential_savings_co2e_grams"),
-        current_cpu_request_millicores=row.get("current_cpu_request_millicores"),
-        recommended_cpu_request_millicores=row.get("recommended_cpu_request_millicores"),
-        current_memory_request_bytes=row.get("current_memory_request_bytes"),
-        recommended_memory_request_bytes=row.get("recommended_memory_request_bytes"),
-        cron_schedule=row.get("cron_schedule"),
-        target_node=row.get("target_node"),
-        applied_at=row.get("applied_at"),
-        actual_cpu_request_millicores=row.get("actual_cpu_request_millicores"),
-        actual_memory_request_bytes=row.get("actual_memory_request_bytes"),
-        carbon_saved_co2e_grams=row.get("carbon_saved_co2e_grams"),
-        cost_saved=row.get("cost_saved"),
-        ignored_at=row.get("ignored_at"),
-        ignored_reason=row.get("ignored_reason"),
-        created_at=row["created_at"],
-        updated_at=row.get("updated_at"),
+        id=data["id"],
+        pod_name=data["pod_name"],
+        namespace=data["namespace"],
+        type=RecommendationType(data["type"]),
+        description=data["description"],
+        reason=data.get("reason", ""),
+        priority=data.get("priority", "medium"),
+        scope=data.get("scope", "pod"),
+        status=RecommendationStatus(data.get("status", "active")),
+        potential_savings_cost=data.get("potential_savings_cost"),
+        potential_savings_co2e_grams=data.get("potential_savings_co2e_grams"),
+        current_cpu_request_millicores=data.get("current_cpu_request_millicores"),
+        recommended_cpu_request_millicores=data.get("recommended_cpu_request_millicores"),
+        current_memory_request_bytes=data.get("current_memory_request_bytes"),
+        recommended_memory_request_bytes=data.get("recommended_memory_request_bytes"),
+        cron_schedule=data.get("cron_schedule"),
+        target_node=data.get("target_node"),
+        applied_at=data.get("applied_at"),
+        actual_cpu_request_millicores=data.get("actual_cpu_request_millicores"),
+        actual_memory_request_bytes=data.get("actual_memory_request_bytes"),
+        carbon_saved_co2e_grams=data.get("carbon_saved_co2e_grams"),
+        cost_saved=data.get("cost_saved"),
+        ignored_at=data.get("ignored_at"),
+        ignored_reason=data.get("ignored_reason"),
+        created_at=data["created_at"],
+        updated_at=data.get("updated_at"),
     )
 
 
@@ -361,11 +362,11 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
             carbon_saved = request.carbon_saved_co2e_grams
             if carbon_saved is None:
-                carbon_saved = row.get("potential_savings_co2e_grams")
+                carbon_saved = dict(row).get("potential_savings_co2e_grams")
 
             cost_saved = request.cost_saved
             if cost_saved is None:
-                cost_saved = row.get("potential_savings_cost")
+                cost_saved = dict(row).get("potential_savings_cost")
 
             updated = await conn.fetchrow(
                 """
@@ -491,11 +492,12 @@ class PostgresRecommendationRepository(RecommendationRepository):
             by_ns: dict = defaultdict(lambda: {"carbon_saved_co2e_grams": 0.0, "cost_saved": 0.0, "count": 0})
 
             for row in rows:
-                c = row.get("carbon_saved_co2e_grams") or 0.0
-                s = row.get("cost_saved") or 0.0
+                data = dict(row)
+                c = data.get("carbon_saved_co2e_grams") or 0.0
+                s = data.get("cost_saved") or 0.0
                 total_carbon += c
                 total_cost += s
-                ns_key = row["namespace"] or "_cluster"
+                ns_key = data["namespace"] or "_cluster"
                 by_ns[ns_key]["carbon_saved_co2e_grams"] += c
                 by_ns[ns_key]["cost_saved"] += s
                 by_ns[ns_key]["count"] += 1
