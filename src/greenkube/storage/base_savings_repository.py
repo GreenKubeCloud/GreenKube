@@ -40,11 +40,15 @@ class SavingsLedgerRepository(ABC):
         cluster_name: str,
         start_time: datetime,
         end_time: datetime,
+        namespace: str | None = None,
     ) -> Dict[str, Dict[str, float]]:
         """Return exact savings grouped by recommendation_type for a time window.
 
         Queries both raw ledger rows and hourly aggregates so callers get the
         same totals regardless of whether older savings records were compressed.
+        When ``namespace`` is provided, only savings attributed to that namespace
+        are included. An empty namespace string selects cluster-scoped rows that
+        have no namespace attribution.
 
         Returns:
             ``{recommendation_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``

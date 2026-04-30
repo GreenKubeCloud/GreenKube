@@ -53,6 +53,7 @@ def mock_carbon_repo():
 def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
+    repo.list_namespaces = AsyncMock(return_value=[])
     return repo
 
 
@@ -282,6 +283,8 @@ class TestComprehensiveClusterMetrics:
         assert "greenkube_zone_grid_intensity_gco2_kwh" in output
         assert 'zone="FR"' in output
         assert 'node_count="2"' in output
+        assert 'bubble_size="' in output
+        assert 'bubble_label="FR\\n43 gCO₂/kWh\\n2 nodes"' in output
         assert 'nodes="node-a, node-b"' in output
         assert 'map_label="FR · 43 gCO₂/kWh · 2 nodes · node-a, node-b"' in output
 
@@ -361,6 +364,7 @@ class TestComprehensiveClusterMetrics:
             "7d",
             {"RIGHTSIZING_CPU": {"co2e_saved_grams": 1.25, "cost_saved_dollars": 0.4}},
             cluster="test-cluster",
+            namespace="prod",
             reset=True,
         )
         from prometheus_client import generate_latest
@@ -368,11 +372,24 @@ class TestComprehensiveClusterMetrics:
         output = generate_latest(REGISTRY).decode("utf-8")
         assert "greenkube_dashboard_savings_co2e_grams_total" in output
         assert 'cluster="test-cluster"' in output
+        assert 'namespace="prod"' in output
         assert 'recommendation_type="all"' in output
         assert 'recommendation_type="RIGHTSIZING_CPU"' in output
         assert 'window="7d"' in output
         assert 'window="604800s"' in output
         assert "greenkube_dashboard_savings_cost_dollars_total" in output
+
+    def test_sustainability_scores_are_exposed_per_namespace(self, sample_combined_metrics):
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert 'greenkube_sustainability_score{cluster="' in output
+        assert 'namespace="__all__"' in output
+        assert 'namespace="production"' in output
+        assert 'namespace="staging"' in output
+        assert 'greenkube_estimated_metrics_ratio{cluster="' in output
+        assert 'namespace="production"' in output
 
     def test_update_sets_grid_intensity(self, sample_combined_metrics):
         update_cluster_metrics(sample_combined_metrics)
@@ -523,6 +540,11 @@ class TestEndpointAfterUpdate:
             ),
         ]
         update_recommendation_metrics(recs)
+        from prometheus_client import generate_latest
+
+        metrics_body = generate_latest(REGISTRY).decode("utf-8")
+        assert 'namespace="__all__"' in metrics_body
+        assert 'namespace="default"' in metrics_body
         response = client.get("/prometheus/metrics")
         assert response.status_code == 200
         body = response.text
@@ -1149,7 +1171,9 @@ class TestRealizedSavingsMetrics:
         assert "greenkube_dashboard_savings_co2e_grams_total" in output
         assert 'recommendation_type="all"' in output
         assert 'recommendation_type="RIGHTSIZING_CPU"' in output
+        assert 'namespace="__all__"' in output
+        assert 'namespace="_cluster"' in output
         assert 'window="604800s"' in output
         assert "} 2.5" in output
         assert 'window="31536000s"' in output
-        assert mock_savings_repo.get_window_totals.await_count == 7
+        assert mock_savings_repo.get_window_totals.await_count == 14

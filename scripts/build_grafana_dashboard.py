@@ -717,9 +717,9 @@ def sustainability_radar(pid, gridpos=None):
         {
             "datasource": PROM_DS,
             "expr": (
-                "avg(max by (cluster) "
+                "avg(max by (cluster, namespace) "
                 f"(greenkube_sustainability_dimension_score{{{CLUSTER_FILTER}, "
-                f'dimension="{dimension}"}}))'
+                f'namespace=~"$namespace", namespace!="__all__", dimension="{dimension}"}}))'
             ),
             "legendFormat": label,
             "refId": chr(65 + index),
@@ -731,7 +731,11 @@ def sustainability_radar(pid, gridpos=None):
     dimension_targets.append(
         {
             "datasource": PROM_DS,
-            "expr": f"avg(max by (cluster) (greenkube_sustainability_score{{{CLUSTER_FILTER}}}))",
+            "expr": (
+                "avg(max by (cluster, namespace) "
+                f"(greenkube_sustainability_score{{{CLUSTER_FILTER}, "
+                'namespace=~"$namespace", namespace!="__all__"}))'
+            ),
             "legendFormat": "Global score",
             "refId": "H",
             "range": False,
@@ -815,16 +819,16 @@ def geomap(pid, title, targets, unit="gCO₂/kWh", gridpos=None):
                         "style": {
                             "color": {"field": "Value", "fixed": "green"},
                             "opacity": 0.82,
-                            "size": {"field": "node_count", "fixed": 14, "min": 10, "max": 36},
+                            "size": {"field": "bubble_size", "fixed": 18, "min": 14, "max": 56},
                             "symbol": {"mode": "fixed", "fixed": "build/img/icons/marker/circle.svg"},
                             "symbolAlign": {"horizontal": "center", "vertical": "center"},
-                            "text": {"mode": "field", "field": "map_label", "fixed": ""},
+                            "text": {"mode": "field", "field": "bubble_label", "fixed": ""},
                             "textConfig": {
                                 "fontSize": 12,
                                 "textAlign": "center",
                                 "textBaseline": "middle",
                                 "offsetX": 0,
-                                "offsetY": -18,
+                                "offsetY": 0,
                             },
                         },
                     },
@@ -850,7 +854,12 @@ def geomap(pid, title, targets, unit="gCO₂/kWh", gridpos=None):
         "transformations": [
             {
                 "id": "convertFieldType",
-                "options": {"conversions": [{"targetField": "node_count", "destinationType": "number"}]},
+                "options": {
+                    "conversions": [
+                        {"targetField": "node_count", "destinationType": "number"},
+                        {"targetField": "bubble_size", "destinationType": "number"},
+                    ]
+                },
             }
         ],
     }
@@ -947,37 +956,46 @@ y += 1
 panels.append(sustainability_radar(101, gridpos={"x": 0, "y": y, "w": 8, "h": 12}))
 
 _scope2_expr = (
-    "sum(max by (cluster) "
+    "sum(max by (cluster, namespace) "
     f'(greenkube_dashboard_summary_co2e_grams_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'namespace="__all__", scope="scope2"})) '
+    'namespace=~"$namespace", namespace!="__all__", scope="scope2"})) '
     "or "
     f"sum(max by (cluster) (greenkube_cluster_co2e_grams_total{{{CLUSTER_FILTER}}}))"
 )
 _scope3_expr = (
-    "sum(max by (cluster) "
+    "sum(max by (cluster, namespace) "
     f'(greenkube_dashboard_summary_co2e_grams_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'namespace="__all__", scope="scope3"})) '
+    'namespace=~"$namespace", namespace!="__all__", scope="scope3"})) '
     "or "
     f"sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{{{CLUSTER_FILTER}}}))"
 )
 _cloud_cost_expr = (
-    "sum(max by (cluster) "
+    "sum(max by (cluster, namespace) "
     f'(greenkube_dashboard_summary_cost_dollars_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'namespace="__all__"})) '
+    'namespace=~"$namespace", namespace!="__all__"})) '
     "or "
     f"sum(max by (cluster) (greenkube_cluster_cost_dollars_total{{{CLUSTER_FILTER}}}))"
 )
 _co2_saved_expr = (
-    "sum(max by (cluster) "
+    "sum(max by (cluster, namespace) "
     f'(greenkube_dashboard_savings_co2e_grams_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'recommendation_type="all"}))'
+    'namespace=~"$namespace", namespace!="__all__", recommendation_type="all"}))'
 )
 _cost_saved_expr = (
-    "sum(max by (cluster) "
+    "sum(max by (cluster, namespace) "
     f'(greenkube_dashboard_savings_cost_dollars_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'recommendation_type="all"}))'
+    'namespace=~"$namespace", namespace!="__all__", recommendation_type="all"}))'
 )
-_coverage_expr = f"avg(max by (cluster) ((1 - greenkube_estimated_metrics_ratio{{{CLUSTER_FILTER}}}))) * 100"
+_coverage_expr = (
+    "avg(max by (cluster, namespace) "
+    f'((1 - greenkube_estimated_metrics_ratio{{{CLUSTER_FILTER}, namespace=~"$namespace", '
+    'namespace!="__all__"}))) * 100'
+)
+_implemented_expr = (
+    "sum(max by (cluster, namespace, type) "
+    f"(greenkube_recommendations_implemented_total{{{CLUSTER_FILTER}, "
+    'namespace=~"$namespace", namespace!="__all__"}))'
+)
 
 panels.append(
     echarts_panel(
@@ -1001,7 +1019,7 @@ panels.append(
             {"expr": _co2_saved_expr, "legend": "CO₂e avoided", "refId": "A"},
             {"expr": _cost_saved_expr, "legend": "Cost avoided", "refId": "B"},
             {
-                "expr": f"sum(greenkube_recommendations_implemented_total{{{CLUSTER_FILTER}}})",
+                "expr": _implemented_expr,
                 "legend": "Implemented",
                 "refId": "C",
             },
@@ -1019,18 +1037,18 @@ _top3_co2e_expr = (
     "sort_desc(topk(3, sum by (namespace) "
     "(max by (cluster, namespace) "
     f'(greenkube_dashboard_summary_co2e_grams_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'namespace!="__all__", scope="all"}))))'
+    'namespace=~"$namespace", namespace!="__all__", scope="all"}))))'
 )
 _top3_cost_expr = (
     "sort_desc(topk(3, sum by (namespace) "
     "(max by (cluster, namespace) "
     f'(greenkube_dashboard_summary_cost_dollars_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
-    'namespace!="__all__"}))))'
+    'namespace=~"$namespace", namespace!="__all__"}))))'
 )
 _top3_types_expr = (
     f"topk(3, sum by (type)"
     f" (max by (cluster, namespace, type, priority)"
-    f" (greenkube_recommendations_total{{{CLUSTER_FILTER}}})))"
+    f' (greenkube_recommendations_total{{{CLUSTER_FILTER}, namespace=~"$namespace", namespace!="__all__"}})))'
 )
 panels.append(
     echarts_panel(
@@ -1056,7 +1074,7 @@ y += 1
 # of the $node variable selection. The lookup remains the EM zone used for grid
 # intensity, while the node_info join adds Kubernetes topology labels.
 _node_effective_intensity_expr = (
-    "avg by (cluster, zone, lookup, nodes, node_count, map_label) "
+    "avg by (cluster, zone, lookup, nodes, node_count, bubble_size, bubble_label, map_label) "
     f"(greenkube_zone_grid_intensity_gco2_kwh{{{CLUSTER_FILTER}}})"
 )
 panels.append(
@@ -1288,7 +1306,7 @@ panels.append(
                 "expr": (
                     f"sum by (namespace)"
                     f" (max by (cluster, namespace, type, priority)"
-                    f" (greenkube_recommendations_total{{{CLUSTER_FILTER}}}))"
+                    f' (greenkube_recommendations_total{{{CLUSTER_FILTER}, namespace!="__all__"}}))'
                 ),
                 "legend": "Active Recommendations",
                 "refId": "F",
@@ -1503,7 +1521,8 @@ for i, (title, expr, unit, use_full_range) in enumerate(
     [
         (
             "Active Recommendations",
-            f"sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{{{CLUSTER_FILTER}}}))",
+            f"sum(max by (cluster, namespace, type, priority) "
+            f'(greenkube_recommendations_total{{{CLUSTER_FILTER}, namespace=~"$namespace", namespace!="__all__"}}))',
             "short",
             False,
         ),
@@ -1521,13 +1540,14 @@ for i, (title, expr, unit, use_full_range) in enumerate(
         ),
         (
             "Recommendations Implemented",
-            f"sum(greenkube_recommendations_implemented_total{{{CLUSTER_FILTER}}})",
+            _implemented_expr,
             "short",
             False,
         ),
         (
             "Open Recommendations",
-            f"sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{{{CLUSTER_FILTER}}}))",
+            f"sum(max by (cluster, namespace, type, priority) "
+            f'(greenkube_recommendations_total{{{CLUSTER_FILTER}, namespace=~"$namespace", namespace!="__all__"}}))',
             "short",
             False,
         ),
@@ -1553,7 +1573,7 @@ panels.append(
         (
             f"sum by (type)"
             f" (max by (cluster, namespace, type, priority)"
-            f" (greenkube_recommendations_total{{{CLUSTER_FILTER}}}))"
+            f' (greenkube_recommendations_total{{{CLUSTER_FILTER}, namespace=~"$namespace", namespace!="__all__"}}))'
         ),
         "{{type}}",
         unit="short",

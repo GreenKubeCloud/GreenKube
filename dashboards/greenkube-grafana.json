@@ -288,7 +288,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"resource_efficiency\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"resource_efficiency\"}))",
           "legendFormat": "Resource efficiency",
           "refId": "A",
           "range": false,
@@ -299,7 +299,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"carbon_efficiency\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"carbon_efficiency\"}))",
           "legendFormat": "Carbon efficiency",
           "refId": "B",
           "range": false,
@@ -310,7 +310,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"waste_elimination\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"waste_elimination\"}))",
           "legendFormat": "Waste elimination",
           "refId": "C",
           "range": false,
@@ -321,7 +321,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"node_efficiency\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"node_efficiency\"}))",
           "legendFormat": "Node efficiency",
           "refId": "D",
           "range": false,
@@ -332,7 +332,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"scaling_practices\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"scaling_practices\"}))",
           "legendFormat": "Scaling practices",
           "refId": "E",
           "range": false,
@@ -343,7 +343,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"carbon_aware_scheduling\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"carbon_aware_scheduling\"}))",
           "legendFormat": "Carbon aware",
           "refId": "F",
           "range": false,
@@ -354,7 +354,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", dimension=\"stability\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_dimension_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\", dimension=\"stability\"}))",
           "legendFormat": "Stability",
           "refId": "G",
           "range": false,
@@ -365,7 +365,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) (greenkube_sustainability_score{cluster=~\"$cluster\"}))",
+          "expr": "avg(max by (cluster, namespace) (greenkube_sustainability_score{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "legendFormat": "Global score",
           "refId": "H",
           "range": false,
@@ -454,7 +454,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=\"__all__\", scope=\"scope2\"})) or sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"scope2\"})) or sum(max by (cluster) (greenkube_cluster_co2e_grams_total{cluster=~\"$cluster\"}))",
           "legendFormat": "Scope 2",
           "refId": "A",
           "range": true,
@@ -465,7 +465,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=\"__all__\", scope=\"scope3\"})) or sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"scope3\"})) or sum(max by (cluster) (greenkube_cluster_embodied_co2e_grams_total{cluster=~\"$cluster\"}))",
           "legendFormat": "Scope 3",
           "refId": "B",
           "range": true,
@@ -476,7 +476,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=\"__all__\"})) or sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\"})) or sum(max by (cluster) (greenkube_cluster_cost_dollars_total{cluster=~\"$cluster\"}))",
           "legendFormat": "Cloud cost",
           "refId": "C",
           "range": true,
@@ -541,7 +541,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", recommendation_type=\"all\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "legendFormat": "CO₂e avoided",
           "refId": "A",
           "range": true,
@@ -552,7 +552,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", recommendation_type=\"all\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "legendFormat": "Cost avoided",
           "refId": "B",
           "range": true,
@@ -563,7 +563,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
+          "expr": "sum(max by (cluster, namespace, type) (greenkube_recommendations_implemented_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "legendFormat": "Implemented",
           "refId": "C",
           "range": true,
@@ -574,7 +574,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg(max by (cluster) ((1 - greenkube_estimated_metrics_ratio{cluster=~\"$cluster\"}))) * 100",
+          "expr": "avg(max by (cluster, namespace) ((1 - greenkube_estimated_metrics_ratio{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))) * 100",
           "legendFormat": "Measured coverage",
           "refId": "D",
           "range": true,
@@ -639,7 +639,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace!=\"__all__\", scope=\"all\"}))))",
+          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", scope=\"all\"}))))",
           "legendFormat": "{{namespace}}",
           "refId": "A",
           "range": false,
@@ -650,7 +650,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace!=\"__all__\"}))))",
+          "expr": "sort_desc(topk(3, sum by (namespace) (max by (cluster, namespace) (greenkube_dashboard_summary_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\"}))))",
           "legendFormat": "{{namespace}}",
           "refId": "B",
           "range": false,
@@ -661,7 +661,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(3, sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"})))",
+          "expr": "topk(3, sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"})))",
           "legendFormat": "{{type}}",
           "refId": "C",
           "range": false,
@@ -738,7 +738,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "avg by (cluster, zone, lookup, nodes, node_count, map_label) (greenkube_zone_grid_intensity_gco2_kwh{cluster=~\"$cluster\"})",
+          "expr": "avg by (cluster, zone, lookup, nodes, node_count, bubble_size, bubble_label, map_label) (greenkube_zone_grid_intensity_gco2_kwh{cluster=~\"$cluster\"})",
           "legendFormat": "{{node}} · {{zone}} · {{region}} grid intensity",
           "refId": "A",
           "range": false,
@@ -787,10 +787,10 @@
                 },
                 "opacity": 0.82,
                 "size": {
-                  "field": "node_count",
-                  "fixed": 14,
-                  "min": 10,
-                  "max": 36
+                  "field": "bubble_size",
+                  "fixed": 18,
+                  "min": 14,
+                  "max": 56
                 },
                 "symbol": {
                   "mode": "fixed",
@@ -802,7 +802,7 @@
                 },
                 "text": {
                   "mode": "field",
-                  "field": "map_label",
+                  "field": "bubble_label",
                   "fixed": ""
                 },
                 "textConfig": {
@@ -810,7 +810,7 @@
                   "textAlign": "center",
                   "textBaseline": "middle",
                   "offsetX": 0,
-                  "offsetY": -18
+                  "offsetY": 0
                 }
               }
             }
@@ -854,6 +854,10 @@
             "conversions": [
               {
                 "targetField": "node_count",
+                "destinationType": "number"
+              },
+              {
+                "targetField": "bubble_size",
                 "destinationType": "number"
               }
             ]
@@ -1857,7 +1861,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (namespace) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum by (namespace) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace!=\"__all__\"}))",
           "legendFormat": "Active Recommendations",
           "refId": "F",
           "range": true,
@@ -2929,7 +2933,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -2993,7 +2997,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", recommendation_type=\"all\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_co2e_grams_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3056,7 +3060,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", recommendation_type=\"all\"}))",
+          "expr": "sum(max by (cluster, namespace) (greenkube_dashboard_savings_cost_dollars_total{cluster=~\"$cluster\", window=\"$dashboard_window\", namespace=~\"$namespace\", namespace!=\"__all__\", recommendation_type=\"all\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3119,7 +3123,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(greenkube_recommendations_implemented_total{cluster=~\"$cluster\"})",
+          "expr": "sum(max by (cluster, namespace, type) (greenkube_recommendations_implemented_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3183,7 +3187,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum(max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "refId": "A",
           "range": true,
           "instant": false
@@ -3247,7 +3251,7 @@
             "type": "datasource",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\"}))",
+          "expr": "sum by (type) (max by (cluster, namespace, type, priority) (greenkube_recommendations_total{cluster=~\"$cluster\", namespace=~\"$namespace\", namespace!=\"__all__\"}))",
           "legendFormat": "{{type}}",
           "refId": "A",
           "range": true,

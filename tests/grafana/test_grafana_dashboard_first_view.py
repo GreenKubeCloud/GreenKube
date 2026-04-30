@@ -68,6 +68,8 @@ def test_top_left_panel_is_sustainability_radar_chart():
     assert panel["gridPos"] == {"x": 0, "y": 1, "w": 8, "h": 12}
     assert panel["datasource"]["uid"] == "${DS_PROMETHEUS}"
     assert any("greenkube_sustainability_dimension_score" in expr for expr in target_exprs)
+    assert all('namespace=~"$namespace"' in expr for expr in target_exprs)
+    assert all('namespace!="__all__"' in expr for expr in target_exprs)
     assert panel["options"]["renderer"] == "canvas"
     assert panel["options"]["editorMode"] == "code"
     assert panel["options"]["map"] == "none"
@@ -150,7 +152,8 @@ def test_command_center_groups_footprint_and_cost_in_echarts():
     assert "greenkube_dashboard_summary_co2e_grams_total" in panel["targets"][1]["expr"]
     assert "greenkube_dashboard_summary_cost_dollars_total" in panel["targets"][2]["expr"]
     assert 'window="$dashboard_window"' in panel["targets"][0]["expr"]
-    assert 'namespace="__all__"' in panel["targets"][0]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][0]["expr"]
+    assert 'namespace!="__all__"' in panel["targets"][0]["expr"]
     assert 'scope="scope2"' in panel["targets"][0]["expr"]
     assert 'scope="scope3"' in panel["targets"][1]["expr"]
     assert 'scope="scope2"}}' not in panel["targets"][0]["expr"]
@@ -178,10 +181,14 @@ def test_command_center_groups_impact_metrics_in_echarts():
     assert "greenkube_dashboard_savings_cost_dollars_total" in panel["targets"][1]["expr"]
     assert 'window="$dashboard_window"' in panel["targets"][0]["expr"]
     assert 'recommendation_type="all"' in panel["targets"][0]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][0]["expr"]
+    assert 'namespace!="__all__"' in panel["targets"][0]["expr"]
     assert "increase(" not in panel["targets"][0]["expr"]
     assert "increase(" not in panel["targets"][1]["expr"]
     assert "greenkube_recommendations_implemented_total" in panel["targets"][2]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][2]["expr"]
     assert "greenkube_estimated_metrics_ratio" in panel["targets"][3]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][3]["expr"]
 
 
 def test_top_three_action_priorities_are_grouped_in_one_echarts_panel():
@@ -196,8 +203,11 @@ def test_top_three_action_priorities_are_grouped_in_one_echarts_panel():
     assert "greenkube_dashboard_summary_co2e_grams_total" in panel["targets"][0]["expr"]
     assert "greenkube_dashboard_summary_cost_dollars_total" in panel["targets"][1]["expr"]
     assert 'window="$dashboard_window"' in panel["targets"][0]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][0]["expr"]
     assert 'namespace!="__all__"' in panel["targets"][0]["expr"]
     assert 'scope="all"' in panel["targets"][0]["expr"]
+    assert 'namespace=~"$namespace"' in panel["targets"][2]["expr"]
+    assert 'namespace!="__all__"' in panel["targets"][2]["expr"]
     assert ".filter((series) => matchesRefId(series, refId))" in get_option
     assert "pointsFor(group.refId, group.labelKey, 3)" in get_option
     assert "CO₂e namespaces" in get_option
@@ -214,18 +224,18 @@ def test_dashboard_has_native_node_region_geomap():
     assert panel["type"] == "geomap"
     assert any("greenkube_zone_grid_intensity_gco2_kwh" in expr for expr in target_exprs)
     assert any("node_count" in expr for expr in target_exprs)
-    assert any("map_label" in expr for expr in target_exprs)
+    assert any("bubble_size" in expr for expr in target_exprs)
+    assert any("bubble_label" in expr for expr in target_exprs)
     # PUE join removed — grid intensity remains the map value
     assert all("greenkube_pue" not in expr for expr in target_exprs)
     assert len(panel["targets"]) == 1
     assert panel["options"]["layers"][0]["location"]["gazetteer"] == "/public/build/gazetteer/countries.json"
-    assert panel["options"]["layers"][0]["config"]["style"]["text"]["field"] == "map_label"
-    assert panel["options"]["layers"][0]["config"]["style"]["size"]["field"] == "node_count"
+    assert panel["options"]["layers"][0]["config"]["style"]["text"]["field"] == "bubble_label"
+    assert panel["options"]["layers"][0]["config"]["style"]["size"]["field"] == "bubble_size"
     assert panel["options"]["layers"][0]["config"]["style"]["color"]["field"] == "Value"
     assert panel["transformations"][0]["id"] == "convertFieldType"
-    assert panel["transformations"][0]["options"]["conversions"][0] == {
-        "targetField": "node_count",
-        "destinationType": "number",
-    }
+    conversions = panel["transformations"][0]["options"]["conversions"]
+    assert {"targetField": "node_count", "destinationType": "number"} in conversions
+    assert {"targetField": "bubble_size", "destinationType": "number"} in conversions
     assert panel["options"]["layers"][0]["config"]["style"]["symbol"]["fixed"].endswith("circle.svg")
     assert panel["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]["color"] == "red"
