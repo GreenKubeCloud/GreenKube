@@ -10,7 +10,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
 [![Python Coverage](https://img.shields.io/badge/coverage%20python-90%25-brightgreen)](tests/)
 [![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-[![Tests](https://img.shields.io/badge/tests-1044%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1048%20passed-brightgreen)](tests/)
 [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 >**Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the full dashboard with realistic sample data, no install required.
