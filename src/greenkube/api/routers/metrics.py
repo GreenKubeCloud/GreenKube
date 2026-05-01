@@ -4,7 +4,7 @@ API routes for carbon/cost/energy metrics.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,7 +18,7 @@ from greenkube.api.schemas import (
     TopPodItem,
 )
 from greenkube.storage.base_repository import CombinedMetricsRepository
-from greenkube.utils.date_utils import parse_duration
+from greenkube.utils.date_utils import time_range_from_last
 
 logger = logging.getLogger(__name__)
 
@@ -27,22 +27,16 @@ router = APIRouter()
 
 def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
     """Compute (start, end) time range. Defaults to last 24h."""
-    end = datetime.now(timezone.utc)
-    if last:
-        try:
-            delta = parse_duration(last)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        start = end - delta
-    else:
-        start = end - timedelta(days=1)
-    return start, end
+    try:
+        return time_range_from_last(last)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/metrics", response_model=PaginatedMetricsResponse)
 async def list_metrics(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     offset: int = Query(0, ge=0, description="Number of records to skip."),
     limit: int = Query(1000, ge=1, le=10000, description="Maximum number of records to return."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
@@ -58,7 +52,7 @@ async def list_metrics(
 @router.get("/metrics/summary", response_model=MetricsSummaryResponse)
 async def metrics_summary(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return an aggregated summary of metrics over the time range."""
@@ -82,7 +76,7 @@ _GRANULARITY_FORMATS = {
 @router.get("/metrics/timeseries", response_model=List[TimeseriesPoint])
 async def metrics_timeseries(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     granularity: Optional[str] = Query("hour", description="Grouping: 'hour', 'day', 'week', 'month'."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
@@ -115,7 +109,7 @@ async def metrics_timeseries(
 @router.get("/metrics/by-namespace", response_model=List[NamespaceBreakdownItem])
 async def metrics_by_namespace(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Return metrics aggregated by namespace (lightweight, SQL-level)."""
@@ -127,7 +121,7 @@ async def metrics_by_namespace(
 @router.get("/metrics/top-pods", response_model=List[TopPodItem])
 async def metrics_top_pods(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     limit: int = Query(10, ge=1, le=50, description="Number of top pods to return."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):

@@ -45,6 +45,22 @@ class TestMetricsListEndpoint:
         response = client.get("/api/v1/metrics?last=7d")
         assert response.status_code == 200
 
+    def test_metrics_supports_ytd_last(self, client, mock_combined_metrics_repo):
+        """YTD should resolve to January 1st of the current UTC year."""
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/metrics?last=ytd")
+
+        assert response.status_code == 200
+        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        start = kwargs["start_time"]
+        end = kwargs["end_time"]
+        assert start.year == end.year
+        assert start.month == 1
+        assert start.day == 1
+        assert start.hour == 0
+        assert start.tzinfo is not None
+
     def test_metrics_invalid_last_returns_400(self, client):
         """Should return 400 for invalid last parameter."""
         response = client.get("/api/v1/metrics?last=invalid")
@@ -118,3 +134,19 @@ class TestMetricsSummaryEndpoint:
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics/summary?last=24h")
         assert response.status_code == 200
+
+    def test_summary_supports_ytd_last(self, client, mock_combined_metrics_repo):
+        """YTD should resolve to January 1st of the current UTC year."""
+        mock_combined_metrics_repo.aggregate_summary = AsyncMock(return_value={})
+
+        response = client.get("/api/v1/metrics/summary?last=ytd")
+
+        assert response.status_code == 200
+        kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
+        start = kwargs["start_time"]
+        end = kwargs["end_time"]
+        assert start.year == end.year
+        assert start.month == 1
+        assert start.day == 1
+        assert start.hour == 0
+        assert start.tzinfo is not None

@@ -29,6 +29,7 @@ All metric and report endpoints accept a `last` parameter to define the time win
 | `1h`, `6h`, `24h` | Last N hours |
 | `7d`, `30d`, `90d` | Last N days |
 | `3m`, `6m`, `12m` | Last N months |
+| `ytd` | Year to date, from Jan 1 UTC through now |
 
 ### Granularity
 
@@ -62,7 +63,7 @@ curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
 curl "http://localhost:8000/api/v1/recommendations?namespace=production"
 
 # Preview a report before downloading
-curl "http://localhost:8000/api/v1/report/summary?last=30d&aggregate=true&granularity=daily"
+curl "http://localhost:8000/api/v1/report/summary?last=ytd&aggregate=true&granularity=monthly"
 
 # Download a daily CSV report for the last 7 days
 curl -O -J "http://localhost:8000/api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily"
