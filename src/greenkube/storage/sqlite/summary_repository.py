@@ -27,35 +27,62 @@ class SQLiteSummaryRepository(SummaryRepository):
         updated_at = (row.updated_at or datetime.now(timezone.utc)).isoformat()
         try:
             async with self.db_manager.connection_scope() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO metrics_summary
-                        (window_slug, namespace,
-                         total_co2e_grams, total_embodied_co2e_grams,
-                         total_cost, total_energy_joules,
-                         pod_count, namespace_count, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(window_slug, namespace) DO UPDATE SET
-                        total_co2e_grams          = excluded.total_co2e_grams,
-                        total_embodied_co2e_grams = excluded.total_embodied_co2e_grams,
-                        total_cost                = excluded.total_cost,
-                        total_energy_joules       = excluded.total_energy_joules,
-                        pod_count                 = excluded.pod_count,
-                        namespace_count           = excluded.namespace_count,
-                        updated_at                = excluded.updated_at
-                    """,
-                    (
-                        row.window_slug,
-                        row.namespace,
-                        row.total_co2e_grams,
-                        row.total_embodied_co2e_grams,
-                        row.total_cost,
-                        row.total_energy_joules,
-                        row.pod_count,
-                        row.namespace_count,
-                        updated_at,
-                    ),
-                )
+                if row.namespace is None:
+                    await conn.execute(
+                        "DELETE FROM metrics_summary WHERE window_slug = ? AND namespace IS NULL",
+                        (row.window_slug,),
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO metrics_summary
+                            (window_slug, namespace,
+                             total_co2e_grams, total_embodied_co2e_grams,
+                             total_cost, total_energy_joules,
+                             pod_count, namespace_count, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row.window_slug,
+                            None,
+                            row.total_co2e_grams,
+                            row.total_embodied_co2e_grams,
+                            row.total_cost,
+                            row.total_energy_joules,
+                            row.pod_count,
+                            row.namespace_count,
+                            updated_at,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO metrics_summary
+                            (window_slug, namespace,
+                             total_co2e_grams, total_embodied_co2e_grams,
+                             total_cost, total_energy_joules,
+                             pod_count, namespace_count, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(window_slug, namespace) DO UPDATE SET
+                            total_co2e_grams          = excluded.total_co2e_grams,
+                            total_embodied_co2e_grams = excluded.total_embodied_co2e_grams,
+                            total_cost                = excluded.total_cost,
+                            total_energy_joules       = excluded.total_energy_joules,
+                            pod_count                 = excluded.pod_count,
+                            namespace_count           = excluded.namespace_count,
+                            updated_at                = excluded.updated_at
+                        """,
+                        (
+                            row.window_slug,
+                            row.namespace,
+                            row.total_co2e_grams,
+                            row.total_embodied_co2e_grams,
+                            row.total_cost,
+                            row.total_energy_joules,
+                            row.pod_count,
+                            row.namespace_count,
+                            updated_at,
+                        ),
+                    )
                 await conn.commit()
         except sqlite3.Error as e:
             logger.error("upsert_row failed for slug '%s': %s", row.window_slug, e)

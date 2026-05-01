@@ -3,7 +3,8 @@
 Unit tests for the OpenCostCollector using pytest-asyncio and respx.
 """
 
-from unittest.mock import patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -155,3 +156,139 @@ async def test_collect_handles_api_error_gracefully():
     # Le collecteur doit retourner une liste vide en cas d'erreur
     assert isinstance(results, list)
     assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_collect_returns_empty_when_url_resolution_fails():
+    collector = OpenCostCollector()
+    client = AsyncMock()
+    collector._get_client = AsyncMock(return_value=client)
+    collector._resolve_url = AsyncMock(return_value=None)
+
+    assert await collector.collect() == []
+
+
+@pytest.mark.asyncio
+async def test_collect_tries_allocation_compute_path_and_uses_resource_id_fallback():
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value="http://opencost")
+    first_response = MagicMock()
+    first_response.raise_for_status.return_value = None
+    first_response.json.return_value = {"data": []}
+    second_response = MagicMock()
+    second_response.raise_for_status.return_value = None
+    second_response.json.return_value = {
+        "data": [
+            {
+                "resource-id-pod": {
+                    "properties": {"namespace": "prod"},
+                    "cpuCost": 1.25,
+                    "ramCost": 2.5,
+                    "totalCost": 3.75,
+                }
+            }
+        ]
+    }
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[first_response, second_response])
+    collector._get_client = AsyncMock(return_value=client)
+
+    timestamp = datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc)
+    metrics = await collector.collect(timestamp=timestamp)
+
+    assert len(metrics) == 1
+    assert metrics[0].pod_name == "resource-id-pod"
+    assert metrics[0].namespace == "prod"
+    assert metrics[0].timestamp == timestamp
+    assert collector._resolved_url == "http://opencost/allocation/compute"
+
+
+@pytest.mark.asyncio
+async def test_collect_handles_non_json_response():
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value="http://opencost")
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.side_effect = ValueError("not json")
+    response.text = "<html>nope</html>"
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=response)
+    collector._get_client = AsyncMock(return_value=client)
+
+    assert await collector.collect() == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_url_uses_cache_config_discovery_and_fallback(monkeypatch):
+    client = AsyncMock()
+
+    cached = OpenCostCollector()
+    cached._resolved_url = "http://cached"
+    assert await cached._resolve_url(client) == "http://cached"
+
+    configured = OpenCostCollector()
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_API_URL", "http://configured")
+    assert await configured._resolve_url(client) == "http://configured"
+
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_API_URL", None)
+    discovered = OpenCostCollector()
+    with patch("greenkube.collectors.opencost_collector.OpenCostDiscovery") as discovery_cls:
+        discovery_cls.return_value.discover = AsyncMock(return_value="http://discovered")
+        assert await discovered._resolve_url(client) == "http://discovered"
+
+    fallback = OpenCostCollector()
+    fallback._probe = AsyncMock(side_effect=[False, True])
+    with patch("greenkube.collectors.opencost_collector.OpenCostDiscovery") as discovery_cls:
+        discovery_cls.return_value.discover = AsyncMock(return_value=None)
+        assert await fallback._resolve_url(client) == "http://opencost:9003"
+
+
+@pytest.mark.asyncio
+async def test_resolve_url_checks_in_cluster_candidates(monkeypatch):
+    collector = OpenCostCollector()
+    collector._probe = AsyncMock(side_effect=[False, False, False, True])
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_API_URL", None)
+    with patch("greenkube.collectors.opencost_collector.OpenCostDiscovery") as discovery_cls:
+        discovery_cls.return_value.discover = AsyncMock(return_value=None)
+        with patch("greenkube.collectors.opencost_collector.BaseDiscovery._is_running_in_cluster", return_value=True):
+            assert await collector._resolve_url(AsyncMock()) == "http://opencost.opencost.svc.cluster.local:9003"
+
+
+@pytest.mark.asyncio
+async def test_is_available_uses_alt_path_and_discovery_fallback(monkeypatch):
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_API_URL", "http://configured")
+    collector = OpenCostCollector()
+    collector._get_client = AsyncMock(return_value=AsyncMock())
+    collector._probe = AsyncMock(side_effect=[False, True])
+
+    assert await collector.is_available() is True
+    assert collector._resolved_url == "http://configured/allocation/compute"
+
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_API_URL", None)
+    discovered = OpenCostCollector()
+    discovered._get_client = AsyncMock(return_value=AsyncMock())
+    discovered._probe = AsyncMock(return_value=True)
+    with patch("greenkube.collectors.opencost_collector.OpenCostDiscovery") as discovery_cls:
+        discovery_cls.return_value.discover = AsyncMock(return_value="http://discovered")
+        assert await discovered.is_available() is True
+        assert discovered._resolved_url == "http://discovered"
+
+
+@pytest.mark.asyncio
+async def test_probe_and_close_behaviour():
+    collector = OpenCostCollector()
+    client = AsyncMock()
+    good_response = MagicMock()
+    good_response.raise_for_status.return_value = None
+    client.get = AsyncMock(return_value=good_response)
+
+    assert await collector._probe(client, "http://opencost") is True
+
+    client.get = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await collector._probe(client, "http://opencost") is False
+
+    collector._client = AsyncMock()
+    collector._client.is_closed = False
+    collector._client.aclose = AsyncMock()
+    await collector.close()
+    assert collector._client is None

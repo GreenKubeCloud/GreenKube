@@ -6,7 +6,7 @@ import pytest
 from kubernetes_asyncio.client import models as k8s
 
 from greenkube.collectors.pod_collector import PodCollector
-from greenkube.utils.k8s_utils import parse_cpu_request, parse_memory_request
+from greenkube.utils.k8s_utils import parse_cpu_request, parse_memory_request, parse_storage_request
 
 
 # Fixture to simulate the Kubernetes API
@@ -133,3 +133,95 @@ def test_parse_memory_units():
     assert parse_memory_request(None) == 0
     assert parse_memory_request("1G") == 1000 * 1000 * 1000  # G (non-binary)
     assert parse_memory_request("1M") == 1000 * 1000  # M (non-binary)
+
+
+@pytest.mark.asyncio
+async def test_pod_collector_returns_empty_without_client(monkeypatch):
+    collector = PodCollector()
+    monkeypatch.setattr(collector, "_ensure_client", AsyncMock(return_value=None))
+
+    assert await collector.collect() == []
+
+
+@pytest.mark.asyncio
+async def test_pod_collector_reuses_existing_client():
+    collector = PodCollector()
+    collector._api = MagicMock()
+
+    assert await collector._ensure_client() is collector._api
+
+
+@pytest.mark.asyncio
+@patch("greenkube.collectors.pod_collector.get_core_v1_api")
+async def test_pod_collector_handles_missing_client(mock_get_api):
+    mock_get_api.return_value = None
+    collector = PodCollector()
+
+    assert await collector._ensure_client() is None
+    assert await collector.collect() == []
+
+
+@pytest.mark.asyncio
+async def test_pod_collector_extracts_owner_and_ephemeral_storage():
+    replica_set_owner = k8s.V1OwnerReference(
+        api_version="apps/v1",
+        kind="ReplicaSet",
+        name="api-abc123",
+        uid="1",
+        controller=True,
+    )
+    non_controller_owner = k8s.V1OwnerReference(
+        api_version="batch/v1",
+        kind="Job",
+        name="ignored",
+        uid="2",
+        controller=False,
+    )
+    container = k8s.V1Container(
+        name="app",
+        resources=k8s.V1ResourceRequirements(requests={"cpu": "1", "memory": "128Mi", "ephemeral-storage": "1Gi"}),
+    )
+    owned_pod = k8s.V1Pod(
+        metadata=k8s.V1ObjectMeta(
+            name="api-pod",
+            namespace="prod",
+            owner_references=[non_controller_owner, replica_set_owner],
+        ),
+        spec=k8s.V1PodSpec(containers=[container]),
+    )
+    no_spec_pod = k8s.V1Pod(metadata=k8s.V1ObjectMeta(name="empty", namespace="prod"), spec=None)
+    no_container_pod = k8s.V1Pod(
+        metadata=k8s.V1ObjectMeta(name="empty-list", namespace="prod"),
+        spec=k8s.V1PodSpec(containers=[]),
+    )
+    api = MagicMock()
+    api.list_pod_for_all_namespaces = AsyncMock(
+        return_value=k8s.V1PodList(items=[owned_pod, no_spec_pod, no_container_pod])
+    )
+    collector = PodCollector()
+    collector._api = api
+
+    metrics = await collector.collect()
+
+    assert len(metrics) == 1
+    assert metrics[0].owner_kind == "Deployment"
+    assert metrics[0].owner_name == "api"
+    assert metrics[0].ephemeral_storage_request == 1024**3
+
+
+def test_parse_storage_units():
+    assert parse_storage_request("1Mi") == 1024 * 1024
+    assert parse_storage_request("1G") == 1000 * 1000 * 1000
+
+
+@pytest.mark.asyncio
+async def test_pod_collector_close_closes_cached_api_client():
+    collector = PodCollector()
+    api_client = MagicMock()
+    api_client.close = AsyncMock()
+    collector._api = MagicMock(api_client=api_client)
+
+    await collector.close()
+
+    api_client.close.assert_awaited_once()
+    assert collector._api is None

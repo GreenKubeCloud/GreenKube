@@ -160,6 +160,44 @@ async def test_get_snapshots(node_repo):
 
 
 @pytest.mark.asyncio
+async def test_get_snapshots_falls_back_to_legacy_table(node_repo, db_connection):
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    await db_connection.execute(
+        """
+        INSERT INTO node_snapshots (
+            timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
+            cloud_provider, region, zone, node_pool, memory_capacity_bytes, embodied_emissions_kg
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ts,
+            "legacy-node",
+            "c6i.large",
+            2.0,
+            "amd64",
+            "aws",
+            "eu-west-3",
+            "eu-west-3a",
+            "legacy",
+            8_000_000_000,
+            120.0,
+        ),
+    )
+    await db_connection.commit()
+
+    snapshots = await node_repo.get_snapshots(
+        datetime.now(timezone.utc) - timedelta(minutes=10),
+        datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0][0] == ts
+    assert snapshots[0][1].name == "legacy-node"
+    assert snapshots[0][1].embodied_emissions_kg == 120.0
+
+
+@pytest.mark.asyncio
 async def test_get_latest_snapshots_before(node_repo, db_connection):
     """Test retrieving latest snapshots before a timestamp."""
     # We need to simulate history.

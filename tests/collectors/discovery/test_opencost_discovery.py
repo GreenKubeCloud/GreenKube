@@ -8,10 +8,13 @@ existing in different namespaces.
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from greenkube.collectors import discovery
+from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 
 def make_svc(name, namespace, ports, labels=None):
@@ -120,3 +123,84 @@ async def test_opencost_prefers_9003_over_8080(monkeypatch):
     url = await discovery.discover_service_dns("opencost")
     assert url is not None
     assert ":9003" in url
+
+
+@pytest.mark.asyncio
+async def test_opencost_discover_returns_none_without_candidates():
+    opencost_discovery = OpenCostDiscovery()
+    opencost_discovery._collect_candidates = AsyncMock(return_value=[])
+
+    assert await opencost_discovery.discover() is None
+
+
+@pytest.mark.asyncio
+async def test_opencost_discover_returns_verified_candidate():
+    opencost_discovery = OpenCostDiscovery()
+    opencost_discovery._collect_candidates = AsyncMock(return_value=[("http://opencost", 10)])
+    opencost_discovery.probe_candidates = AsyncMock(return_value="http://opencost")
+
+    assert await opencost_discovery.discover() == "http://opencost"
+
+
+@pytest.mark.asyncio
+async def test_opencost_discover_returns_none_when_probes_fail():
+    opencost_discovery = OpenCostDiscovery()
+    opencost_discovery._collect_candidates = AsyncMock(return_value=[("http://opencost", 10)])
+    opencost_discovery.probe_candidates = AsyncMock(return_value=None)
+
+    assert await opencost_discovery.discover() is None
+
+
+class _FakeOpenCostResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _FakeAsyncClientContext:
+    def __init__(self, client):
+        self.client = client
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_probe_opencost_endpoint_accepts_2xx_healthz_response():
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_FakeOpenCostResponse(204))
+
+    with patch(
+        "greenkube.collectors.discovery.opencost.get_async_http_client",
+        return_value=_FakeAsyncClientContext(client),
+    ):
+        assert await OpenCostDiscovery()._probe_opencost_endpoint("http://opencost/", 10) is True
+
+    client.get.assert_awaited_once_with("http://opencost/healthz")
+
+
+@pytest.mark.asyncio
+async def test_probe_opencost_endpoint_rejects_non_2xx_healthz_response():
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_FakeOpenCostResponse(503))
+
+    with patch(
+        "greenkube.collectors.discovery.opencost.get_async_http_client",
+        return_value=_FakeAsyncClientContext(client),
+    ):
+        assert await OpenCostDiscovery()._probe_opencost_endpoint("http://opencost", 10) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_opencost_endpoint_handles_request_and_unexpected_errors():
+    for error in (httpx.RequestError("connection refused"), RuntimeError("boom")):
+        client = AsyncMock()
+        client.get = AsyncMock(side_effect=error)
+
+        with patch(
+            "greenkube.collectors.discovery.opencost.get_async_http_client",
+            return_value=_FakeAsyncClientContext(client),
+        ):
+            assert await OpenCostDiscovery()._probe_opencost_endpoint("http://opencost", 10) is False

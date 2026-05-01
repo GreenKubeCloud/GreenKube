@@ -269,3 +269,100 @@ def test_estimator_attributes_idle_energy_to_unallocated(estimator):
     expected_joules = expected_power * 300  # 5 minutes
 
     assert result.joules == pytest.approx(expected_joules)
+
+
+def test_estimator_parses_step_units_and_defaults_on_unknown(mock_config):
+    mock_config.PROMETHEUS_QUERY_RANGE_STEP = "15s"
+    assert BasicEstimator(mock_config).query_range_step_sec == 15
+
+    mock_config.PROMETHEUS_QUERY_RANGE_STEP = "2h"
+    assert BasicEstimator(mock_config).query_range_step_sec == 7200
+
+    mock_config.PROMETHEUS_QUERY_RANGE_STEP = "weird"
+    assert BasicEstimator(mock_config).query_range_step_sec == 300
+
+
+def test_estimator_uses_configured_default_profile_values():
+    config = Config()
+    config.PROMETHEUS_QUERY_RANGE_STEP = "5m"
+    config.DEFAULT_INSTANCE_VCORES = 8
+    config.DEFAULT_INSTANCE_MIN_WATTS = 16
+    config.DEFAULT_INSTANCE_MAX_WATTS = 64
+
+    estimator = BasicEstimator(config)
+
+    assert estimator.DEFAULT_INSTANCE_PROFILE == {"vcores": 8, "minWatts": 16.0, "maxWatts": 64.0}
+    assert estimator._create_cpu_profile(4) == {"vcores": 4, "minWatts": 8.0, "maxWatts": 32.0}
+
+
+def test_estimator_create_cpu_profile_handles_zero_default_vcores():
+    config = Config()
+    config.DEFAULT_INSTANCE_VCORES = 0
+    config.DEFAULT_INSTANCE_MIN_WATTS = 3
+    config.DEFAULT_INSTANCE_MAX_WATTS = 9
+
+    estimator = BasicEstimator(config)
+
+    assert estimator._create_cpu_profile(2) == {"vcores": 2, "minWatts": 6.0, "maxWatts": 18.0}
+
+
+def test_estimator_builds_inferred_cpu_profile_and_falls_back_for_invalid_cpu_label(mock_config):
+    metrics = PrometheusMetric(
+        pod_cpu_usage=[
+            PodCPUUsage(namespace="prod", pod="inferred", container="app", node="node-cpu", cpu_usage_cores=1.0),
+            PodCPUUsage(namespace="prod", pod="fallback", container="app", node="node-bad", cpu_usage_cores=1.0),
+        ],
+        node_instance_types=[
+            NodeInstanceType(node="node-cpu", instance_type="cpu-4"),
+            NodeInstanceType(node="node-bad", instance_type="cpu-not-a-number"),
+        ],
+    )
+
+    results = BasicEstimator(mock_config).estimate(metrics)
+
+    inferred = next(result for result in results if result.pod_name == "inferred")
+    fallback = next(result for result in results if result.pod_name == "fallback")
+    assert inferred.is_estimated is True
+    assert inferred.estimation_reasons == ["Inferred profile from CPU count: cpu-4"]
+    assert fallback.is_estimated is True
+    assert fallback.estimation_reasons == ["Unknown instance type 'cpu-not-a-number'; used default profile"]
+
+
+def test_estimator_uses_default_profile_for_pod_node_without_instance_type(mock_config):
+    metrics = PrometheusMetric(
+        pod_cpu_usage=[
+            PodCPUUsage(namespace="prod", pod="api", container="app", node="node-missing", cpu_usage_cores=0.5)
+        ],
+        node_instance_types=[],
+    )
+
+    result = BasicEstimator(mock_config).estimate(metrics)[0]
+
+    assert result.is_estimated is True
+    assert result.node == "node-missing"
+    assert "No profile found for node 'node-missing'; used default profile" in result.estimation_reasons
+
+
+def test_calculate_node_energy_distributes_idle_power_and_handles_zero_vcores(estimator):
+    idle_results = estimator.calculate_node_energy(
+        node_name="node-idle",
+        node_profile={"vcores": 2, "minWatts": 6.0, "maxWatts": 12.0},
+        node_total_cpu=0,
+        pods_on_node=[(("prod", "api"), 0.0), (("prod", "worker"), 0.0)],
+        duration_seconds=10,
+        estimation_reasons=["estimated"],
+    )
+
+    assert [metric.pod_name for metric in idle_results] == ["api", "worker"]
+    assert idle_results[0].joules == pytest.approx(30.0)
+    assert idle_results[0].is_estimated is True
+
+    busy_result = estimator.calculate_node_energy(
+        node_name="node-zero",
+        node_profile={"vcores": 0, "minWatts": 4.0, "maxWatts": 20.0},
+        node_total_cpu=2.0,
+        pods_on_node=[(("prod", "api"), 2.0)],
+        duration_seconds=5,
+    )
+
+    assert busy_result[0].joules == pytest.approx(20.0)
