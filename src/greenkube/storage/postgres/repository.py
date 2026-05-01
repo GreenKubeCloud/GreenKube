@@ -291,13 +291,12 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                 for row in results:
                     data = dict(row)
                     data.pop("id", None)
-                    data.pop("sample_count", None)
-                    data.pop("cpu_usage_max", None)
-                    data.pop("memory_usage_max", None)
                     # Map hourly columns back to CombinedMetric fields
                     data["timestamp"] = data.pop("hour_bucket", None)
                     data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
+                    data["cpu_usage_max_millicores"] = data.pop("cpu_usage_max", None)
                     data["memory_usage_bytes"] = data.pop("memory_usage_avg", None)
+                    data["memory_usage_max_bytes"] = data.pop("memory_usage_max", None)
                     if "estimation_reasons" in data and isinstance(data["estimation_reasons"], str):
                         try:
                             data["estimation_reasons"] = json.loads(data["estimation_reasons"])

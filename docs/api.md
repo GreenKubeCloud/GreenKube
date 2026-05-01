@@ -14,7 +14,8 @@ The GreenKube REST API is available at `/api/v1`. Interactive documentation (Swa
 | `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=day&last=7d`) |
 | `GET` | `/api/v1/namespaces` | List of active namespaces |
 | `GET` | `/api/v1/nodes` | Cluster node inventory |
-| `GET` | `/api/v1/recommendations` | Optimization recommendations (`?namespace=`) |
+| `GET` | `/api/v1/recommendations` | Generate and persist optimization recommendations (`?namespace=`) |
+| `GET` | `/api/v1/recommendations/active` | Active recommendation records (`?namespace=&refresh=true`) |
 | `GET` | `/api/v1/report/summary` | Report preview — row count and totals (`?namespace=&last=24h&aggregate=true&granularity=daily`) |
 | `GET` | `/api/v1/report/export` | Download report as CSV or JSON (`?format=csv&last=7d&aggregate=true&granularity=daily`) |
 
@@ -61,6 +62,9 @@ curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
 
 # Optimization recommendations for a namespace
 curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+
+# Active recommendation records, refreshed before returning
+curl "http://localhost:8000/api/v1/recommendations/active?namespace=production&refresh=true"
 
 # Preview a report before downloading
 curl "http://localhost:8000/api/v1/report/summary?last=ytd&aggregate=true&granularity=monthly"

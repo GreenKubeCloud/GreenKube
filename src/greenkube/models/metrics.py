@@ -99,6 +99,7 @@ class RecommendationStatus(str, Enum):
     ACTIVE = "active"
     APPLIED = "applied"
     IGNORED = "ignored"
+    STALE = "stale"
 
 
 class Recommendation(BaseModel):
@@ -114,7 +115,7 @@ class Recommendation(BaseModel):
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
     scope: str = Field(
         "pod",
-        description="Recommendation scope: 'pod', 'namespace', or 'node'.",
+        description="Recommendation scope: 'pod', 'workload', 'namespace', or 'node'.",
     )
     potential_savings_co2e_grams: Optional[float] = Field(
         None, description="Estimated CO2e savings in grams if implemented."
@@ -142,7 +143,7 @@ class RecommendationRecord(BaseModel):
     description: str = Field(..., description="A human-readable description of the recommendation.")
     reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
-    scope: str = Field("pod", description="Recommendation scope: 'pod', 'namespace', or 'node'.")
+    scope: str = Field("pod", description="Recommendation scope: 'pod', 'workload', 'namespace', or 'node'.")
     status: RecommendationStatus = Field(RecommendationStatus.ACTIVE, description="Lifecycle status.")
     potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
     potential_savings_co2e_grams: Optional[float] = Field(
@@ -353,8 +354,17 @@ class CombinedMetric(BaseModel):
     cpu_request: int = 0  # in millicores
     memory_request: int = 0  # in bytes
     # Actual usage metrics (from Prometheus)
+    sample_count: int = Field(1, description="Number of raw samples represented by this metric point.")
     cpu_usage_millicores: Optional[int] = Field(None, description="Actual CPU usage in millicores.")
+    cpu_usage_max_millicores: Optional[int] = Field(
+        None,
+        description="Maximum CPU usage in millicores represented by this metric point.",
+    )
     memory_usage_bytes: Optional[int] = Field(None, description="Actual memory working set in bytes.")
+    memory_usage_max_bytes: Optional[int] = Field(
+        None,
+        description="Maximum memory working set in bytes represented by this metric point.",
+    )
     # Network I/O metrics (from Prometheus)
     network_receive_bytes: Optional[float] = Field(None, description="Network bytes received per second (rate).")
     network_transmit_bytes: Optional[float] = Field(None, description="Network bytes transmitted per second (rate).")

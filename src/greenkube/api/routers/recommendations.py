@@ -44,6 +44,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _get_active_k8s_namespaces() -> set[str] | None:
+    """Return names of currently active Kubernetes namespaces, or None if unavailable.
+
+    Returns None (rather than an empty set) when the Kubernetes API cannot be reached
+    so that the calling code skips filtering instead of discarding all metrics.
+    The ApiClient is closed after each call to avoid aiohttp session leaks.
+    """
+    try:
+        from kubernetes_asyncio.client import ApiClient, CoreV1Api
+
+        from greenkube.core.k8s_client import ensure_k8s_config
+
+        if not await ensure_k8s_config():
+            return None
+
+        async with ApiClient() as api_client:
+            v1 = CoreV1Api(api_client=api_client)
+            ns_list = await v1.list_namespace()
+            return {ns.metadata.name for ns in ns_list.items if ns.metadata.name}
+    except Exception as e:
+        logger.warning("Could not list Kubernetes namespaces: %s. Skipping namespace filter.", e)
+        return None
+
+
 def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], Optional[datetime]]:
     """Compute an optional UTC time range from a dashboard window slug."""
     if not last:
@@ -61,26 +85,30 @@ def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], O
     return end - delta, end
 
 
-@router.get("/recommendations", response_model=List[Recommendation])
-async def list_recommendations(
-    namespace: Optional[str] = Depends(validate_namespace),
-    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
-    node_repo: NodeRepository = Depends(get_node_repository),
-    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
-):
-    """Analyze recent metrics, upsert recommendations in DB, and return them.
-
-    Recommended CPU and memory values are guaranteed to be at least the
-    configured minimums (RECOMMENDATION_MIN_CPU_MILLICORES /
-    RECOMMENDATION_MIN_MEMORY_BYTES), so all returned recommendations are
-    actionable as-is.
-    """
+async def _generate_and_persist_recommendations(
+    namespace: Optional[str],
+    repo: CombinedMetricsRepository,
+    node_repo: NodeRepository,
+    reco_repo: RecommendationRepository,
+) -> list[Recommendation]:
+    """Analyze recent metrics and reconcile persisted active recommendations."""
     lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
     metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
+    # Remove metrics from Kubernetes namespaces that no longer exist so that
+    # the recommender does not regenerate recommendations for deleted namespaces,
+    # allowing the subsequent reconcile call to mark those rows as stale.
+    active_namespaces = await _get_active_k8s_namespaces()
+    if active_namespaces is not None and metrics:
+        metrics = [m for m in metrics if m.namespace in active_namespaces]
+
     if not metrics:
+        try:
+            await reco_repo.reconcile_active_recommendations([], namespace=namespace)
+        except Exception as e:
+            logger.error("Failed to reconcile empty recommendation set: %s", e)
         return []
 
     node_infos = []
@@ -109,22 +137,49 @@ async def list_recommendations(
         records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
         if records:
             await reco_repo.upsert_recommendations(records)
+        await reco_repo.reconcile_active_recommendations(records, namespace=namespace)
     except Exception as e:
         logger.error("Failed to upsert recommendation history: %s", e)
 
     return recommendations
 
 
+@router.get("/recommendations", response_model=List[Recommendation])
+async def list_recommendations(
+    namespace: Optional[str] = Depends(validate_namespace),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
+    node_repo: NodeRepository = Depends(get_node_repository),
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Analyze recent metrics, upsert recommendations in DB, and return them.
+
+    Recommended CPU and memory values are guaranteed to be at least the
+    configured minimums (RECOMMENDATION_MIN_CPU_MILLICORES /
+    RECOMMENDATION_MIN_MEMORY_BYTES), so all returned recommendations are
+    actionable as-is.
+    """
+    return await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+
+
 @router.get("/recommendations/active", response_model=List[RecommendationRecord])
 async def list_active_recommendations(
     namespace: Optional[str] = Depends(validate_namespace),
+    refresh: bool = Query(False, description="Refresh recommendations before returning active records."),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
+    node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
     """Return currently active recommendations from the database.
 
-    This endpoint reads directly from the DB without re-running the recommender engine,
-    making it faster for the dashboard to poll.
+    By default this endpoint reads directly from the DB. Pass ``refresh=true``
+    to run the recommender first and reconcile stale active records.
     """
+    if refresh:
+        try:
+            await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+        except Exception as e:
+            logger.error("Failed to refresh active recommendations: %s", e)
+
     return await reco_repo.get_active_recommendations(namespace=namespace)
 
 

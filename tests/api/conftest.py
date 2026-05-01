@@ -31,6 +31,20 @@ def mock_hpa_collector():
         yield mock_cls
 
 
+@pytest.fixture(autouse=True)
+def mock_k8s_namespaces():
+    """Mock Kubernetes namespace listing to avoid real K8s API calls in tests.
+
+    Returns None by default so the namespace filter is bypassed unless the
+    individual test explicitly overrides this mock.
+    """
+    with patch(
+        "greenkube.api.routers.recommendations._get_active_k8s_namespaces",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_carbon_repo():
     """Returns a mock CarbonIntensityRepository."""
@@ -94,6 +108,7 @@ def mock_reco_repo():
     repo = AsyncMock()
     repo.save_recommendations = AsyncMock(return_value=0)
     repo.upsert_recommendations = AsyncMock(return_value=0)
+    repo.reconcile_active_recommendations = AsyncMock(return_value=0)
     repo.get_recommendations = AsyncMock(return_value=[])
     repo.get_active_recommendations = AsyncMock(return_value=[])
     repo.get_ignored_recommendations = AsyncMock(return_value=[])

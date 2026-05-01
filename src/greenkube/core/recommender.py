@@ -11,6 +11,7 @@ and node-level optimizations.
 
 import logging
 import math
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -18,6 +19,8 @@ from greenkube.core.config import Config, get_config
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 
 LOG = logging.getLogger(__name__)
+
+DEPLOYMENT_POD_NAME_RE = re.compile(r"^(?P<deployment>.+)-[a-z0-9]{8,10}-[a-z0-9]{5}$")
 
 
 class Recommender:
@@ -71,16 +74,16 @@ class Recommender:
         if not metrics:
             return []
 
-        pod_series = self._group_by_pod(metrics)
+        target_series = self._group_by_recommendation_target(metrics)
 
         recs: List[Recommendation] = []
-        recs.extend(self._analyze_zombies(metrics))
-        recs.extend(self._analyze_cpu_rightsizing(pod_series))
-        recs.extend(self._analyze_memory_rightsizing(pod_series))
-        recs.extend(self._analyze_autoscaling(pod_series, hpa_targets=hpa_targets))
-        recs.extend(self._analyze_off_peak(pod_series))
+        recs.extend(self._analyze_zombies(target_series))
+        recs.extend(self._analyze_cpu_rightsizing(target_series))
+        recs.extend(self._analyze_memory_rightsizing(target_series))
+        recs.extend(self._analyze_autoscaling(target_series, hpa_targets=hpa_targets))
+        recs.extend(self._analyze_off_peak(target_series))
         recs.extend(self._analyze_idle_namespaces(metrics))
-        recs.extend(self._analyze_carbon_aware(metrics))
+        recs.extend(self._analyze_carbon_aware(metrics, target_series))
         recs.extend(self._analyze_nodes(metrics, node_infos))
 
         deduped = self._deduplicate(recs)
@@ -92,7 +95,7 @@ class Recommender:
 
     def generate_zombie_recommendations(self, metrics: List[CombinedMetric]) -> List[Recommendation]:
         """Legacy method for zombie pod detection."""
-        return self._analyze_zombies(metrics)
+        return self._analyze_zombies(self._group_by_recommendation_target(metrics))
 
     def generate_rightsizing_recommendations(self, metrics: List[CombinedMetric]) -> List[Recommendation]:
         """Legacy method for CPU rightsizing via energy-based estimation."""
@@ -111,6 +114,47 @@ class Recommender:
         return groups
 
     @staticmethod
+    def _infer_deployment_target(pod_name: str) -> Tuple[str, str] | None:
+        """Infer a Deployment target from the standard Deployment pod name format."""
+        match = DEPLOYMENT_POD_NAME_RE.match(pod_name)
+        if not match:
+            return None
+        return "Deployment", match.group("deployment")
+
+    @classmethod
+    def _target_key(cls, metric: CombinedMetric) -> Tuple[str, str, str]:
+        """Returns the stable recommendation target for a metric."""
+        if metric.owner_kind and metric.owner_name:
+            return (metric.namespace, metric.owner_kind, metric.owner_name)
+
+        inferred_target = cls._infer_deployment_target(metric.pod_name)
+        if inferred_target:
+            target_kind, target_name = inferred_target
+            return (metric.namespace, target_kind, target_name)
+
+        return (metric.namespace, "Pod", metric.pod_name)
+
+    @classmethod
+    def _group_by_recommendation_target(
+        cls, metrics: List[CombinedMetric]
+    ) -> Dict[Tuple[str, str, str], List[CombinedMetric]]:
+        """Groups metrics by stable workload owner, falling back to pod name."""
+        groups: Dict[Tuple[str, str, str], List[CombinedMetric]] = defaultdict(list)
+        for metric in metrics:
+            groups[cls._target_key(metric)].append(metric)
+        return groups
+
+    @staticmethod
+    def _scope_for_target_kind(target_kind: str) -> str:
+        """Maps a Kubernetes owner kind to the persisted recommendation scope."""
+        return "pod" if target_kind == "Pod" else "workload"
+
+    @staticmethod
+    def _target_label(target_kind: str, target_name: str) -> str:
+        """Returns a compact human label for a recommendation target."""
+        return f"{target_kind} '{target_name}'"
+
+    @staticmethod
     def _percentile(values: List[float], p: float) -> float:
         """Computes the p-th percentile of a list of values (0-100 scale)."""
         if not values:
@@ -124,12 +168,48 @@ class Recommender:
         return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
 
     @staticmethod
+    def _usage_stats(
+        series: List[CombinedMetric],
+        usage_attr: str,
+        max_attr: str,
+    ) -> Tuple[float, float, List[float]]:
+        """Returns weighted average, observed maximum, and average points for a usage series."""
+        weighted_total = 0.0
+        sample_total = 0
+        average_points: List[float] = []
+        observed_max_values: List[float] = []
+
+        for metric in series:
+            usage = getattr(metric, usage_attr)
+            if usage is None:
+                continue
+
+            sample_count = max(int(getattr(metric, "sample_count", 1) or 1), 1)
+            usage_float = float(usage)
+            weighted_total += usage_float * sample_count
+            sample_total += sample_count
+            average_points.append(usage_float)
+
+            max_usage = getattr(metric, max_attr, None)
+            observed_max_values.append(float(max_usage if max_usage is not None else usage_float))
+
+        if sample_total == 0 or not observed_max_values:
+            return 0.0, 0.0, []
+
+        return weighted_total / sample_total, max(observed_max_values), average_points
+
+    def _balanced_rightsizing_target(self, avg_usage: float, observed_max: float, p95_usage: float) -> int:
+        """Calculates a rightsizing target that balances steady-state and peak demand."""
+        balanced_peak = (avg_usage + observed_max) / 2.0
+        return max(int(max(p95_usage, balanced_peak) * self.rightsizing_headroom), 1)
+
+    @staticmethod
     def _deduplicate(recs: List[Recommendation]) -> List[Recommendation]:
-        """Removes duplicate recommendations (same pod + same type)."""
+        """Removes duplicate recommendations with the same target and type."""
         seen = set()
         result = []
         for rec in recs:
-            key = (rec.namespace, rec.pod_name, rec.type, rec.target_node or "")
+            key = (rec.scope, rec.namespace, rec.pod_name, rec.type, rec.target_node or "")
             if key not in seen:
                 seen.add(key)
                 result.append(rec)
@@ -183,28 +263,29 @@ class Recommender:
     # ZOMBIE_POD
     # ------------------------------------------------------------------
 
-    def _analyze_zombies(self, metrics: List[CombinedMetric]) -> List[Recommendation]:
-        """Identifies pods with cost but near-zero energy consumption."""
+    def _analyze_zombies(
+        self,
+        target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+    ) -> List[Recommendation]:
+        """Identifies targets with cost but near-zero energy consumption."""
         recs = []
-        pod_aggregated: Dict[Tuple[str, str], Dict] = defaultdict(
-            lambda: {"total_cost": 0.0, "joules": 0.0, "co2e_grams": 0.0}
-        )
 
-        for m in metrics:
-            key = (m.namespace, m.pod_name)
-            pod_aggregated[key]["total_cost"] += m.total_cost
-            pod_aggregated[key]["joules"] += m.joules
-            pod_aggregated[key]["co2e_grams"] += m.co2e_grams
-
-        for (ns, pod), agg in pod_aggregated.items():
+        for (ns, target_kind, target_name), series in target_series.items():
+            agg = {
+                "total_cost": sum(metric.total_cost for metric in series),
+                "joules": sum(metric.joules for metric in series),
+                "co2e_grams": sum(metric.co2e_grams for metric in series),
+            }
             if agg["total_cost"] > self.zombie_cost_threshold and agg["joules"] < self.zombie_energy_threshold:
+                target_label = self._target_label(target_kind, target_name)
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.ZOMBIE_POD,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' has cost ${agg['total_cost']:.4f} but consumed only "
+                            f"{target_label} has cost ${agg['total_cost']:.4f} but consumed only "
                             f"{agg['joules']:.0f} Joules. It may be idle or a zombie."
                         ),
                         reason=(
@@ -223,40 +304,52 @@ class Recommender:
     # RIGHTSIZING_CPU (new, usage-based)
     # ------------------------------------------------------------------
 
-    def _analyze_cpu_rightsizing(self, pod_series: Dict[Tuple[str, str], List[CombinedMetric]]) -> List[Recommendation]:
-        """Identifies pods with CPU requests much larger than actual usage."""
+    def _analyze_cpu_rightsizing(
+        self,
+        target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+    ) -> List[Recommendation]:
+        """Identifies targets with CPU requests much larger than actual usage."""
         recs = []
 
-        for (ns, pod), series in pod_series.items():
+        for (ns, target_kind, target_name), series in target_series.items():
             cpu_request = max((m.cpu_request or 0) for m in series)
             if cpu_request == 0:
                 continue
 
-            usages = [m.cpu_usage_millicores for m in series if m.cpu_usage_millicores is not None]
+            avg_usage, observed_max, usages = self._usage_stats(
+                series,
+                "cpu_usage_millicores",
+                "cpu_usage_max_millicores",
+            )
             if not usages:
                 continue
 
-            avg_usage = sum(usages) / len(usages)
             usage_ratio = avg_usage / cpu_request
 
             if usage_ratio < self.rightsizing_cpu_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = max(int(p95 * self.rightsizing_headroom), 1)
+                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
                 savings_ratio = max(0, 1.0 - (recommended / cpu_request))
+                target_label = self._target_label(target_kind, target_name)
 
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.RIGHTSIZING_CPU,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' uses avg {avg_usage:.0f}m of {cpu_request}m CPU "
+                            f"{target_label} uses avg {avg_usage:.0f}m and max {observed_max:.0f}m of "
+                            f"{cpu_request}m CPU "
                             f"requested ({usage_ratio:.0%}). Recommend reducing to {recommended}m."
                         ),
-                        reason=(f"Average CPU usage is {usage_ratio:.0%} of the request. P95 usage is {p95:.0f}m."),
+                        reason=(
+                            f"Average CPU usage is {usage_ratio:.0%} of the request. "
+                            f"P95 usage is {p95:.0f}m and observed max is {observed_max:.0f}m."
+                        ),
                         priority="medium",
                         current_cpu_request_millicores=cpu_request,
                         recommended_cpu_request_millicores=recommended,
@@ -328,42 +421,52 @@ class Recommender:
     # ------------------------------------------------------------------
 
     def _analyze_memory_rightsizing(
-        self, pod_series: Dict[Tuple[str, str], List[CombinedMetric]]
+        self, target_series: Dict[Tuple[str, str, str], List[CombinedMetric]]
     ) -> List[Recommendation]:
-        """Identifies pods with memory requests much larger than actual usage."""
+        """Identifies targets with memory requests much larger than actual usage."""
         recs = []
 
-        for (ns, pod), series in pod_series.items():
+        for (ns, target_kind, target_name), series in target_series.items():
             mem_request = max((m.memory_request or 0) for m in series)
             if mem_request == 0:
                 continue
 
-            usages = [m.memory_usage_bytes for m in series if m.memory_usage_bytes is not None]
+            avg_usage, observed_max, usages = self._usage_stats(
+                series,
+                "memory_usage_bytes",
+                "memory_usage_max_bytes",
+            )
             if not usages:
                 continue
 
-            avg_usage = sum(usages) / len(usages)
             usage_ratio = avg_usage / mem_request
 
             if usage_ratio < self.rightsizing_memory_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = max(int(p95 * self.rightsizing_headroom), 1)
+                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
                 savings_ratio = max(0, 1.0 - (recommended / mem_request))
+                target_label = self._target_label(target_kind, target_name)
 
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.RIGHTSIZING_MEMORY,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' uses avg {avg_usage / (1024 * 1024):.0f}MiB of "
+                            f"{target_label} uses avg {avg_usage / (1024 * 1024):.0f}MiB and max "
+                            f"{observed_max / (1024 * 1024):.0f}MiB of "
                             f"{mem_request / (1024 * 1024):.0f}MiB memory requested ({usage_ratio:.0%}). "
                             f"Recommend reducing to {recommended / (1024 * 1024):.0f}MiB."
                         ),
-                        reason=f"Average memory usage is {usage_ratio:.0%} of the request.",
+                        reason=(
+                            f"Average memory usage is {usage_ratio:.0%} of the request. "
+                            f"P95 usage is {p95 / (1024 * 1024):.0f}MiB and observed max is "
+                            f"{observed_max / (1024 * 1024):.0f}MiB."
+                        ),
                         priority="medium",
                         current_memory_request_bytes=mem_request,
                         recommended_memory_request_bytes=recommended,
@@ -379,18 +482,22 @@ class Recommender:
 
     def _analyze_autoscaling(
         self,
-        pod_series: Dict[Tuple[str, str], List[CombinedMetric]],
+        target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
         hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
     ) -> List[Recommendation]:
-        """Identifies pods with spiky load patterns that would benefit from HPA.
+        """Identifies targets with spiky load patterns that would benefit from HPA.
 
         Skips pods whose owner (Deployment/StatefulSet) is already managed by
         an existing HorizontalPodAutoscaler.
         """
         recs = []
 
-        for (ns, pod), series in pod_series.items():
-            usages = [m.cpu_usage_millicores for m in series if m.cpu_usage_millicores is not None]
+        for (ns, target_kind, target_name), series in target_series.items():
+            mean_usage, max_usage, usages = self._usage_stats(
+                series,
+                "cpu_usage_millicores",
+                "cpu_usage_max_millicores",
+            )
             if len(usages) < 3:
                 continue
 
@@ -398,41 +505,36 @@ class Recommender:
             if cpu_request == 0:
                 continue
 
-            mean_usage = sum(usages) / len(usages)
             if mean_usage == 0:
                 continue
 
             variance = sum((u - mean_usage) ** 2 for u in usages) / len(usages)
             stddev = math.sqrt(variance)
             cv = stddev / mean_usage
-            max_usage = max(usages)
             spike_ratio = max_usage / mean_usage
 
             if cv > self.autoscaling_cv_threshold and spike_ratio > self.autoscaling_spike_ratio:
                 # Check if the pod's owner already has an HPA
-                if hpa_targets:
-                    owner_kinds = {m.owner_kind for m in series if m.owner_kind}
-                    owner_names = {m.owner_name for m in series if m.owner_name}
-                    if owner_kinds and owner_names:
-                        owner_kind = next(iter(owner_kinds))
-                        owner_name = next(iter(owner_names))
-                        if (ns, owner_kind, owner_name) in hpa_targets:
-                            LOG.debug(
-                                "Skipping autoscaling recommendation for %s/%s: HPA already exists for %s/%s",
-                                ns,
-                                pod,
-                                owner_kind,
-                                owner_name,
-                            )
-                            continue
+                if hpa_targets and target_kind != "Pod" and (ns, target_kind, target_name) in hpa_targets:
+                    LOG.debug(
+                        "Skipping autoscaling recommendation for %s/%s: HPA already exists for %s/%s",
+                        ns,
+                        target_name,
+                        target_kind,
+                        target_name,
+                    )
+                    continue
+
+                target_label = self._target_label(target_kind, target_name)
 
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.AUTOSCALING_CANDIDATE,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' has highly variable CPU usage (CV={cv:.2f}, "
+                            f"{target_label} has highly variable CPU usage (CV={cv:.2f}, "
                             f"spike ratio={spike_ratio:.1f}x). Consider using HPA "
                             f"instead of static resource allocation."
                         ),
@@ -450,11 +552,13 @@ class Recommender:
     # OFF_PEAK_SCALING
     # ------------------------------------------------------------------
 
-    def _analyze_off_peak(self, pod_series: Dict[Tuple[str, str], List[CombinedMetric]]) -> List[Recommendation]:
+    def _analyze_off_peak(
+        self, target_series: Dict[Tuple[str, str, str], List[CombinedMetric]]
+    ) -> List[Recommendation]:
         """Identifies workloads active only during certain hours."""
         recs = []
 
-        for (ns, pod), series in pod_series.items():
+        for (ns, target_kind, target_name), series in target_series.items():
             timed = [
                 (m.timestamp, m.cpu_usage_millicores)
                 for m in series
@@ -484,14 +588,16 @@ class Recommender:
                 start_h = consecutive[0]
                 end_h = (consecutive[-1] + 1) % 24
                 cron_schedule = f"Scale to 0: {start_h:02d}:00-{end_h:02d}:00 UTC"
+                target_label = self._target_label(target_kind, target_name)
 
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.OFF_PEAK_SCALING,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' is idle {len(consecutive)}h/day "
+                            f"{target_label} is idle {len(consecutive)}h/day "
                             f"({start_h:02d}:00-{end_h:02d}:00 UTC). "
                             f"Consider scaling to zero during off-peak hours."
                         ),
@@ -579,8 +685,12 @@ class Recommender:
     # CARBON_AWARE_SCHEDULING
     # ------------------------------------------------------------------
 
-    def _analyze_carbon_aware(self, metrics: List[CombinedMetric]) -> List[Recommendation]:
-        """Identifies pods running during high carbon intensity periods."""
+    def _analyze_carbon_aware(
+        self,
+        metrics: List[CombinedMetric],
+        target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+    ) -> List[Recommendation]:
+        """Identifies targets running during high carbon intensity periods."""
         recs = []
 
         zone_intensities: Dict[str, List[float]] = defaultdict(list)
@@ -592,17 +702,15 @@ class Recommender:
         for zone, vals in zone_intensities.items():
             zone_avg[zone] = sum(vals) / len(vals)
 
-        pod_agg: Dict[Tuple[str, str], Dict] = defaultdict(lambda: {"intensities": [], "zone": None, "co2e": 0.0})
+        for (ns, target_kind, target_name), series in target_series.items():
+            agg: Dict = {"intensities": [], "zone": None, "co2e": 0.0}
+            for metric in series:
+                if metric.grid_intensity:
+                    agg["intensities"].append(metric.grid_intensity)
+                if metric.emaps_zone:
+                    agg["zone"] = metric.emaps_zone
+                agg["co2e"] += metric.co2e_grams
 
-        for m in metrics:
-            key = (m.namespace, m.pod_name)
-            if m.grid_intensity:
-                pod_agg[key]["intensities"].append(m.grid_intensity)
-            if m.emaps_zone:
-                pod_agg[key]["zone"] = m.emaps_zone
-            pod_agg[key]["co2e"] += m.co2e_grams
-
-        for (ns, pod), agg in pod_agg.items():
             zone = agg.get("zone")
             if not zone or zone not in zone_avg:
                 continue
@@ -618,13 +726,15 @@ class Recommender:
 
             ratio = pod_avg_intensity / zone_average
             if ratio > self.carbon_aware_threshold:
+                target_label = self._target_label(target_kind, target_name)
                 recs.append(
                     Recommendation(
-                        pod_name=pod,
+                        pod_name=target_name,
                         namespace=ns,
                         type=RecommendationType.CARBON_AWARE_SCHEDULING,
+                        scope=self._scope_for_target_kind(target_kind),
                         description=(
-                            f"Pod '{pod}' runs during high carbon intensity periods "
+                            f"{target_label} runs during high carbon intensity periods "
                             f"(avg {pod_avg_intensity:.0f} vs zone avg {zone_average:.0f} gCO2e/kWh, "
                             f"{ratio:.1f}x). Consider scheduling during low-carbon windows."
                         ),

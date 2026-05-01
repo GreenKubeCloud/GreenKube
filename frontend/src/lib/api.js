@@ -151,8 +151,8 @@ export function getRecommendations({ namespace } = {}) {
 }
 
 /** @returns {Promise<Object[]>} */
-export function getActiveRecommendations({ namespace } = {}) {
-	return request(`${BASE}/recommendations/active`, { namespace });
+export function getActiveRecommendations({ namespace, refresh } = {}) {
+	return request(`${BASE}/recommendations/active`, { namespace, refresh });
 }
 
 /** @returns {Promise<Object[]>} */

@@ -55,6 +55,27 @@ def _row_to_record(row) -> RecommendationRecord:
     )
 
 
+def _type_value(record: RecommendationRecord) -> str:
+    """Returns the persisted recommendation type value."""
+    return record.type.value if isinstance(record.type, RecommendationType) else record.type
+
+
+def _status_value(record: RecommendationRecord) -> str:
+    """Returns the persisted recommendation status value."""
+    return record.status.value if isinstance(record.status, RecommendationStatus) else record.status
+
+
+def _identity_key(record: RecommendationRecord) -> tuple:
+    """Returns the stable identity used to refresh recommendation lifecycle rows."""
+    return (
+        record.scope or "pod",
+        record.namespace,
+        record.pod_name,
+        record.target_node,
+        _type_value(record),
+    )
+
+
 class PostgresRecommendationRepository(RecommendationRepository):
     """PostgreSQL implementation for recommendation lifecycle storage."""
 
@@ -119,10 +140,10 @@ class PostgresRecommendationRepository(RecommendationRepository):
             return len(records)
 
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
-        """Inserts or updates active recommendations using (pod_name, namespace, type) as the key.
+        """Inserts or updates active recommendations using their full target identity.
 
-        Uses IS NOT DISTINCT FROM for NULL-safe matching so that cluster-level
-        recommendations (pod_name=NULL, namespace=NULL) are correctly deduplicated.
+        Uses IS NOT DISTINCT FROM for NULL-safe matching so namespace, node,
+        pod, and workload recommendations are all deduplicated on the right target.
         Ignored and applied recommendations are left untouched.
 
         Args:
@@ -141,18 +162,21 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     description = $1,
                     reason = $2,
                     priority = $3,
-                    potential_savings_cost = $4,
-                    potential_savings_co2e_grams = $5,
-                    current_cpu_request_millicores = $6,
-                    recommended_cpu_request_millicores = $7,
-                    current_memory_request_bytes = $8,
-                    recommended_memory_request_bytes = $9,
-                    cron_schedule = $10,
-                    target_node = $11,
-                    updated_at = $12
-                WHERE pod_name IS NOT DISTINCT FROM $13
-                  AND namespace IS NOT DISTINCT FROM $14
-                  AND type = $15
+                    scope = $4,
+                    potential_savings_cost = $5,
+                    potential_savings_co2e_grams = $6,
+                    current_cpu_request_millicores = $7,
+                    recommended_cpu_request_millicores = $8,
+                    current_memory_request_bytes = $9,
+                    recommended_memory_request_bytes = $10,
+                    cron_schedule = $11,
+                    target_node = $12,
+                    updated_at = $13
+                WHERE COALESCE(scope, 'pod') = $14
+                  AND namespace IS NOT DISTINCT FROM $15
+                  AND pod_name IS NOT DISTINCT FROM $16
+                  AND target_node IS NOT DISTINCT FROM $17
+                  AND type = $18
                   AND status = 'active'
             """
             insert_query = """
@@ -170,14 +194,15 @@ class PostgresRecommendationRepository(RecommendationRepository):
             """
             count = 0
             for r in records:
-                type_val = r.type.value if isinstance(r.type, RecommendationType) else r.type
-                status_val = r.status.value if isinstance(r.status, RecommendationStatus) else r.status
+                type_val = _type_value(r)
+                status_val = _status_value(r)
 
                 result = await conn.execute(
                     update_query,
                     r.description,
                     r.reason,
                     r.priority,
+                    r.scope,
                     r.potential_savings_cost,
                     r.potential_savings_co2e_grams,
                     r.current_cpu_request_millicores,
@@ -187,8 +212,10 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.cron_schedule,
                     r.target_node,
                     now,
-                    r.pod_name,
+                    r.scope or "pod",
                     r.namespace,
+                    r.pod_name,
+                    r.target_node,
                     type_val,
                 )
                 if result == "UPDATE 0":
@@ -217,6 +244,52 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
             logger.info("Upserted %d recommendation records in PostgreSQL.", count)
             return count
+
+    async def reconcile_active_recommendations(
+        self,
+        records: List[RecommendationRecord],
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Marks active recommendations absent from the latest generated set as stale."""
+        current_keys = {_identity_key(record) for record in records}
+        now = datetime.now(timezone.utc)
+
+        async with self.db_manager.connection_scope() as conn:
+            params: list = []
+            query = (
+                "SELECT id, pod_name, namespace, type, scope, target_node "
+                "FROM recommendation_history WHERE status = 'active'"
+            )
+            if namespace:
+                params.append(namespace)
+                query += f" AND namespace = ${len(params)}"
+
+            rows = await conn.fetch(query, *params)
+            stale_ids = []
+            for row in rows:
+                data = dict(row)
+                row_record = RecommendationRecord(
+                    id=data["id"],
+                    pod_name=data["pod_name"],
+                    namespace=data["namespace"],
+                    type=RecommendationType(data["type"]),
+                    scope=data.get("scope") or "pod",
+                    target_node=data.get("target_node"),
+                    description="placeholder",
+                )
+                if _identity_key(row_record) not in current_keys:
+                    stale_ids.append(data["id"])
+
+            if not stale_ids:
+                return 0
+
+            await conn.execute(
+                "UPDATE recommendation_history SET status = 'stale', updated_at = $1 WHERE id = ANY($2::int[])",
+                now,
+                stale_ids,
+            )
+            logger.info("Marked %d PostgreSQL recommendation record(s) as stale.", len(stale_ids))
+            return len(stale_ids)
 
     async def get_recommendations(
         self,

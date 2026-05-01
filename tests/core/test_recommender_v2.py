@@ -29,7 +29,9 @@ def _make_metric(
     cpu_request: int = 1000,
     memory_request: int = 512 * 1024 * 1024,
     cpu_usage_millicores: int = 500,
+    cpu_usage_max_millicores: int = None,
     memory_usage_bytes: int = 256 * 1024 * 1024,
+    memory_usage_max_bytes: int = None,
     joules: float = 50000.0,
     total_cost: float = 0.10,
     co2e_grams: float = 5.0,
@@ -48,7 +50,9 @@ def _make_metric(
         cpu_request=cpu_request,
         memory_request=memory_request,
         cpu_usage_millicores=cpu_usage_millicores,
+        cpu_usage_max_millicores=cpu_usage_max_millicores,
         memory_usage_bytes=memory_usage_bytes,
+        memory_usage_max_bytes=memory_usage_max_bytes,
         joules=joules,
         total_cost=total_cost,
         co2e_grams=co2e_grams,
@@ -268,6 +272,75 @@ class TestRightsizingCPU:
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
         assert len(cpu_recs) == 0
 
+    def test_recommended_value_accounts_for_observed_maximum(self, recommender):
+        """A low average with a high observed max should not recommend idle-sized CPU."""
+        metrics = [
+            _make_metric(
+                pod_name="bursty-worker",
+                cpu_request=1000,
+                cpu_usage_millicores=10,
+                cpu_usage_max_millicores=500,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert len(cpu_recs) == 1
+        assert cpu_recs[0].recommended_cpu_request_millicores is not None
+        assert cpu_recs[0].recommended_cpu_request_millicores > 250
+        assert cpu_recs[0].recommended_cpu_request_millicores < 1000
+
+    def test_deployment_pods_are_grouped_as_one_workload(self, recommender):
+        """Pod restarts for the same Deployment should produce one stable workload recommendation."""
+        metrics = [
+            _make_metric(
+                pod_name="api-7f9c5d9f6d-a1b2c",
+                cpu_request=2000,
+                cpu_usage_millicores=100,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            _make_metric(
+                pod_name="api-7f9c5d9f6d-d4e5f",
+                cpu_request=2000,
+                cpu_usage_millicores=120,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert len(cpu_recs) == 1
+        assert cpu_recs[0].scope == "workload"
+        assert cpu_recs[0].pod_name == "api"
+        assert "Deployment 'api'" in cpu_recs[0].description
+
+    def test_deployment_like_pods_without_owner_metadata_are_grouped(self, recommender):
+        """Historical rows missing owner fields should still target the stable Deployment."""
+        metrics = [
+            _make_metric(
+                pod_name="api-7f9c5d9f6d-a1b2c",
+                cpu_request=2000,
+                cpu_usage_millicores=100,
+            ),
+            _make_metric(
+                pod_name="api-6f89d4fc7c-d4e5f",
+                cpu_request=2000,
+                cpu_usage_millicores=120,
+            ),
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert len(cpu_recs) == 1
+        assert cpu_recs[0].scope == "workload"
+        assert cpu_recs[0].pod_name == "api"
+        assert "Deployment 'api'" in cpu_recs[0].description
+
 
 # ---------------------------------------------------------------------------
 # Test: RIGHTSIZING_MEMORY
@@ -307,6 +380,27 @@ class TestRightsizingMemory:
         recs = recommender.generate_recommendations(metrics)
         mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
         assert len(mem_recs) == 0
+
+    def test_recommended_value_accounts_for_observed_maximum(self, recommender):
+        """A low average with a high observed max should not recommend idle-sized memory."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="bursty-cache",
+                memory_request=1000 * mib,
+                memory_usage_bytes=10 * mib,
+                memory_usage_max_bytes=500 * mib,
+                cpu_usage_millicores=500,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
+
+        assert len(mem_recs) == 1
+        assert mem_recs[0].recommended_memory_request_bytes is not None
+        assert mem_recs[0].recommended_memory_request_bytes > 250 * mib
+        assert mem_recs[0].recommended_memory_request_bytes < 1000 * mib
 
 
 # ---------------------------------------------------------------------------

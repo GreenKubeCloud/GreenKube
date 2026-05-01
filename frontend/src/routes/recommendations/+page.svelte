@@ -40,7 +40,7 @@
 		error = null;
 		try {
 			[activeRecs, ignoredRecs, appliedRecs, savings] = await Promise.all([
-				getActiveRecommendations({ namespace: $selectedNamespace || undefined }),
+				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
 				getIgnoredRecommendations(),
 				getAppliedRecommendations(),
 				getRecommendationSavings()

@@ -293,6 +293,61 @@ class TestRecommendationPersistence:
         assert len(prod_recs) == 1
         assert prod_recs[0].namespace == "prod"
 
+    @pytest.mark.asyncio
+    async def test_node_recommendations_are_upserted_per_node(self, sqlite_repos):
+        """Node-scope recommendations with the same type must not collapse into one row."""
+        _, _, _, reco_repo = sqlite_repos
+
+        await reco_repo.upsert_recommendations(
+            [
+                RecommendationRecord(
+                    scope="node",
+                    target_node="node-a",
+                    type=RecommendationType.UNDERUTILIZED_NODE,
+                    description="Node A is underutilized",
+                ),
+                RecommendationRecord(
+                    scope="node",
+                    target_node="node-b",
+                    type=RecommendationType.UNDERUTILIZED_NODE,
+                    description="Node B is underutilized",
+                ),
+            ]
+        )
+
+        active = await reco_repo.get_active_recommendations()
+
+        assert {r.target_node for r in active} == {"node-a", "node-b"}
+
+    @pytest.mark.asyncio
+    async def test_reconcile_marks_missing_active_recommendations_stale(self, sqlite_repos):
+        """Active recommendations absent from the latest generation should stop being active."""
+        _, _, _, reco_repo = sqlite_repos
+
+        await reco_repo.upsert_recommendations(
+            [
+                RecommendationRecord(
+                    scope="workload",
+                    pod_name="api",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="Old active recommendation",
+                )
+            ]
+        )
+
+        stale_count = await reco_repo.reconcile_active_recommendations([], namespace="prod")
+        active = await reco_repo.get_active_recommendations(namespace="prod")
+        history = await reco_repo.get_recommendations(
+            start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            namespace="prod",
+        )
+
+        assert stale_count == 1
+        assert active == []
+        assert history[0].status == RecommendationStatus.STALE
+
 
 # ---------------------------------------------------------------------------
 # Step 4: API retrieval

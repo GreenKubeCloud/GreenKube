@@ -104,7 +104,7 @@
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
 			[recommendations, savings] = await Promise.all([
-				getActiveRecommendations({ namespace: ns }),
+				getActiveRecommendations({ namespace: ns, refresh: true }),
 				getRecommendationSavings({ namespace: ns, last })
 			]);
 		} catch {
