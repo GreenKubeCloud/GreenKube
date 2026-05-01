@@ -5,8 +5,8 @@ Tests for the PrometheusCollector using Test-Driven Development (TDD).
 We will mock all HTTP requests to the Prometheus API using respx.
 """
 
-from datetime import datetime, timedelta
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -458,3 +458,148 @@ def test_update_url_respects_config_verify_certs(mock_config):
     collector2 = PrometheusCollector(settings=mock_config)
     collector2._update_url("https://another-prometheus:9090")
     assert collector2.verify is False
+
+
+@pytest.mark.asyncio
+async def test_query_run_loop_handles_non_success_errors_and_then_success(collector):
+    non_success = MagicMock()
+    non_success.raise_for_status.return_value = None
+    non_success.json.return_value = {"status": "error", "error": "bad query"}
+    success = MagicMock()
+    success.raise_for_status.return_value = None
+    success.json.return_value = {"status": "success", "data": {"result": [{"metric": {}, "value": [0, "1"]}]}}
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[non_success, httpx.ConnectError("refused"), RuntimeError("boom"), success])
+
+    result = await collector._query_run_loop(
+        client,
+        ["http://p/one", "http://p/two", "http://p/three", "http://p/four"],
+        {"query": "up"},
+        {},
+        None,
+        "up",
+    )
+
+    assert result == [{"metric": {}, "value": [0, "1"]}]
+    assert client.get.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_query_run_loop_returns_empty_when_all_candidates_fail(collector):
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    collector._discover_and_update_url = AsyncMock(return_value=False)
+
+    result = await collector._query_run_loop(client, ["http://p/query"], {"query": "up"}, {}, None, "up")
+
+    assert result == []
+    collector._discover_and_update_url.assert_awaited_once_with(client)
+
+
+@pytest.mark.asyncio
+async def test_query_run_loop_handles_empty_candidate_list(collector):
+    client = AsyncMock()
+    collector._discover_and_update_url = AsyncMock(return_value=False)
+
+    assert await collector._query_run_loop(client, [], {"query": "up"}, {}, None, "up") == []
+
+
+@pytest.mark.asyncio
+async def test_probe_url_tries_candidate_paths_and_uses_auth_headers(collector):
+    collector.bearer_token = "token"
+    collector.username = "user"
+    collector.password = "pass"
+    bad_response = MagicMock()
+    bad_response.raise_for_status.return_value = None
+    bad_response.json.return_value = {"status": "error"}
+    good_response = MagicMock()
+    good_response.raise_for_status.return_value = None
+    good_response.json.return_value = {"status": "success"}
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[bad_response, good_response])
+
+    assert await collector._probe_url(client, "http://prometheus") is True
+    assert client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer token"}
+    assert client.get.await_args.kwargs["auth"] == ("user", "pass")
+
+
+@pytest.mark.asyncio
+async def test_discover_and_update_url_uses_well_known_in_cluster_url(collector):
+    collector._discovery._is_running_in_cluster = MagicMock(return_value=True)
+    collector._probe_url = AsyncMock(side_effect=[False, True])
+
+    with patch.object(PrometheusDiscovery, "discover", AsyncMock(return_value=None)):
+        assert await collector._discover_and_update_url(AsyncMock()) is True
+
+    assert collector.base_url == "https://prometheus-k8s.monitoring.svc.cluster.local:9090"
+
+
+@pytest.mark.asyncio
+async def test_collect_range_returns_empty_for_invalid_dates_or_failed_discovery(collector):
+    collector.base_url = None
+    collector._discover_and_update_url = AsyncMock(return_value=False)
+
+    assert await collector.collect_range("not-a-date", datetime.now(timezone.utc)) == []
+    assert await collector.collect_range(datetime.now(timezone.utc), datetime.now(timezone.utc)) == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_retries_cpu_query_without_container_label(collector):
+    respx.get(f"{collector.base_url}/api/v1/query_range").mock(
+        side_effect=[Response(200, json=MOCK_EMPTY_RESPONSE), Response(200, json=MOCK_CPU_RANGE_RESPONSE)]
+    )
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(minutes=5)
+
+    result = await collector.collect_range(start_time, end_time)
+
+    assert len(result) == 1
+    assert result[0]["metric"]["pod"] == "api-1"
+
+
+def test_parsing_memory_network_disk_and_restart_edge_cases(collector):
+    valid_metric = {"namespace": "prod", "pod": "api", "node": "node-a"}
+    invalid_values = [None, "NaN", "-1", "inf", "not-a-number"]
+
+    for value in invalid_values:
+        assert collector._parse_memory_data({"metric": valid_metric, "value": [0, value]}) is None
+
+    assert collector._parse_memory_data({"metric": valid_metric, "value": [0, "1024"]}).memory_usage_bytes == 1024
+    assert collector._parse_network_receive_data({"metric": {}, "value": [0, "1"]}) is None
+    assert collector._parse_network_transmit_data({"metric": valid_metric, "value": [0, "bad"]}) is None
+    assert collector._parse_disk_read_data({"metric": {}, "value": [0, "1"]}) is None
+    assert collector._parse_disk_write_data({"metric": valid_metric, "value": [0, "bad"]}) is None
+    assert collector._parse_restart_count_data({"metric": {"namespace": "prod"}, "value": [0, "1"]}) is None
+    assert collector._parse_restart_count_data({"metric": valid_metric, "value": [0, "bad"]}) is None
+
+
+def test_network_and_disk_parsers_merge_receive_transmit_and_read_write(collector):
+    base_metric = {"namespace": "prod", "pod": "api", "node": "node-a"}
+
+    network = collector._parse_network_io(
+        [{"metric": base_metric, "value": [0, "10"]}],
+        [{"metric": base_metric, "value": [0, "5"]}],
+    )
+    disk = collector._parse_disk_io(
+        [{"metric": base_metric, "value": [0, "20"]}],
+        [{"metric": base_metric, "value": [0, "7"]}],
+    )
+
+    assert len(network) == 1
+    assert network[0].network_receive_bytes == 10
+    assert network[0].network_transmit_bytes == 5
+    assert len(disk) == 1
+    assert disk[0].disk_read_bytes == 20
+    assert disk[0].disk_write_bytes == 7
+
+
+@pytest.mark.asyncio
+async def test_close_closes_reusable_client(collector):
+    collector._client = AsyncMock()
+    collector._client.is_closed = False
+    collector._client.aclose = AsyncMock()
+
+    await collector.close()
+
+    assert collector._client is None

@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from greenkube.core.db import DatabaseManager
-from greenkube.storage.embodied_repository import EmbodiedRepository
+from greenkube.core.exceptions import QueryError
+from greenkube.storage.embodied_repository import (
+    EmbodiedRepository,
+    PostgresEmbodiedRepository,
+    SQLiteEmbodiedRepository,
+)
 
 
 @pytest.fixture
@@ -61,3 +66,42 @@ async def test_save_profile_es(repo_es):
         assert kwargs["gwp_manufacture"] == 1000.0
 
         mock_instance.save.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_get_profile_es_returns_none_on_error(repo_es):
+    with patch("greenkube.storage.embodied_repository.InstanceCarbonProfileDoc") as MockDoc:
+        MockDoc.get = AsyncMock(side_effect=RuntimeError("search failed"))
+
+        profile = await repo_es.get_profile("aws", "m5.large")
+
+        assert profile is None
+
+
+@pytest.mark.asyncio
+async def test_save_profile_es_raises_query_error(repo_es):
+    with patch("greenkube.storage.embodied_repository.InstanceCarbonProfileDoc") as MockDoc:
+        mock_instance = MagicMock()
+        mock_instance.save = AsyncMock(side_effect=RuntimeError("index failed"))
+        MockDoc.return_value = mock_instance
+
+        with pytest.raises(QueryError):
+            await repo_es.save_profile("aws", "m5.large", 1000.0, 20000)
+
+
+def test_embodied_repository_selects_postgres_backend():
+    mgr = MagicMock(spec=DatabaseManager)
+    mgr.db_type = "postgres"
+
+    repo = EmbodiedRepository(mgr)
+
+    assert isinstance(repo._impl, PostgresEmbodiedRepository)
+
+
+def test_embodied_repository_selects_sqlite_backend_by_default():
+    mgr = MagicMock(spec=DatabaseManager)
+    mgr.db_type = "sqlite"
+
+    repo = EmbodiedRepository(mgr)
+
+    assert isinstance(repo._impl, SQLiteEmbodiedRepository)

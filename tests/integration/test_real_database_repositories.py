@@ -22,6 +22,7 @@ from greenkube.models.metrics import (
 )
 from greenkube.models.node import NodeInfo
 from greenkube.models.savings import SavingsLedgerRecord
+from greenkube.storage.embodied_repository import PostgresEmbodiedRepository, SQLiteEmbodiedRepository
 from greenkube.storage.postgres.node_repository import PostgresNodeRepository
 from greenkube.storage.postgres.recommendation_repository import PostgresRecommendationRepository
 from greenkube.storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
@@ -79,6 +80,11 @@ class RealDatabase:
         if self.backend == "postgres":
             return PostgresSavingsLedgerRepository(self.manager)
         return SQLiteSavingsLedgerRepository(self.manager)
+
+    def embodied_repository(self):
+        if self.backend == "postgres":
+            return PostgresEmbodiedRepository(self.manager)
+        return SQLiteEmbodiedRepository(self.manager)
 
 
 @pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
@@ -211,6 +217,178 @@ def _recommendation_record(
     )
 
 
+async def _insert_hourly_metric(
+    database: RealDatabase,
+    pod_name: str,
+    namespace: str,
+    hour_bucket: datetime,
+    co2e_grams: float,
+    total_cost: float,
+    joules: float,
+    estimation_reasons: str = '["hourly-rollup"]',
+) -> None:
+    async with database.manager.connection_scope() as conn:
+        if database.backend == "postgres":
+            await conn.execute(
+                """
+                INSERT INTO combined_metrics_hourly (
+                    pod_name, namespace, hour_bucket, sample_count,
+                    total_cost, co2e_grams, embodied_co2e_grams,
+                    pue, grid_intensity, joules,
+                    cpu_request, memory_request,
+                    cpu_usage_avg, cpu_usage_max,
+                    memory_usage_avg, memory_usage_max,
+                    network_receive_bytes, network_transmit_bytes,
+                    disk_read_bytes, disk_write_bytes,
+                    storage_request_bytes, storage_usage_bytes,
+                    gpu_usage_millicores, restart_count,
+                    owner_kind, owner_name,
+                    duration_seconds, node, node_instance_type,
+                    node_zone, emaps_zone, is_estimated,
+                    estimation_reasons, calculation_version
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    $5, $6, $7,
+                    $8, $9, $10,
+                    $11, $12,
+                    $13, $14,
+                    $15, $16,
+                    $17, $18,
+                    $19, $20,
+                    $21, $22,
+                    $23, $24,
+                    $25, $26,
+                    $27, $28, $29,
+                    $30, $31, $32,
+                    $33, $34
+                )
+                """,
+                pod_name,
+                namespace,
+                hour_bucket,
+                3,
+                total_cost,
+                co2e_grams,
+                1.5,
+                1.2,
+                50.0,
+                joules,
+                250,
+                512 * 1024 * 1024,
+                125,
+                200,
+                256 * 1024 * 1024,
+                300 * 1024 * 1024,
+                10.0,
+                20.0,
+                30.0,
+                40.0,
+                1024,
+                512,
+                0,
+                1,
+                "Deployment",
+                f"{pod_name}-deployment",
+                900,
+                "node-a",
+                "m5.large",
+                "eu-west-3a",
+                "FR",
+                True,
+                estimation_reasons,
+                "hourly-contract-test",
+            )
+            return
+
+        await conn.execute(
+            """
+            INSERT INTO combined_metrics_hourly (
+                pod_name, namespace, hour_bucket, sample_count,
+                total_cost, co2e_grams, embodied_co2e_grams,
+                pue, grid_intensity, joules,
+                cpu_request, memory_request,
+                cpu_usage_avg, cpu_usage_max,
+                memory_usage_avg, memory_usage_max,
+                network_receive_bytes, network_transmit_bytes,
+                disk_read_bytes, disk_write_bytes,
+                storage_request_bytes, storage_usage_bytes,
+                gpu_usage_millicores, restart_count,
+                owner_kind, owner_name,
+                duration_seconds, node, node_instance_type,
+                node_zone, emaps_zone, is_estimated,
+                estimation_reasons, calculation_version
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                pod_name,
+                namespace,
+                hour_bucket.isoformat(),
+                3,
+                total_cost,
+                co2e_grams,
+                1.5,
+                1.2,
+                50.0,
+                joules,
+                250,
+                512 * 1024 * 1024,
+                125,
+                200,
+                256 * 1024 * 1024,
+                300 * 1024 * 1024,
+                10.0,
+                20.0,
+                30.0,
+                40.0,
+                1024,
+                512,
+                0,
+                1,
+                "Deployment",
+                f"{pod_name}-deployment",
+                900,
+                "node-a",
+                "m5.large",
+                "eu-west-3a",
+                "FR",
+                1,
+                estimation_reasons,
+                "hourly-contract-test",
+            ),
+        )
+        await conn.commit()
+
+
+async def _insert_namespace_cache(database: RealDatabase, namespaces: list[str]) -> None:
+    async with database.manager.connection_scope() as conn:
+        if database.backend == "postgres":
+            for namespace in namespaces:
+                await conn.execute(
+                    """
+                    INSERT INTO namespace_cache (namespace, last_seen)
+                    VALUES ($1, $2)
+                    ON CONFLICT (namespace) DO UPDATE SET last_seen = EXCLUDED.last_seen
+                    """,
+                    namespace,
+                    datetime.now(timezone.utc),
+                )
+            return
+
+        for namespace in namespaces:
+            await conn.execute(
+                """
+                INSERT INTO namespace_cache (namespace, last_seen)
+                VALUES (?, ?)
+                ON CONFLICT(namespace) DO UPDATE SET last_seen = excluded.last_seen
+                """,
+                (namespace, datetime.now(timezone.utc).isoformat()),
+            )
+        await conn.commit()
+
+
 @pytest.mark.asyncio
 @pytest.mark.database
 async def test_database_manager_creates_schema_and_records_migrations(real_database: RealDatabase):
@@ -290,6 +468,81 @@ async def test_combined_metrics_repository_round_trips_and_aggregates(real_datab
 
     timeseries = await repo.aggregate_timeseries(start, now, granularity="hour")
     assert sum(point["co2e_grams"] for point in timeseries) == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_combined_metrics_repository_reads_hourly_rollups(real_database: RealDatabase):
+    repo = real_database.combined_repository()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old_hour = (now - timedelta(hours=30)).replace(minute=0, second=0, microsecond=0)
+    old_window_start = old_hour - timedelta(minutes=5)
+    old_window_end = old_hour + timedelta(minutes=55)
+
+    await _insert_hourly_metric(real_database, "api-hourly", "prod", old_hour, 12.0, 1.2, 1200.0)
+    await _insert_hourly_metric(real_database, "worker-hourly", "dev", old_hour, 8.0, 0.8, 800.0, "not-json")
+
+    prod_hourly = await repo.read_hourly_metrics(old_window_start, old_window_end, namespace="prod")
+    assert len(prod_hourly) == 1
+    assert prod_hourly[0].pod_name == "api-hourly"
+    assert prod_hourly[0].estimation_reasons == ["hourly-rollup"]
+    assert prod_hourly[0].calculation_version == "hourly-contract-test"
+
+    all_hourly = await repo.read_hourly_metrics(old_window_start, old_window_end)
+    invalid_json_row = next(metric for metric in all_hourly if metric.pod_name == "worker-hourly")
+    assert invalid_json_row.estimation_reasons == []
+
+    summary = await repo.aggregate_summary(old_window_start, old_window_end, namespace="prod")
+    assert summary["total_co2e_grams"] == pytest.approx(12.0)
+    assert summary["total_embodied_co2e_grams"] == pytest.approx(1.5)
+    assert summary["pod_count"] == 1
+
+    timeseries = await repo.aggregate_timeseries(old_window_start, old_window_end, granularity="week", namespace="prod")
+    assert len(timeseries) == 1
+    assert timeseries[0]["co2e_grams"] == pytest.approx(12.0)
+    assert timeseries[0]["energy_joules"] == pytest.approx(1200.0)
+
+    by_namespace = await repo.aggregate_by_namespace(old_window_start, old_window_end, namespace="prod")
+    assert by_namespace == [
+        {
+            "namespace": "prod",
+            "co2e_grams": pytest.approx(12.0),
+            "embodied_co2e_grams": pytest.approx(1.5),
+            "total_cost": pytest.approx(1.2),
+            "energy_joules": pytest.approx(1200.0),
+        }
+    ]
+
+    top_pods = await repo.aggregate_top_pods(old_window_start, old_window_end, namespace="prod", limit=5)
+    assert len(top_pods) == 1
+    assert top_pods[0]["pod_name"] == "api-hourly"
+    assert top_pods[0]["co2e_grams"] == pytest.approx(12.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_combined_metrics_repository_namespace_cache_and_empty_ranges(real_database: RealDatabase):
+    repo = real_database.combined_repository()
+    await _insert_namespace_cache(real_database, ["cache-a", "cache-b"])
+
+    assert await repo.list_namespaces() == ["cache-a", "cache-b"]
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    inverted_start = now
+    inverted_end = now - timedelta(hours=30)
+
+    empty_summary = await repo.aggregate_summary(inverted_start, inverted_end)
+    assert empty_summary == {
+        "total_co2e_grams": 0.0,
+        "total_embodied_co2e_grams": 0.0,
+        "total_cost": 0.0,
+        "total_energy_joules": 0.0,
+        "pod_count": 0,
+        "namespace_count": 0,
+    }
+    assert await repo.aggregate_timeseries(inverted_start, inverted_end) == []
+    assert await repo.aggregate_by_namespace(inverted_start, inverted_end) == []
+    assert await repo.aggregate_top_pods(inverted_start, inverted_end) == []
 
 
 @pytest.mark.asyncio
@@ -492,3 +745,26 @@ async def test_savings_ledger_repository_keeps_totals_across_compression(real_da
         namespace="prod",
     )
     assert window_totals["RIGHTSIZING_CPU"]["cost_saved_dollars"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_embodied_repository_round_trips_and_upserts(real_database: RealDatabase):
+    repo = real_database.embodied_repository()
+
+    assert await repo.get_profile("aws", "missing.instance") is None
+
+    await repo.save_profile("aws", "m5.large", gwp=950.0, lifespan=35_040, source="contract-test")
+    first = await repo.get_profile("aws", "m5.large")
+    assert first is not None
+    assert first["gwp_manufacture"] == pytest.approx(950.0)
+    assert first["lifespan_hours"] == 35_040
+    assert first["source"] == "contract-test"
+    assert first["last_updated"] is not None
+
+    await repo.save_profile("aws", "m5.large", gwp=1000.0, lifespan=40_000, source="contract-update")
+    updated = await repo.get_profile("aws", "m5.large")
+    assert updated is not None
+    assert updated["gwp_manufacture"] == pytest.approx(1000.0)
+    assert updated["lifespan_hours"] == 40_000
+    assert updated["source"] == "contract-update"

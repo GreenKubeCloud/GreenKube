@@ -9,6 +9,7 @@ MetricsCompressor is critical for production data management:
 """
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -128,6 +129,21 @@ class TestMetricsCompressorRun:
         # Must not raise
         stats = await compressor.run()
         assert isinstance(stats, dict)
+
+    @pytest.mark.asyncio
+    async def test_run_does_not_raise_on_hourly_prune_error(self, compressor, monkeypatch):
+        monkeypatch.setattr(compressor, "_compress_to_hourly", AsyncMock(return_value={"hours": 1, "rows": 2}))
+        monkeypatch.setattr(compressor, "_prune_raw", AsyncMock(return_value=3))
+        monkeypatch.setattr(compressor, "_prune_hourly", AsyncMock(side_effect=RuntimeError("hourly failed")))
+
+        stats = await compressor.run()
+
+        assert stats == {
+            "hours_compressed": 1,
+            "rows_compressed": 2,
+            "raw_rows_pruned": 3,
+            "hourly_rows_pruned": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +373,69 @@ class TestRefreshNamespaceCache:
                 rows = await cur.fetchall()
         namespaces = {r[0] for r in rows}
         assert "ns-1" in namespaces
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL paths with fake async connections
+# ---------------------------------------------------------------------------
+
+
+class FakePostgresScope:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakePostgresDb:
+    db_type = "postgres"
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def connection_scope(self):
+        return FakePostgresScope(self.conn)
+
+
+class TestPostgresCompressionBranches:
+    """PostgreSQL SQL branches parse asyncpg status strings correctly."""
+
+    @pytest.mark.asyncio
+    async def test_compress_to_hourly_uses_postgres_branch(self):
+        conn = type("Conn", (), {})()
+        conn.execute = AsyncMock(return_value="INSERT 0 7")
+        compressor = MetricsCompressor(FakePostgresDb(conn))
+
+        result = await compressor._compress_to_hourly()
+
+        assert result == {"hours": 7, "rows": 7}
+        assert "INSERT INTO combined_metrics_hourly" in conn.execute.await_args.args[0]
+        assert isinstance(conn.execute.await_args.args[1], datetime)
+
+    @pytest.mark.asyncio
+    async def test_postgres_pruning_parses_deleted_row_counts(self):
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.METRICS_RAW_RETENTION_DAYS = 7
+        cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
+        conn = type("Conn", (), {})()
+        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2"])
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+
+        assert await compressor._prune_raw() == 4
+        assert await compressor._prune_hourly() == 2
+        assert conn.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_postgres_namespace_cache_refresh_and_empty_status_counts(self):
+        conn = type("Conn", (), {})()
+        conn.execute = AsyncMock(side_effect=["INSERT 0 3", ""])
+        compressor = MetricsCompressor(FakePostgresDb(conn))
+
+        assert await compressor.refresh_namespace_cache() == 3
+        assert await compressor._compress_postgres(datetime.now(timezone.utc)) == {"hours": 0, "rows": 0}

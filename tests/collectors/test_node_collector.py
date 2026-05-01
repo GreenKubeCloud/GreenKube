@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from kubernetes_asyncio import client
 
 # We need to import the module where ConfigException lives to patch effectively if we were mocking it,
@@ -378,3 +379,112 @@ async def test_collect_scaleway_node_providerid_fallback(mock_get_api):
     assert "scw-node-minimal" in result
     assert result["scw-node-minimal"].cloud_provider == "scaleway"
     assert result["scw-node-minimal"].instance_type == "GP1-XS"
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected_provider"),
+    [
+        ({"node.k8s.ovh/type": "standard"}, "ovh"),
+        ({"kubernetes.azure.com/agentpool": "pool-a"}, "azure"),
+        ({"eks.amazonaws.com/nodegroup": "workers"}, "aws"),
+        ({"node.kubernetes.io/instance-type": "m5.large", "topology.kubernetes.io/region": "eu-west-3"}, "aws"),
+        ({"cloud.google.com/gke-nodepool": "pool-a"}, "gcp"),
+    ],
+)
+def test_detect_cloud_provider_variants(labels, expected_provider):
+    assert NodeCollector()._detect_cloud_provider(labels) == expected_provider
+
+
+@pytest.mark.parametrize(
+    ("provider", "labels", "expected_pool"),
+    [
+        ("ovh", {"k8s.ovh.net/nodepool": "ovh-pool"}, "ovh-pool"),
+        ("azure", {"agentpool": "aks-pool"}, "aks-pool"),
+        ("azure", {"kubernetes.azure.com/agentpool": "aks-label-pool"}, "aks-label-pool"),
+        ("aws", {"eks.amazonaws.com/nodegroup": "eks-pool"}, "eks-pool"),
+        ("gcp", {"cloud.google.com/gke-nodepool": "gke-pool"}, "gke-pool"),
+        ("unknown", {}, None),
+    ],
+)
+def test_extract_node_pool_variants(provider, labels, expected_pool):
+    assert NodeCollector()._extract_node_pool(labels, provider) == expected_pool
+
+
+def test_extract_instance_type_falls_back_to_configured_label_and_cpu(monkeypatch):
+    collector = NodeCollector()
+    node = create_mock_node_detailed("node-a", {}, capacity_cpu="2500m")
+
+    monkeypatch.setattr(
+        "greenkube.collectors.node_collector.global_config.PROMETHEUS_NODE_INSTANCE_LABEL",
+        "custom.instance/type",
+    )
+    assert collector._extract_instance_type({"custom.instance/type": "custom-large"}, node, "unknown") == "custom-large"
+    assert collector._extract_instance_type({}, node, "unknown") == "cpu-2"
+
+
+def test_extract_instance_type_returns_unknown_when_capacity_parse_fails(monkeypatch):
+    collector = NodeCollector()
+    node = create_mock_node_detailed("node-a", {}, capacity_cpu="4")
+    monkeypatch.setattr("greenkube.collectors.node_collector.parse_quantity", MagicMock(side_effect=ValueError))
+
+    assert collector._extract_instance_type({}, node, "unknown") == "unknown"
+
+
+def test_extract_capacity_helpers_handle_valid_and_invalid_quantities(monkeypatch):
+    collector = NodeCollector()
+    node = create_mock_node_detailed("node-a", {}, capacity_cpu="1500m")
+    node.status.capacity["memory"] = "2Gi"
+
+    assert collector._extract_cpu_capacity(node) == 1.5
+    assert collector._extract_memory_capacity(node) == 2 * 1024**3
+
+    bad_node = create_mock_node_detailed("node-b", {}, capacity_cpu="bad-cpu")
+    bad_node.status.capacity["memory"] = "bad-memory"
+    monkeypatch.setattr("greenkube.collectors.node_collector.parse_quantity", MagicMock(side_effect=ValueError))
+    assert collector._extract_cpu_capacity(bad_node) is None
+    assert collector._extract_memory_capacity(bad_node) is None
+
+
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_instance_types_uses_labels_and_capacity_fallback(mock_get_api):
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
+    labeled_node = create_mock_node_with_instance("node-labeled", "m5.large")
+    inferred_node = create_mock_node_detailed("node-inferred", {}, capacity_cpu="6")
+    mock_api_instance.list_node = AsyncMock(return_value=client.V1NodeList(items=[labeled_node, inferred_node]))
+
+    result = await NodeCollector().collect_instance_types()
+
+    assert result == {"node-labeled": "m5.large", "node-inferred": "cpu-6"}
+
+
+@patch("greenkube.collectors.node_collector.get_core_v1_api")
+async def test_collect_instance_types_handles_empty_and_errors(mock_get_api):
+    mock_api_instance = AsyncMock()
+    mock_get_api.return_value = mock_api_instance
+    mock_api_instance.list_node = AsyncMock(return_value=client.V1NodeList(items=[]))
+    collector = NodeCollector()
+
+    assert await collector.collect_instance_types() == {}
+
+    mock_api_instance.list_node = AsyncMock(side_effect=RuntimeError("k8s failed"))
+    assert await collector.collect_instance_types() == {}
+
+
+async def test_collect_instance_types_returns_empty_without_client(monkeypatch):
+    collector = NodeCollector()
+    monkeypatch.setattr(collector, "_ensure_client", AsyncMock(return_value=None))
+
+    assert await collector.collect_instance_types() == {}
+
+
+async def test_close_closes_cached_api_client():
+    collector = NodeCollector()
+    api_client = MagicMock()
+    api_client.close = AsyncMock()
+    collector._api = MagicMock(api_client=api_client)
+
+    await collector.close()
+
+    api_client.close.assert_awaited_once()
+    assert collector._api is None

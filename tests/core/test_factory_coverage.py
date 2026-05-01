@@ -8,19 +8,34 @@ to ensure each test gets a fresh instance (handled by conftest.py autouse).
 """
 
 import pytest
+import typer
 
+from greenkube.core import factory
 from greenkube.core.factory import (
     clear_caches,
     get_combined_metrics_repository,
+    get_embodied_repository,
     get_node_repository,
+    get_processor,
     get_recommendation_repository,
     get_repository,
+    get_savings_ledger_repository,
     get_summary_repository,
     get_timeseries_cache_repository,
 )
 
 # The conftest.py autouse fixture already sets DB_TYPE=sqlite and calls clear_caches()
 # between tests, so we can call factory functions directly.
+
+
+def _cached_stub(return_value=None, side_effect=None):
+    def _stub():
+        if side_effect is not None:
+            raise side_effect
+        return return_value
+
+    _stub.cache_clear = lambda: None
+    return _stub
 
 
 class TestFactorySQLite:
@@ -96,5 +111,110 @@ class TestFactoryUnknownDbType:
 
         with pytest.raises(NotImplementedError):
             get_repository()
+
+        clear_caches()
+
+    def test_unknown_combined_metrics_repository_raises(self, monkeypatch):
+        from greenkube.core import config as config_module
+
+        monkeypatch.setattr(config_module.config, "DB_TYPE", "unknown_backend")
+        clear_caches()
+
+        with pytest.raises(NotImplementedError):
+            get_combined_metrics_repository()
+
+        clear_caches()
+
+    def test_unknown_backend_uses_sqlite_fallbacks(self, monkeypatch):
+        from greenkube.core import config as config_module
+        from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
+        from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
+        from greenkube.storage.sqlite.summary_repository import SQLiteSummaryRepository
+        from greenkube.storage.sqlite.timeseries_cache_repository import SQLiteTimeseriesCacheRepository
+
+        monkeypatch.setattr(config_module.config, "DB_TYPE", "unknown_backend")
+        clear_caches()
+
+        assert isinstance(get_node_repository(), SQLiteNodeRepository)
+        assert isinstance(get_recommendation_repository(), SQLiteRecommendationRepository)
+        assert isinstance(get_summary_repository(), SQLiteSummaryRepository)
+        assert isinstance(get_timeseries_cache_repository(), SQLiteTimeseriesCacheRepository)
+
+        clear_caches()
+
+
+class TestFactoryPostgres:
+    def test_postgres_factories_return_postgres_implementations(self, monkeypatch):
+        from greenkube.core import config as config_module
+        from greenkube.storage.embodied_repository import EmbodiedRepository, PostgresEmbodiedRepository
+        from greenkube.storage.postgres.node_repository import PostgresNodeRepository
+        from greenkube.storage.postgres.recommendation_repository import PostgresRecommendationRepository
+        from greenkube.storage.postgres.repository import (
+            PostgresCarbonIntensityRepository,
+            PostgresCombinedMetricsRepository,
+        )
+        from greenkube.storage.postgres.savings_repository import PostgresSavingsLedgerRepository
+        from greenkube.storage.postgres.summary_repository import PostgresSummaryRepository
+        from greenkube.storage.postgres.timeseries_cache_repository import PostgresTimeseriesCacheRepository
+
+        monkeypatch.setattr(config_module.config, "DB_TYPE", "postgres")
+        clear_caches()
+
+        assert isinstance(get_repository(), PostgresCarbonIntensityRepository)
+        assert isinstance(get_combined_metrics_repository(), PostgresCombinedMetricsRepository)
+        assert isinstance(get_node_repository(), PostgresNodeRepository)
+        assert isinstance(get_recommendation_repository(), PostgresRecommendationRepository)
+        assert isinstance(get_savings_ledger_repository(), PostgresSavingsLedgerRepository)
+        assert isinstance(get_summary_repository(), PostgresSummaryRepository)
+        assert isinstance(get_timeseries_cache_repository(), PostgresTimeseriesCacheRepository)
+
+        embodied = get_embodied_repository()
+        assert isinstance(embodied, EmbodiedRepository)
+        assert isinstance(embodied._impl, PostgresEmbodiedRepository)
+
+        clear_caches()
+
+
+class TestFactoryProcessor:
+    def test_get_processor_constructs_data_processor(self, monkeypatch):
+        components = {
+            "repository": object(),
+            "combined_metrics_repository": object(),
+            "node_repository": object(),
+            "embodied_repository": object(),
+        }
+        processor = object()
+
+        monkeypatch.setattr(factory, "get_repository", _cached_stub(components["repository"]))
+        monkeypatch.setattr(
+            factory,
+            "get_combined_metrics_repository",
+            _cached_stub(components["combined_metrics_repository"]),
+        )
+        monkeypatch.setattr(factory, "get_node_repository", _cached_stub(components["node_repository"]))
+        monkeypatch.setattr(factory, "get_embodied_repository", _cached_stub(components["embodied_repository"]))
+        monkeypatch.setattr(factory, "PrometheusCollector", lambda cfg: "prometheus")
+        monkeypatch.setattr(factory, "OpenCostCollector", lambda: "opencost")
+        monkeypatch.setattr(factory, "NodeCollector", lambda: "node")
+        monkeypatch.setattr(factory, "PodCollector", lambda: "pod")
+        monkeypatch.setattr(factory, "ElectricityMapsCollector", lambda: "electricity")
+        monkeypatch.setattr(factory, "BoaviztaCollector", lambda: "boavizta")
+        monkeypatch.setattr(factory, "CarbonCalculator", lambda repository, config: "calculator")
+        monkeypatch.setattr(factory, "BasicEstimator", lambda cfg: "estimator")
+        monkeypatch.setattr(factory, "DataProcessor", lambda **kwargs: processor)
+        clear_caches()
+
+        assert get_processor() is processor
+
+        clear_caches()
+
+    def test_get_processor_clears_caches_and_exits_on_error(self, monkeypatch):
+        monkeypatch.setattr(factory, "get_repository", _cached_stub(side_effect=RuntimeError("boom")))
+        clear_caches()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            get_processor()
+
+        assert exc_info.value.exit_code == 1
 
         clear_caches()
