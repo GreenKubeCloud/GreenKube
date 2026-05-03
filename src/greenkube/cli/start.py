@@ -152,6 +152,36 @@ async def scheduled_write_metrics():
     await async_write_combined_metrics_to_database(last=None)
 
 
+async def attribute_recommendation_savings() -> None:
+    """Attribute prorated savings for all applied recommendations to the ledger."""
+    logger.info("--- Starting savings attribution task ---")
+    try:
+        from ..core.config import get_config as _cfg
+        from ..core.factory import get_recommendation_repository as _reco_repo
+        from ..core.factory import get_savings_ledger_repository as _savings_repo
+        from ..core.savings_attributor import SavingsAttributor
+
+        cfg = _cfg()
+        # Derive period_seconds from PROMETHEUS_QUERY_RANGE_STEP
+        step = cfg.PROMETHEUS_QUERY_RANGE_STEP or "5m"
+        unit = step[-1]
+        value = int(step[:-1])
+        period_map = {"s": 1, "m": 60, "h": 3600}
+        period_seconds = value * period_map.get(unit, 60)
+
+        reco_repo = _reco_repo()
+        savings_repo = _savings_repo()
+        applied = await reco_repo.get_applied_recommendations()
+
+        cluster = cfg.CLUSTER_NAME or "default"
+        attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
+        count = await attributor.attribute_period(applied, period_seconds=period_seconds)
+        logger.info("Savings attribution complete: %d records written.", count)
+    except Exception as e:
+        logger.error("Savings attribution task failed: %s", e)
+    logger.info("--- Finished savings attribution task ---")
+
+
 async def compress_metrics() -> None:
     """Compress old raw metrics into hourly aggregates and prune stale data."""
     logger.info("--- Starting metrics compression task ---")
@@ -169,6 +199,18 @@ async def compress_metrics() -> None:
             stats["raw_rows_pruned"],
             stats["hourly_rows_pruned"],
         )
+        # Compress savings ledger too
+        try:
+            from ..core.config import get_config as _cfg
+            from ..core.factory import get_savings_ledger_repository as _savings_repo
+
+            savings_repo = _savings_repo()
+            cfg_c = _cfg()
+            compressed = await savings_repo.compress_to_hourly(cutoff_hours=cfg_c.METRICS_COMPRESSION_AGE_HOURS)
+            await savings_repo.prune_raw(retention_days=cfg_c.METRICS_RAW_RETENTION_DAYS)
+            logger.info("Savings ledger compression: %d hourly rows upserted.", compressed)
+        except Exception as e_s:
+            logger.error("Savings ledger compression failed: %s", e_s)
     except Exception as e:
         logger.error("Metrics compression failed: %s", e)
     logger.info("--- Finished metrics compression task ---")
@@ -178,6 +220,7 @@ async def refresh_dashboard_summary() -> None:
     """Refresh the pre-computed dashboard summary table."""
     logger.info("--- Starting dashboard summary refresh task ---")
     try:
+        from ..api.metrics_endpoint import update_dashboard_summary_metrics
         from ..core.factory import (
             get_combined_metrics_repository,
             get_summary_repository,
@@ -185,12 +228,15 @@ async def refresh_dashboard_summary() -> None:
         )
         from ..core.summary_refresher import SummaryRefresher
 
+        summary_repo = get_summary_repository()
         refresher = SummaryRefresher(
             metrics_repo=get_combined_metrics_repository(),
-            summary_repo=get_summary_repository(),
+            summary_repo=summary_repo,
             timeseries_cache_repo=get_timeseries_cache_repository(),
         )
         count = await refresher.run()
+        rows = await summary_repo.get_rows(namespace=None)
+        update_dashboard_summary_metrics(rows, reset=True)
         logger.info("Dashboard summary refresh complete: %d rows upserted.", count)
     except Exception as e:
         logger.error("Dashboard summary refresh failed: %s", e)
@@ -221,6 +267,7 @@ async def _async_start(last: Optional[str]):
 
     scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
     scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL, skip_initial=True)
+    scheduler.add_job_from_string(attribute_recommendation_savings, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
     # Compress old raw metrics into hourly aggregates every hour
     scheduler.add_job(compress_metrics, interval_hours=1)
     # Refresh pre-computed dashboard summary every hour (after compression)
@@ -235,6 +282,7 @@ async def _async_start(last: Optional[str]):
     await analyze_nodes()
     # pass 'last' only to the initial run
     await async_write_combined_metrics_to_database(last=last)
+    await attribute_recommendation_savings()
     await compress_metrics()
     await refresh_dashboard_summary()
     logger.info("Initial collection complete.")

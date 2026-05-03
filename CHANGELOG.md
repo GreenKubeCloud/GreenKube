@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recommendation full lifecycle:** Recommendations now support a complete status lifecycle (`open`, `in_progress`, `resolved`, `dismissed`, `snoozed`). New API endpoints allow updating status, bulk-dismissing, and snoozing recommendations. DB migrations `0006` (lifecycle columns) and `0007` (upsert null-fix) applied for both PostgreSQL and SQLite.
 - **Frontend recommendation lifecycle UI:** The recommendations page now exposes status filters, per-recommendation status controls (dismiss, snooze, mark in-progress/resolved), and a lifecycle summary on the dashboard.
 - **Expanded test coverage:** Nine new test files covering `CollectionOrchestrator`, `MetricAssembler`, `MetricsCompressor`, `Scheduler`, recommender v2, factory, `SummaryRepository` (SQLite), `TimeseriesCacheRepository` (SQLite), and a full recommendation lifecycle end-to-end suite (2 366 lines of new tests).
+- **Grafana dashboard overhaul (`scripts/build_grafana_dashboard.py`):** Complete rebuild of the Grafana JSON dashboard generation script with full PromQL aggregation correctness, instant-query bargauges for Top 3 panels, and a `reduce` transformation to fix bar-scale inflation from historical data.
+- **Savings attribution system:** New `SavingsAttributor` service (`src/greenkube/core/savings_attributor.py`) prorates projected annual CO₂e and cost savings to the actual observation window. New `SavingsLedger` Pydantic model, abstract `BaseSavingsRepository`, and PostgreSQL/SQLite implementations. DB migrations `0008` applied for both engines. Two new Prometheus gauges: `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total`.
+- **Grafana dashboard: Sustainability Command Center row** with Sustainability Score gauge, CO₂e/Cost/Energy stats, attributed savings window panels, active-recommendation counters, and three sorted Top-3 bargauges (CO₂e by namespace, Cost by namespace, Recommendation Types).
 
 ### Fixed
 - **Node recommendation memory usage:** The underutilised-node recommender now correctly factors in memory utilisation alongside CPU, preventing false positives on memory-heavy workloads.
@@ -18,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **CI: automated test-coverage badge update:** The README test-coverage shields are now refreshed automatically by CI on each push to `dev`.
+- **All Grafana PromQL expressions deduplicated:** Every expression across all rows uses the appropriate aggregation (`sum(max by (cluster)(…))` for cluster-level scalars, `sum by (namespace)(…)` for namespace breakdowns, `max by (namespace, pod)(…)` for pod-level topk, `max by (node)(…)` for node metrics) to prevent value multiplication from multiple scrape instances.
 
 ## [0.2.9] — 2026-04-21
 

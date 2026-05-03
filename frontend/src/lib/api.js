@@ -151,8 +151,8 @@ export function getRecommendations({ namespace } = {}) {
 }
 
 /** @returns {Promise<Object[]>} */
-export function getActiveRecommendations({ namespace } = {}) {
-	return request(`${BASE}/recommendations/active`, { namespace });
+export function getActiveRecommendations({ namespace, refresh } = {}) {
+	return request(`${BASE}/recommendations/active`, { namespace, refresh });
 }
 
 /** @returns {Promise<Object[]>} */
@@ -165,9 +165,14 @@ export function getAppliedRecommendations() {
 	return request(`${BASE}/recommendations/applied`);
 }
 
-/** @returns {Promise<Object>} */
-export function getRecommendationSavings() {
-	return request(`${BASE}/recommendations/savings`);
+/**
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.last]
+ * @returns {Promise<Object>}
+ */
+export function getRecommendationSavings({ namespace, last } = {}) {
+	return request(`${BASE}/recommendations/savings`, { namespace, last });
 }
 
 /**

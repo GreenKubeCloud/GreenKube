@@ -8,8 +8,12 @@ existing in different namespaces.
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+
+from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
 
 
 def make_svc(name, namespace, ports, labels=None):
@@ -138,3 +142,98 @@ async def test_prometheus_prefers_namespace_and_labels(monkeypatch):
     # should pick the monitoring one with labels
     assert "prometheus-k8s.monitoring.svc.cluster.local" in url
     assert ":9090" in url
+
+
+@pytest.mark.asyncio
+async def test_prometheus_discover_returns_none_without_candidates():
+    discovery = PrometheusDiscovery()
+    discovery._collect_candidates = AsyncMock(return_value=[])
+
+    assert await discovery.discover() is None
+
+
+@pytest.mark.asyncio
+async def test_prometheus_discover_returns_verified_candidate():
+    discovery = PrometheusDiscovery()
+    discovery._collect_candidates = AsyncMock(return_value=[("http://prometheus", 10)])
+    discovery.probe_candidates = AsyncMock(return_value="http://prometheus")
+
+    assert await discovery.discover() == "http://prometheus"
+
+
+@pytest.mark.asyncio
+async def test_prometheus_discover_returns_none_when_probes_fail():
+    discovery = PrometheusDiscovery()
+    discovery._collect_candidates = AsyncMock(return_value=[("http://prometheus", 10)])
+    discovery.probe_candidates = AsyncMock(return_value=None)
+
+    assert await discovery.discover() is None
+
+
+class _FakePrometheusResponse:
+    def __init__(self, status_code, payload=None, json_error=False):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self._json_error = json_error
+
+    def json(self):
+        if self._json_error:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _FakeAsyncClientContext:
+    def __init__(self, client):
+        self.client = client
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_probe_prometheus_endpoint_accepts_successful_query_response():
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_FakePrometheusResponse(200, {"status": "success"}))
+
+    with patch(
+        "greenkube.collectors.discovery.prometheus.get_async_http_client",
+        return_value=_FakeAsyncClientContext(client),
+    ):
+        assert await PrometheusDiscovery()._probe_prometheus_endpoint("http://prometheus/", 10) is True
+
+    client.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_prometheus_endpoint_tries_all_paths_before_failure():
+    client = AsyncMock()
+    client.get = AsyncMock(
+        side_effect=[
+            _FakePrometheusResponse(500, {"status": "error"}),
+            _FakePrometheusResponse(200, json_error=True),
+            httpx.RequestError("connection refused"),
+        ]
+    )
+
+    with patch(
+        "greenkube.collectors.discovery.prometheus.get_async_http_client",
+        return_value=_FakeAsyncClientContext(client),
+    ):
+        assert await PrometheusDiscovery()._probe_prometheus_endpoint("http://prometheus", 10) is False
+
+    assert client.get.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_probe_prometheus_endpoint_handles_unexpected_errors():
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with patch(
+        "greenkube.collectors.discovery.prometheus.get_async_http_client",
+        return_value=_FakeAsyncClientContext(client),
+    ):
+        assert await PrometheusDiscovery()._probe_prometheus_endpoint("http://prometheus", 10) is False

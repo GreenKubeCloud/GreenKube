@@ -62,7 +62,7 @@ GreenKube classifies carbon emissions according to the [GHG Protocol Corporate A
 | GHG Scope | GreenKube field | Description |
 |---|---|---|
 | **Scope 2** (market-based) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (real-time) or the configurable `DEFAULT_INTENSITY` fallback. |
-| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU share — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 350 kg CO₂e) when Boavizta does not recognise the provider or instance type. |
+| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU share — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **100 kg CO₂e**) when Boavizta does not recognise the provider or instance type. The Boavizta `/v1/cloud/instance` endpoint returns per-instance allocated GWP (typically 50–170 kg for common cloud VMs such as `aws/m5.large`); the fallback is calibrated to the same scale to avoid over-estimating Scope 3. |
 | **Scope 2 + Scope 3** | `total_co2e_grams` | Full pod carbon footprint — computed field on `CombinedMetric`, also exposed as `total_co2e_all_scopes` in API summary and timeseries responses. |
 
 **Scope 1** (direct combustion) is not applicable for cloud/virtualised Kubernetes workloads and is therefore not tracked.

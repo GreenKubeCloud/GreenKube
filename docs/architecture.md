@@ -549,13 +549,15 @@ Used for reporting over time ranges with historical accuracy.
 2. **Analysis:**
    ```
    RecommenderV2.generate_recommendations()
-   ├─ Aggregate by pod/namespace
-   ├─ Calculate statistics (mean, max, CV)
+   ├─ Aggregate pod metrics by stable workload owner when available
+   ├─ Calculate statistics (weighted mean, observed max, percentile, CV)
    ├─ Apply thresholds:
    │   ├─ Zombie detection
-   │   ├─ Rightsizing analysis
+   │   ├─ Rightsizing analysis using average and retained maximum usage
    │   ├─ Autoscaling candidates
    │   └─ Carbon-aware opportunities
+   ├─ Upsert active recommendations by full target identity
+   ├─ Mark previously active recommendations as stale when absent from the latest generation
    └─ Calculate savings (cost + CO2e)
    ```
 

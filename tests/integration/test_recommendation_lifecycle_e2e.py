@@ -293,6 +293,61 @@ class TestRecommendationPersistence:
         assert len(prod_recs) == 1
         assert prod_recs[0].namespace == "prod"
 
+    @pytest.mark.asyncio
+    async def test_node_recommendations_are_upserted_per_node(self, sqlite_repos):
+        """Node-scope recommendations with the same type must not collapse into one row."""
+        _, _, _, reco_repo = sqlite_repos
+
+        await reco_repo.upsert_recommendations(
+            [
+                RecommendationRecord(
+                    scope="node",
+                    target_node="node-a",
+                    type=RecommendationType.UNDERUTILIZED_NODE,
+                    description="Node A is underutilized",
+                ),
+                RecommendationRecord(
+                    scope="node",
+                    target_node="node-b",
+                    type=RecommendationType.UNDERUTILIZED_NODE,
+                    description="Node B is underutilized",
+                ),
+            ]
+        )
+
+        active = await reco_repo.get_active_recommendations()
+
+        assert {r.target_node for r in active} == {"node-a", "node-b"}
+
+    @pytest.mark.asyncio
+    async def test_reconcile_marks_missing_active_recommendations_stale(self, sqlite_repos):
+        """Active recommendations absent from the latest generation should stop being active."""
+        _, _, _, reco_repo = sqlite_repos
+
+        await reco_repo.upsert_recommendations(
+            [
+                RecommendationRecord(
+                    scope="workload",
+                    pod_name="api",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="Old active recommendation",
+                )
+            ]
+        )
+
+        stale_count = await reco_repo.reconcile_active_recommendations([], namespace="prod")
+        active = await reco_repo.get_active_recommendations(namespace="prod")
+        history = await reco_repo.get_recommendations(
+            start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            namespace="prod",
+        )
+
+        assert stale_count == 1
+        assert active == []
+        assert history[0].status == RecommendationStatus.STALE
+
 
 # ---------------------------------------------------------------------------
 # Step 4: API retrieval
@@ -394,6 +449,41 @@ class TestRecommendationLifecycleTransitions:
         data = resp.json()
         assert data["status"] == "applied"
         assert data["actual_cpu_request_millicores"] == 300
+
+    @pytest.mark.asyncio
+    async def test_apply_recommendation_scales_realized_savings_for_partial_cpu_rightsizing(self, lifecycle_client):
+        """Partial CPU rightsizing should prorate realized savings when actual values differ."""
+        client, reco_repo = lifecycle_client
+
+        record = RecommendationRecord(
+            pod_name="cpu-pod",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Oversized CPU",
+            current_cpu_request_millicores=200,
+            recommended_cpu_request_millicores=20,
+            potential_savings_cost=180.0,
+            potential_savings_co2e_grams=900.0,
+            created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+        await reco_repo.save_recommendations([record])
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        saved = await reco_repo.get_recommendations(start=start, end=end)
+        rec_id = saved[0].id
+
+        resp = client.patch(
+            f"/api/v1/recommendations/{rec_id}/apply",
+            json={"actual_cpu_request_millicores": 30},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "applied"
+        assert data["actual_cpu_request_millicores"] == 30
+        assert data["cost_saved"] == pytest.approx(170.0)
+        assert data["carbon_saved_co2e_grams"] == pytest.approx(850.0)
 
     @pytest.mark.asyncio
     async def test_ignore_recommendation_updates_status(self, lifecycle_client):

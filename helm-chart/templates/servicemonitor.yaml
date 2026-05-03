@@ -46,4 +46,11 @@ spec:
           action: replace
         - regex: exported_namespace|exported_pod|exported_cluster|exported_region
           action: labeldrop
+        # Safety net: if cluster label is still empty after relabeling, set it to
+        # "default" so Prometheus does not drop the label silently.
+        - sourceLabels: [cluster]
+          regex: "^$"
+          replacement: "default"
+          targetLabel: cluster
+          action: replace
 {{- end }}

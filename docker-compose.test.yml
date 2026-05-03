@@ -1,0 +1,17 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: greenkube-postgres-test
+    environment:
+      POSTGRES_DB: greenkube_test
+      POSTGRES_USER: greenkube
+      POSTGRES_PASSWORD: greenkube_password
+    ports:
+      - "5432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U greenkube -d greenkube_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

@@ -12,6 +12,7 @@ import pytest
 from greenkube.models.metrics import (
     Recommendation,
     RecommendationRecord,
+    RecommendationStatus,
     RecommendationType,
 )
 
@@ -36,6 +37,31 @@ def _make_record(
         potential_savings_cost=potential_savings_cost,
         potential_savings_co2e_grams=potential_savings_co2e_grams,
         created_at=created_at or datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+
+def _make_applied_record() -> RecommendationRecord:
+    """Helper to create an applied RecommendationRecord with realized savings."""
+    return RecommendationRecord(
+        pod_name="historical-pod",
+        namespace="commerce",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        description="Historical applied recommendation",
+        reason="Observed overprovisioning for several months",
+        priority="high",
+        status=RecommendationStatus.APPLIED,
+        potential_savings_cost=312.5,
+        potential_savings_co2e_grams=1840.0,
+        current_cpu_request_millicores=1200,
+        recommended_cpu_request_millicores=650,
+        actual_cpu_request_millicores=700,
+        current_memory_request_bytes=2 * 1024**3,
+        recommended_memory_request_bytes=1536 * 1024**2,
+        actual_memory_request_bytes=1536 * 1024**2,
+        applied_at=datetime(2026, 2, 25, 9, 30, 0, tzinfo=timezone.utc),
+        carbon_saved_co2e_grams=1800.0,
+        cost_saved=275.0,
+        created_at=datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc),
     )
 
 
@@ -133,6 +159,24 @@ class TestSQLiteRecommendationRepository:
         assert count == 0
 
     @pytest.mark.asyncio
+    async def test_save_recommendations_persists_applied_lifecycle_fields(self, repo, mock_db_manager):
+        """SQLite should persist applied recommendation lifecycle fields when seeding demo data."""
+        record = _make_applied_record()
+
+        await repo.save_recommendations([record])
+
+        query, params = mock_db_manager._mock_conn.execute.await_args.args
+        assert "applied_at" in query
+        assert "actual_cpu_request_millicores" in query
+        assert "actual_memory_request_bytes" in query
+        assert "carbon_saved_co2e_grams" in query
+        assert "cost_saved" in query
+        assert "applied" in params
+        assert "2026-02-25T09:30:00Z" in params
+        assert 1800.0 in params
+        assert 275.0 in params
+
+    @pytest.mark.asyncio
     async def test_get_recommendations_with_filters(self, repo, mock_db_manager):
         """Should apply type and namespace filters."""
         mock_conn = mock_db_manager._mock_conn
@@ -150,6 +194,24 @@ class TestSQLiteRecommendationRepository:
             namespace="default",
         )
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_get_savings_summary_filters_by_applied_at_window(self, repo, mock_db_manager):
+        """SQLite savings summary should filter applied recommendations by applied_at."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        mock_conn.row_factory = None
+
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 2, 8, tzinfo=timezone.utc)
+        await repo.get_savings_summary(namespace="default", start=start, end=end)
+
+        query, params = mock_conn.execute.await_args.args
+        assert "applied_at >= ?" in query
+        assert "applied_at < ?" in query
+        assert params[-2:] == ["2026-02-01T00:00:00Z", "2026-02-08T00:00:00Z"]
 
 
 class TestPostgresRecommendationRepository:
@@ -194,6 +256,24 @@ class TestPostgresRecommendationRepository:
         assert count == 0
 
     @pytest.mark.asyncio
+    async def test_save_recommendations_persists_applied_lifecycle_fields(self, repo, mock_db_manager):
+        """Postgres should persist applied recommendation lifecycle fields when seeding demo data."""
+        record = _make_applied_record()
+
+        await repo.save_recommendations([record])
+
+        query, data = mock_db_manager._mock_conn.executemany.await_args.args
+        saved = data[0]
+        assert "applied_at" in query
+        assert "actual_cpu_request_millicores" in query
+        assert "actual_memory_request_bytes" in query
+        assert "carbon_saved_co2e_grams" in query
+        assert "cost_saved" in query
+        assert record.applied_at in saved
+        assert record.cost_saved in saved
+        assert record.carbon_saved_co2e_grams in saved
+
+    @pytest.mark.asyncio
     async def test_get_recommendations_with_filters(self, repo, mock_db_manager):
         """Should apply type and namespace filters."""
         mock_conn = mock_db_manager._mock_conn
@@ -208,3 +288,19 @@ class TestPostgresRecommendationRepository:
             namespace="default",
         )
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_get_savings_summary_filters_by_applied_at_window(self, repo, mock_db_manager):
+        """Postgres savings summary should filter applied recommendations by applied_at."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 2, 8, tzinfo=timezone.utc)
+        await repo.get_savings_summary(namespace="default", start=start, end=end)
+
+        query = mock_conn.fetch.await_args.args[0]
+        params = mock_conn.fetch.await_args.args[1:]
+        assert "applied_at >= $2" in query
+        assert "applied_at < $3" in query
+        assert params == ("default", start, end)

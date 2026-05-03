@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List
 
 try:
-    from elasticsearch_dsl import Date, Document, Float, Keyword, Long
+    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Long
 except ImportError as _es_import_error:
     raise ImportError(
         "The 'elasticsearch' extra is required to use the Elasticsearch backend. "
@@ -51,6 +51,7 @@ class NodeSnapshotDoc(Document):
     zone = Keyword()
     node_pool = Keyword()
     memory_capacity_bytes = Long()
+    is_active = Boolean()
     embodied_emissions_kg = Float()
 
     class Index:
@@ -98,6 +99,7 @@ class ElasticsearchNodeRepository(NodeRepository):
                         "zone": node.zone,
                         "node_pool": node.node_pool,
                         "memory_capacity_bytes": node.memory_capacity_bytes,
+                        "is_active": node.is_active,
                         "embodied_emissions_kg": node.embodied_emissions_kg,
                     },
                 }
@@ -141,6 +143,7 @@ class ElasticsearchNodeRepository(NodeRepository):
                     node_pool=hit.node_pool,
                     cpu_capacity_cores=hit.cpu_capacity_cores,
                     memory_capacity_bytes=hit.memory_capacity_bytes,
+                    is_active=getattr(hit, "is_active", True),
                     timestamp=hit.timestamp,
                     embodied_emissions_kg=hit.embodied_emissions_kg,
                 )
@@ -157,7 +160,7 @@ class ElasticsearchNodeRepository(NodeRepository):
             logging.error("Failed to retrieve snapshots from Elasticsearch: %s", e)
             return []
 
-    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime, include_inactive: bool = False) -> List[NodeInfo]:
         """
         Retrieves the latest snapshot for each node before the given timestamp.
         """
@@ -196,12 +199,15 @@ class ElasticsearchNodeRepository(NodeRepository):
                             node_pool=hit.get("node_pool"),
                             cpu_capacity_cores=hit.get("cpu_capacity_cores"),
                             memory_capacity_bytes=hit.get("memory_capacity_bytes"),
+                            is_active=hit.get("is_active", True),
                             timestamp=hit.get("timestamp"),
                             embodied_emissions_kg=hit.get("embodied_emissions_kg"),
                         )
                         results.append(node_info)
 
-            return results
+            if include_inactive:
+                return results
+            return [node for node in results if node.is_active]
 
         except Exception as e:
             logging.error("Failed to retrieve latest snapshots from Elasticsearch: %s", e)

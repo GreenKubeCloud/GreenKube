@@ -11,6 +11,7 @@ from typing import List, Optional
 
 import aiosqlite
 
+from greenkube.core.recommendation_realization import estimate_realized_savings
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -65,6 +66,48 @@ def _row_to_record(row) -> RecommendationRecord:
     )
 
 
+def _type_value(record: RecommendationRecord) -> str:
+    """Returns the persisted recommendation type value."""
+    return record.type.value if isinstance(record.type, RecommendationType) else record.type
+
+
+def _status_value(record: RecommendationRecord) -> str:
+    """Returns the persisted recommendation status value."""
+    return record.status.value if isinstance(record.status, RecommendationStatus) else record.status
+
+
+def _identity_key(record: RecommendationRecord) -> tuple:
+    """Returns the stable identity used to refresh recommendation lifecycle rows."""
+    return (
+        record.scope or "pod",
+        record.namespace,
+        record.pod_name,
+        record.target_node,
+        _type_value(record),
+    )
+
+
+def _identity_where_clause(record: RecommendationRecord) -> tuple[str, list]:
+    """Builds a SQLite WHERE clause for NULL-safe recommendation identity matching."""
+    return (
+        "COALESCE(scope, 'pod') = ? "
+        "AND ((namespace = ?) OR (namespace IS NULL AND ? IS NULL)) "
+        "AND ((pod_name = ?) OR (pod_name IS NULL AND ? IS NULL)) "
+        "AND ((target_node = ?) OR (target_node IS NULL AND ? IS NULL)) "
+        "AND type = ? AND status = 'active'",
+        [
+            record.scope or "pod",
+            record.namespace,
+            record.namespace,
+            record.pod_name,
+            record.pod_name,
+            record.target_node,
+            record.target_node,
+            _type_value(record),
+        ],
+    )
+
+
 class SQLiteRecommendationRepository(RecommendationRepository):
     """SQLite implementation for recommendation lifecycle storage."""
 
@@ -96,8 +139,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     potential_savings_cost, potential_savings_co2e_grams,
                     current_cpu_request_millicores, recommended_cpu_request_millicores,
                     current_memory_request_bytes, recommended_memory_request_bytes,
-                    cron_schedule, target_node, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cron_schedule, target_node,
+                    applied_at, actual_cpu_request_millicores, actual_memory_request_bytes,
+                    carbon_saved_co2e_grams, cost_saved,
+                    ignored_at, ignored_reason,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             for r in records:
                 await conn.execute(
@@ -119,7 +166,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         r.recommended_memory_request_bytes,
                         r.cron_schedule,
                         r.target_node,
+                        to_iso_z(r.applied_at) if r.applied_at else None,
+                        r.actual_cpu_request_millicores,
+                        r.actual_memory_request_bytes,
+                        r.carbon_saved_co2e_grams,
+                        r.cost_saved,
+                        to_iso_z(r.ignored_at) if r.ignored_at else None,
+                        r.ignored_reason,
                         to_iso_z(r.created_at) if r.created_at else None,
+                        to_iso_z(r.updated_at) if r.updated_at else None,
                     ),
                 )
             await conn.commit()
@@ -127,7 +182,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             return len(records)
 
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
-        """Inserts or updates active recommendations using (pod_name, namespace, type) as key.
+        """Inserts or updates active recommendations using their full target identity.
 
         Ignored and applied recommendations are left untouched.
 
@@ -144,11 +199,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             for r in records:
-                type_val = r.type.value if isinstance(r.type, RecommendationType) else r.type
+                status_val = _status_value(r)
+                identity_where, identity_params = _identity_where_clause(r)
                 row = await conn.execute(
-                    "SELECT id, status FROM recommendation_history "
-                    "WHERE pod_name = ? AND namespace = ? AND type = ? AND status = 'active'",
-                    (r.pod_name, r.namespace, type_val),
+                    f"SELECT id, status FROM recommendation_history WHERE {identity_where}",
+                    identity_params,
                 )
                 existing = await row.fetchone()
                 if existing:
@@ -156,6 +211,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         """
                         UPDATE recommendation_history SET
                             description = ?, reason = ?, priority = ?,
+                            scope = ?,
                             potential_savings_cost = ?, potential_savings_co2e_grams = ?,
                             current_cpu_request_millicores = ?, recommended_cpu_request_millicores = ?,
                             current_memory_request_bytes = ?, recommended_memory_request_bytes = ?,
@@ -166,6 +222,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                             r.description,
                             r.reason,
                             r.priority,
+                            r.scope,
                             r.potential_savings_cost,
                             r.potential_savings_co2e_grams,
                             r.current_cpu_request_millicores,
@@ -198,7 +255,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                             r.reason,
                             r.priority,
                             r.scope,
-                            r.status.value if isinstance(r.status, RecommendationStatus) else r.status,
+                            status_val,
                             r.potential_savings_cost,
                             r.potential_savings_co2e_grams,
                             r.current_cpu_request_millicores,
@@ -214,6 +271,55 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             await conn.commit()
             logger.info("Upserted %d recommendation records in SQLite.", len(records))
             return len(records)
+
+    async def reconcile_active_recommendations(
+        self,
+        records: List[RecommendationRecord],
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Marks active recommendations absent from the latest generated set as stale."""
+        current_keys = {_identity_key(record) for record in records}
+        now = to_iso_z(datetime.now(timezone.utc))
+
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            params: list = []
+            query = (
+                "SELECT id, pod_name, namespace, type, scope, target_node "
+                "FROM recommendation_history WHERE status = 'active'"
+            )
+            if namespace:
+                query += " AND namespace = ?"
+                params.append(namespace)
+
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+
+            stale_ids = []
+            for row in rows:
+                row_record = RecommendationRecord(
+                    id=row["id"],
+                    pod_name=row["pod_name"],
+                    namespace=row["namespace"],
+                    type=RecommendationType(row["type"]),
+                    scope=row["scope"] or "pod",
+                    target_node=row["target_node"],
+                    description="placeholder",
+                )
+                if _identity_key(row_record) not in current_keys:
+                    stale_ids.append(row["id"])
+
+            if not stale_ids:
+                return 0
+
+            placeholders = ", ".join("?" for _ in stale_ids)
+            await conn.execute(
+                f"UPDATE recommendation_history SET status = 'stale', updated_at = ? WHERE id IN ({placeholders})",
+                [now, *stale_ids],
+            )
+            await conn.commit()
+            logger.info("Marked %d SQLite recommendation record(s) as stale.", len(stale_ids))
+            return len(stale_ids)
 
     async def get_recommendations(
         self,
@@ -366,13 +472,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if not row:
                 raise ValueError(f"Recommendation {rec_id} not found.")
 
-            carbon_saved = request.carbon_saved_co2e_grams
-            if carbon_saved is None:
-                carbon_saved = row["potential_savings_co2e_grams"]
-
-            cost_saved = request.cost_saved
-            if cost_saved is None:
-                cost_saved = row["potential_savings_cost"]
+            record = _row_to_record(row)
+            carbon_saved, cost_saved = estimate_realized_savings(record, request)
 
             await conn.execute(
                 """
@@ -472,11 +573,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def get_savings_summary(
         self,
         namespace: Optional[str] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
         """Returns aggregate savings from all applied recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            start: Optional inclusive lower bound on applied_at.
+            end: Optional exclusive upper bound on applied_at.
 
         Returns:
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
@@ -492,6 +597,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if namespace:
                 query += " AND namespace = ?"
                 params.append(namespace)
+            if start:
+                query += " AND applied_at >= ?"
+                params.append(to_iso_z(start))
+            if end:
+                query += " AND applied_at < ?"
+                params.append(to_iso_z(end))
 
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()

@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,7 +20,7 @@ from greenkube.api.dependencies import get_combined_metrics_repository, validate
 from greenkube.api.schemas import ReportSummaryResponse
 from greenkube.core.aggregator import aggregate_metrics
 from greenkube.storage.base_repository import CombinedMetricsRepository
-from greenkube.utils.date_utils import parse_duration
+from greenkube.utils.date_utils import time_range_from_last
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +32,16 @@ _VALID_GRANULARITIES = ("hourly", "daily", "weekly", "monthly", "yearly")
 
 def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
     """Compute (start, end) time range. Defaults to last 24h."""
-    end = datetime.now(timezone.utc)
-    if last:
-        try:
-            delta = parse_duration(last)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        start = end - delta
-    else:
-        start = end - timedelta(days=1)
-    return start, end
+    try:
+        return time_range_from_last(last)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/report/summary", response_model=ReportSummaryResponse)
 async def report_summary(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', '30d', '1y')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', '30d', '1y', 'ytd')."),
     aggregate: bool = Query(False, description="Aggregate rows by (namespace, pod, period)."),
     granularity: Optional[str] = Query(
         None,
@@ -94,7 +88,7 @@ async def report_summary(
 @router.get("/report/export")
 async def report_export(
     namespace: Optional[str] = Depends(validate_namespace),
-    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', '30d', '1y')."),
+    last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', '30d', '1y', 'ytd')."),
     aggregate: bool = Query(False, description="Aggregate rows by (namespace, pod, period)."),
     granularity: Optional[str] = Query(
         None,

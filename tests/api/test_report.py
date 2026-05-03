@@ -71,6 +71,24 @@ class TestReportSummaryEndpoint:
         response = client.get("/api/v1/report/summary?last=7d")
         assert response.status_code == 200
 
+    def test_summary_supports_ytd_window(self, client, mock_combined_metrics_repo):
+        """YTD should resolve to January 1st of the current UTC year."""
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/report/summary?last=ytd")
+
+        assert response.status_code == 200
+        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        start = kwargs["start_time"]
+        end = kwargs["end_time"]
+        assert start.year == end.year
+        assert start.month == 1
+        assert start.day == 1
+        assert start.hour == 0
+        assert start.minute == 0
+        assert start.second == 0
+        assert start.tzinfo is not None
+
 
 class TestReportExportEndpoint:
     """Tests for GET /api/v1/report/export."""
@@ -169,3 +187,21 @@ class TestReportExportEndpoint:
         response = client.get("/api/v1/report/export")
         assert response.status_code == 200
         assert "text/csv" in response.headers.get("content-type", "")
+
+    def test_export_supports_ytd_window(self, client, mock_combined_metrics_repo):
+        """YTD exports should use January 1st through now as the time range."""
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/report/export?format=json&last=ytd")
+
+        assert response.status_code == 200
+        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        start = kwargs["start_time"]
+        end = kwargs["end_time"]
+        assert start.year == end.year
+        assert start.month == 1
+        assert start.day == 1
+        assert start.hour == 0
+        assert start.minute == 0
+        assert start.second == 0
+        assert start.tzinfo is not None

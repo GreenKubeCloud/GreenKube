@@ -1,7 +1,10 @@
 # tests/api/test_recommendations.py
 """Tests for the recommendations endpoint."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
+
+from greenkube.models.metrics import RecommendationSavingsSummary
 
 
 class TestRecommendationsEndpoint:
@@ -78,8 +81,6 @@ class TestRecommendationsEndpoint:
 
     def test_recommendations_contain_expected_fields(self, client, mock_combined_metrics_repo):
         """Each recommendation should contain expected fields."""
-        from datetime import datetime, timezone
-
         from greenkube.models.metrics import CombinedMetric
 
         zombie = CombinedMetric(
@@ -100,3 +101,35 @@ class TestRecommendationsEndpoint:
             rec = data[0]
             for field in ["pod_name", "namespace", "type", "description"]:
                 assert field in rec, f"Missing field: {field}"
+
+    def test_savings_summary_passes_last_time_window_to_repository(self, client, mock_reco_repo):
+        """Savings should be filtered by the selected dashboard time window."""
+        mock_reco_repo.get_savings_summary = AsyncMock(
+            return_value=RecommendationSavingsSummary(
+                total_carbon_saved_co2e_grams=42,
+                total_cost_saved=1.5,
+                applied_count=2,
+            )
+        )
+
+        response = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d")
+
+        assert response.status_code == 200
+        kwargs = mock_reco_repo.get_savings_summary.await_args.kwargs
+        assert kwargs["namespace"] == "prod"
+        assert kwargs["start"] < kwargs["end"]
+        assert kwargs["start"].tzinfo is not None
+        assert kwargs["end"].tzinfo is not None
+
+    def test_savings_summary_supports_ytd_window(self, client, mock_reco_repo):
+        """YTD should resolve to January 1st of the current UTC year."""
+        mock_reco_repo.get_savings_summary = AsyncMock(return_value=RecommendationSavingsSummary())
+
+        response = client.get("/api/v1/recommendations/savings?last=ytd")
+
+        assert response.status_code == 200
+        start = mock_reco_repo.get_savings_summary.await_args.kwargs["start"]
+        assert start.month == 1
+        assert start.day == 1
+        assert start.hour == 0
+        assert start.tzinfo is not None

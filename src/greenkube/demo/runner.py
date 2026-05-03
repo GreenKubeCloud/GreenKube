@@ -12,6 +12,7 @@ import os
 import signal
 import tempfile
 import webbrowser
+from datetime import datetime, timedelta, timezone
 
 import uvicorn
 
@@ -23,8 +24,67 @@ from greenkube.demo.data_generator import (
     generate_node_snapshots,
     generate_recommendations,
 )
+from greenkube.models.savings import SavingsLedgerRecord
 
 logger = logging.getLogger(__name__)
+
+_SECONDS_PER_YEAR = 365.25 * 24 * 3600
+
+
+async def _backfill_demo_savings_ledger(
+    reco_repo,
+    savings_repo,
+    *,
+    cluster_name: str,
+    period_seconds: int = 3600,
+    chunk_size: int = 2000,
+) -> int:
+    """Populate the historical savings ledger for already applied demo recommendations."""
+    applied_records = await reco_repo.get_applied_recommendations()
+    if not applied_records:
+        return 0
+
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    period_factor = period_seconds / _SECONDS_PER_YEAR
+    pending: list[SavingsLedgerRecord] = []
+    inserted = 0
+
+    for record in applied_records:
+        if not record.id or not record.applied_at:
+            continue
+
+        annual_co2e = record.carbon_saved_co2e_grams or 0.0
+        if annual_co2e <= 0:
+            continue
+
+        annual_cost = record.cost_saved or 0.0
+        rec_type = record.type.value if hasattr(record.type, "value") else str(record.type)
+        timestamp = record.applied_at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+        while timestamp <= now:
+            pending.append(
+                SavingsLedgerRecord(
+                    recommendation_id=record.id,
+                    cluster_name=cluster_name,
+                    namespace=record.namespace or "",
+                    recommendation_type=rec_type,
+                    co2e_saved_grams=annual_co2e * period_factor,
+                    cost_saved_dollars=annual_cost * period_factor,
+                    period_seconds=period_seconds,
+                    timestamp=timestamp,
+                )
+            )
+
+            if len(pending) >= chunk_size:
+                inserted += await savings_repo.save_records(pending)
+                pending.clear()
+
+            timestamp += timedelta(seconds=period_seconds)
+
+    if pending:
+        inserted += await savings_repo.save_records(pending)
+
+    return inserted
 
 
 def _configure_demo_environment(db_path: str, port: int, no_browser: bool = False) -> None:
@@ -70,7 +130,13 @@ async def _populate_database(days: int) -> dict[str, int]:
 
     repo = get_repository()
     history = generate_carbon_intensity_history(days=days)
-    counts["carbon_intensity"] = await repo.save_history(history, zone=DEMO_ZONE)
+    history_by_zone: dict[str, list[dict]] = {}
+    for record in history:
+        history_by_zone.setdefault(record["zone"], []).append(record)
+
+    counts["carbon_intensity"] = 0
+    for zone, zone_history in history_by_zone.items():
+        counts["carbon_intensity"] += await repo.save_history(zone_history, zone=zone)
 
     # 2. Node snapshots
     logger.info("🖥️  Generating node snapshots...")
@@ -90,11 +156,20 @@ async def _populate_database(days: int) -> dict[str, int]:
 
     # 4. Recommendations
     logger.info("💡 Generating optimization recommendations...")
-    from greenkube.core.factory import get_recommendation_repository
+    from greenkube.core.factory import get_recommendation_repository, get_savings_ledger_repository
 
     reco_repo = get_recommendation_repository()
+    savings_repo = get_savings_ledger_repository()
     recommendations = generate_recommendations()
     counts["recommendations"] = await reco_repo.save_recommendations(recommendations)
+
+    logger.info("💸 Backfilling historical savings ledger...")
+    counts["savings_ledger"] = await _backfill_demo_savings_ledger(
+        reco_repo,
+        savings_repo,
+        cluster_name=get_config().CLUSTER_NAME,
+    )
+    counts["savings_ledger_hourly"] = await savings_repo.compress_to_hourly()
 
     # 5. Compress older raw metrics into hourly buckets so aggregate_timeseries
     #    can query both the raw and hourly tables consistently across all windows.
@@ -108,15 +183,21 @@ async def _populate_database(days: int) -> dict[str, int]:
 
     # 6. Pre-compute dashboard summary and timeseries cache for all windows
     logger.info("⚡ Pre-computing dashboard summary and timeseries cache...")
+    from greenkube.api.metrics_endpoint import update_dashboard_summary_metrics
     from greenkube.core.factory import get_summary_repository, get_timeseries_cache_repository
     from greenkube.core.summary_refresher import SummaryRefresher
 
+    summary_repo = get_summary_repository()
     refresher = SummaryRefresher(
         metrics_repo=combined_repo,
-        summary_repo=get_summary_repository(),
+        summary_repo=summary_repo,
         timeseries_cache_repo=get_timeseries_cache_repository(),
     )
     counts["timeseries_cache_rows"] = await refresher.run()
+    try:
+        update_dashboard_summary_metrics(await summary_repo.get_rows(namespace=None), reset=True)
+    except Exception as exc:
+        logger.warning("Unable to publish demo dashboard summary metrics: %s", exc)
 
     return counts
 

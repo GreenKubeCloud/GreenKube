@@ -8,9 +8,9 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
-[![Python Coverage](https://img.shields.io/badge/coverage%20python-74%25-yellowgreen)](tests/)
+[![Python Coverage](https://img.shields.io/badge/coverage%20python-90%25-brightgreen)](tests/)
 [![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-[![Tests](https://img.shields.io/badge/tests-820%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1076%20passed-brightgreen)](tests/)
 [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 >**Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the full dashboard with realistic sample data, no install required.
@@ -28,6 +28,12 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 ---
 
 ## Screenshots
+
+| Grafana dashboard |
+|------------------|
+| <img src="assets/grafana-dashboard-top-panel.png" width="460"> |
+
+### Frontend screenshots 
 
 | Dashboard | Metrics |
 |----------|----------|
@@ -52,7 +58,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 | [Configuration](docs/configuration.md) | All Helm values and environment variables |
 | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
 | [CLI Reference](docs/cli.md) | `greenkube report`, `recommend`, and other CLI commands |
-| [Prometheus & Grafana](docs/grafana.md) | ServiceMonitor setup and Grafana dashboard import |
+| [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
 | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
 | [Changelog](CHANGELOG.md) | Version history |
 

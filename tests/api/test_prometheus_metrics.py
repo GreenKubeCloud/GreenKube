@@ -87,6 +87,8 @@ class TestUpdateRecommendationMetrics:
 
     def test_update_sets_gauge_values(self):
         """Should set gauge values based on recommendation list."""
+        from unittest.mock import patch
+
         from greenkube.api.metrics_endpoint import update_recommendation_metrics
 
         recs = [
@@ -118,7 +120,8 @@ class TestUpdateRecommendationMetrics:
                 potential_savings_co2e_grams=0.2,
             ),
         ]
-        update_recommendation_metrics(recs)
+        with patch("greenkube.api.metrics_endpoint._get_cluster_name", return_value="test-cluster"):
+            update_recommendation_metrics(recs)
 
         from greenkube.api.metrics_endpoint import (
             RECOMMENDATION_COUNT,
@@ -126,18 +129,26 @@ class TestUpdateRecommendationMetrics:
         )
 
         # Check ZOMBIE_POD count
-        zombie_count = RECOMMENDATION_COUNT.labels(type="ZOMBIE_POD", priority="high")._value.get()
+        zombie_count = RECOMMENDATION_COUNT.labels(
+            cluster="test-cluster", namespace="__all__", type="ZOMBIE_POD", priority="high"
+        )._value.get()
         assert zombie_count == 2
+        default_zombie_count = RECOMMENDATION_COUNT.labels(
+            cluster="test-cluster", namespace="default", type="ZOMBIE_POD", priority="high"
+        )._value.get()
+        assert default_zombie_count == 2
 
         # Check RIGHTSIZING_CPU count
-        cpu_count = RECOMMENDATION_COUNT.labels(type="RIGHTSIZING_CPU", priority="medium")._value.get()
+        cpu_count = RECOMMENDATION_COUNT.labels(
+            cluster="test-cluster", namespace="prod", type="RIGHTSIZING_CPU", priority="medium"
+        )._value.get()
         assert cpu_count == 1
 
         # Check cost savings
-        zombie_cost = RECOMMENDATION_SAVINGS_COST.labels(type="ZOMBIE_POD")._value.get()
+        zombie_cost = RECOMMENDATION_SAVINGS_COST.labels(cluster="test-cluster", type="ZOMBIE_POD")._value.get()
         assert zombie_cost == pytest.approx(3.0, abs=0.01)
 
-        cpu_cost = RECOMMENDATION_SAVINGS_COST.labels(type="RIGHTSIZING_CPU")._value.get()
+        cpu_cost = RECOMMENDATION_SAVINGS_COST.labels(cluster="test-cluster", type="RIGHTSIZING_CPU")._value.get()
         assert cpu_cost == pytest.approx(0.5, abs=0.01)
 
     def test_update_with_empty_list_resets_gauges(self):

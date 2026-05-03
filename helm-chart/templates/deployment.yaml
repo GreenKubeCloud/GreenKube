@@ -81,6 +81,12 @@ spec:
                   name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
+            # Expose the node name via the Downward API so that CLUSTER_NAME
+            # auto-detection can use it as a fallback (e.g. "minikube" for local clusters).
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -125,6 +131,10 @@ spec:
                   name: {{ include "greenkube.secretName" . }}
                   key: DB_CONNECTION_STRING
             {{- end }}
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           ports:
             - name: http-api
               containerPort: {{ .Values.config.api.port }}

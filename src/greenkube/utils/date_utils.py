@@ -87,3 +87,36 @@ def parse_duration(value: str) -> timedelta:
         "y": timedelta(days=amount * 365),
     }
     return mapping[unit]
+
+
+def time_range_from_last(
+    last: Optional[str],
+    default: timedelta = timedelta(days=1),
+    now: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
+    """Compute a UTC ``(start, end)`` range from a dashboard ``last`` value.
+
+    ``last`` accepts the same duration strings as :func:`parse_duration`, plus
+    the special ``"ytd"`` slug used by the frontend dashboard to mean year to
+    date. When ``last`` is empty, ``default`` is used.
+
+    Args:
+        last: Duration string such as ``"24h"`` or the special ``"ytd"`` slug.
+        default: Duration used when ``last`` is not provided.
+        now: Optional current time override, mainly for tests.
+
+    Returns:
+        A timezone-aware UTC ``(start, end)`` tuple.
+
+    Raises:
+        ValueError: If ``last`` is neither ``"ytd"`` nor a valid duration.
+    """
+    end = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+    if not last:
+        return end - default, end
+
+    window = last.strip()
+    if window.lower() == "ytd":
+        return datetime(end.year, 1, 1, tzinfo=timezone.utc), end
+
+    return end - parse_duration(window), end

@@ -1,16 +1,15 @@
 <script>
 	import { onMount } from 'svelte';
 	import { getNamespaces, getReportSummary, buildReportExportUrl } from '$lib/api.js';
+	import { reportTimeRanges as timeRanges, aggregationLevels, buildReportRequestParams } from '$lib/reportOptions.js';
 	import { formatCO2, formatCost, formatEnergy } from '$lib/utils/format.js';
 	import Card from '$lib/components/Card.svelte';
-	import StatCard from '$lib/components/StatCard.svelte';
 	import DataState from '$lib/components/DataState.svelte';
 
 	// ── Filter state ──────────────────────────────────────────────────────────
 	let namespace = '';
 	let last = '24h';
-	let aggregate = false;
-	let granularity = 'daily';
+	let aggregationLevel = 'raw';
 	let format = 'csv';
 
 	// ── UI state ──────────────────────────────────────────────────────────────
@@ -22,31 +21,15 @@
 	let downloadError = null;
 	let downloadSuccess = false;
 
-	const timeRanges = [
-		{ value: '1h',  label: '1 hour' },
-		{ value: '6h',  label: '6 hours' },
-		{ value: '24h', label: '24 hours' },
-		{ value: '7d',  label: '7 days' },
-		{ value: '30d', label: '30 days' },
-		{ value: '90d', label: '90 days' },
-		{ value: '1y',  label: '1 year' }
-	];
-
-	const granularities = [
-		{ value: 'hourly',   label: 'Hourly' },
-		{ value: 'daily',    label: 'Daily' },
-		{ value: 'weekly',   label: 'Weekly' },
-		{ value: 'monthly',  label: 'Monthly' },
-		{ value: 'yearly',   label: 'Yearly' }
-	];
-
 	const formats = [
 		{ value: 'csv',  label: 'CSV', icon: '📊', description: 'Spreadsheet-compatible, ideal for Excel / Google Sheets' },
 		{ value: 'json', label: 'JSON', icon: '🗂️', description: 'Machine-readable, ideal for further processing' }
 	];
 
 	// ── Reactive summary preview ──────────────────────────────────────────────
-	$: previewParams = { namespace, last, aggregate, granularity: aggregate ? granularity : undefined };
+	$: reportParams = buildReportRequestParams({ namespace, last, aggregationLevel });
+	$: aggregate = reportParams.aggregate;
+	$: previewParams = { namespace, last, aggregationLevel };
 	$: if (previewParams) refreshSummary();
 
 	async function refreshSummary() {
@@ -54,12 +37,7 @@
 		error = null;
 		summary = null;
 		try {
-			summary = await getReportSummary({
-				namespace: namespace || undefined,
-				last,
-				aggregate,
-				granularity: aggregate ? granularity : undefined
-			});
+			summary = await getReportSummary(reportParams);
 		} catch (e) {
 			error = e.message;
 		} finally {
@@ -73,10 +51,7 @@
 		downloadSuccess = false;
 		try {
 			const url = buildReportExportUrl({
-				namespace: namespace || undefined,
-				last,
-				aggregate,
-				granularity: aggregate ? granularity : undefined,
+				...reportParams,
 				format
 			});
 			// Trigger browser download without leaving the page
@@ -154,41 +129,19 @@
 			</Card>
 
 			<!-- Aggregation -->
-			<Card title="Aggregation">
-				<div class="space-y-3">
-					<label class="flex items-center gap-3 cursor-pointer group">
-						<div class="relative">
-							<input
-								type="checkbox"
-								bind:checked={aggregate}
-								class="sr-only peer"
-							/>
-							<div class="w-10 h-5 bg-dark-700 rounded-full peer peer-checked:bg-green-600 transition-colors"></div>
-							<div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-5"></div>
-						</div>
-						<span class="text-sm text-dark-300 group-hover:text-dark-100 transition-colors">
-							Aggregate by period
-						</span>
-					</label>
-
-					{#if aggregate}
-						<div class="space-y-1.5 pt-1">
-							<p class="text-xs text-dark-500 uppercase tracking-wider font-medium">Grouping</p>
-							<div class="grid grid-cols-1 gap-1.5">
-								{#each granularities as g}
-									<button
-										on:click={() => (granularity = g.value)}
-										class="px-3 py-1.5 rounded-lg text-sm text-left transition-all duration-150
-										       {granularity === g.value
-												? 'bg-green-600/20 text-green-400 border border-green-600/50'
-												: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
-									>
-										{g.label}
-									</button>
-								{/each}
-							</div>
-						</div>
-					{/if}
+			<Card title="Aggregation Level">
+				<div class="grid grid-cols-1 gap-1.5">
+					{#each aggregationLevels as level}
+						<button
+							on:click={() => (aggregationLevel = level.value)}
+							class="px-3 py-1.5 rounded-lg text-sm text-left transition-all duration-150
+							       {aggregationLevel === level.value
+									? 'bg-green-600/20 text-green-400 border border-green-600/50'
+									: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
+						>
+							{level.label}
+						</button>
+					{/each}
 				</div>
 			</Card>
 
@@ -278,13 +231,9 @@
 						<span class="text-dark-200 font-medium">{namespace || 'All namespaces'}</span>
 					</div>
 					<div class="flex justify-between items-center py-1.5 border-b border-dark-700/50">
-						<span class="text-dark-500">Aggregation</span>
+						<span class="text-dark-500">Aggregation level</span>
 						<span class="text-dark-200 font-medium">
-							{#if aggregate}
-								{granularities.find(g => g.value === granularity)?.label ?? granularity}
-							{:else}
-								None (raw data)
-							{/if}
+							{aggregationLevels.find(level => level.value === aggregationLevel)?.label ?? aggregationLevel}
 						</span>
 					</div>
 					<div class="flex justify-between items-center py-1.5">

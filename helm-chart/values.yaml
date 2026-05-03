@@ -27,8 +27,11 @@ rbac:
 config:
   logLevel: INFO
   cloudProvider: unknown
-  # Cluster name for multi-cluster environments. Used as the `cluster` label
-  # in Prometheus metrics so you can filter/join across clusters in Grafana.
+  # Cluster name used as the `cluster` label in Prometheus metrics for
+  # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
+  #   1. Node name from the Kubernetes Downward API (works for minikube/kind/k3s).
+  #   2. Well-known cloud-provider node labels (EKS, GKE, AKS).
+  #   3. Falls back to "default" when nothing is detectable.
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
                   # Leave empty to let GreenKube auto-discover the zone from node labels.
@@ -64,10 +67,12 @@ config:
   # Boavizta configuration
   boavizta:
     url: https://api.boavizta.org
-    # Default embodied emissions (kg CO2e) used when Boavizta API does not
-    # recognize a cloud provider or instance type. 350 kg is a reasonable
-    # average for a typical cloud server over its full lifecycle.
-    defaultEmbodiedEmissionsKg: 350
+    # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
+    # recognize a cloud provider or instance type. Boavizta returns per-instance
+    # allocated values (typically 50–170 kg for common cloud VMs). 100 kg is a
+    # conservative midpoint. The former value of 350 kg represented a full physical
+    # server and over-estimated Scope 3 by 2–7× on low-carbon grids.
+    defaultEmbodiedEmissionsKg: 100
 
   # Database configuration
   db:

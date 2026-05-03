@@ -31,6 +31,7 @@ async def db_connection():
                 zone TEXT,
                 node_pool TEXT,
                 memory_capacity_bytes INTEGER,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
                 embodied_emissions_kg REAL,
                 UNIQUE(node_name, timestamp)
             );
@@ -47,6 +48,7 @@ async def db_connection():
                 zone TEXT,
                 node_pool TEXT,
                 memory_capacity_bytes INTEGER,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
                 embodied_emissions_kg REAL,
                 valid_from TEXT NOT NULL,
                 valid_to TEXT,
@@ -160,6 +162,44 @@ async def test_get_snapshots(node_repo):
 
 
 @pytest.mark.asyncio
+async def test_get_snapshots_falls_back_to_legacy_table(node_repo, db_connection):
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    await db_connection.execute(
+        """
+        INSERT INTO node_snapshots (
+            timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
+            cloud_provider, region, zone, node_pool, memory_capacity_bytes, embodied_emissions_kg
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ts,
+            "legacy-node",
+            "c6i.large",
+            2.0,
+            "amd64",
+            "aws",
+            "eu-west-3",
+            "eu-west-3a",
+            "legacy",
+            8_000_000_000,
+            120.0,
+        ),
+    )
+    await db_connection.commit()
+
+    snapshots = await node_repo.get_snapshots(
+        datetime.now(timezone.utc) - timedelta(minutes=10),
+        datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0][0] == ts
+    assert snapshots[0][1].name == "legacy-node"
+    assert snapshots[0][1].embodied_emissions_kg == 120.0
+
+
+@pytest.mark.asyncio
 async def test_get_latest_snapshots_before(node_repo, db_connection):
     """Test retrieving latest snapshots before a timestamp."""
     # We need to simulate history.
@@ -254,6 +294,79 @@ async def test_save_nodes_multiple_snapshots(node_repo, db_connection):
     ) as cursor:
         row = await cursor.fetchone()
         assert row[0] == "m5.xlarge"
+
+
+@pytest.mark.asyncio
+async def test_save_nodes_sorts_history_before_applying_scd2(node_repo):
+    """Out-of-order snapshots should still produce the latest node state."""
+    first_ts = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    second_ts = first_ts + timedelta(minutes=10)
+
+    older = NodeInfo(
+        name="node-chronological",
+        instance_type="m5.large",
+        zone="eu-west-3a",
+        region="eu-west-3",
+        cloud_provider="aws",
+        architecture="amd64",
+        node_pool="default",
+        cpu_capacity_cores=2.0,
+        memory_capacity_bytes=8 * 1024 * 1024 * 1024,
+        timestamp=first_ts,
+        embodied_emissions_kg=100.0,
+    )
+    newer = older.model_copy(
+        update={
+            "instance_type": "m5.xlarge",
+            "cpu_capacity_cores": 4.0,
+            "memory_capacity_bytes": 16 * 1024 * 1024 * 1024,
+            "timestamp": second_ts,
+        }
+    )
+
+    saved_count = await node_repo.save_nodes([newer, older])
+
+    assert saved_count == 2
+    latest = await node_repo.get_latest_snapshots_before(second_ts + timedelta(minutes=1))
+    assert len(latest) == 1
+    assert latest[0].name == "node-chronological"
+    assert latest[0].instance_type == "m5.xlarge"
+    assert latest[0].cpu_capacity_cores == 4.0
+
+
+@pytest.mark.asyncio
+async def test_get_latest_snapshots_before_can_include_inactive(node_repo):
+    """Inactive current node records should be hidden by default and opt-in when requested."""
+    first_ts = datetime(2025, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    retired_ts = first_ts + timedelta(minutes=10)
+
+    active = NodeInfo(
+        name="node-retired",
+        instance_type="m5.large",
+        zone="eu-west-3a",
+        region="eu-west-3",
+        cloud_provider="aws",
+        architecture="amd64",
+        node_pool="default",
+        cpu_capacity_cores=2.0,
+        memory_capacity_bytes=8 * 1024 * 1024 * 1024,
+        timestamp=first_ts,
+        embodied_emissions_kg=100.0,
+    )
+    inactive = active.model_copy(update={"timestamp": retired_ts, "is_active": False})
+
+    assert await node_repo.save_nodes([active, inactive]) == 2
+
+    active_only = await node_repo.get_latest_snapshots_before(retired_ts + timedelta(minutes=1))
+    assert active_only == []
+
+    including_inactive = await node_repo.get_latest_snapshots_before(
+        retired_ts + timedelta(minutes=1),
+        include_inactive=True,
+    )
+    assert len(including_inactive) == 1
+    assert including_inactive[0].name == "node-retired"
+    assert including_inactive[0].is_active is False
 
 
 @pytest.mark.asyncio

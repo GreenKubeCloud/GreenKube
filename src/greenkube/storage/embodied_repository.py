@@ -138,7 +138,7 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
     async def save_profile(
         self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
     ):
-        now_iso = to_iso_z(datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
         query = """
             INSERT INTO instance_carbon_profiles (
                 provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
@@ -153,7 +153,7 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
         """
         try:
             async with self.db_manager.connection_scope() as conn:
-                await conn.execute(query, provider, instance_type, gwp, lifespan, source, now_iso)
+                await conn.execute(query, provider, instance_type, gwp, lifespan, source, now)
         except Exception as e:
             logger.error("Error saving embodied profile for %s/%s: %s", provider, instance_type, e)
             raise QueryError(f"Database error in save_profile: {e}") from e

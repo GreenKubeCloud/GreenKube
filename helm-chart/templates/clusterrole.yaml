@@ -11,6 +11,7 @@ rules:
 - apiGroups: [""]
   resources:
   - nodes
+  - namespaces
   - pods
   - services
   - configmaps

@@ -138,7 +138,7 @@ async def test_migration_adds_missing_columns(tmp_path):
 
 @pytest.mark.asyncio
 async def test_migration_adds_node_snapshots_column(tmp_path):
-    """Migration should add embodied_emissions_kg to node_snapshots."""
+    """Migration should add node metadata columns to node_snapshots."""
     db_file = str(tmp_path / "v1.db")
     _create_v1_schema(db_file)
 
@@ -151,6 +151,7 @@ async def test_migration_adds_node_snapshots_column(tmp_path):
 
     after = _column_names(db_file, "node_snapshots")
     assert "embodied_emissions_kg" in after
+    assert "is_active" in after
 
 
 @pytest.mark.asyncio

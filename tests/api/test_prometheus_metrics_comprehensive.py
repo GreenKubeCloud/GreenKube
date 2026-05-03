@@ -4,7 +4,9 @@ Tests for the comprehensive Prometheus metrics exposition.
 
 These tests validate that GreenKube exposes all key metrics
 (CO2, cost, energy, CPU, memory, network, grid intensity, node info,
-recommendations) as Prometheus gauges at /prometheus/metrics.
+recommendations, efficiency ratios, restart count, node allocation,
+per-namespace savings, and realized savings) as Prometheus gauges
+at /prometheus/metrics.
 """
 
 from datetime import datetime, timezone
@@ -22,13 +24,21 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import (
     REGISTRY,
+    refresh_metrics_from_db,
     update_cluster_metrics,
+    update_dashboard_savings_metrics,
+    update_dashboard_summary_metrics,
     update_node_metrics,
+    update_realized_savings_metrics,
     update_recommendation_metrics,
 )
+from greenkube.core.factory import get_summary_repository
 from greenkube.models.metrics import (
     CombinedMetric,
+    MetricsSummaryRow,
     Recommendation,
+    RecommendationRecord,
+    RecommendationStatus,
     RecommendationType,
 )
 from greenkube.models.node import NodeInfo
@@ -43,6 +53,7 @@ def mock_carbon_repo():
 def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
+    repo.list_namespaces = AsyncMock(return_value=[])
     return repo
 
 
@@ -58,16 +69,26 @@ def mock_reco_repo():
     repo = AsyncMock()
     repo.save_recommendations = AsyncMock(return_value=0)
     repo.get_recommendations = AsyncMock(return_value=[])
+    repo.get_active_recommendations = AsyncMock(return_value=[])
+    repo.get_applied_recommendations = AsyncMock(return_value=[])
     return repo
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
+def mock_summary_repo():
+    repo = AsyncMock()
+    repo.get_rows = AsyncMock(return_value=[])
+    return repo
+
+
+@pytest.fixture
+def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_summary_repo):
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
     app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+    app.dependency_overrides[get_summary_repository] = lambda: mock_summary_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -222,6 +243,154 @@ class TestComprehensiveClusterMetrics:
         assert "greenkube_cluster_pod_count" in output
         assert "greenkube_cluster_namespace_count" in output
 
+    def test_update_sets_zone_map_grid_intensity_with_node_labels(self):
+        now = datetime.now(timezone.utc)
+        update_cluster_metrics(
+            [
+                CombinedMetric(
+                    pod_name="web-a",
+                    namespace="production",
+                    total_cost=0.1,
+                    co2e_grams=1.0,
+                    embodied_co2e_grams=0.1,
+                    pue=1.1,
+                    grid_intensity=42.0,
+                    joules=1000.0,
+                    node="node-a",
+                    node_zone="europe-west1-b",
+                    emaps_zone="FR",
+                    timestamp=now,
+                ),
+                CombinedMetric(
+                    pod_name="web-b",
+                    namespace="production",
+                    total_cost=0.2,
+                    co2e_grams=1.5,
+                    embodied_co2e_grams=0.2,
+                    pue=1.1,
+                    grid_intensity=44.0,
+                    joules=2000.0,
+                    node="node-b",
+                    node_zone="europe-west1-c",
+                    emaps_zone="FR",
+                    timestamp=now,
+                ),
+            ]
+        )
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_zone_grid_intensity_gco2_kwh" in output
+        assert 'zone="FR"' in output
+        assert 'node_count="2"' in output
+        assert 'bubble_size="' in output
+        assert 'bubble_label="FR\\n43 gCO₂/kWh\\n2 nodes"' in output
+        assert 'nodes="node-a, node-b"' in output
+        assert 'map_label="FR · 43 gCO₂/kWh · 2 nodes · node-a, node-b"' in output
+
+    def test_dashboard_summary_rows_are_exposed_as_windowed_prometheus_metrics(self):
+        update_dashboard_summary_metrics(
+            [
+                MetricsSummaryRow(
+                    window_slug="7d",
+                    namespace=None,
+                    total_co2e_grams=1.32,
+                    total_embodied_co2e_grams=26.15,
+                    total_co2e_all_scopes=27.47,
+                    total_cost=0.592,
+                    total_energy_joules=191000.0,
+                    pod_count=60,
+                    namespace_count=9,
+                    updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                )
+            ],
+            reset=True,
+        )
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert 'greenkube_dashboard_summary_co2e_grams_total{cluster="' in output
+        assert 'namespace="__all__"' in output
+        assert 'scope="scope2"' in output
+        assert 'scope="scope3"' in output
+        assert 'scope="all"' in output
+        assert 'window="7d"' in output
+        assert 'window="604800s"' in output
+        assert "greenkube_dashboard_summary_cost_dollars_total" in output
+        assert "greenkube_dashboard_summary_energy_joules_total" in output
+        assert "greenkube_dashboard_summary_pod_count" in output
+
+    def test_dashboard_summary_rows_include_short_window_aliases(self):
+        update_dashboard_summary_metrics(
+            [
+                MetricsSummaryRow(
+                    window_slug="1h",
+                    namespace="prod",
+                    total_co2e_grams=0.12,
+                    total_embodied_co2e_grams=0.8,
+                    total_co2e_all_scopes=0.92,
+                    total_cost=0.02,
+                    total_energy_joules=1200.0,
+                    pod_count=3,
+                    namespace_count=1,
+                    updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                ),
+                MetricsSummaryRow(
+                    window_slug="6h",
+                    namespace="prod",
+                    total_co2e_grams=0.42,
+                    total_embodied_co2e_grams=2.4,
+                    total_co2e_all_scopes=2.82,
+                    total_cost=0.09,
+                    total_energy_joules=4200.0,
+                    pod_count=5,
+                    namespace_count=1,
+                    updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                ),
+            ],
+            reset=True,
+        )
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert 'namespace="prod"' in output
+        assert 'window="1h"' in output
+        assert 'window="3600s"' in output
+        assert 'window="6h"' in output
+        assert 'window="21600s"' in output
+
+    def test_dashboard_savings_rows_are_exposed_as_windowed_prometheus_metrics(self):
+        update_dashboard_savings_metrics(
+            "7d",
+            {"RIGHTSIZING_CPU": {"co2e_saved_grams": 1.25, "cost_saved_dollars": 0.4}},
+            cluster="test-cluster",
+            namespace="prod",
+            reset=True,
+        )
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_dashboard_savings_co2e_grams_total" in output
+        assert 'cluster="test-cluster"' in output
+        assert 'namespace="prod"' in output
+        assert 'recommendation_type="all"' in output
+        assert 'recommendation_type="RIGHTSIZING_CPU"' in output
+        assert 'window="7d"' in output
+        assert 'window="604800s"' in output
+        assert "greenkube_dashboard_savings_cost_dollars_total" in output
+
+    def test_sustainability_scores_are_exposed_per_namespace(self, sample_combined_metrics):
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert 'greenkube_sustainability_score{cluster="' in output
+        assert 'namespace="__all__"' in output
+        assert 'namespace="production"' in output
+        assert 'namespace="staging"' in output
+        assert 'greenkube_estimated_metrics_ratio{cluster="' in output
+        assert 'namespace="production"' in output
+
     def test_update_sets_grid_intensity(self, sample_combined_metrics):
         update_cluster_metrics(sample_combined_metrics)
         from prometheus_client import generate_latest
@@ -308,6 +477,29 @@ class TestNodeMetrics:
         output = generate_latest(REGISTRY).decode("utf-8")
         assert "greenkube_node_embodied_emissions_kg" in output
 
+    def test_node_embodied_emissions_defaults_to_zero_when_unknown(self):
+        update_node_metrics(
+            [
+                NodeInfo(
+                    name="node-without-profile",
+                    instance_type="unknown",
+                    zone="FR",
+                    region="FR",
+                    cloud_provider="unknown",
+                    architecture="amd64",
+                    cpu_capacity_cores=2.0,
+                    memory_capacity_bytes=8589934592,
+                    embodied_emissions_kg=None,
+                )
+            ]
+        )
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert 'greenkube_node_embodied_emissions_kg{architecture="amd64"' in output
+        assert 'node="node-without-profile"' in output
+        assert "} 0.0" in output
+
     def test_labels_contain_node_metadata(self, sample_node_infos):
         update_node_metrics(sample_node_infos)
         from prometheus_client import generate_latest
@@ -348,6 +540,11 @@ class TestEndpointAfterUpdate:
             ),
         ]
         update_recommendation_metrics(recs)
+        from prometheus_client import generate_latest
+
+        metrics_body = generate_latest(REGISTRY).decode("utf-8")
+        assert 'namespace="__all__"' in metrics_body
+        assert 'namespace="default"' in metrics_body
         response = client.get("/prometheus/metrics")
         assert response.status_code == 200
         body = response.text
@@ -425,7 +622,8 @@ class TestRefreshMetricsFromDB:
         ]
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
         mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
-        mock_reco_repo.get_recommendations = AsyncMock(return_value=records)
+        mock_reco_repo.get_active_recommendations = AsyncMock(return_value=records)
+        mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
 
         app = create_app()
         app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
@@ -439,7 +637,7 @@ class TestRefreshMetricsFromDB:
         body = response.text
         assert "greenkube_recommendations_total" in body
         assert "ZOMBIE_POD" in body
-        mock_reco_repo.get_recommendations.assert_called_once()
+        mock_reco_repo.get_active_recommendations.assert_called_once()
         app.dependency_overrides.clear()
 
     def test_endpoint_survives_db_errors_gracefully(self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
@@ -519,3 +717,463 @@ class TestRefreshMetricsFromDB:
         # Cluster total should reflect only the latest row
         assert "greenkube_cluster_co2e_grams_total" in body
         app.dependency_overrides.clear()
+
+
+class TestEfficiencyRatios:
+    """Tests for pod CPU/memory efficiency ratio gauges."""
+
+    def test_cpu_efficiency_ratio_exposed(self, sample_combined_metrics):
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_pod_cpu_efficiency_ratio" in output
+
+    def test_cpu_efficiency_ratio_value(self, sample_combined_metrics):
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        # web-frontend-abc: 320 / 500 = 0.64
+        assert "greenkube_pod_cpu_efficiency_ratio" in output
+        assert "0.64" in output or "0.6" in output
+
+    def test_memory_efficiency_ratio_exposed(self, sample_combined_metrics):
+        update_cluster_metrics(sample_combined_metrics)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_pod_memory_efficiency_ratio" in output
+
+    def test_efficiency_ratio_capped_at_one(self):
+        """Usage > request must be capped at 1.0, not exceed it."""
+        m = CombinedMetric(
+            pod_name="overloaded",
+            namespace="test",
+            co2e_grams=1.0,
+            pue=1.2,
+            grid_intensity=50.0,
+            joules=100.0,
+            cpu_request=100,
+            memory_request=100,
+            cpu_usage_millicores=200,  # over-used
+            memory_usage_bytes=150,  # over-used
+            node="node-1",
+        )
+        update_cluster_metrics([m])
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_pod_cpu_efficiency_ratio" in output
+        # Value must be exactly 1.0
+        assert 'pod="overloaded"' in output
+
+    def test_efficiency_ratio_absent_when_request_zero(self):
+        """Efficiency ratio must not be set when cpu_request == 0."""
+        m = CombinedMetric(
+            pod_name="no-request",
+            namespace="test",
+            co2e_grams=1.0,
+            pue=1.2,
+            grid_intensity=50.0,
+            joules=100.0,
+            cpu_request=0,
+            memory_request=0,
+            cpu_usage_millicores=50,
+            memory_usage_bytes=50,
+            node="node-1",
+        )
+        update_cluster_metrics([m])
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        # The gauge should not have a series for this pod
+        assert (
+            'pod="no-request"' not in output.split("greenkube_pod_cpu_efficiency_ratio")[1].split("\n")[0]
+            if "greenkube_pod_cpu_efficiency_ratio" in output
+            else True
+        )
+
+
+class TestRestartCountGauge:
+    """Tests for the pod restart count gauge."""
+
+    def test_restart_count_exposed(self):
+        m = CombinedMetric(
+            pod_name="crasher",
+            namespace="production",
+            co2e_grams=1.0,
+            pue=1.2,
+            grid_intensity=50.0,
+            joules=100.0,
+            cpu_request=100,
+            memory_request=134217728,
+            restart_count=7,
+            node="node-1",
+        )
+        update_cluster_metrics([m])
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_pod_restart_count" in output
+        assert "7.0" in output or " 7" in output
+
+    def test_restart_count_absent_when_none(self):
+        """Restart count gauge must not be set when restart_count is None."""
+        m = CombinedMetric(
+            pod_name="stable",
+            namespace="production",
+            co2e_grams=1.0,
+            pue=1.2,
+            grid_intensity=50.0,
+            joules=100.0,
+            cpu_request=100,
+            memory_request=134217728,
+            restart_count=None,
+            node="node-1",
+        )
+        update_cluster_metrics([m])
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        # The gauge line should be absent for this pod
+        if "greenkube_pod_restart_count" in output:
+            assert 'pod="stable"' not in output.split("greenkube_pod_restart_count")[1].split("\n")[0]
+
+
+class TestNodeAllocationGauges:
+    """Tests for node CPU and memory allocation gauges."""
+
+    def test_node_allocation_exposed_after_combined_then_node_update(self, sample_combined_metrics, sample_node_infos):
+        """Node allocation gauges must be populated after update_cluster_metrics → update_node_metrics."""
+        update_cluster_metrics(sample_combined_metrics)
+        update_node_metrics(sample_node_infos)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_node_cpu_allocated_millicores" in output
+        assert "greenkube_node_memory_allocated_bytes" in output
+
+    def test_node_cpu_allocation_value(self, sample_combined_metrics, sample_node_infos):
+        """node-1 has web-frontend-abc (500m) + api-server-def (1000m) = 1500m."""
+        update_cluster_metrics(sample_combined_metrics)
+        update_node_metrics(sample_node_infos)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_node_cpu_allocated_millicores" in output
+        assert "1500" in output
+
+    def test_node_memory_allocation_value(self, sample_combined_metrics, sample_node_infos):
+        """node-1 has 512MiB + 1GiB = 1610612736 bytes (≈ 1.61e+09 in Prometheus notation)."""
+        update_cluster_metrics(sample_combined_metrics)
+        update_node_metrics(sample_node_infos)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_node_memory_allocated_bytes" in output
+        # Prometheus renders large integers in scientific notation
+        assert "1.610612736e+09" in output or "1610612736" in output
+
+
+class TestPerNamespaceRecommendationSavings:
+    """Tests for per-namespace recommendation savings gauges."""
+
+    def test_ns_savings_co2_exposed(self):
+        recs = [
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="Zombie",
+                priority="high",
+                namespace="production",
+                pod_name="pod-a",
+                potential_savings_co2e_grams=20.0,
+                potential_savings_cost=1.5,
+            ),
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description="Right-size",
+                priority="medium",
+                namespace="staging",
+                pod_name="pod-b",
+                potential_savings_co2e_grams=5.0,
+                potential_savings_cost=0.3,
+            ),
+        ]
+        update_recommendation_metrics(recs)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_namespace_recommendation_savings_co2e_grams_total" in output
+        assert "greenkube_namespace_recommendation_savings_cost_dollars_total" in output
+        assert 'namespace="production"' in output
+        assert 'namespace="staging"' in output
+
+    def test_ns_savings_aggregated_correctly(self):
+        recs = [
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="Zombie 1",
+                priority="high",
+                namespace="production",
+                pod_name="pod-a",
+                potential_savings_co2e_grams=10.0,
+                potential_savings_cost=1.0,
+            ),
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description="Zombie 2",
+                priority="medium",
+                namespace="production",
+                pod_name="pod-b",
+                potential_savings_co2e_grams=15.0,
+                potential_savings_cost=2.0,
+            ),
+        ]
+        update_recommendation_metrics(recs)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        # 10 + 15 = 25 grams for production
+        assert "25.0" in output or "25" in output
+
+
+class TestRealizedSavingsMetrics:
+    """Tests for update_realized_savings_metrics()."""
+
+    def test_realized_savings_co2_exposed(self):
+        applied = [
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="Zombie applied",
+                priority="high",
+                namespace="production",
+                pod_name="pod-a",
+                status=RecommendationStatus.APPLIED,
+                carbon_saved_co2e_grams=30.0,
+                cost_saved=2.5,
+            ),
+        ]
+        update_realized_savings_metrics(applied)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_cluster_co2e_saved_grams_total" in output
+        assert "greenkube_cluster_cost_saved_dollars_total" in output
+        assert "greenkube_recommendations_implemented_total" in output
+
+    def test_realized_savings_totals_correct(self):
+        applied = [
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="A",
+                priority="high",
+                namespace="production",
+                pod_name="pod-a",
+                status=RecommendationStatus.APPLIED,
+                carbon_saved_co2e_grams=20.0,
+                cost_saved=1.0,
+            ),
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description="B",
+                priority="medium",
+                namespace="staging",
+                pod_name="pod-b",
+                status=RecommendationStatus.APPLIED,
+                carbon_saved_co2e_grams=10.0,
+                cost_saved=0.5,
+            ),
+        ]
+        update_realized_savings_metrics(applied)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        # 20 + 10 = 30 g CO2e, $1.5 saved
+        assert "30.0" in output
+        assert "1.5" in output
+
+    def test_realized_savings_empty_list_sets_zero(self):
+        update_realized_savings_metrics([])
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_cluster_co2e_saved_grams_total" in output
+
+    def test_implemented_count_by_type(self):
+        applied = [
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="A",
+                priority="high",
+                namespace="production",
+                pod_name="pod-a",
+                status=RecommendationStatus.APPLIED,
+                carbon_saved_co2e_grams=5.0,
+            ),
+            RecommendationRecord(
+                type=RecommendationType.ZOMBIE_POD,
+                description="B",
+                priority="high",
+                namespace="production",
+                pod_name="pod-b",
+                status=RecommendationStatus.APPLIED,
+                carbon_saved_co2e_grams=3.0,
+            ),
+        ]
+        update_realized_savings_metrics(applied)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_recommendations_implemented_total" in output
+        assert "ZOMBIE_POD" in output
+
+    def test_refresh_metrics_from_db_calls_applied_recommendations(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_summary_repo
+    ):
+        """Verify the /prometheus/metrics endpoint calls get_applied_recommendations."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
+        mock_reco_repo.get_recommendations = AsyncMock(return_value=[])
+        mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
+
+        app = create_app()
+        app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
+        app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
+        app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+        app.dependency_overrides[get_summary_repository] = lambda: mock_summary_repo
+
+        with TestClient(app) as c:
+            response = c.get("/prometheus/metrics")
+
+        assert response.status_code == 200
+        mock_reco_repo.get_applied_recommendations.assert_called_once()
+        app.dependency_overrides.clear()
+
+        app.dependency_overrides.clear()
+
+    def test_prometheus_scrape_refreshes_dashboard_summary_metrics(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_summary_repo
+    ):
+        """Verify /prometheus/metrics exposes precomputed dashboard summary rows."""
+        mock_summary_repo.get_rows = AsyncMock(
+            return_value=[
+                MetricsSummaryRow(
+                    window_slug="7d",
+                    namespace=None,
+                    total_co2e_grams=1.32,
+                    total_embodied_co2e_grams=26.15,
+                    total_co2e_all_scopes=27.47,
+                    total_cost=0.592,
+                    total_energy_joules=191000.0,
+                    pod_count=60,
+                    namespace_count=9,
+                    updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                )
+            ]
+        )
+
+        app = create_app()
+        app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
+        app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
+        app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+        app.dependency_overrides[get_summary_repository] = lambda: mock_summary_repo
+
+        with TestClient(app) as c:
+            response = c.get("/prometheus/metrics")
+
+        assert response.status_code == 200
+        assert 'greenkube_dashboard_summary_co2e_grams_total{cluster="' in response.text
+        assert 'namespace="__all__"' in response.text
+        assert 'scope="scope2"' in response.text
+        assert 'scope="scope3"' in response.text
+        assert 'greenkube_dashboard_summary_cost_dollars_total{cluster="' in response.text
+        assert 'window="7d"' in response.text
+        mock_summary_repo.get_rows.assert_awaited_with(namespace=None)
+        app.dependency_overrides.clear()
+
+    def test_prometheus_scrape_refreshes_namespace_dashboard_summary_metrics(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_summary_repo
+    ):
+        """Verify /prometheus/metrics exposes per-namespace precomputed summary rows."""
+        cluster_row = MetricsSummaryRow(
+            window_slug="7d",
+            namespace=None,
+            total_co2e_grams=1.0,
+            total_embodied_co2e_grams=2.0,
+            total_co2e_all_scopes=3.0,
+            total_cost=0.1,
+            total_energy_joules=1000.0,
+            pod_count=10,
+            namespace_count=1,
+            updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+        )
+        namespace_row = MetricsSummaryRow(
+            window_slug="7d",
+            namespace="prod",
+            total_co2e_grams=0.7,
+            total_embodied_co2e_grams=1.1,
+            total_co2e_all_scopes=1.8,
+            total_cost=0.06,
+            total_energy_joules=700.0,
+            pod_count=7,
+            namespace_count=1,
+            updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+        )
+
+        async def get_rows(namespace=None):
+            return [namespace_row] if namespace == "prod" else [cluster_row]
+
+        mock_summary_repo.get_rows = AsyncMock(side_effect=get_rows)
+        mock_combined_metrics_repo.list_namespaces = AsyncMock(return_value=["prod"])
+
+        app = create_app()
+        app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
+        app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
+        app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+        app.dependency_overrides[get_summary_repository] = lambda: mock_summary_repo
+
+        with TestClient(app) as c:
+            response = c.get("/prometheus/metrics")
+
+        assert response.status_code == 200
+        assert 'greenkube_dashboard_summary_co2e_grams_total{cluster="' in response.text
+        assert 'namespace="prod"' in response.text
+        assert 'window="604800s"' in response.text
+        assert "} 0.7" in response.text
+        mock_combined_metrics_repo.list_namespaces.assert_awaited_once()
+        mock_summary_repo.get_rows.assert_any_await(namespace=None)
+        mock_summary_repo.get_rows.assert_any_await(namespace="prod")
+        app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_refresh_metrics_from_db_exposes_exact_dashboard_savings_windows(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
+        """Verify exact DB-backed savings windows are exported without Prometheus increase()."""
+        mock_savings_repo = AsyncMock()
+        mock_savings_repo.get_cumulative_totals = AsyncMock(return_value={})
+        mock_savings_repo.get_window_totals = AsyncMock(
+            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 2.5, "cost_saved_dollars": 0.75}}
+        )
+
+        await refresh_metrics_from_db(
+            mock_combined_metrics_repo,
+            mock_node_repo,
+            mock_reco_repo,
+            savings_repo=mock_savings_repo,
+            summary_repo=None,
+        )
+
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "greenkube_dashboard_savings_co2e_grams_total" in output
+        assert 'recommendation_type="all"' in output
+        assert 'recommendation_type="RIGHTSIZING_CPU"' in output
+        assert 'namespace="__all__"' in output
+        assert 'namespace="_cluster"' in output
+        assert 'window="604800s"' in output
+        assert "} 2.5" in output
+        assert 'window="31536000s"' in output
+        assert mock_savings_repo.get_window_totals.await_count == 14

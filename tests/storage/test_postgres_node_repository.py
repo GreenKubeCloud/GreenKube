@@ -97,6 +97,33 @@ async def test_get_snapshots_success(repository, connection_mock):
 
 
 @pytest.mark.asyncio
+async def test_get_snapshots_falls_back_to_legacy_table(repository, connection_mock):
+    start = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2023, 1, 1, 23, 59, tzinfo=timezone.utc)
+    legacy_row = {
+        "timestamp": datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc),
+        "node_name": "legacy-node",
+        "instance_type": "c6i.large",
+        "cpu_capacity_cores": 2.0,
+        "architecture": "amd64",
+        "cloud_provider": "aws",
+        "region": "eu-west-3",
+        "zone": "eu-west-3a",
+        "node_pool": "legacy",
+        "memory_capacity_bytes": 8_000_000_000,
+        "embodied_emissions_kg": 120.0,
+    }
+    connection_mock.fetch.side_effect = [[], [legacy_row]]
+
+    snapshots = await repository.get_snapshots(start, end)
+
+    assert len(snapshots) == 1
+    assert snapshots[0][0] == legacy_row["timestamp"].isoformat()
+    assert snapshots[0][1].name == "legacy-node"
+    assert snapshots[0][1].embodied_emissions_kg == 120.0
+
+
+@pytest.mark.asyncio
 async def test_get_latest_snapshots_before_success(repository, connection_mock):
     # Setup
     cutoff = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -126,3 +153,28 @@ async def test_get_latest_snapshots_before_success(repository, connection_mock):
     node = nodes[0]
     assert isinstance(node, NodeInfo)
     assert node.name == "node1"
+
+
+@pytest.mark.asyncio
+async def test_get_latest_snapshots_before_falls_back_to_legacy_table(repository, connection_mock):
+    cutoff = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
+    legacy_row = {
+        "timestamp": datetime(2023, 1, 1, 10, 0, tzinfo=timezone.utc),
+        "node_name": "legacy-node",
+        "instance_type": "c6i.large",
+        "cpu_capacity_cores": 2.0,
+        "architecture": "amd64",
+        "cloud_provider": "aws",
+        "region": "eu-west-3",
+        "zone": "eu-west-3a",
+        "node_pool": "legacy",
+        "memory_capacity_bytes": 8_000_000_000,
+        "embodied_emissions_kg": 120.0,
+    }
+    connection_mock.fetch.side_effect = [[], [legacy_row]]
+
+    nodes = await repository.get_latest_snapshots_before(cutoff)
+
+    assert len(nodes) == 1
+    assert nodes[0].name == "legacy-node"
+    assert nodes[0].timestamp == legacy_row["timestamp"]
