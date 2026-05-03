@@ -571,12 +571,11 @@ const rows = [
     { refId: 'A', name: 'CO₂e avoided', unit: 'g CO₂e', color: palette.cyan },
     { refId: 'B', name: 'Cost avoided', unit: 'currencyUSD', color: palette.green },
     { refId: 'C', name: 'Implemented', unit: 'count', color: palette.blue },
-    { refId: 'D', name: 'Measured coverage', unit: 'percent', color: palette.amber },
 ];
 
 const data = rows.map((row) => {
     const raw = Math.max(0, valueFor(row.refId));
-    const value = row.unit === 'percent' ? Math.min(100, raw) : Math.log10(raw + 1) * 16;
+    const value = Math.log10(raw + 1) * 16;
 
     return {
         name: row.name,
@@ -986,11 +985,6 @@ _cost_saved_expr = (
     f'(greenkube_dashboard_savings_cost_dollars_total{{{CLUSTER_FILTER}, window="$dashboard_window", '
     'namespace=~"$namespace", namespace!="__all__", recommendation_type="all"}))'
 )
-_coverage_expr = (
-    "avg(max by (cluster, namespace) "
-    f'((1 - greenkube_estimated_metrics_ratio{{{CLUSTER_FILTER}, namespace=~"$namespace", '
-    'namespace!="__all__"}))) * 100'
-)
 _implemented_expr = (
     "sum(max by (cluster, namespace, type) "
     f"(greenkube_recommendations_implemented_total{{{CLUSTER_FILTER}, "
@@ -1023,11 +1017,10 @@ panels.append(
                 "legend": "Implemented",
                 "refId": "C",
             },
-            {"expr": _coverage_expr, "legend": "Measured coverage", "refId": "D"},
         ],
         ECHARTS_IMPACT_LEDGER_OPTION,
         gridpos={"x": 16, "y": y, "w": 8, "h": 6},
-        description="Grouped ECharts impact strip for realized savings, implemented recommendations, and coverage.",
+        description="Grouped ECharts impact strip for realized savings and implemented recommendations.",
     )
 )
 

@@ -176,7 +176,7 @@ def test_command_center_groups_impact_metrics_in_echarts():
 
     assert panel["type"] == "volkovlabs-echarts-panel"
     assert panel["gridPos"] == {"x": 16, "y": 1, "w": 8, "h": 6}
-    assert target_labels == {"CO₂e avoided", "Cost avoided", "Implemented", "Measured coverage"}
+    assert target_labels == {"CO₂e avoided", "Cost avoided", "Implemented"}
     assert "greenkube_dashboard_savings_co2e_grams_total" in panel["targets"][0]["expr"]
     assert "greenkube_dashboard_savings_cost_dollars_total" in panel["targets"][1]["expr"]
     assert 'window="$dashboard_window"' in panel["targets"][0]["expr"]
@@ -187,8 +187,6 @@ def test_command_center_groups_impact_metrics_in_echarts():
     assert "increase(" not in panel["targets"][1]["expr"]
     assert "greenkube_recommendations_implemented_total" in panel["targets"][2]["expr"]
     assert 'namespace=~"$namespace"' in panel["targets"][2]["expr"]
-    assert "greenkube_estimated_metrics_ratio" in panel["targets"][3]["expr"]
-    assert 'namespace=~"$namespace"' in panel["targets"][3]["expr"]
 
 
 def test_top_three_action_priorities_are_grouped_in_one_echarts_panel():
