@@ -1104,13 +1104,29 @@ def _zone_intensity(zone: str, ts: datetime) -> float:
 
 def _build_metric_timestamps(days: int) -> list[tuple[datetime, int, bool]]:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    recent = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    recent -= timedelta(minutes=recent.minute % 5)
     timestamps: list[tuple[datetime, int, bool]] = []
+    seen: set[datetime] = set()
 
     for hours_ago in range(days * 24):
-        timestamps.append((now - timedelta(hours=hours_ago), 3600, False))
+        ts = now - timedelta(hours=hours_ago)
+        timestamps.append((ts, 3600, False))
+        seen.add(ts)
+
+    for minutes_ago in range(0, 20, 5):
+        ts = recent - timedelta(minutes=minutes_ago)
+        if ts <= now or ts in seen:
+            continue
+        timestamps.append((ts, 300, False))
+        seen.add(ts)
 
     for day_offset in range(days, DEMO_HISTORY_DAYS + 1):
-        timestamps.append(((now - timedelta(days=day_offset)).replace(hour=12), 86400, True))
+        ts = (now - timedelta(days=day_offset)).replace(hour=12)
+        if ts in seen:
+            continue
+        timestamps.append((ts, 86400, True))
+        seen.add(ts)
 
     return timestamps
 

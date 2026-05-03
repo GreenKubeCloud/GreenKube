@@ -226,6 +226,13 @@ class TestGenerateCombinedMetrics:
         # Should span at least (days-1)*24 hours
         assert span >= (days - 1) * 23
 
+    def test_latest_metrics_stay_within_live_scrape_window(self):
+        """Demo metrics should include a recent dense point for /prometheus/metrics."""
+        metrics = generate_combined_metrics(days=1)
+
+        latest = max(m.timestamp for m in metrics if m.timestamp is not None)
+        assert datetime.now(timezone.utc) - latest <= timedelta(minutes=20)
+
     def test_metrics_cover_two_year_story(self):
         """Metrics history should keep roughly two years of sparse-to-dense records."""
         metrics = generate_combined_metrics(days=30)
