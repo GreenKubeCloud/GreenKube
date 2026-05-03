@@ -20,6 +20,8 @@ from greenkube.utils.date_utils import parse_iso_date
 
 logger = logging.getLogger(__name__)
 
+_MAX_TIMESTAMP = datetime.max.replace(tzinfo=timezone.utc)
+
 # Columns that define a node's "identity" for SCD comparison.
 _SCD_COMPARE_COLS = (
     "instance_type",
@@ -30,6 +32,7 @@ _SCD_COMPARE_COLS = (
     "zone",
     "node_pool",
     "memory_capacity_bytes",
+    "is_active",
     "embodied_emissions_kg",
 )
 
@@ -47,13 +50,14 @@ class SQLiteNodeRepository(NodeRepository):
         if not nodes:
             return 0
 
+        ordered_nodes = sorted(nodes, key=lambda node: node.timestamp or _MAX_TIMESTAMP)
         new_records = 0
         now_str = datetime.now(timezone.utc).isoformat()
 
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                for node in nodes:
+                for node in ordered_nodes:
                     ts = node.timestamp.isoformat() if node.timestamp else now_str
 
                     # Fetch current active SCD record
@@ -61,6 +65,7 @@ class SQLiteNodeRepository(NodeRepository):
                         """
                         SELECT id, instance_type, cpu_capacity_cores, architecture,
                                cloud_provider, region, zone, node_pool,
+                               is_active,
                                memory_capacity_bytes, embodied_emissions_kg
                         FROM node_snapshots_scd
                         WHERE node_name = ? AND is_current = 1
@@ -98,9 +103,9 @@ class SQLiteNodeRepository(NodeRepository):
                         INSERT INTO node_snapshots_scd (
                             node_name, instance_type, cpu_capacity_cores,
                             architecture, cloud_provider, region, zone, node_pool,
-                            memory_capacity_bytes, embodied_emissions_kg,
+                            memory_capacity_bytes, is_active, embodied_emissions_kg,
                             valid_from, valid_to, is_current
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
                         """,
                         (
                             node.name,
@@ -112,6 +117,7 @@ class SQLiteNodeRepository(NodeRepository):
                             node.zone,
                             node.node_pool,
                             node.memory_capacity_bytes,
+                            node.is_active,
                             node.embodied_emissions_kg,
                             ts,
                         ),
@@ -119,7 +125,7 @@ class SQLiteNodeRepository(NodeRepository):
                     new_records += 1
 
                 # Also write to legacy table for backward compatibility
-                await self._save_to_legacy(conn, nodes, now_str)
+                await self._save_to_legacy(conn, ordered_nodes, now_str)
                 await conn.commit()
 
             if new_records:
@@ -144,8 +150,9 @@ class SQLiteNodeRepository(NodeRepository):
                     """
                     INSERT INTO node_snapshots
                         (timestamp, node_name, instance_type, cpu_capacity_cores, architecture,
-                         cloud_provider, region, zone, node_pool, memory_capacity_bytes, embodied_emissions_kg)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         cloud_provider, region, zone, node_pool, memory_capacity_bytes,
+                         is_active, embodied_emissions_kg)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_name, timestamp) DO NOTHING;
                     """,
                     (
@@ -159,6 +166,7 @@ class SQLiteNodeRepository(NodeRepository):
                         node.zone,
                         node.node_pool,
                         node.memory_capacity_bytes,
+                        node.is_active,
                         node.embodied_emissions_kg,
                     ),
                 )
@@ -174,7 +182,7 @@ class SQLiteNodeRepository(NodeRepository):
                     """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, embodied_emissions_kg,
+                              memory_capacity_bytes, is_active, embodied_emissions_kg,
                            valid_from
                     FROM node_snapshots_scd
                     WHERE valid_from <= ?
@@ -201,6 +209,7 @@ class SQLiteNodeRepository(NodeRepository):
                                     node_pool=row["node_pool"],
                                     cpu_capacity_cores=row["cpu_capacity_cores"],
                                     memory_capacity_bytes=row["memory_capacity_bytes"],
+                                    is_active=bool(row["is_active"]),
                                     timestamp=parse_iso_date(row["valid_from"]),
                                     embodied_emissions_kg=row["embodied_emissions_kg"],
                                 ),
@@ -224,7 +233,7 @@ class SQLiteNodeRepository(NodeRepository):
         async with conn.execute(
             """
             SELECT node_name, instance_type, zone, region, cloud_provider, architecture,
-                   node_pool, cpu_capacity_cores, memory_capacity_bytes, timestamp, embodied_emissions_kg
+                     node_pool, cpu_capacity_cores, memory_capacity_bytes, is_active, timestamp, embodied_emissions_kg
             FROM node_snapshots
             WHERE timestamp >= ? AND timestamp <= ?
             ORDER BY timestamp ASC
@@ -248,6 +257,7 @@ class SQLiteNodeRepository(NodeRepository):
                         node_pool=row["node_pool"],
                         cpu_capacity_cores=row["cpu_capacity_cores"],
                         memory_capacity_bytes=row["memory_capacity_bytes"],
+                        is_active=bool(row["is_active"]),
                         timestamp=parse_iso_date(row["timestamp"]),
                         embodied_emissions_kg=row["embodied_emissions_kg"],
                     ),
@@ -255,23 +265,30 @@ class SQLiteNodeRepository(NodeRepository):
             )
         return snapshots
 
-    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime, include_inactive: bool = False) -> List[NodeInfo]:
         """Retrieves the current SCD record for each node valid before the given timestamp."""
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
+                conditions = [
+                    "valid_from <= ?",
+                    "(valid_to IS NULL OR valid_to >= ?)",
+                ]
+                params: list[object] = [timestamp.isoformat(), timestamp.isoformat()]
+                if not include_inactive:
+                    conditions.append("is_active = 1")
+
                 async with conn.execute(
-                    """
+                    f"""
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, embodied_emissions_kg,
+                           memory_capacity_bytes, is_active, embodied_emissions_kg,
                            valid_from
                     FROM node_snapshots_scd
-                    WHERE valid_from <= ?
-                      AND (valid_to IS NULL OR valid_to >= ?)
+                    WHERE {" AND ".join(conditions)}
                     ORDER BY valid_from DESC
                     """,
-                    (timestamp.isoformat(), timestamp.isoformat()),
+                    params,
                 ) as cursor:
                     rows = await cursor.fetchall()
 
@@ -293,6 +310,7 @@ class SQLiteNodeRepository(NodeRepository):
                                     node_pool=row["node_pool"],
                                     cpu_capacity_cores=row["cpu_capacity_cores"],
                                     memory_capacity_bytes=row["memory_capacity_bytes"],
+                                    is_active=bool(row["is_active"]),
                                     timestamp=parse_iso_date(row["valid_from"]),
                                     embodied_emissions_kg=row["embodied_emissions_kg"],
                                 )
@@ -300,7 +318,7 @@ class SQLiteNodeRepository(NodeRepository):
                     return results
 
                 # Fallback to legacy table
-                return await self._get_latest_snapshots_legacy(conn, timestamp)
+                return await self._get_latest_snapshots_legacy(conn, timestamp, include_inactive=include_inactive)
 
         except sqlite3.Error as e:
             logging.error("Could not retrieve latest snapshots: %s", e)
@@ -309,14 +327,20 @@ class SQLiteNodeRepository(NodeRepository):
             logging.error("Unexpected error in get_latest_snapshots_before: %s", e)
             raise QueryError(f"Unexpected error in get_latest_snapshots_before: {e}") from e
 
-    async def _get_latest_snapshots_legacy(self, conn, timestamp: datetime) -> List[NodeInfo]:
+    async def _get_latest_snapshots_legacy(
+        self,
+        conn,
+        timestamp: datetime,
+        include_inactive: bool = False,
+    ) -> List[NodeInfo]:
         """Fallback: read from legacy node_snapshots table."""
+        active_filter = "" if include_inactive else "WHERE COALESCE(ns.is_active, 1) = 1"
         conn.row_factory = aiosqlite.Row
         async with conn.execute(
-            """
+            f"""
             SELECT ns.node_name, ns.instance_type, ns.zone, ns.region, ns.cloud_provider,
-                   ns.architecture, ns.node_pool, ns.cpu_capacity_cores, ns.memory_capacity_bytes, ns.timestamp,
-                   ns.embodied_emissions_kg
+                   ns.architecture, ns.node_pool, ns.cpu_capacity_cores, ns.memory_capacity_bytes, ns.is_active,
+                   ns.timestamp, ns.embodied_emissions_kg
             FROM node_snapshots ns
             INNER JOIN (
                 SELECT node_name, MAX(timestamp) as max_ts
@@ -324,6 +348,7 @@ class SQLiteNodeRepository(NodeRepository):
                 WHERE timestamp <= ?
                 GROUP BY node_name
             ) latest ON ns.node_name = latest.node_name AND ns.timestamp = latest.max_ts
+            {active_filter}
             """,
             (timestamp.isoformat(),),
         ) as cursor:
@@ -339,6 +364,7 @@ class SQLiteNodeRepository(NodeRepository):
                 node_pool=row["node_pool"],
                 cpu_capacity_cores=row["cpu_capacity_cores"],
                 memory_capacity_bytes=row["memory_capacity_bytes"],
+                is_active=bool(row["is_active"]),
                 timestamp=parse_iso_date(row["timestamp"]),
                 embodied_emissions_kg=row["embodied_emissions_kg"],
             )

@@ -451,6 +451,41 @@ class TestRecommendationLifecycleTransitions:
         assert data["actual_cpu_request_millicores"] == 300
 
     @pytest.mark.asyncio
+    async def test_apply_recommendation_scales_realized_savings_for_partial_cpu_rightsizing(self, lifecycle_client):
+        """Partial CPU rightsizing should prorate realized savings when actual values differ."""
+        client, reco_repo = lifecycle_client
+
+        record = RecommendationRecord(
+            pod_name="cpu-pod",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Oversized CPU",
+            current_cpu_request_millicores=200,
+            recommended_cpu_request_millicores=20,
+            potential_savings_cost=180.0,
+            potential_savings_co2e_grams=900.0,
+            created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+        await reco_repo.save_recommendations([record])
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        saved = await reco_repo.get_recommendations(start=start, end=end)
+        rec_id = saved[0].id
+
+        resp = client.patch(
+            f"/api/v1/recommendations/{rec_id}/apply",
+            json={"actual_cpu_request_millicores": 30},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "applied"
+        assert data["actual_cpu_request_millicores"] == 30
+        assert data["cost_saved"] == pytest.approx(170.0)
+        assert data["carbon_saved_co2e_grams"] == pytest.approx(850.0)
+
+    @pytest.mark.asyncio
     async def test_ignore_recommendation_updates_status(self, lifecycle_client):
         """PATCH /api/v1/recommendations/{id}/ignore changes status to 'ignored'."""
         client, reco_repo = lifecycle_client

@@ -11,6 +11,7 @@ from typing import List, Optional
 
 import aiosqlite
 
+from greenkube.core.recommendation_realization import estimate_realized_savings
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -138,8 +139,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     potential_savings_cost, potential_savings_co2e_grams,
                     current_cpu_request_millicores, recommended_cpu_request_millicores,
                     current_memory_request_bytes, recommended_memory_request_bytes,
-                    cron_schedule, target_node, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cron_schedule, target_node,
+                    applied_at, actual_cpu_request_millicores, actual_memory_request_bytes,
+                    carbon_saved_co2e_grams, cost_saved,
+                    ignored_at, ignored_reason,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             for r in records:
                 await conn.execute(
@@ -161,7 +166,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         r.recommended_memory_request_bytes,
                         r.cron_schedule,
                         r.target_node,
+                        to_iso_z(r.applied_at) if r.applied_at else None,
+                        r.actual_cpu_request_millicores,
+                        r.actual_memory_request_bytes,
+                        r.carbon_saved_co2e_grams,
+                        r.cost_saved,
+                        to_iso_z(r.ignored_at) if r.ignored_at else None,
+                        r.ignored_reason,
                         to_iso_z(r.created_at) if r.created_at else None,
+                        to_iso_z(r.updated_at) if r.updated_at else None,
                     ),
                 )
             await conn.commit()
@@ -459,13 +472,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if not row:
                 raise ValueError(f"Recommendation {rec_id} not found.")
 
-            carbon_saved = request.carbon_saved_co2e_grams
-            if carbon_saved is None:
-                carbon_saved = row["potential_savings_co2e_grams"]
-
-            cost_saved = request.cost_saved
-            if cost_saved is None:
-                cost_saved = row["potential_savings_cost"]
+            record = _row_to_record(row)
+            carbon_saved, cost_saved = estimate_realized_savings(record, request)
 
             await conn.execute(
                 """

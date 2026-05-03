@@ -52,12 +52,17 @@ class NodeRepository(ABC):
         pass
 
     @abstractmethod
-    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(
+        self,
+        timestamp: datetime,
+        include_inactive: bool = False,
+    ) -> List[NodeInfo]:
         """
         Retrieves the latest snapshot for each node before the given timestamp.
 
         Args:
             timestamp: The cutoff timestamp.
+            include_inactive: When True, include nodes whose latest state is inactive.
 
         Returns:
             A list of NodeInfo objects.

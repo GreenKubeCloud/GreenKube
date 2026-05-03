@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from ...core.recommendation_realization import estimate_realized_savings
 from ...models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -107,10 +108,17 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     potential_savings_cost, potential_savings_co2e_grams,
                     current_cpu_request_millicores, recommended_cpu_request_millicores,
                     current_memory_request_bytes, recommended_memory_request_bytes,
-                    cron_schedule, target_node, created_at
+                    cron_schedule, target_node,
+                    applied_at, actual_cpu_request_millicores, actual_memory_request_bytes,
+                    carbon_saved_co2e_grams, cost_saved,
+                    ignored_at, ignored_reason,
+                    created_at, updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8,
-                    $9, $10, $11, $12, $13, $14, $15, $16, $17
+                    $9, $10, $11, $12, $13, $14, $15, $16,
+                    $17, $18, $19, $20, $21,
+                    $22, $23,
+                    $24, $25
                 )
             """
             data = [
@@ -131,7 +139,15 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.recommended_memory_request_bytes,
                     r.cron_schedule,
                     r.target_node,
+                    r.applied_at,
+                    r.actual_cpu_request_millicores,
+                    r.actual_memory_request_bytes,
+                    r.carbon_saved_co2e_grams,
+                    r.cost_saved,
+                    r.ignored_at,
+                    r.ignored_reason,
                     r.created_at,
+                    r.updated_at,
                 )
                 for r in records
             ]
@@ -433,13 +449,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
             if not row:
                 raise ValueError(f"Recommendation {rec_id} not found.")
 
-            carbon_saved = request.carbon_saved_co2e_grams
-            if carbon_saved is None:
-                carbon_saved = dict(row).get("potential_savings_co2e_grams")
-
-            cost_saved = request.cost_saved
-            if cost_saved is None:
-                cost_saved = dict(row).get("potential_savings_cost")
+            record = _row_to_record(row)
+            carbon_saved, cost_saved = estimate_realized_savings(record, request)
 
             updated = await conn.fetchrow(
                 """

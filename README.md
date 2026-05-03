@@ -29,6 +29,12 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 
 ## Screenshots
 
+| Grafana dashboard |
+|------------------|
+| <img src="assets/grafana-dashboard-top-panel.png" width="460"> |
+
+### Frontend screenshots 
+
 | Dashboard | Metrics |
 |----------|----------|
 | <img src="assets/demo-dashboard.png" width="460"> | <img src="assets/demo-metrics.png" width="460"> |
@@ -52,7 +58,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 | [Configuration](docs/configuration.md) | All Helm values and environment variables |
 | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
 | [CLI Reference](docs/cli.md) | `greenkube report`, `recommend`, and other CLI commands |
-| [Prometheus & Grafana](docs/grafana.md) | ServiceMonitor setup and Grafana dashboard import |
+| [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
 | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
 | [Changelog](CHANGELOG.md) | Version history |
 

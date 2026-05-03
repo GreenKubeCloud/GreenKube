@@ -25,6 +25,7 @@ async def _create_test_db():
             zone TEXT,
             node_pool TEXT,
             memory_capacity_bytes INTEGER,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
             embodied_emissions_kg REAL,
             UNIQUE(node_name, timestamp)
         );
@@ -41,6 +42,7 @@ async def _create_test_db():
             zone TEXT,
             node_pool TEXT,
             memory_capacity_bytes INTEGER,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
             embodied_emissions_kg REAL,
             valid_from TEXT NOT NULL,
             valid_to TEXT,
