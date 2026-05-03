@@ -6,7 +6,7 @@ avoiding thousands of duplicate snapshots.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from ...core.exceptions import QueryError
@@ -14,6 +14,8 @@ from ...models.node import NodeInfo
 from ..base_repository import NodeRepository
 
 logger = logging.getLogger(__name__)
+
+_MAX_TIMESTAMP = datetime.max.replace(tzinfo=timezone.utc)
 
 # Columns that define a node's "identity" for SCD comparison.
 # If any of these change, a new SCD record is created.
@@ -26,6 +28,7 @@ _SCD_COMPARE_COLS = (
     "zone",
     "node_pool",
     "memory_capacity_bytes",
+    "is_active",
     "embodied_emissions_kg",
 )
 
@@ -41,16 +44,18 @@ class PostgresNodeRepository(NodeRepository):
         if not nodes:
             return 0
 
+        ordered_nodes = sorted(nodes, key=lambda node: node.timestamp or _MAX_TIMESTAMP)
         new_records = 0
         try:
             async with self.db_manager.connection_scope() as conn:
-                for node in nodes:
+                for node in ordered_nodes:
                     now = node.timestamp or datetime.utcnow()
                     # Fetch the current active SCD record for this node
                     current = await conn.fetchrow(
                         """
                         SELECT id, instance_type, cpu_capacity_cores, architecture,
                                cloud_provider, region, zone, node_pool,
+                               is_active,
                                memory_capacity_bytes, embodied_emissions_kg
                         FROM node_snapshots_scd
                         WHERE node_name = $1 AND is_current = TRUE
@@ -90,9 +95,9 @@ class PostgresNodeRepository(NodeRepository):
                         INSERT INTO node_snapshots_scd (
                             node_name, instance_type, cpu_capacity_cores,
                             architecture, cloud_provider, region, zone, node_pool,
-                            memory_capacity_bytes, embodied_emissions_kg,
+                            memory_capacity_bytes, is_active, embodied_emissions_kg,
                             valid_from, valid_to, is_current
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, TRUE)
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE)
                         """,
                         node.name,
                         node.instance_type,
@@ -103,13 +108,14 @@ class PostgresNodeRepository(NodeRepository):
                         node.zone,
                         node.node_pool,
                         node.memory_capacity_bytes,
+                        node.is_active,
                         node.embodied_emissions_kg,
                         now,
                     )
                     new_records += 1
 
                 # Also write to legacy table for backward compatibility
-                await self._save_to_legacy(conn, nodes)
+                await self._save_to_legacy(conn, ordered_nodes)
 
             if new_records:
                 logger.info("SCD2: created %d new node record(s).", new_records)
@@ -126,8 +132,8 @@ class PostgresNodeRepository(NodeRepository):
             INSERT INTO node_snapshots (
                 timestamp, node_name, instance_type, cpu_capacity_cores,
                 architecture, cloud_provider, region, zone, node_pool,
-                memory_capacity_bytes, embodied_emissions_kg
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                memory_capacity_bytes, is_active, embodied_emissions_kg
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (node_name, timestamp) DO NOTHING
         """
         data = [
@@ -142,6 +148,7 @@ class PostgresNodeRepository(NodeRepository):
                 node.zone,
                 node.node_pool,
                 node.memory_capacity_bytes,
+                node.is_active,
                 node.embodied_emissions_kg,
             )
             for node in nodes
@@ -155,7 +162,7 @@ class PostgresNodeRepository(NodeRepository):
                 query = """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, embodied_emissions_kg,
+                              memory_capacity_bytes, is_active, embodied_emissions_kg,
                            valid_from
                     FROM node_snapshots_scd
                     WHERE valid_from <= $2
@@ -169,6 +176,7 @@ class PostgresNodeRepository(NodeRepository):
                     data = dict(row)
                     ts = data.pop("valid_from")
                     data["name"] = data.pop("node_name")
+                    data["is_active"] = data.get("is_active", True)
                     data["timestamp"] = ts
                     snapshots.append((ts.isoformat(), NodeInfo(**data)))
 
@@ -186,7 +194,7 @@ class PostgresNodeRepository(NodeRepository):
         query = """
             SELECT timestamp, node_name, instance_type, cpu_capacity_cores,
                    architecture, cloud_provider, region, zone, node_pool,
-                   memory_capacity_bytes, embodied_emissions_kg
+                     memory_capacity_bytes, is_active, embodied_emissions_kg
             FROM node_snapshots
             WHERE timestamp >= $1 AND timestamp <= $2
         """
@@ -196,49 +204,64 @@ class PostgresNodeRepository(NodeRepository):
             data = dict(row)
             ts = data["timestamp"]
             data["name"] = data.pop("node_name")
+            data["is_active"] = data.get("is_active", True)
             snapshots.append((ts.isoformat(), NodeInfo(**data)))
         return snapshots
 
-    async def get_latest_snapshots_before(self, timestamp: datetime) -> List[NodeInfo]:
+    async def get_latest_snapshots_before(self, timestamp: datetime, include_inactive: bool = False) -> List[NodeInfo]:
         """Retrieves the current active snapshot for each node."""
         try:
             async with self.db_manager.connection_scope() as conn:
-                # Use SCD2 table — just fetch all current records
+                conditions = [
+                    "valid_from <= $1",
+                    "(valid_to IS NULL OR valid_to >= $1)",
+                ]
+                if not include_inactive:
+                    conditions.append("is_active = TRUE")
+
                 query = """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, embodied_emissions_kg,
+                           memory_capacity_bytes, is_active, embodied_emissions_kg,
                            valid_from
                     FROM node_snapshots_scd
-                    WHERE is_current = TRUE AND valid_from <= $1
-                """
+                    WHERE {where_clause}
+                    ORDER BY valid_from DESC
+                """.format(where_clause=" AND ".join(conditions))
                 results = await conn.fetch(query, timestamp)
 
                 if results:
+                    seen = set()
                     nodes = []
                     for row in results:
                         data = dict(row)
+                        if data["node_name"] in seen:
+                            continue
+                        seen.add(data["node_name"])
                         data["name"] = data.pop("node_name")
+                        data["is_active"] = data.get("is_active", True)
                         data["timestamp"] = data.pop("valid_from")
                         nodes.append(NodeInfo(**data))
                     return nodes
 
                 # Fallback to legacy table if SCD2 table is empty
                 query = """
-                    SELECT DISTINCT ON (node_name)
-                           timestamp, node_name, instance_type, cpu_capacity_cores,
+                    SELECT DISTINCT ON (ns.node_name)
+                           ns.timestamp, ns.node_name, ns.instance_type, ns.cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, embodied_emissions_kg
-                    FROM node_snapshots
-                    WHERE timestamp <= $1
-                    ORDER BY node_name, timestamp DESC
-                """
+                           memory_capacity_bytes, ns.is_active, embodied_emissions_kg
+                    FROM node_snapshots ns
+                    WHERE ns.timestamp <= $1
+                      {active_filter}
+                    ORDER BY ns.node_name, ns.timestamp DESC
+                """.format(active_filter="" if include_inactive else "AND COALESCE(ns.is_active, TRUE) = TRUE")
                 results = await conn.fetch(query, timestamp)
 
                 nodes = []
                 for row in results:
                     data = dict(row)
                     data["name"] = data.pop("node_name")
+                    data["is_active"] = data.get("is_active", True)
                     nodes.append(NodeInfo(**data))
                 return nodes
         except Exception as e:

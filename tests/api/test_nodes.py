@@ -18,6 +18,24 @@ class TestNodesEndpoint:
         data = response.json()
         assert data == []
 
+    def test_nodes_excludes_inactive_by_default(self, client, mock_node_repo):
+        """The route should request only active nodes unless include_inactive is set."""
+        response = client.get("/api/v1/nodes")
+
+        assert response.status_code == 200
+        mock_node_repo.get_latest_snapshots_before.assert_awaited_once()
+        _, kwargs = mock_node_repo.get_latest_snapshots_before.await_args
+        assert kwargs["include_inactive"] is False
+
+    def test_nodes_can_include_inactive(self, client, mock_node_repo):
+        """The route should pass through include_inactive=true to the repository."""
+        response = client.get("/api/v1/nodes", params={"include_inactive": "true"})
+
+        assert response.status_code == 200
+        mock_node_repo.get_latest_snapshots_before.assert_awaited_once()
+        _, kwargs = mock_node_repo.get_latest_snapshots_before.await_args
+        assert kwargs["include_inactive"] is True
+
     def test_nodes_returns_data(self, client, mock_node_repo, sample_node_infos):
         """Should return node info from the repository."""
         mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
@@ -42,6 +60,7 @@ class TestNodesEndpoint:
             "architecture",
             "cpu_capacity_cores",
             "memory_capacity_bytes",
+            "is_active",
         ]
         for field in expected_fields:
             assert field in node, f"Missing field: {field}"

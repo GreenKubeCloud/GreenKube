@@ -70,7 +70,13 @@ async def _populate_database(days: int) -> dict[str, int]:
 
     repo = get_repository()
     history = generate_carbon_intensity_history(days=days)
-    counts["carbon_intensity"] = await repo.save_history(history, zone=DEMO_ZONE)
+    history_by_zone: dict[str, list[dict]] = {}
+    for record in history:
+        history_by_zone.setdefault(record["zone"], []).append(record)
+
+    counts["carbon_intensity"] = 0
+    for zone, zone_history in history_by_zone.items():
+        counts["carbon_intensity"] += await repo.save_history(zone_history, zone=zone)
 
     # 2. Node snapshots
     logger.info("🖥️  Generating node snapshots...")
