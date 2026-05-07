@@ -1,6 +1,6 @@
 {
   "name": "greenkube-frontend",
-  "version": "0.2.9",
+  "version": "v0.2.10",
   "private": true,
   "scripts": {
     "dev": "vite dev",
