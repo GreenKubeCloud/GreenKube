@@ -291,6 +291,60 @@ class TestRightsizingCPU:
         assert cpu_recs[0].recommended_cpu_request_millicores > 250
         assert cpu_recs[0].recommended_cpu_request_millicores < 1000
 
+    def test_no_cpu_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
+        """A peak-aware target above the current request is not an optimization."""
+        metrics = [
+            _make_metric(
+                pod_name="bursty-api",
+                cpu_request=500,
+                cpu_usage_millicores=25,
+                cpu_usage_max_millicores=819,
+                total_cost=1.0,
+                co2e_grams=10.0,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert cpu_recs == []
+
+    def test_no_cpu_rightsizing_when_minimum_floor_removes_savings(self, recommender):
+        """Minimum CPU floors must not turn an equal request into a savings recommendation."""
+        metrics = [
+            _make_metric(
+                pod_name="tiny-worker",
+                cpu_request=recommender.min_cpu_millicores,
+                cpu_usage_millicores=1,
+                total_cost=1.0,
+                co2e_grams=10.0,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert cpu_recs == []
+
+    def test_cpu_savings_use_floored_recommended_value(self, recommender):
+        """Savings estimates should match the final recommendation shown to users."""
+        metrics = [
+            _make_metric(
+                pod_name="floor-aware-worker",
+                cpu_request=100,
+                cpu_usage_millicores=1,
+                total_cost=100.0,
+                co2e_grams=100.0,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU)
+
+        assert cpu_rec.recommended_cpu_request_millicores == recommender.min_cpu_millicores
+        assert cpu_rec.potential_savings_cost == pytest.approx(90.0)
+        assert cpu_rec.potential_savings_co2e_grams == pytest.approx(90.0)
+
     def test_deployment_pods_are_grouped_as_one_workload(self, recommender):
         """Pod restarts for the same Deployment should produce one stable workload recommendation."""
         metrics = [
@@ -401,6 +455,47 @@ class TestRightsizingMemory:
         assert mem_recs[0].recommended_memory_request_bytes is not None
         assert mem_recs[0].recommended_memory_request_bytes > 250 * mib
         assert mem_recs[0].recommended_memory_request_bytes < 1000 * mib
+
+    def test_no_memory_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
+        """A peak-aware memory target above the current request is not an optimization."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="bursty-cache",
+                memory_request=500 * mib,
+                memory_usage_bytes=25 * mib,
+                memory_usage_max_bytes=819 * mib,
+                cpu_usage_millicores=500,
+                total_cost=1.0,
+                co2e_grams=10.0,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
+
+        assert mem_recs == []
+
+    def test_memory_savings_use_floored_recommended_value(self, recommender):
+        """Memory savings estimates should match the final floored recommendation."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="floor-aware-cache",
+                memory_request=32 * mib,
+                memory_usage_bytes=1 * mib,
+                cpu_usage_millicores=500,
+                total_cost=100.0,
+                co2e_grams=100.0,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
+
+        assert mem_rec.recommended_memory_request_bytes == recommender.min_memory_bytes
+        assert mem_rec.potential_savings_cost == pytest.approx(50.0)
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(50.0)
 
 
 # ---------------------------------------------------------------------------

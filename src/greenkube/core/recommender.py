@@ -204,6 +204,13 @@ class Recommender:
         return max(int(max(p95_usage, balanced_peak) * self.rightsizing_headroom), 1)
 
     @staticmethod
+    def _resource_savings_ratio(current_value: int, recommended_value: int) -> float | None:
+        """Returns the proportional request reduction, or None if no reduction exists."""
+        if current_value <= 0 or recommended_value >= current_value:
+            return None
+        return 1.0 - (recommended_value / current_value)
+
+    @staticmethod
     def _deduplicate(recs: List[Recommendation]) -> List[Recommendation]:
         """Removes duplicate recommendations with the same target and type."""
         seen = set()
@@ -328,12 +335,30 @@ class Recommender:
 
             if usage_ratio < self.rightsizing_cpu_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                raw_recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                recommended = max(raw_recommended, self.min_cpu_millicores)
+                savings_ratio = self._resource_savings_ratio(cpu_request, recommended)
+                if savings_ratio is None:
+                    LOG.debug(
+                        "Skipping CPU rightsizing for %s/%s: final recommendation %sm is not below current %sm.",
+                        ns,
+                        target_name,
+                        recommended,
+                        cpu_request,
+                    )
+                    continue
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
-                savings_ratio = max(0, 1.0 - (recommended / cpu_request))
                 target_label = self._target_label(target_kind, target_name)
+                floor_description = ""
+                floor_reason = ""
+                if recommended != raw_recommended:
+                    floor_description = f" (Floored to minimum: {self.min_cpu_millicores}m CPU.)"
+                    floor_reason = (
+                        f" Recommended value was below the minimum of {self.min_cpu_millicores}m; "
+                        "floored to avoid impractically small requests."
+                    )
 
                 recs.append(
                     Recommendation(
@@ -345,10 +370,12 @@ class Recommender:
                             f"{target_label} uses avg {avg_usage:.0f}m and max {observed_max:.0f}m of "
                             f"{cpu_request}m CPU "
                             f"requested ({usage_ratio:.0%}). Recommend reducing to {recommended}m."
+                            f"{floor_description}"
                         ),
                         reason=(
                             f"Average CPU usage is {usage_ratio:.0%} of the request. "
                             f"P95 usage is {p95:.0f}m and observed max is {observed_max:.0f}m."
+                            f"{floor_reason}"
                         ),
                         priority="medium",
                         current_cpu_request_millicores=cpu_request,
@@ -443,12 +470,31 @@ class Recommender:
 
             if usage_ratio < self.rightsizing_memory_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                raw_recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                recommended = max(raw_recommended, self.min_memory_bytes)
+                savings_ratio = self._resource_savings_ratio(mem_request, recommended)
+                if savings_ratio is None:
+                    LOG.debug(
+                        "Skipping memory rightsizing for %s/%s: final %s bytes is not below current %s bytes.",
+                        ns,
+                        target_name,
+                        recommended,
+                        mem_request,
+                    )
+                    continue
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
-                savings_ratio = max(0, 1.0 - (recommended / mem_request))
                 target_label = self._target_label(target_kind, target_name)
+                floor_description = ""
+                floor_reason = ""
+                if recommended != raw_recommended:
+                    min_memory_mib = self.min_memory_bytes // (1024 * 1024)
+                    floor_description = f" (Floored to minimum: {min_memory_mib}MiB memory.)"
+                    floor_reason = (
+                        f" Recommended memory was below the minimum of {min_memory_mib}MiB; "
+                        "floored to avoid impractically small requests."
+                    )
 
                 recs.append(
                     Recommendation(
@@ -461,11 +507,13 @@ class Recommender:
                             f"{observed_max / (1024 * 1024):.0f}MiB of "
                             f"{mem_request / (1024 * 1024):.0f}MiB memory requested ({usage_ratio:.0%}). "
                             f"Recommend reducing to {recommended / (1024 * 1024):.0f}MiB."
+                            f"{floor_description}"
                         ),
                         reason=(
                             f"Average memory usage is {usage_ratio:.0%} of the request. "
                             f"P95 usage is {p95 / (1024 * 1024):.0f}MiB and observed max is "
                             f"{observed_max / (1024 * 1024):.0f}MiB."
+                            f"{floor_reason}"
                         ),
                         priority="medium",
                         current_memory_request_bytes=mem_request,
