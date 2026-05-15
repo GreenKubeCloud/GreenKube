@@ -29,5 +29,8 @@
   "dependencies": {
     "echarts": "^5.5.1"
   },
+  "overrides": {
+    "cookie": "0.7.2"
+  },
   "type": "module"
 }
