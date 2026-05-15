@@ -520,11 +520,16 @@ class RecommendationRepository(ABC):
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
-        """Returns aggregate savings from all applied recommendations.
+        """Returns fallback aggregate savings from applied recommendations.
+
+        Applied recommendations continue saving after their application date, so
+        the fallback summary includes recommendations applied before ``end``.
+        Time-series ledger repositories should be used for exact period totals
+        when a bounded window is requested.
 
         Args:
             namespace: Optional namespace filter.
-            start: Optional inclusive lower bound on when recommendations were applied.
+            start: Optional requested window start, ignored by fallback storage summaries.
             end: Optional exclusive upper bound on when recommendations were applied.
 
         Returns:

@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from ...core.recommendation_realization import estimate_realized_savings
+from ...core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
 from ...models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -160,7 +160,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
         Uses IS NOT DISTINCT FROM for NULL-safe matching so namespace, node,
         pod, and workload recommendations are all deduplicated on the right target.
-        Ignored and applied recommendations are left untouched.
+        Ignored recommendations are left untouched. Matching applied recommendations
+        are refreshed so future savings attribution reflects the latest observed state.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -208,6 +209,26 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
                 )
             """
+            applied_select_query = """
+                SELECT * FROM recommendation_history
+                WHERE COALESCE(scope, 'pod') = $1
+                  AND namespace IS NOT DISTINCT FROM $2
+                  AND pod_name IS NOT DISTINCT FROM $3
+                  AND target_node IS NOT DISTINCT FROM $4
+                  AND type = $5
+                  AND status = 'applied'
+                ORDER BY applied_at DESC
+                LIMIT 1
+            """
+            applied_update_query = """
+                UPDATE recommendation_history SET
+                    actual_cpu_request_millicores = $1,
+                    actual_memory_request_bytes = $2,
+                    carbon_saved_co2e_grams = $3,
+                    cost_saved = $4,
+                    updated_at = $5
+                WHERE id = $6
+            """
             count = 0
             for r in records:
                 type_val = _type_value(r)
@@ -234,28 +255,53 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.target_node,
                     type_val,
                 )
-                if result == "UPDATE 0":
+                if result != "UPDATE 0":
+                    count += 1
+                    continue
+
+                applied_row = await conn.fetchrow(
+                    applied_select_query,
+                    r.scope or "pod",
+                    r.namespace,
+                    r.pod_name,
+                    r.target_node,
+                    type_val,
+                )
+                if applied_row:
+                    refreshed = refresh_applied_recommendation(_row_to_record(applied_row), r, observed_at=now)
                     await conn.execute(
-                        insert_query,
-                        r.pod_name,
-                        r.namespace,
-                        type_val,
-                        r.description,
-                        r.reason,
-                        r.priority,
-                        r.scope,
-                        status_val,
-                        r.potential_savings_cost,
-                        r.potential_savings_co2e_grams,
-                        r.current_cpu_request_millicores,
-                        r.recommended_cpu_request_millicores,
-                        r.current_memory_request_bytes,
-                        r.recommended_memory_request_bytes,
-                        r.cron_schedule,
-                        r.target_node,
-                        r.created_at,
-                        now,
+                        applied_update_query,
+                        refreshed.actual_cpu_request_millicores,
+                        refreshed.actual_memory_request_bytes,
+                        refreshed.carbon_saved_co2e_grams,
+                        refreshed.cost_saved,
+                        refreshed.updated_at,
+                        refreshed.id,
                     )
+                    count += 1
+                    continue
+
+                await conn.execute(
+                    insert_query,
+                    r.pod_name,
+                    r.namespace,
+                    type_val,
+                    r.description,
+                    r.reason,
+                    r.priority,
+                    r.scope,
+                    status_val,
+                    r.potential_savings_cost,
+                    r.potential_savings_co2e_grams,
+                    r.current_cpu_request_millicores,
+                    r.recommended_cpu_request_millicores,
+                    r.current_memory_request_bytes,
+                    r.recommended_memory_request_bytes,
+                    r.cron_schedule,
+                    r.target_node,
+                    r.created_at,
+                    now,
+                )
                 count += 1
 
             logger.info("Upserted %d recommendation records in PostgreSQL.", count)
@@ -541,11 +587,15 @@ class PostgresRecommendationRepository(RecommendationRepository):
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
-        """Returns aggregate savings from all applied recommendations.
+        """Returns fallback aggregate savings from applied recommendations.
+
+        Savings continue after a recommendation is applied, so this fallback
+        includes records applied before ``end``. Use the savings ledger for
+        exact period totals.
 
         Args:
             namespace: Optional namespace filter.
-            start: Optional inclusive lower bound on applied_at.
+            start: Optional requested window start, ignored by this fallback.
             end: Optional exclusive upper bound on applied_at.
 
         Returns:
@@ -557,9 +607,6 @@ class PostgresRecommendationRepository(RecommendationRepository):
             if namespace:
                 params.append(namespace)
                 conditions.append(f"namespace = ${len(params)}")
-            if start:
-                params.append(start)
-                conditions.append(f"applied_at >= ${len(params)}")
             if end:
                 params.append(end)
                 conditions.append(f"applied_at < ${len(params)}")

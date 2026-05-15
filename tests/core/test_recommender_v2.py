@@ -326,6 +326,28 @@ class TestRightsizingCPU:
 
         assert cpu_recs == []
 
+    def test_cpu_rightsizing_uses_latest_request_not_historical_maximum(self, recommender):
+        """A workload already reduced during the lookback should not be judged against its old request."""
+        metrics = [
+            _make_metric(
+                pod_name="recently-rightsized",
+                cpu_request=500,
+                cpu_usage_millicores=70,
+                timestamp=_ts(hour=1),
+            ),
+            _make_metric(
+                pod_name="recently-rightsized",
+                cpu_request=100,
+                cpu_usage_millicores=70,
+                timestamp=_ts(hour=2),
+            ),
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
+
+        assert cpu_recs == []
+
     def test_cpu_savings_use_floored_recommended_value(self, recommender):
         """Savings estimates should match the final recommendation shown to users."""
         metrics = [
@@ -469,6 +491,31 @@ class TestRightsizingMemory:
                 total_cost=1.0,
                 co2e_grams=10.0,
             )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+        mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
+
+        assert mem_recs == []
+
+    def test_memory_rightsizing_uses_latest_request_not_historical_maximum(self, recommender):
+        """A workload already reduced during the lookback should use its current memory request."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="recently-rightsized-cache",
+                memory_request=500 * mib,
+                memory_usage_bytes=70 * mib,
+                cpu_usage_millicores=500,
+                timestamp=_ts(hour=1),
+            ),
+            _make_metric(
+                pod_name="recently-rightsized-cache",
+                memory_request=100 * mib,
+                memory_usage_bytes=70 * mib,
+                cpu_usage_millicores=500,
+                timestamp=_ts(hour=2),
+            ),
         ]
 
         recs = recommender.generate_recommendations(metrics)

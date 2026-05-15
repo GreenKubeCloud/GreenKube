@@ -133,3 +133,48 @@ class TestRecommendationsEndpoint:
         assert start.day == 1
         assert start.hour == 0
         assert start.tzinfo is not None
+
+    def test_savings_summary_uses_ledger_for_selected_window(self, client, mock_reco_repo, mock_savings_repo):
+        """Savings windows should count ongoing ledger rows, not only recommendations applied in the window."""
+        mock_savings_repo.get_window_totals = AsyncMock(
+            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
+        )
+        mock_reco_repo.get_savings_summary = AsyncMock(
+            return_value=RecommendationSavingsSummary(
+                total_carbon_saved_co2e_grams=0.0,
+                total_cost_saved=0.0,
+                applied_count=1,
+            )
+        )
+
+        response = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_carbon_saved_co2e_grams"] == 42.0
+        assert data["total_cost_saved"] == 1.5
+        assert data["applied_count"] == 1
+        mock_savings_repo.get_window_totals.assert_awaited_once()
+
+    def test_savings_summary_without_window_uses_repository_summary(self, client, mock_reco_repo, mock_savings_repo):
+        """Unbounded summaries should keep repository fallback semantics and namespace filtering."""
+        mock_savings_repo.get_cumulative_totals = AsyncMock(
+            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 999.0, "cost_saved_dollars": 99.0}}
+        )
+        mock_reco_repo.get_savings_summary = AsyncMock(
+            return_value=RecommendationSavingsSummary(
+                total_carbon_saved_co2e_grams=12.0,
+                total_cost_saved=1.2,
+                applied_count=2,
+            )
+        )
+
+        response = client.get("/api/v1/recommendations/savings?namespace=prod")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_carbon_saved_co2e_grams"] == 12.0
+        assert data["total_cost_saved"] == 1.2
+        assert data["applied_count"] == 2
+        mock_savings_repo.get_cumulative_totals.assert_not_awaited()
+        mock_savings_repo.get_window_totals.assert_not_awaited()

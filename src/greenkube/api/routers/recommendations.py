@@ -23,6 +23,7 @@ from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
+    get_savings_ledger_repository,
     validate_namespace,
 )
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
@@ -37,6 +38,7 @@ from greenkube.models.metrics import (
     RecommendationSavingsSummary,
 )
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,38 @@ def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], O
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return end - delta, end
+
+
+def _get_savings_cluster_name() -> str:
+    """Return the cluster name used by the savings attribution task."""
+    return get_config().CLUSTER_NAME or "default"
+
+
+def _summary_from_savings_totals(
+    totals_by_type: dict[str, dict[str, float]],
+    applied_count: int,
+    namespace: Optional[str],
+) -> RecommendationSavingsSummary:
+    """Build an API savings summary from ledger totals grouped by recommendation type."""
+    total_carbon = sum(values.get("co2e_saved_grams", 0.0) for values in totals_by_type.values())
+    total_cost = sum(values.get("cost_saved_dollars", 0.0) for values in totals_by_type.values())
+    namespace_breakdown = []
+    if namespace is not None:
+        namespace_breakdown.append(
+            {
+                "namespace": namespace,
+                "carbon_saved_co2e_grams": total_carbon,
+                "cost_saved": total_cost,
+                "count": applied_count,
+            }
+        )
+
+    return RecommendationSavingsSummary(
+        total_carbon_saved_co2e_grams=total_carbon,
+        total_cost_saved=total_cost,
+        applied_count=applied_count,
+        namespace_breakdown=namespace_breakdown,
+    )
 
 
 async def _generate_and_persist_recommendations(
@@ -233,6 +267,7 @@ async def get_savings_summary(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '24h', '7d', '30d', 'ytd')."),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    savings_repo: SavingsLedgerRepository = Depends(get_savings_ledger_repository),
 ):
     """Return aggregate CO2e and cost savings from all applied recommendations.
 
@@ -240,7 +275,26 @@ async def get_savings_summary(
     impact of the optimizations that have been implemented.
     """
     start, end = _get_optional_time_range(last)
-    return await reco_repo.get_savings_summary(namespace=namespace, start=start, end=end)
+    record_summary = await reco_repo.get_savings_summary(namespace=namespace, start=start, end=end)
+
+    if start is None or end is None:
+        return record_summary
+
+    try:
+        cluster_name = _get_savings_cluster_name()
+        totals = await savings_repo.get_window_totals(
+            cluster_name=cluster_name,
+            start_time=start,
+            end_time=end,
+            namespace=namespace,
+        )
+
+        if totals:
+            return _summary_from_savings_totals(totals, record_summary.applied_count, namespace)
+    except Exception as exc:
+        logger.warning("Could not load savings ledger summary: %s. Falling back to recommendation records.", exc)
+
+    return record_summary
 
 
 @router.patch("/recommendations/{rec_id}/apply", response_model=RecommendationRecord)

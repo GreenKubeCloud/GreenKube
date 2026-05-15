@@ -198,6 +198,17 @@ class Recommender:
 
         return weighted_total / sample_total, max(observed_max_values), average_points
 
+    @staticmethod
+    def _latest_request_value(series: List[CombinedMetric], request_attr: str) -> int:
+        """Returns the latest observed resource request, falling back to the maximum when timestamps are absent."""
+        timestamped = [metric for metric in series if metric.timestamp is not None]
+        if not timestamped:
+            return max((getattr(metric, request_attr) or 0) for metric in series)
+
+        latest_timestamp = max(metric.timestamp for metric in timestamped)
+        latest_metrics = [metric for metric in timestamped if metric.timestamp == latest_timestamp]
+        return max((getattr(metric, request_attr) or 0) for metric in latest_metrics)
+
     def _balanced_rightsizing_target(self, avg_usage: float, observed_max: float, p95_usage: float) -> int:
         """Calculates a rightsizing target that balances steady-state and peak demand."""
         balanced_peak = (avg_usage + observed_max) / 2.0
@@ -319,7 +330,7 @@ class Recommender:
         recs = []
 
         for (ns, target_kind, target_name), series in target_series.items():
-            cpu_request = max((m.cpu_request or 0) for m in series)
+            cpu_request = self._latest_request_value(series, "cpu_request")
             if cpu_request == 0:
                 continue
 
@@ -454,7 +465,7 @@ class Recommender:
         recs = []
 
         for (ns, target_kind, target_name), series in target_series.items():
-            mem_request = max((m.memory_request or 0) for m in series)
+            mem_request = self._latest_request_value(series, "memory_request")
             if mem_request == 0:
                 continue
 
@@ -549,7 +560,7 @@ class Recommender:
             if len(usages) < 3:
                 continue
 
-            cpu_request = max((m.cpu_request or 0) for m in series)
+            cpu_request = self._latest_request_value(series, "cpu_request")
             if cpu_request == 0:
                 continue
 

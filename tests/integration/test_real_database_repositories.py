@@ -606,6 +606,29 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     assert savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
     assert savings.total_cost_saved == pytest.approx(2.0)
 
+    drifted_observation = record.model_copy(
+        update={
+            "description": "Observed after drift",
+            "current_cpu_request_millicores": 400,
+            "recommended_cpu_request_millicores": 250,
+        }
+    )
+    assert await repo.upsert_recommendations([drifted_observation]) == 1
+    assert await repo.get_active_recommendations(namespace="prod") == []
+
+    refreshed_savings = await repo.get_savings_summary(
+        namespace="prod", start=now - timedelta(hours=1), end=now + timedelta(hours=1)
+    )
+    assert refreshed_savings.applied_count == 1
+    assert refreshed_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
+    assert refreshed_savings.total_cost_saved == pytest.approx(1.4)
+
+    future_savings = await repo.get_savings_summary(
+        namespace="prod", start=now + timedelta(days=30), end=now + timedelta(days=31)
+    )
+    assert future_savings.applied_count == 1
+    assert future_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
+
     ignored_seed = _recommendation_record(
         pod_name="worker-pod",
         rec_type=RecommendationType.ZOMBIE_POD,
