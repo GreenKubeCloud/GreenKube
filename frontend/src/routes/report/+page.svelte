@@ -1,7 +1,12 @@
 <script>
 	import { onMount } from 'svelte';
-	import { getNamespaces, getReportSummary, buildReportExportUrl } from '$lib/api.js';
-	import { reportTimeRanges as timeRanges, aggregationLevels, buildReportRequestParams } from '$lib/reportOptions.js';
+	import { getNamespaces, getReportSummary, getReportYears, buildReportExportUrl } from '$lib/api.js';
+	import {
+		reportTimeRanges as timeRanges,
+		aggregationLevels,
+		groupByOptions,
+		buildReportRequestParams
+	} from '$lib/reportOptions.js';
 	import { formatCO2, formatCost, formatEnergy } from '$lib/utils/format.js';
 	import Card from '$lib/components/Card.svelte';
 	import DataState from '$lib/components/DataState.svelte';
@@ -9,11 +14,21 @@
 	// ── Filter state ──────────────────────────────────────────────────────────
 	let namespace = '';
 	let last = '24h';
+	let timeMode = 'relative';
+	let selectedYears = [];
+	let customStart = toInputDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+	let customEnd = toInputDate(new Date());
 	let aggregationLevel = 'raw';
+	let groupBy = 'pod';
 	let format = 'csv';
 
 	// ── UI state ──────────────────────────────────────────────────────────────
 	let namespaces = [];
+	let availableYears = [];
+	let yearsLoading = false;
+	let yearsError = null;
+	let yearsNamespace = null;
+	let yearsRequestId = 0;
 	let summary = null;
 	let loading = false;
 	let error = null;
@@ -26,11 +41,82 @@
 		{ value: 'json', label: 'JSON', icon: '🗂️', description: 'Machine-readable, ideal for further processing' }
 	];
 
+	function toInputDate(date) {
+		return date.toISOString().slice(0, 10);
+	}
+
+	function selectRelativeRange(value) {
+		timeMode = 'relative';
+		last = value;
+	}
+
+	function selectYearlyMode() {
+		timeMode = 'yearly';
+		if (selectedYears.length === 0 && availableYears.length > 0) {
+			selectedYears = [availableYears[0]];
+		}
+	}
+
+	function toggleYear(year) {
+		selectedYears = selectedYears.includes(year)
+			? selectedYears.filter((selectedYear) => selectedYear !== year)
+			: [...selectedYears, year].sort((left, right) => right - left);
+	}
+
+	async function refreshAvailableYears(currentNamespace = namespace) {
+		const requestId = ++yearsRequestId;
+		yearsLoading = true;
+		yearsError = null;
+		try {
+			const years = await getReportYears({ namespace: currentNamespace || undefined });
+			if (requestId !== yearsRequestId) return;
+			availableYears = years;
+			selectedYears = selectedYears.filter((year) => years.includes(year));
+			if (timeMode === 'yearly' && selectedYears.length === 0 && years.length > 0) {
+				selectedYears = [years[0]];
+			}
+		} catch (e) {
+			if (requestId !== yearsRequestId) return;
+			availableYears = [];
+			selectedYears = [];
+			yearsError = e.message;
+		} finally {
+			if (requestId === yearsRequestId) {
+				yearsLoading = false;
+				yearsNamespace = currentNamespace;
+			}
+		}
+	}
+
 	// ── Reactive summary preview ──────────────────────────────────────────────
-	$: reportParams = buildReportRequestParams({ namespace, last, aggregationLevel });
+	$: reportParams = buildReportRequestParams({
+		namespace,
+		last,
+		timeMode,
+		years: selectedYears,
+		start: customStart,
+		end: customEnd,
+		aggregationLevel,
+		groupBy
+	});
 	$: aggregate = reportParams.aggregate;
-	$: previewParams = { namespace, last, aggregationLevel };
-	$: if (previewParams) refreshSummary();
+	$: selectionReady = (timeMode !== 'yearly' || selectedYears.length > 0) && (timeMode !== 'custom' || (customStart && customEnd));
+	$: previewParams = { namespace, last, timeMode, years: selectedYears.join(','), customStart, customEnd, aggregationLevel, groupBy };
+	$: if (previewParams) {
+		if (selectionReady) {
+			refreshSummary();
+		} else {
+			summary = null;
+			error = null;
+			loading = false;
+		}
+	}
+	$: if (namespace !== yearsNamespace) refreshAvailableYears(namespace);
+	$: timeRangeLabel = timeMode === 'yearly'
+		? (selectedYears.length ? selectedYears.join(', ') : 'No years selected')
+		: timeMode === 'custom'
+			? `${customStart} to ${customEnd}`
+			: (timeRanges.find(r => r.value === last)?.label ?? last);
 
 	async function refreshSummary() {
 		loading = true;
@@ -46,6 +132,7 @@
 	}
 
 	async function handleExport() {
+		if (!selectionReady) return;
 		downloading = true;
 		downloadError = null;
 		downloadSuccess = false;
@@ -76,7 +163,6 @@
 		} catch {
 			namespaces = [];
 		}
-		await refreshSummary();
 	});
 </script>
 
@@ -101,16 +187,81 @@
 					<div class="grid grid-cols-2 gap-2">
 						{#each timeRanges as tr}
 							<button
-								on:click={() => (last = tr.value)}
+								on:click={() => selectRelativeRange(tr.value)}
 								class="px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150
-								       {last === tr.value
+								       {timeMode === 'relative' && last === tr.value
 										? 'bg-green-600/20 text-green-400 border border-green-600/50'
 										: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
 							>
 								{tr.label}
 							</button>
 						{/each}
+						<button
+							on:click={selectYearlyMode}
+							class="px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150
+							       {timeMode === 'yearly'
+									? 'bg-green-600/20 text-green-400 border border-green-600/50'
+									: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
+						>
+							Years
+						</button>
+						<button
+							on:click={() => (timeMode = 'custom')}
+							class="px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150
+							       {timeMode === 'custom'
+									? 'bg-green-600/20 text-green-400 border border-green-600/50'
+									: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
+						>
+							Custom
+						</button>
 					</div>
+
+					{#if timeMode === 'yearly'}
+						<div class="grid grid-cols-3 gap-2">
+							{#if yearsLoading}
+								<div class="col-span-3 text-xs text-dark-500 px-1 py-2">Loading years…</div>
+							{:else if yearsError}
+								<div class="col-span-3 text-xs text-red-400 px-1 py-2">{yearsError}</div>
+							{:else if availableYears.length === 0}
+								<div class="col-span-3 text-xs text-dark-500 px-1 py-2">No years found.</div>
+							{:else}
+								{#each availableYears as year}
+									<button
+										on:click={() => toggleYear(year)}
+										class="px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150
+										       {selectedYears.includes(year)
+												? 'bg-green-600/20 text-green-400 border border-green-600/50'
+												: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
+									>
+										{year}
+									</button>
+								{/each}
+							{/if}
+						</div>
+					{/if}
+
+					{#if timeMode === 'custom'}
+						<div class="grid grid-cols-2 gap-2">
+							<label class="text-xs text-dark-500 space-y-1">
+								<span>Start</span>
+								<input
+									type="date"
+									bind:value={customStart}
+									class="w-full bg-dark-800 border border-dark-600/50 text-dark-200 text-sm rounded-lg px-3 py-2
+									       focus:ring-2 focus:ring-green-500/50 focus:border-green-500 transition-colors"
+								/>
+							</label>
+							<label class="text-xs text-dark-500 space-y-1">
+								<span>End</span>
+								<input
+									type="date"
+									bind:value={customEnd}
+									class="w-full bg-dark-800 border border-dark-600/50 text-dark-200 text-sm rounded-lg px-3 py-2
+									       focus:ring-2 focus:ring-green-500/50 focus:border-green-500 transition-colors"
+								/>
+							</label>
+						</div>
+					{/if}
 				</div>
 			</Card>
 
@@ -140,6 +291,23 @@
 									: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
 						>
 							{level.label}
+						</button>
+					{/each}
+				</div>
+			</Card>
+
+			<!-- Aggregation grouping -->
+			<Card title="Group By">
+				<div class="grid grid-cols-2 gap-2">
+					{#each groupByOptions as option}
+						<button
+							on:click={() => (groupBy = option.value)}
+							class="px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150
+							       {groupBy === option.value
+									? 'bg-green-600/20 text-green-400 border border-green-600/50'
+									: 'bg-dark-800 text-dark-400 border border-dark-700/50 hover:text-dark-200 hover:bg-dark-700'}"
+						>
+							{option.label}
 						</button>
 					{/each}
 				</div>
@@ -222,9 +390,7 @@
 				<div class="space-y-2 text-sm">
 					<div class="flex justify-between items-center py-1.5 border-b border-dark-700/50">
 						<span class="text-dark-500">Time range</span>
-						<span class="text-dark-200 font-medium">
-							{timeRanges.find(r => r.value === last)?.label ?? last}
-						</span>
+						<span class="text-dark-200 font-medium">{timeRangeLabel}</span>
 					</div>
 					<div class="flex justify-between items-center py-1.5 border-b border-dark-700/50">
 						<span class="text-dark-500">Namespace</span>
@@ -236,6 +402,14 @@
 							{aggregationLevels.find(level => level.value === aggregationLevel)?.label ?? aggregationLevel}
 						</span>
 					</div>
+					{#if aggregate}
+						<div class="flex justify-between items-center py-1.5 border-b border-dark-700/50">
+							<span class="text-dark-500">Group by</span>
+							<span class="text-dark-200 font-medium">
+								{groupByOptions.find(option => option.value === groupBy)?.label ?? groupBy}
+							</span>
+						</div>
+					{/if}
 					<div class="flex justify-between items-center py-1.5">
 						<span class="text-dark-500">Export format</span>
 						<span class="text-dark-200 font-medium uppercase">{format}</span>
@@ -247,10 +421,10 @@
 			<div class="space-y-2">
 				<button
 					on:click={handleExport}
-					disabled={downloading || loading}
+					disabled={downloading || loading || !selectionReady}
 					class="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-xl
 					       font-semibold text-sm transition-all duration-200
-					       {downloading || loading
+					       {downloading || loading || !selectionReady
 							? 'bg-dark-700 text-dark-500 cursor-not-allowed'
 							: 'bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-900/30 hover:shadow-green-800/40'}"
 				>

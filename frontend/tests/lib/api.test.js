@@ -18,6 +18,7 @@ import {
 	getNodes,
 	getRecommendations,
 	getRecommendationSavings,
+	getReportYears,
 	getReportSummary,
 	buildReportExportUrl
 } from '$lib/api.js';
@@ -308,13 +309,26 @@ describe('getRecommendationSavings', () => {
 describe('getReportSummary', () => {
 	it('passes all filter params', async () => {
 		globalThis.fetch = mockFetchOk({ total_rows: 10 });
-		await getReportSummary({ namespace: 'prod', last: '30d', aggregate: true, granularity: 'daily' });
+		await getReportSummary({ namespace: 'prod', last: '30d', aggregate: true, granularity: 'daily', group_by: 'namespace' });
 
 		const url = fetch.mock.calls[0][0];
 		expect(url).toContain('namespace=prod');
 		expect(url).toContain('last=30d');
 		expect(url).toContain('aggregate=true');
 		expect(url).toContain('granularity=daily');
+		expect(url).toContain('group_by=namespace');
+	});
+
+	it('passes custom dates and selected years as query params', async () => {
+		globalThis.fetch = mockFetchOk({ total_rows: 10 });
+		await getReportSummary({ start: '2025-01-01', end: '2025-12-31', years: [2025, 2026] });
+
+		const url = fetch.mock.calls[0][0];
+		expect(url).toContain('start=2025-01-01');
+		expect(url).toContain('end=2025-12-31');
+		expect(url.match(/years=/g)).toHaveLength(2);
+		expect(url).toContain('years=2025');
+		expect(url).toContain('years=2026');
 	});
 
 	it('omits aggregate and granularity when falsy', async () => {
@@ -329,6 +343,22 @@ describe('getReportSummary', () => {
 
 
 // ---------------------------------------------------------------------------
+// getReportYears
+// ---------------------------------------------------------------------------
+describe('getReportYears', () => {
+	it('returns available report years', async () => {
+		globalThis.fetch = mockFetchOk([2026, 2025]);
+		const result = await getReportYears({ namespace: 'prod' });
+
+		const url = fetch.mock.calls[0][0];
+		expect(result).toEqual([2026, 2025]);
+		expect(url).toContain('/api/v1/report/years');
+		expect(url).toContain('namespace=prod');
+	});
+});
+
+
+// ---------------------------------------------------------------------------
 // buildReportExportUrl
 // ---------------------------------------------------------------------------
 describe('buildReportExportUrl', () => {
@@ -336,15 +366,23 @@ describe('buildReportExportUrl', () => {
 		const url = buildReportExportUrl({
 			namespace: 'prod',
 			last: '7d',
+			start: '2025-01-01',
+			end: '2025-12-31',
+			years: [2025, 2026],
 			aggregate: true,
 			granularity: 'daily',
+			group_by: 'namespace',
 			format: 'csv'
 		});
 		expect(url).toContain('/api/v1/report/export');
 		expect(url).toContain('namespace=prod');
 		expect(url).toContain('last=7d');
+		expect(url).toContain('start=2025-01-01');
+		expect(url).toContain('end=2025-12-31');
+		expect(url.match(/years=/g)).toHaveLength(2);
 		expect(url).toContain('aggregate=true');
 		expect(url).toContain('granularity=daily');
+		expect(url).toContain('group_by=namespace');
 		expect(url).toContain('format=csv');
 	});
 

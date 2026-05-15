@@ -308,6 +308,45 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
             logger.error("Error reading hourly metrics from Postgres: %s", e)
             raise QueryError(f"Error reading hourly metrics: {e}") from e
 
+    async def list_metric_years(self, namespace: Optional[str] = None) -> List[int]:
+        """Return distinct metric years from raw and hourly Postgres tables."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    query = """
+                        SELECT DISTINCT year FROM (
+                            SELECT EXTRACT(YEAR FROM timestamp)::int AS year
+                            FROM combined_metrics
+                            WHERE timestamp IS NOT NULL AND namespace = $1
+                            UNION
+                            SELECT EXTRACT(YEAR FROM hour_bucket)::int AS year
+                            FROM combined_metrics_hourly
+                            WHERE hour_bucket IS NOT NULL AND namespace = $1
+                        ) AS metric_years
+                        WHERE year IS NOT NULL
+                        ORDER BY year DESC
+                    """
+                    rows = await conn.fetch(query, namespace)
+                else:
+                    query = """
+                        SELECT DISTINCT year FROM (
+                            SELECT EXTRACT(YEAR FROM timestamp)::int AS year
+                            FROM combined_metrics
+                            WHERE timestamp IS NOT NULL
+                            UNION
+                            SELECT EXTRACT(YEAR FROM hour_bucket)::int AS year
+                            FROM combined_metrics_hourly
+                            WHERE hour_bucket IS NOT NULL
+                        ) AS metric_years
+                        WHERE year IS NOT NULL
+                        ORDER BY year DESC
+                    """
+                    rows = await conn.fetch(query)
+                return [int(row["year"]) for row in rows]
+        except Exception as e:
+            logger.error("Error listing metric years from Postgres: %s", e)
+            raise QueryError(f"Error listing metric years: {e}") from e
+
     async def aggregate_summary(
         self,
         start_time: datetime,

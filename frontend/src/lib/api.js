@@ -8,12 +8,22 @@
 
 const BASE = '/api/v1';
 
+function addSearchParam(url, key, value) {
+	if (Array.isArray(value)) {
+		value.filter((item) => item !== null && item !== undefined && item !== '').forEach((item) => {
+			url.searchParams.append(key, item);
+		});
+		return;
+	}
+	if (value !== null && value !== undefined && value !== '') {
+		url.searchParams.set(key, value);
+	}
+}
+
 async function request(path, params = {}) {
 	const url = new URL(path, window.location.origin);
 	Object.entries(params).forEach(([k, v]) => {
-		if (v !== null && v !== undefined && v !== '') {
-			url.searchParams.set(k, v);
-		}
+		addSearchParam(url, k, v);
 	});
 
 	const res = await fetch(url.toString());
@@ -231,12 +241,34 @@ export async function unignoreRecommendation(id) {
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]
+ * @param {string} [opts.start]
+ * @param {string} [opts.end]
+ * @param {number[]} [opts.years]
  * @param {boolean} [opts.aggregate]
  * @param {string} [opts.granularity]
+ * @param {string} [opts.group_by]
  * @returns {Promise<Object>}
  */
-export function getReportSummary({ namespace, last, aggregate, granularity } = {}) {
-	return request(`${BASE}/report/summary`, { namespace, last, aggregate: aggregate || undefined, granularity });
+export function getReportSummary({ namespace, last, start, end, years, aggregate, granularity, group_by } = {}) {
+	return request(`${BASE}/report/summary`, {
+		namespace,
+		last,
+		start,
+		end,
+		years,
+		aggregate: aggregate || undefined,
+		granularity,
+		group_by
+	});
+}
+
+/**
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @returns {Promise<number[]>}
+ */
+export function getReportYears({ namespace } = {}) {
+	return request(`${BASE}/report/years`, { namespace });
 }
 
 /**
@@ -244,18 +276,26 @@ export function getReportSummary({ namespace, last, aggregate, granularity } = {
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]
+ * @param {string} [opts.start]
+ * @param {string} [opts.end]
+ * @param {number[]} [opts.years]
  * @param {boolean} [opts.aggregate]
  * @param {string} [opts.granularity]
+ * @param {string} [opts.group_by]
  * @param {string} [opts.format]
  * @returns {string}
  */
-export function buildReportExportUrl({ namespace, last, aggregate, granularity, format } = {}) {
+export function buildReportExportUrl({ namespace, last, start, end, years, aggregate, granularity, group_by, format } = {}) {
 	const url = new URL(`${BASE}/report/export`, window.location.origin);
-	if (namespace) url.searchParams.set('namespace', namespace);
-	if (last) url.searchParams.set('last', last);
-	if (aggregate) url.searchParams.set('aggregate', 'true');
-	if (granularity) url.searchParams.set('granularity', granularity);
-	if (format) url.searchParams.set('format', format);
+	addSearchParam(url, 'namespace', namespace);
+	addSearchParam(url, 'last', last);
+	addSearchParam(url, 'start', start);
+	addSearchParam(url, 'end', end);
+	addSearchParam(url, 'years', years);
+	addSearchParam(url, 'aggregate', aggregate ? 'true' : undefined);
+	addSearchParam(url, 'granularity', granularity);
+	addSearchParam(url, 'group_by', group_by);
+	addSearchParam(url, 'format', format);
 	return url.toString();
 }
 

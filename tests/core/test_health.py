@@ -470,6 +470,26 @@ class TestCheckKubernetes:
         assert "1.30.0" in result.message
 
     @pytest.mark.asyncio
+    async def test_healthy_version_probe_does_not_double_prefix_v(self):
+        version = MagicMock(git_version="v1.30.0")
+        api_client_cm = MagicMock()
+        api_client_cm.__aenter__ = AsyncMock(return_value="api-client")
+        api_client_cm.__aexit__ = AsyncMock(return_value=False)
+        version_api = MagicMock()
+        version_api.get_code = AsyncMock(return_value=version)
+
+        with (
+            patch("greenkube.core.k8s_client.get_core_v1_api", new_callable=AsyncMock, return_value=MagicMock()),
+            patch("kubernetes_asyncio.client.ApiClient", return_value=api_client_cm),
+            patch("kubernetes_asyncio.client.VersionApi", return_value=version_api),
+        ):
+            result = await check_kubernetes()
+
+        assert result.status == ServiceStatus.HEALTHY
+        assert "(v1.30.0)" in result.message
+        assert "vv1.30.0" not in result.message
+
+    @pytest.mark.asyncio
     async def test_version_probe_exception_returns_unreachable(self):
         api_client_cm = MagicMock()
         api_client_cm.__aenter__ = AsyncMock(return_value="api-client")

@@ -78,3 +78,50 @@ def test_aggregate_metrics_daily():
 
     # Verify period string
     assert agg_pod1.period == "2023-10-27"
+
+
+def test_aggregate_metrics_by_namespace_daily():
+    """Namespace grouping should combine pods within the same namespace and period."""
+    metrics = [
+        CombinedMetric(
+            pod_name="pod-1",
+            namespace="ns-1",
+            timestamp=datetime(2023, 10, 27, 10, 0, 0, tzinfo=timezone.utc),
+            duration_seconds=300,
+            joules=100,
+            co2e_grams=10,
+            total_cost=1,
+            embodied_co2e_grams=5,
+        ),
+        CombinedMetric(
+            pod_name="pod-2",
+            namespace="ns-1",
+            timestamp=datetime(2023, 10, 27, 11, 0, 0, tzinfo=timezone.utc),
+            duration_seconds=300,
+            joules=200,
+            co2e_grams=20,
+            total_cost=2,
+            embodied_co2e_grams=7,
+        ),
+        CombinedMetric(
+            pod_name="pod-3",
+            namespace="ns-2",
+            timestamp=datetime(2023, 10, 27, 12, 0, 0, tzinfo=timezone.utc),
+            duration_seconds=300,
+            joules=50,
+            co2e_grams=5,
+            total_cost=0.5,
+            embodied_co2e_grams=1,
+        ),
+    ]
+
+    result = aggregate_metrics(metrics, daily=True, group_by="namespace")
+
+    assert len(result) == 2
+    ns_1 = next(metric for metric in result if metric.namespace == "ns-1")
+    assert ns_1.pod_name == ""
+    assert ns_1.period == "2023-10-27"
+    assert ns_1.joules == 300
+    assert ns_1.co2e_grams == 30
+    assert ns_1.embodied_co2e_grams == 12
+    assert ns_1.total_cost == 3

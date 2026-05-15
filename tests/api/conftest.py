@@ -16,6 +16,7 @@ from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
+    get_savings_ledger_repository,
 )
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.node import NodeInfo
@@ -87,9 +88,13 @@ def mock_combined_metrics_repo():
     async def _list_namespaces():
         return await _Base.list_namespaces(repo)
 
+    async def _list_metric_years(namespace=None):
+        return await _Base.list_metric_years(repo, namespace=namespace)
+
     repo.read_combined_metrics_smart = _read_combined_metrics_smart
     repo.read_hourly_metrics = _read_hourly_metrics
     repo.list_namespaces = _list_namespaces
+    repo.list_metric_years = _list_metric_years
     return repo
 
 
@@ -118,13 +123,23 @@ def mock_reco_repo():
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
+def mock_savings_repo():
+    """Returns a mock SavingsLedgerRepository."""
+    repo = AsyncMock()
+    repo.get_cumulative_totals = AsyncMock(return_value={})
+    repo.get_window_totals = AsyncMock(return_value={})
+    return repo
+
+
+@pytest.fixture
+def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_savings_repo):
     """Creates a TestClient with dependency overrides for all repositories."""
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
     app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+    app.dependency_overrides[get_savings_ledger_repository] = lambda: mock_savings_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

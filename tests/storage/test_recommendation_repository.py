@@ -196,8 +196,8 @@ class TestSQLiteRecommendationRepository:
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_get_savings_summary_filters_by_applied_at_window(self, repo, mock_db_manager):
-        """SQLite savings summary should filter applied recommendations by applied_at."""
+    async def test_get_savings_summary_includes_applied_before_window_end(self, repo, mock_db_manager):
+        """SQLite summary should include recommendations already applied before the selected window."""
         mock_conn = mock_db_manager._mock_conn
         mock_cursor = AsyncMock()
         mock_cursor.fetchall = AsyncMock(return_value=[])
@@ -209,9 +209,9 @@ class TestSQLiteRecommendationRepository:
         await repo.get_savings_summary(namespace="default", start=start, end=end)
 
         query, params = mock_conn.execute.await_args.args
-        assert "applied_at >= ?" in query
+        assert "applied_at >= ?" not in query
         assert "applied_at < ?" in query
-        assert params[-2:] == ["2026-02-01T00:00:00Z", "2026-02-08T00:00:00Z"]
+        assert params[-1:] == ["2026-02-08T00:00:00Z"]
 
 
 class TestPostgresRecommendationRepository:
@@ -290,8 +290,8 @@ class TestPostgresRecommendationRepository:
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_get_savings_summary_filters_by_applied_at_window(self, repo, mock_db_manager):
-        """Postgres savings summary should filter applied recommendations by applied_at."""
+    async def test_get_savings_summary_includes_applied_before_window_end(self, repo, mock_db_manager):
+        """Postgres summary should include recommendations already applied before the selected window."""
         mock_conn = mock_db_manager._mock_conn
         mock_conn.fetch = AsyncMock(return_value=[])
 
@@ -301,6 +301,6 @@ class TestPostgresRecommendationRepository:
 
         query = mock_conn.fetch.await_args.args[0]
         params = mock_conn.fetch.await_args.args[1:]
-        assert "applied_at >= $2" in query
-        assert "applied_at < $3" in query
-        assert params == ("default", start, end)
+        assert "applied_at >=" not in query
+        assert "applied_at < $2" in query
+        assert params == ("default", end)

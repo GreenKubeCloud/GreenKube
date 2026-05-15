@@ -11,7 +11,7 @@ from typing import List, Optional
 
 import aiosqlite
 
-from greenkube.core.recommendation_realization import estimate_realized_savings
+from greenkube.core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -87,14 +87,14 @@ def _identity_key(record: RecommendationRecord) -> tuple:
     )
 
 
-def _identity_where_clause(record: RecommendationRecord) -> tuple[str, list]:
+def _identity_where_clause(record: RecommendationRecord, status: str = "active") -> tuple[str, list]:
     """Builds a SQLite WHERE clause for NULL-safe recommendation identity matching."""
     return (
         "COALESCE(scope, 'pod') = ? "
         "AND ((namespace = ?) OR (namespace IS NULL AND ? IS NULL)) "
         "AND ((pod_name = ?) OR (pod_name IS NULL AND ? IS NULL)) "
         "AND ((target_node = ?) OR (target_node IS NULL AND ? IS NULL)) "
-        "AND type = ? AND status = 'active'",
+        "AND type = ? AND status = ?",
         [
             record.scope or "pod",
             record.namespace,
@@ -104,6 +104,7 @@ def _identity_where_clause(record: RecommendationRecord) -> tuple[str, list]:
             record.target_node,
             record.target_node,
             _type_value(record),
+            status,
         ],
     )
 
@@ -184,7 +185,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
         """Inserts or updates active recommendations using their full target identity.
 
-        Ignored and applied recommendations are left untouched.
+        Ignored recommendations are left untouched. Matching applied recommendations
+        are refreshed so future savings attribution reflects the latest observed state.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -233,6 +235,37 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                             r.target_node,
                             now,
                             existing["id"],
+                        ),
+                    )
+                    continue
+
+                applied_where, applied_params = _identity_where_clause(r, status="applied")
+                cursor = await conn.execute(
+                    f"SELECT * FROM recommendation_history WHERE {applied_where} ORDER BY applied_at DESC LIMIT 1",
+                    applied_params,
+                )
+                applied_row = await cursor.fetchone()
+                if applied_row:
+                    refreshed = refresh_applied_recommendation(
+                        _row_to_record(applied_row), r, observed_at=datetime.now(timezone.utc)
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE recommendation_history SET
+                            actual_cpu_request_millicores = ?,
+                            actual_memory_request_bytes = ?,
+                            carbon_saved_co2e_grams = ?,
+                            cost_saved = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            refreshed.actual_cpu_request_millicores,
+                            refreshed.actual_memory_request_bytes,
+                            refreshed.carbon_saved_co2e_grams,
+                            refreshed.cost_saved,
+                            to_iso_z(refreshed.updated_at) if refreshed.updated_at else now,
+                            refreshed.id,
                         ),
                     )
                 else:
@@ -576,11 +609,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
-        """Returns aggregate savings from all applied recommendations.
+        """Returns fallback aggregate savings from applied recommendations.
+
+        Savings continue after a recommendation is applied, so this fallback
+        includes records applied before ``end``. Use the savings ledger for
+        exact period totals.
 
         Args:
             namespace: Optional namespace filter.
-            start: Optional inclusive lower bound on applied_at.
+            start: Optional requested window start, ignored by this fallback.
             end: Optional exclusive upper bound on applied_at.
 
         Returns:
@@ -597,9 +634,6 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if namespace:
                 query += " AND namespace = ?"
                 params.append(namespace)
-            if start:
-                query += " AND applied_at >= ?"
-                params.append(to_iso_z(start))
             if end:
                 query += " AND applied_at < ?"
                 params.append(to_iso_z(end))

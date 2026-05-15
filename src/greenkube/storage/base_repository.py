@@ -1,6 +1,6 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from ..models.metrics import (
@@ -211,6 +211,13 @@ class CombinedMetricsRepository(ABC):
         start = end - timedelta(days=7)
         metrics = await self.read_combined_metrics(start, end)
         return sorted({m.namespace for m in metrics})
+
+    async def list_metric_years(self, namespace: Optional[str] = None) -> List[int]:
+        """Return calendar years that have persisted combined metric data."""
+        start = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        end = datetime.now(timezone.utc)
+        metrics = await self.read_combined_metrics_smart(start, end, namespace=namespace)
+        return sorted({m.timestamp.year for m in metrics if m.timestamp}, reverse=True)
 
     async def aggregate_summary(
         self,
@@ -520,11 +527,16 @@ class RecommendationRepository(ABC):
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
     ) -> RecommendationSavingsSummary:
-        """Returns aggregate savings from all applied recommendations.
+        """Returns fallback aggregate savings from applied recommendations.
+
+        Applied recommendations continue saving after their application date, so
+        the fallback summary includes recommendations applied before ``end``.
+        Time-series ledger repositories should be used for exact period totals
+        when a bounded window is requested.
 
         Args:
             namespace: Optional namespace filter.
-            start: Optional inclusive lower bound on when recommendations were applied.
+            start: Optional requested window start, ignored by fallback storage summaries.
             end: Optional exclusive upper bound on when recommendations were applied.
 
         Returns:
