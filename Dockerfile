@@ -1,9 +1,8 @@
 # --- STAGE 1: Frontend Build ---
 # Builds the SvelteKit SPA into static files.
-# The output is pure HTML/CSS/JS — architecture-independent.
-# We pin to linux/amd64 so that multi-platform builds never run this
-# stage under slow QEMU emulation.
-FROM --platform=linux/amd64 node:22-alpine AS frontend-builder
+# The output is pure HTML/CSS/JS — architecture-independent, so build it
+# on the native build platform instead of running npm through emulation.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
 
 WORKDIR /frontend
 

@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	reportTimeRanges,
 	aggregationLevels,
+	groupByOptions,
 	buildReportRequestParams
 } from '$lib/reportOptions.js';
 
@@ -36,6 +37,12 @@ describe('aggregationLevels', () => {
 	});
 });
 
+describe('groupByOptions', () => {
+	it('offers pod and namespace report grouping', () => {
+		expect(groupByOptions.map((option) => option.value)).toEqual(['pod', 'namespace']);
+	});
+});
+
 
 describe('buildReportRequestParams', () => {
 	it('keeps aggregation level independent from the selected window', () => {
@@ -43,14 +50,16 @@ describe('buildReportRequestParams', () => {
 			namespace: 'prod',
 			last: '24h',
 			aggregate: true,
-			granularity: 'monthly'
+			granularity: 'monthly',
+			group_by: 'pod'
 		});
 
 		expect(buildReportRequestParams({ namespace: 'prod', last: 'ytd', aggregationLevel: 'hourly' })).toEqual({
 			namespace: 'prod',
 			last: 'ytd',
 			aggregate: true,
-			granularity: 'hourly'
+			granularity: 'hourly',
+			group_by: 'pod'
 		});
 	});
 
@@ -58,6 +67,41 @@ describe('buildReportRequestParams', () => {
 		expect(buildReportRequestParams({ namespace: '', last: '7d', aggregationLevel: 'raw' })).toEqual({
 			namespace: undefined,
 			last: '7d',
+			aggregate: false,
+			granularity: undefined
+		});
+	});
+
+	it('builds params for selected report years', () => {
+		expect(
+			buildReportRequestParams({
+				namespace: 'prod',
+				timeMode: 'yearly',
+				years: [2026, 2025],
+				aggregationLevel: 'yearly',
+				groupBy: 'namespace'
+			})
+		).toEqual({
+			namespace: 'prod',
+			years: [2026, 2025],
+			aggregate: true,
+			granularity: 'yearly',
+			group_by: 'namespace'
+		});
+	});
+
+	it('builds params for custom date ranges', () => {
+		expect(
+			buildReportRequestParams({
+				timeMode: 'custom',
+				start: '2025-01-01',
+				end: '2025-01-31',
+				aggregationLevel: 'raw'
+			})
+		).toEqual({
+			namespace: undefined,
+			start: '2025-01-01',
+			end: '2025-01-31',
 			aggregate: false,
 			granularity: undefined
 		});

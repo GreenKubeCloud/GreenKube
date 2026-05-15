@@ -320,11 +320,12 @@ async def check_kubernetes() -> ServiceHealth:
         async with k8s_client.ApiClient() as api_client:
             version_api = k8s_client.VersionApi(api_client)
             version = await version_api.get_code()
+            git_version = version.git_version if version.git_version.startswith("v") else f"v{version.git_version}"
             latency = (time.monotonic() - start) * 1000
             return ServiceHealth(
                 name=name,
                 status=ServiceStatus.HEALTHY,
-                message=f"Kubernetes API is reachable (v{version.git_version}).",
+                message=f"Kubernetes API is reachable ({git_version}).",
                 latency_ms=round(latency, 1),
                 last_check=datetime.now(timezone.utc),
                 configured=True,

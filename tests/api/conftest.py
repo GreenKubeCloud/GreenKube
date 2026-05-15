@@ -88,9 +88,13 @@ def mock_combined_metrics_repo():
     async def _list_namespaces():
         return await _Base.list_namespaces(repo)
 
+    async def _list_metric_years(namespace=None):
+        return await _Base.list_metric_years(repo, namespace=namespace)
+
     repo.read_combined_metrics_smart = _read_combined_metrics_smart
     repo.read_hourly_metrics = _read_hourly_metrics
     repo.list_namespaces = _list_namespaces
+    repo.list_metric_years = _list_metric_years
     return repo
 
 
