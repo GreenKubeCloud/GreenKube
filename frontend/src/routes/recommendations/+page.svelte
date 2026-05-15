@@ -61,6 +61,7 @@
 
 	$: totalSavingsCO2 = activeRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
 	$: totalSavingsCost = activeRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
+	$: potentialSavingsPeriod = 'per year';
 
 	function switchTab(tab) {
 		activeTab = tab;
@@ -403,10 +404,12 @@
 					<div class="card-compact text-center">
 						<p class="stat-label">Potential CO₂ Savings</p>
 						<p class="stat-value text-2xl text-green-400">{formatCO2(totalSavingsCO2)}</p>
+						<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{potentialSavingsPeriod}</p>
 					</div>
 					<div class="card-compact text-center">
 						<p class="stat-label">Potential Cost Savings</p>
 						<p class="stat-value text-2xl text-blue-400">{formatCost(totalSavingsCost)}</p>
+						<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{potentialSavingsPeriod}</p>
 					</div>
 				</div>
 			{/if}

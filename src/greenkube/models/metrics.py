@@ -118,9 +118,9 @@ class Recommendation(BaseModel):
         description="Recommendation scope: 'pod', 'workload', 'namespace', or 'node'.",
     )
     potential_savings_co2e_grams: Optional[float] = Field(
-        None, description="Estimated CO2e savings in grams if implemented."
+        None, description="Estimated annual CO2e savings in grams if implemented."
     )
-    potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
+    potential_savings_cost: Optional[float] = Field(None, description="Estimated annual cost savings if implemented.")
     current_cpu_request_millicores: Optional[int] = Field(None, description="Current CPU request in millicores.")
     recommended_cpu_request_millicores: Optional[int] = Field(
         None, description="Recommended CPU request in millicores (floored to the configured minimum)."
@@ -145,9 +145,9 @@ class RecommendationRecord(BaseModel):
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
     scope: str = Field("pod", description="Recommendation scope: 'pod', 'workload', 'namespace', or 'node'.")
     status: RecommendationStatus = Field(RecommendationStatus.ACTIVE, description="Lifecycle status.")
-    potential_savings_cost: Optional[float] = Field(None, description="Estimated cost savings if implemented.")
+    potential_savings_cost: Optional[float] = Field(None, description="Estimated annual cost savings if implemented.")
     potential_savings_co2e_grams: Optional[float] = Field(
-        None, description="Estimated CO2e savings in grams if implemented."
+        None, description="Estimated annual CO2e savings in grams if implemented."
     )
     current_cpu_request_millicores: Optional[int] = Field(None, description="Current CPU request in millicores.")
     recommended_cpu_request_millicores: Optional[int] = Field(

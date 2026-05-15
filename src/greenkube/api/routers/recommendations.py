@@ -129,6 +129,7 @@ async def _generate_and_persist_recommendations(
     lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
+    analysis_window_seconds = (end - start).total_seconds()
     metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
 
     # Remove metrics from Kubernetes namespaces that no longer exist so that
@@ -163,6 +164,7 @@ async def _generate_and_persist_recommendations(
         metrics,
         node_infos=node_infos,
         hpa_targets=hpa_targets,
+        analysis_window_seconds=analysis_window_seconds,
     )
 
     update_recommendation_metrics(recommendations)

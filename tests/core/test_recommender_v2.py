@@ -544,6 +544,45 @@ class TestRightsizingMemory:
         assert mem_rec.potential_savings_cost == pytest.approx(50.0)
         assert mem_rec.potential_savings_co2e_grams == pytest.approx(50.0)
 
+    def test_memory_savings_are_annualized_from_analysis_window(self, recommender):
+        """Potential memory savings should be annual projections, not only lookback-window totals."""
+        mib = 1024 * 1024
+        analysis_window_seconds = 7 * 24 * 60 * 60
+        metrics = [
+            _make_metric(
+                pod_name="otel-collector-opentelemetry-collector",
+                namespace="otel",
+                memory_request=256 * mib,
+                memory_usage_bytes=40 * mib,
+                memory_usage_max_bytes=40 * mib,
+                cpu_usage_millicores=500,
+                total_cost=0.001,
+                co2e_grams=1.0,
+                timestamp=_ts(day=1, hour=1),
+                duration_seconds=300,
+            ),
+            _make_metric(
+                pod_name="otel-collector-opentelemetry-collector",
+                namespace="otel",
+                memory_request=256 * mib,
+                memory_usage_bytes=40 * mib,
+                memory_usage_max_bytes=40 * mib,
+                cpu_usage_millicores=500,
+                total_cost=0.001,
+                co2e_grams=1.0,
+                timestamp=_ts(day=1, hour=2),
+                duration_seconds=300,
+            ),
+        ]
+
+        recs = recommender.generate_recommendations(metrics, analysis_window_seconds=analysis_window_seconds)
+        mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
+        savings_ratio = 1 - (mem_rec.recommended_memory_request_bytes / mem_rec.current_memory_request_bytes)
+        annualization_factor = (365 * 24 * 60 * 60) / analysis_window_seconds
+
+        assert mem_rec.potential_savings_cost == pytest.approx(0.002 * annualization_factor * savings_ratio)
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(2.0 * annualization_factor * savings_ratio)
+
 
 # ---------------------------------------------------------------------------
 # Test: AUTOSCALING_CANDIDATE

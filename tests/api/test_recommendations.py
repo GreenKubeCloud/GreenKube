@@ -4,6 +4,9 @@
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+import pytest
+
+from greenkube.core.config import get_config
 from greenkube.models.metrics import RecommendationSavingsSummary
 
 
@@ -43,6 +46,31 @@ class TestRecommendationsEndpoint:
         data = response.json()
         assert len(data) >= 1
         assert any(r["type"] == "ZOMBIE_POD" for r in data)
+
+    def test_recommendation_potential_savings_are_annualized(self, client, mock_combined_metrics_repo):
+        """Potential savings returned by the API should be annual projections from the lookback window."""
+        from greenkube.models.metrics import CombinedMetric
+
+        zombie_metric = CombinedMetric(
+            pod_name="zombie-pod",
+            namespace="default",
+            total_cost=0.05,
+            co2e_grams=0.02,
+            joules=100.0,
+            cpu_request=100,
+            memory_request=128 * 1024 * 1024,
+            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
+            duration_seconds=300,
+        )
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[zombie_metric])
+
+        response = client.get("/api/v1/recommendations")
+
+        assert response.status_code == 200
+        zombie_rec = next(r for r in response.json() if r["type"] == "ZOMBIE_POD")
+        annualization_factor = 365 / get_config().RECOMMENDATION_LOOKBACK_DAYS
+        assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
+        assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(0.02 * annualization_factor)
 
     def test_recommendations_filter_by_namespace(self, client, mock_combined_metrics_repo):
         """Should filter recommendations by namespace."""
