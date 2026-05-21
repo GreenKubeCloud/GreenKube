@@ -1,5 +1,15 @@
 # Prometheus & Grafana Integration
 
+## Dashboard preview
+
+![GreenKube Impact Command Center — Sustainability Score Radar, Footprint & Cost Mix, Impact Ledger, and Action Priorities panels](../assets/grafana-dashboard-top-panel.png)
+
+![CO₂e by Namespace — pie charts breaking down operational and cost emissions per namespace](../assets/grafana-dashboard-by-namespace.png)
+
+![Regional Node Cleanliness — bubble geomap colored by grid carbon intensity per electricity zone](../assets/grafana-dashboard-node-map.png)
+
+---
+
 GreenKube has two distinct Prometheus integrations that serve different purposes.
 
 ## How they relate
@@ -238,25 +248,15 @@ Prometheus instance → copy the UID from the URL.
 | `cluster` | query | `label_values(greenkube_cluster_co2e_grams_total, cluster)` | Filter by cluster name |
 | `namespace` | query | `label_values(greenkube_namespace_co2e_grams_total{cluster=~"$cluster"}, namespace)` | Filter by namespace (multi-select) |
 | `dashboard_window` | custom | `1h`, `6h`, `24h`, `7d` (default), `30d`, `YTD`, `1y` | Reporting window for pre-computed summary panels |
-| `node` | query | `label_values(greenkube_node_info, node)` | Filter by node (multi-select) |
-| `region` | query | `label_values(greenkube_pod_co2e_grams, region)` | Filter by region (multi-select) |
 
 ### Dashboard rows
 
 | Row | Key panels | Notes |
 |---|---|---|
 | **GreenKube Impact Command Center** | Sustainability Score Radar, Footprint & Cost Mix (Scope 2 / Scope 3 / Cloud cost), GreenKube Impact (CO₂e avoided, cost avoided, implemented), Action Priorities (top-3 namespaces & recommendation types) | Always-visible summary; panels respect `$namespace` and `$dashboard_window` filters |
+| **CO₂e by Namespace** | CO₂e by Namespace, Cost by Namespace | Second row, above the regional map |
 | **Regional Node Cleanliness** | Node Region Cleanliness Map (Geomap) | Bubble map colored by grid carbon intensity per electricity zone — uses `greenkube_zone_grid_intensity_gco2_kwh` |
-| **Carbon, Cost & Energy Trends** | CO₂e / Cost / Energy over time, Grid intensity by zone | Timeseries — full dashboard time range |
-| **Sustainability Score Breakdown** | Score by dimension bar gauge, Score over time, Data quality gauge | |
-| **Resource Efficiency** | CPU/Memory efficiency by namespace, worst-efficiency pods | |
-| **Namespace Analysis** | CO₂e / Cost / Energy pie charts, Namespace summary table | |
-| **Top Emitters & Spenders** | Top 15 pods by CO₂e, cost, energy, embodied | |
-| **Node Analysis** | CPU/Memory allocation ratios, embodied emissions, Node inventory | |
-| **Network & Storage I/O** | Top 10 pods — RX / TX / disk read / disk write | |
-| **Pod Stability** | Top restarting pods, restarts by namespace | |
-| **Recommendations & Savings** | Active recommendations, CO₂e & Cost Avoided, by-type breakdown | |
-| **GreenKube Self-Monitoring** | Last collection age, metrics count, estimated ratio, PUE, carbon intensity score | |
+| **Top Emitters & Spenders** | Top 15 Pods — CO₂e, Top 15 Pods — Cost | Pod-level emitters and spenders only |
 
 > **Required Grafana plugin:** The Command Center row uses [Business Charts (volkovlabs-echarts-panel)](https://grafana.com/grafana/plugins/volkovlabs-echarts-panel/) v7.2.2+. Install it before importing the dashboard, otherwise the radar, footprint, impact, and action-priority panels will not render.
 
@@ -266,10 +266,9 @@ GreenKube's dashboard targets **Grafana 12**. Several non-obvious choices were r
 
 | Issue | Root cause | Solution |
 |---|---|---|
-| `instant: true` returns empty frames | Grafana 12 changed how the Prometheus proxy handles instant queries | All targets use `"range": true, "instant": false` |
-| Snapshot panels show "No data" when dashboard time range > available history | Range queries over months return no data when GreenKube has only been running for hours | Snapshot panels (stat / gauge / bargauge / piechart / table) have `"timeFrom": "5m"` — they always query the last 5 minutes regardless of the dashboard time-range selector |
+| `instant: true` returns empty frames | Grafana 12 changed how the Prometheus proxy handles instant queries | Range queries are the default; the Action Priorities panel is the only instant-query exception so `topk(3)` returns a compact sorted set |
+| Snapshot panels show "No data" when dashboard time range > available history | Range queries over months return no data when GreenKube has only been running for hours | Use a dashboard time range that overlaps available GreenKube scrape history |
 | `increase()` panels must accumulate over the full selected window | `timeFrom: "5m"` would collapse the window | `CO₂e Avoided` and `Cost Avoided` panels intentionally have **no** `timeFrom` override |
-| Cluster-level timeseries show multiple overlapping lines after pod rollouts | Old pod instances remain in Prometheus TSDB during the scrape staleness window | Cluster timeseries use `max by (cluster)(...)` to deduplicate |
 | `${DS_PROMETHEUS}` not resolved | `/api/dashboards/db` skips template-variable resolution | Import via `/api/dashboards/import` with `inputs` array |
 
 ### Rebuilding the dashboard JSON
@@ -311,12 +310,6 @@ EOF
 ### Datasource shows "not set"
 
 The dashboard was imported via `/api/dashboards/db`. Re-import using the Python script above.
-
-### Trend panels show "No data" with a large time range
-
-Timeseries panels show data only for the period GreenKube has been running.
-Snapshot panels (stat / gauge / bargauge / piechart / table) are unaffected — they always
-display the current value via the `"timeFrom": "5m"` panel override.
 
 ### Recommendations panels show "No data" when a specific namespace is selected
 
