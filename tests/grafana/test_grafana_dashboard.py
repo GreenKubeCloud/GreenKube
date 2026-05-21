@@ -51,45 +51,51 @@ class TestGrafanaDashboardFile:
 
     def test_dashboard_has_carbon_panels(self):
         titles = _all_panel_titles()
-        assert any("CO2" in t or "Carbon" in t for t in titles), "No CO2/Carbon panel found"
+        assert any("CO₂" in t or "CO2" in t or "Carbon" in t for t in titles), "No CO2/Carbon panel found"
 
     def test_dashboard_has_cost_panels(self):
         titles = _all_panel_titles()
         assert any("Cost" in t for t in titles), "No Cost panel found"
 
-    def test_dashboard_has_energy_panels(self):
+    def test_dashboard_keeps_requested_panel_set(self):
         titles = _all_panel_titles()
-        assert any("Energy" in t or "Joules" in t or "kWh" in t for t in titles), "No Energy panel found"
+        assert titles == [
+            "Sustainability Score Radar",
+            "Footprint & Cost Mix",
+            "GreenKube Impact",
+            "Action Priorities",
+            "CO₂e by Namespace",
+            "Cost by Namespace",
+            "Node Region Cleanliness Map",
+            "Top 15 Pods — CO₂e",
+            "Top 15 Pods — Cost",
+        ]
 
-    def test_dashboard_has_recommendation_panels(self):
-        titles = _all_panel_titles()
-        assert any("Recommendation" in t or "Savings" in t for t in titles), "No Recommendation panel found"
-
-    def test_dashboard_has_cpu_panels(self):
-        titles = _all_panel_titles()
-        assert any("CPU" in t for t in titles), "No CPU panel found"
-
-    def test_dashboard_has_memory_panels(self):
-        titles = _all_panel_titles()
-        assert any("Memory" in t for t in titles), "No Memory panel found"
+    def test_command_center_retains_recommendation_metrics(self):
+        dashboard = _load_dashboard()
+        assert any(
+            "greenkube_recommendations" in target.get("expr", "")
+            for panel in _all_panels(dashboard)
+            for target in panel.get("targets", [])
+        )
 
     def test_dashboard_has_node_panels(self):
         titles = _all_panel_titles()
         assert any("Node" in t for t in titles), "No Node panel found"
 
-    def test_dashboard_has_network_panels(self):
-        titles = _all_panel_titles()
-        assert any("Network" in t for t in titles), "No Network panel found"
-
     def test_dashboard_has_grid_intensity_panels(self):
-        titles = _all_panel_titles()
-        assert any("Grid" in t or "Intensity" in t for t in titles), "No Grid Intensity panel found"
+        dashboard = _load_dashboard()
+        assert any(
+            "greenkube_zone_grid_intensity_gco2_kwh" in target.get("expr", "")
+            for panel in _all_panels(dashboard)
+            for target in panel.get("targets", [])
+        ), "No Grid Intensity panel found"
 
-    def test_dashboard_minimum_panel_count(self):
-        """A comprehensive FinGreenOps dashboard should have at least 15 panels."""
+    def test_dashboard_panel_count_matches_reduced_scope(self):
+        """The dashboard should contain only the requested non-row panels."""
         dashboard = _load_dashboard()
         panels = _all_panels(dashboard)
-        assert len(panels) >= 15, f"Dashboard has only {len(panels)} panels, expected >= 15"
+        assert len(panels) == 9
 
     def test_all_panels_have_targets(self):
         """Every non-row panel must have at least one target (query)."""
@@ -113,10 +119,15 @@ class TestGrafanaDashboardFile:
                 )
 
     def test_dashboard_has_rows_for_organization(self):
-        """Dashboard should use row panels to organize sections."""
+        """Dashboard should use only the requested section rows, in order."""
         dashboard = _load_dashboard()
         row_panels = [p for p in dashboard.get("panels", []) if p.get("type") == "row"]
-        assert len(row_panels) >= 4, f"Dashboard has only {len(row_panels)} rows, expected >= 4"
+        assert [row.get("title") for row in row_panels] == [
+            "GreenKube Impact Command Center",
+            "CO₂e by Namespace",
+            "Regional Node Cleanliness",
+            "Top Emitters & Spenders",
+        ]
 
     def test_dashboard_input_requires_prometheus_datasource(self):
         """Dashboard __inputs should declare a Prometheus datasource for import."""
@@ -139,17 +150,12 @@ class TestGrafanaDashboardFile:
             f"Namespace variable default value should be '$__all', got '{current.get('value')}'"
         )
 
-    def test_node_variable_defaults_to_all(self):
-        """Node variable must default to 'All' so all nodes are visible on first load."""
+    def test_unused_variables_are_removed(self):
+        """Node and region variables are no longer used by the reduced dashboard."""
         dashboard = _load_dashboard()
-        node_var = _find_template_variable(dashboard, "node")
-        assert node_var is not None, "Node template variable not found"
-        assert node_var.get("includeAll") is True, "Node variable must have includeAll=true"
-        current = node_var.get("current", {})
-        assert current.get("text") == "All", f"Node variable default should be 'All', got '{current.get('text')}'"
-        assert current.get("value") == "$__all", (
-            f"Node variable default value should be '$__all', got '{current.get('value')}'"
-        )
+        var_names = [v["name"] for v in dashboard.get("templating", {}).get("list", [])]
+        assert "node" not in var_names
+        assert "region" not in var_names
 
 
 def _load_dashboard() -> dict:
