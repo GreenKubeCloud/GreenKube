@@ -60,6 +60,7 @@ def recommend(
 
     async def _recommend_async():
         processor = None
+        analysis_window_seconds = None
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -75,6 +76,7 @@ def recommend(
                 lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
                 end = datetime.now(timezone.utc)
                 start = end - timedelta(days=lookback_days)
+                analysis_window_seconds = (end - start).total_seconds()
                 combined_data = await repository.read_combined_metrics(start_time=start, end_time=end)
 
             if not combined_data:
@@ -114,6 +116,7 @@ def recommend(
                 combined_data,
                 node_infos=node_infos,
                 hpa_targets=hpa_targets,
+                analysis_window_seconds=analysis_window_seconds,
             )
 
             logger.info("Found %d recommendations.", len(recommendations))

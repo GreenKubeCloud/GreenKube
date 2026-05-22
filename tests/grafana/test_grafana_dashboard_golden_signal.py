@@ -1,10 +1,5 @@
 # tests/test_grafana_dashboard_golden_signal.py
-"""
-Tests for Grafana dashboard ticket #182:
-  - cluster and region template variables
-  - Sustainability Golden Signal panels
-  - State Timeline for low-intensity windows
-"""
+"""Tests for the reduced Grafana dashboard scope and shared cluster variable."""
 
 import json
 import os
@@ -59,53 +54,58 @@ class TestClusterTemplateVariable:
         assert current.get("value") == "$__all"
 
 
-class TestRegionTemplateVariable:
-    """Dashboard must have a 'region' template variable."""
+class TestReducedDashboardVariables:
+    """Dashboard should keep only variables used by the reduced panel set."""
 
-    def test_region_variable_exists(self):
+    def test_unused_node_and_region_variables_are_removed(self):
         dashboard = _load_dashboard()
-        var = _find_template_variable(dashboard, "region")
-        assert var is not None, "Dashboard missing 'region' template variable"
+        variable_names = {variable["name"] for variable in dashboard.get("templating", {}).get("list", [])}
 
-    def test_region_variable_defaults_to_all(self):
-        dashboard = _load_dashboard()
-        var = _find_template_variable(dashboard, "region")
-        assert var is not None
-        assert var.get("includeAll") is True
-        current = var.get("current", {})
-        assert current.get("text") == "All"
-        assert current.get("value") == "$__all"
+        assert variable_names == {"DS_PROMETHEUS", "cluster", "namespace", "dashboard_window"}
 
 
-class TestSustainabilityGoldenSignalPanels:
-    """Dashboard must have the sustainability golden signal panels."""
+class TestReducedGrafanaDashboardScope:
+    """Dashboard must contain the requested sections and omit deleted ones."""
 
-    def test_has_carbon_intensity_score_panel(self):
-        titles = _all_panel_titles()
-        assert any("Carbon Intensity Score" in t for t in titles), (
-            f"No 'Carbon Intensity Score' panel found. Titles: {titles}"
-        )
-
-    def test_carbon_intensity_score_uses_correct_metric(self):
-        dashboard = _load_dashboard()
-        panels = _all_panels(dashboard)
-        score_panel = next((p for p in panels if "Carbon Intensity Score" in p.get("title", "")), None)
-        assert score_panel is not None
-        exprs = [t.get("expr", "") for t in score_panel.get("targets", [])]
-        assert any("greenkube_carbon_intensity_score" in e for e in exprs)
-
-    def test_has_low_intensity_windows_panel(self):
-        titles = _all_panel_titles()
-        assert any("Intensity" in t and ("Window" in t or "Timeline" in t or "Zone" in t) for t in titles), (
-            f"No low-intensity windows/timeline panel found. Titles: {titles}"
-        )
-
-    def test_has_sustainability_golden_signal_row(self):
+    def test_kept_rows_match_requested_scope(self):
         dashboard = _load_dashboard()
         rows = [p for p in dashboard.get("panels", []) if p.get("type") == "row"]
-        row_titles = [r.get("title", "") for r in rows]
-        assert any("Sustainability" in t or "Golden Signal" in t for t in row_titles), (
-            f"No sustainability golden signal row found. Rows: {row_titles}"
+
+        assert [row.get("title") for row in rows] == [
+            "GreenKube Impact Command Center",
+            "CO₂e and Cost by Namespace",
+            "Regional Node Cleanliness",
+            "Top Emitters & Spenders",
+        ]
+
+    def test_removed_detail_rows_are_absent(self):
+        dashboard = _load_dashboard()
+        row_titles = {p.get("title", "") for p in dashboard.get("panels", []) if p.get("type") == "row"}
+
+        assert not row_titles.intersection(
+            {
+                "Carbon, Cost & Energy Trends",
+                "Sustainability Score Breakdown",
+                "Resource Efficiency",
+                "Node Analysis",
+                "Network & Storage I/O",
+                "Pod Stability",
+                "Recommendations & Savings",
+                "GreenKube Self-Monitoring",
+            }
+        )
+
+    def test_removed_detail_panels_are_absent(self):
+        titles = set(_all_panel_titles())
+
+        assert not titles.intersection(
+            {
+                "Energy by Namespace (kWh)",
+                "Namespace Summary",
+                "Top 15 Pods — Energy",
+                "Top 15 Pods — Embodied CO₂e (Scope 3)",
+                "Carbon Intensity Score (avg)",
+            }
         )
 
     def test_sustainability_score_panel_exists(self):
@@ -116,8 +116,8 @@ class TestSustainabilityGoldenSignalPanels:
         )
 
 
-class TestDashboardPanelsUseClusterRegion:
-    """Key panels should filter by $cluster and $region template variables."""
+class TestDashboardPanelsUseCluster:
+    """Key panels should filter by the shared $cluster template variable."""
 
     def test_overview_panels_filter_by_cluster(self):
         """At least one cluster-level panel should reference $cluster."""

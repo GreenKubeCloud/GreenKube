@@ -3,7 +3,10 @@
 
 import csv
 import io
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
+
+from greenkube.models.metrics import CombinedMetric
 
 
 class TestReportSummaryEndpoint:
@@ -89,6 +92,56 @@ class TestReportSummaryEndpoint:
         assert start.second == 0
         assert start.tzinfo is not None
 
+    def test_summary_supports_custom_date_range(self, client, mock_combined_metrics_repo):
+        """Custom date ranges should use explicit UTC day boundaries."""
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/report/summary?start=2025-01-02&end=2025-01-05")
+
+        assert response.status_code == 200
+        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        assert kwargs["start_time"] == datetime(2025, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+        assert kwargs["end_time"] == datetime(2025, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+    def test_summary_rejects_partial_custom_date_range(self, client):
+        """Custom report ranges require both start and end."""
+        response = client.get("/api/v1/report/summary?start=2025-01-02")
+
+        assert response.status_code == 400
+
+    def test_summary_supports_selected_years(self, client, mock_combined_metrics_repo):
+        """Selected years should be read as independent calendar-year windows."""
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/report/summary?years=2024&years=2026")
+
+        assert response.status_code == 200
+        assert mock_combined_metrics_repo.read_combined_metrics_smart.await_count == 2
+        first_call = mock_combined_metrics_repo.read_combined_metrics_smart.await_args_list[0].kwargs
+        second_call = mock_combined_metrics_repo.read_combined_metrics_smart.await_args_list[1].kwargs
+        assert first_call["start_time"] == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        assert first_call["end_time"] == datetime(2024, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+        assert second_call["start_time"] == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_summary_invalid_group_by_returns_400(self, client):
+        """Only supported report grouping dimensions are accepted."""
+        response = client.get("/api/v1/report/summary?aggregate=true&group_by=node")
+
+        assert response.status_code == 400
+
+
+class TestReportYearsEndpoint:
+    """Tests for GET /api/v1/report/years."""
+
+    def test_years_returns_available_metric_years(self, client, mock_combined_metrics_repo):
+        mock_combined_metrics_repo.list_metric_years = AsyncMock(return_value=[2026, 2025])
+
+        response = client.get("/api/v1/report/years?namespace=default")
+
+        assert response.status_code == 200
+        assert response.json() == [2026, 2025]
+        assert mock_combined_metrics_repo.list_metric_years.await_args.kwargs == {"namespace": "default"}
+
 
 class TestReportExportEndpoint:
     """Tests for GET /api/v1/report/export."""
@@ -168,6 +221,43 @@ class TestReportExportEndpoint:
         data = response.json()
         assert isinstance(data, list)
         assert len(data) >= 1
+
+    def test_export_with_namespace_grouping(self, client, mock_combined_metrics_repo):
+        """Namespace grouping should collapse pods into one row per namespace and period."""
+        timestamp = datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc)
+        metrics = [
+            CombinedMetric(
+                pod_name="api-a",
+                namespace="default",
+                timestamp=timestamp,
+                duration_seconds=300,
+                joules=100,
+                co2e_grams=10,
+                total_cost=1,
+                embodied_co2e_grams=2,
+            ),
+            CombinedMetric(
+                pod_name="api-b",
+                namespace="default",
+                timestamp=timestamp,
+                duration_seconds=300,
+                joules=200,
+                co2e_grams=20,
+                total_cost=2,
+                embodied_co2e_grams=4,
+            ),
+        ]
+        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=metrics)
+
+        response = client.get("/api/v1/report/export?format=json&aggregate=true&granularity=daily&group_by=namespace")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["namespace"] == "default"
+        assert data[0]["pod_name"] == ""
+        assert data[0]["co2e_grams"] == 30
+        assert data[0]["embodied_co2e_grams"] == 6
 
     def test_export_empty_csv(self, client):
         """Empty dataset should return an empty CSV (no rows, no header)."""

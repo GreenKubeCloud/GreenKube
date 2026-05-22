@@ -16,7 +16,7 @@ def _top_level_panel(title: str) -> dict:
 
 def _panel(title: str) -> dict:
     dashboard = _load_dashboard()
-    return next(panel for panel in dashboard["panels"] if panel.get("title") == title)
+    return next(panel for panel in dashboard["panels"] if panel.get("title") == title and panel.get("type") != "row")
 
 
 def _panel_by_id(panel_id: int) -> dict:
@@ -57,6 +57,47 @@ def test_first_view_promotes_greenkube_value_signals():
     assert "Footprint & Cost Mix" in first_view_titles
     assert "GreenKube Impact" in first_view_titles
     assert "Action Priorities" in first_view_titles
+
+
+def test_reduced_dashboard_section_order():
+    dashboard = _load_dashboard()
+    rows = [panel for panel in dashboard["panels"] if panel.get("type") == "row"]
+
+    assert [row["title"] for row in rows] == [
+        "GreenKube Impact Command Center",
+        "CO₂e and Cost by Namespace",
+        "Regional Node Cleanliness",
+        "Top Emitters & Spenders",
+    ]
+    assert [row["gridPos"]["y"] for row in rows] == [0, 13, 22, 32]
+
+
+def test_namespace_charts_are_second_section_above_map():
+    co2_panel = _panel("CO₂e by Namespace")
+    cost_panel = _panel("Cost by Namespace")
+    map_row = _top_level_panel("Regional Node Cleanliness")
+
+    assert co2_panel["type"] == "piechart"
+    assert cost_panel["type"] == "piechart"
+    assert co2_panel["gridPos"] == {"x": 0, "y": 14, "w": 12, "h": 8}
+    assert cost_panel["gridPos"] == {"x": 12, "y": 14, "w": 12, "h": 8}
+    assert co2_panel["gridPos"]["y"] < map_row["gridPos"]["y"]
+    assert "greenkube_namespace_co2e_grams_total" in co2_panel["targets"][0]["expr"]
+    assert "greenkube_namespace_cost_dollars_total" in cost_panel["targets"][0]["expr"]
+
+
+def test_top_emitters_keeps_only_co2e_and_cost_charts():
+    dashboard = _load_dashboard()
+    row = _top_level_panel("Top Emitters & Spenders")
+    top_panel_titles = [
+        panel["title"]
+        for panel in dashboard["panels"]
+        if panel.get("type") != "row" and panel.get("gridPos", {}).get("y") == row["gridPos"]["y"] + 1
+    ]
+
+    assert top_panel_titles == ["Top 15 Pods — CO₂e", "Top 15 Pods — Cost"]
+    assert _panel("Top 15 Pods — CO₂e")["gridPos"] == {"x": 0, "y": 33, "w": 12, "h": 10}
+    assert _panel("Top 15 Pods — Cost")["gridPos"] == {"x": 12, "y": 33, "w": 12, "h": 10}
 
 
 def test_top_left_panel_is_sustainability_radar_chart():

@@ -38,6 +38,8 @@ jobs:
           load: true
           tags: greenkube/greenkube:scan
           pull: true
+          build-args: |
+            APT_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

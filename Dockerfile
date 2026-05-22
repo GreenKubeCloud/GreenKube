@@ -1,9 +1,8 @@
 # --- STAGE 1: Frontend Build ---
 # Builds the SvelteKit SPA into static files.
-# The output is pure HTML/CSS/JS — architecture-independent.
-# We pin to linux/amd64 so that multi-platform builds never run this
-# stage under slow QEMU emulation.
-FROM --platform=linux/amd64 node:22-alpine AS frontend-builder
+# The output is pure HTML/CSS/JS — architecture-independent, so build it
+# on the native build platform instead of running npm through emulation.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
 
 WORKDIR /frontend
 
@@ -22,7 +21,8 @@ FROM python:3.14.3-slim-bookworm AS builder
 WORKDIR /app
 
 # Upgrade all system packages to pick up security patches
-RUN apt-get update \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update -o Acquire::Retries=5 -o APT::Update::Error-Mode=any \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,11 +47,16 @@ RUN pip install --no-cache-dir . --prefix=/install \
 # This stage creates the final, lean image.
 # SECURITY: All system packages are upgraded, non-root user with high UID,
 # and no shell for the service account.
+ARG APT_CACHE_BUST=manual
 FROM python:3.14.3-slim-bookworm
+
+ARG APT_CACHE_BUST
 
 # Upgrade all system packages in the final image to fix CVEs
 # (libssl3, zlib1g, ncurses, systemd, libc, etc.)
-RUN apt-get update \
+RUN echo "apt-cache-bust=${APT_CACHE_BUST}" \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update -o Acquire::Retries=5 -o APT::Update::Error-Mode=any \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*

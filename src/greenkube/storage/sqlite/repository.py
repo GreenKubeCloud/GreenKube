@@ -642,6 +642,38 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except sqlite3.Error:
             return []
 
+    async def list_metric_years(self, namespace: Optional[str] = None) -> List[int]:
+        """Return distinct metric years from raw and hourly SQLite tables."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                raw_where = ['"timestamp" IS NOT NULL']
+                hourly_where = ["hour_bucket IS NOT NULL"]
+                params: list[str] = []
+                if namespace:
+                    raw_where.append("namespace = ?")
+                    hourly_where.append("namespace = ?")
+                    params.extend([namespace, namespace])
+
+                query = f"""
+                    SELECT DISTINCT year FROM (
+                        SELECT CAST(strftime('%Y', "timestamp") AS INTEGER) AS year
+                        FROM combined_metrics
+                        WHERE {" AND ".join(raw_where)}
+                        UNION
+                        SELECT CAST(strftime('%Y', hour_bucket) AS INTEGER) AS year
+                        FROM combined_metrics_hourly
+                        WHERE {" AND ".join(hourly_where)}
+                    )
+                    WHERE year IS NOT NULL
+                    ORDER BY year DESC
+                """
+                async with conn.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [int(row["year"]) for row in rows]
+        except sqlite3.Error:
+            return []
+
     async def aggregate_by_namespace(
         self,
         start_time: datetime,

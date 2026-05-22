@@ -10,13 +10,15 @@ from typing import Iterable, List, Tuple
 from ..models.metrics import CombinedMetric
 
 
-def _key_for_metric(metric: CombinedMetric) -> Tuple[str, str, str]:
-    """Return a grouping key (namespace,pod,period).
+def _key_for_metric(metric: CombinedMetric, group_by: str = "pod") -> Tuple[str, str, str]:
+    """Return a grouping key for the requested report dimension.
 
     Period may be None for 'now' reports; use an explicit marker in that
     case so aggregation still groups by pod for a single period.
     """
     period = metric.period or "__now__"
+    if group_by == "namespace":
+        return (metric.namespace, "", period)
     return (metric.namespace, metric.pod_name, period)
 
 
@@ -27,8 +29,9 @@ def aggregate_metrics(
     weekly: bool = False,
     monthly: bool = False,
     yearly: bool = False,
+    group_by: str = "pod",
 ) -> List[CombinedMetric]:
-    """Aggregate a sequence of CombinedMetric into one per (namespace,pod,period).
+    """Aggregate a sequence of CombinedMetric into one row per requested group.
 
     Aggregation rules:
     - Joules (energy) are summed.
@@ -41,6 +44,9 @@ def aggregate_metrics(
 
     Returns a new list of CombinedMetric objects.
     """
+    if group_by not in {"pod", "namespace"}:
+        raise ValueError("group_by must be either 'pod' or 'namespace'.")
+
     # First, assign the correct period string to each metric based on its
     # timestamp and the requested grouping.
     # We work on copies to avoid mutating the caller's input objects.
@@ -63,7 +69,7 @@ def aggregate_metrics(
 
     groups = defaultdict(list)
     for m in metrics_list:
-        groups[_key_for_metric(m)].append(m)
+        groups[_key_for_metric(m, group_by=group_by)].append(m)
 
     result: List[CombinedMetric] = []
     for (namespace, pod, period), items in groups.items():

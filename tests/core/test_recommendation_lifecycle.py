@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from greenkube.core.recommendation_realization import refresh_applied_recommendation
 from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
@@ -180,6 +181,78 @@ class TestSavingsSummary:
         assert summary.total_cost_saved == 0.0
         assert summary.applied_count == 0
         assert summary.namespace_breakdown == []
+
+
+# ---------------------------------------------------------------------------
+# Applied recommendation refresh
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedRecommendationRefresh:
+    """Tests for keeping applied recommendations aligned with later observations."""
+
+    def test_cpu_rightsizing_refresh_updates_realized_savings_from_current_request(self):
+        """If a 500m -> 200m applied recommendation drifts to 400m, only partial savings remain."""
+        applied = RecommendationRecord(
+            id=1,
+            pod_name="api",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Reduce CPU",
+            status=RecommendationStatus.APPLIED,
+            current_cpu_request_millicores=500,
+            recommended_cpu_request_millicores=200,
+            actual_cpu_request_millicores=200,
+            potential_savings_co2e_grams=300.0,
+            potential_savings_cost=30.0,
+            carbon_saved_co2e_grams=300.0,
+            cost_saved=30.0,
+            applied_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        observed = RecommendationRecord(
+            pod_name="api",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Still oversized",
+            current_cpu_request_millicores=400,
+            recommended_cpu_request_millicores=200,
+        )
+
+        refreshed = refresh_applied_recommendation(applied, observed)
+
+        assert refreshed.status == RecommendationStatus.APPLIED
+        assert refreshed.applied_at == applied.applied_at
+        assert refreshed.actual_cpu_request_millicores == 400
+        assert refreshed.carbon_saved_co2e_grams == pytest.approx(100.0)
+        assert refreshed.cost_saved == pytest.approx(10.0)
+
+    def test_non_resource_refresh_stops_savings_when_issue_reappears(self):
+        """If an applied non-resource recommendation is generated again, it is no longer saving."""
+        applied = RecommendationRecord(
+            id=2,
+            pod_name="zombie",
+            namespace="prod",
+            type=RecommendationType.ZOMBIE_POD,
+            description="Delete zombie pod",
+            status=RecommendationStatus.APPLIED,
+            potential_savings_co2e_grams=50.0,
+            potential_savings_cost=5.0,
+            carbon_saved_co2e_grams=50.0,
+            cost_saved=5.0,
+            applied_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        observed = RecommendationRecord(
+            pod_name="zombie",
+            namespace="prod",
+            type=RecommendationType.ZOMBIE_POD,
+            description="Zombie pod still exists",
+        )
+
+        refreshed = refresh_applied_recommendation(applied, observed)
+
+        assert refreshed.status == RecommendationStatus.APPLIED
+        assert refreshed.carbon_saved_co2e_grams == 0.0
+        assert refreshed.cost_saved == 0.0
 
     def test_savings_summary_with_data(self):
         summary = RecommendationSavingsSummary(

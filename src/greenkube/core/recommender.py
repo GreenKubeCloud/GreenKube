@@ -21,6 +21,7 @@ from greenkube.models.metrics import CombinedMetric, Recommendation, Recommendat
 LOG = logging.getLogger(__name__)
 
 DEPLOYMENT_POD_NAME_RE = re.compile(r"^(?P<deployment>.+)-[a-z0-9]{8,10}-[a-z0-9]{5}$")
+SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
 
 class Recommender:
@@ -58,6 +59,7 @@ class Recommender:
         metrics: List[CombinedMetric],
         node_infos: Optional[List] = None,
         hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
+        analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Generates all recommendation types from metrics.
 
@@ -67,6 +69,9 @@ class Recommender:
             hpa_targets: Optional set of (namespace, kind, name) tuples for workloads
                          already governed by an HPA. Autoscaling recommendations are
                          skipped for these workloads.
+            analysis_window_seconds: Optional duration represented by the metrics.
+                                     When provided, potential savings are projected
+                                     to yearly values from this analysis window.
 
         Returns:
             A deduplicated list of Recommendation objects.
@@ -77,13 +82,13 @@ class Recommender:
         target_series = self._group_by_recommendation_target(metrics)
 
         recs: List[Recommendation] = []
-        recs.extend(self._analyze_zombies(target_series))
-        recs.extend(self._analyze_cpu_rightsizing(target_series))
-        recs.extend(self._analyze_memory_rightsizing(target_series))
+        recs.extend(self._analyze_zombies(target_series, analysis_window_seconds))
+        recs.extend(self._analyze_cpu_rightsizing(target_series, analysis_window_seconds))
+        recs.extend(self._analyze_memory_rightsizing(target_series, analysis_window_seconds))
         recs.extend(self._analyze_autoscaling(target_series, hpa_targets=hpa_targets))
         recs.extend(self._analyze_off_peak(target_series))
-        recs.extend(self._analyze_idle_namespaces(metrics))
-        recs.extend(self._analyze_carbon_aware(metrics, target_series))
+        recs.extend(self._analyze_idle_namespaces(metrics, analysis_window_seconds))
+        recs.extend(self._analyze_carbon_aware(metrics, target_series, analysis_window_seconds))
         recs.extend(self._analyze_nodes(metrics, node_infos))
 
         deduped = self._deduplicate(recs)
@@ -198,10 +203,35 @@ class Recommender:
 
         return weighted_total / sample_total, max(observed_max_values), average_points
 
+    @staticmethod
+    def _latest_request_value(series: List[CombinedMetric], request_attr: str) -> int:
+        """Returns the latest observed resource request, falling back to the maximum when timestamps are absent."""
+        timestamped = [metric for metric in series if metric.timestamp is not None]
+        if not timestamped:
+            return max((getattr(metric, request_attr) or 0) for metric in series)
+
+        latest_timestamp = max(metric.timestamp for metric in timestamped)
+        latest_metrics = [metric for metric in timestamped if metric.timestamp == latest_timestamp]
+        return max((getattr(metric, request_attr) or 0) for metric in latest_metrics)
+
     def _balanced_rightsizing_target(self, avg_usage: float, observed_max: float, p95_usage: float) -> int:
         """Calculates a rightsizing target that balances steady-state and peak demand."""
         balanced_peak = (avg_usage + observed_max) / 2.0
         return max(int(max(p95_usage, balanced_peak) * self.rightsizing_headroom), 1)
+
+    @staticmethod
+    def _annualized_window_total(total_value: float, analysis_window_seconds: Optional[float]) -> float:
+        """Project a measured window total to a yearly total when a window is known."""
+        if analysis_window_seconds is None or analysis_window_seconds <= 0:
+            return total_value
+        return total_value * (SECONDS_PER_YEAR / analysis_window_seconds)
+
+    @staticmethod
+    def _resource_savings_ratio(current_value: int, recommended_value: int) -> float | None:
+        """Returns the proportional request reduction, or None if no reduction exists."""
+        if current_value <= 0 or recommended_value >= current_value:
+            return None
+        return 1.0 - (recommended_value / current_value)
 
     @staticmethod
     def _deduplicate(recs: List[Recommendation]) -> List[Recommendation]:
@@ -266,6 +296,7 @@ class Recommender:
     def _analyze_zombies(
         self,
         target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+        analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Identifies targets with cost but near-zero energy consumption."""
         recs = []
@@ -278,6 +309,8 @@ class Recommender:
             }
             if agg["total_cost"] > self.zombie_cost_threshold and agg["joules"] < self.zombie_energy_threshold:
                 target_label = self._target_label(target_kind, target_name)
+                annual_cost = self._annualized_window_total(agg["total_cost"], analysis_window_seconds)
+                annual_co2e = self._annualized_window_total(agg["co2e_grams"], analysis_window_seconds)
                 recs.append(
                     Recommendation(
                         pod_name=target_name,
@@ -294,8 +327,8 @@ class Recommender:
                             f"This may be an idle or 'zombie' pod."
                         ),
                         priority="high",
-                        potential_savings_cost=agg["total_cost"],
-                        potential_savings_co2e_grams=agg["co2e_grams"],
+                        potential_savings_cost=annual_cost,
+                        potential_savings_co2e_grams=annual_co2e,
                     )
                 )
         return recs
@@ -307,12 +340,13 @@ class Recommender:
     def _analyze_cpu_rightsizing(
         self,
         target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+        analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Identifies targets with CPU requests much larger than actual usage."""
         recs = []
 
         for (ns, target_kind, target_name), series in target_series.items():
-            cpu_request = max((m.cpu_request or 0) for m in series)
+            cpu_request = self._latest_request_value(series, "cpu_request")
             if cpu_request == 0:
                 continue
 
@@ -328,12 +362,32 @@ class Recommender:
 
             if usage_ratio < self.rightsizing_cpu_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                raw_recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                recommended = max(raw_recommended, self.min_cpu_millicores)
+                savings_ratio = self._resource_savings_ratio(cpu_request, recommended)
+                if savings_ratio is None:
+                    LOG.debug(
+                        "Skipping CPU rightsizing for %s/%s: final recommendation %sm is not below current %sm.",
+                        ns,
+                        target_name,
+                        recommended,
+                        cpu_request,
+                    )
+                    continue
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
-                savings_ratio = max(0, 1.0 - (recommended / cpu_request))
+                annual_cost = self._annualized_window_total(total_cost, analysis_window_seconds)
+                annual_co2 = self._annualized_window_total(total_co2, analysis_window_seconds)
                 target_label = self._target_label(target_kind, target_name)
+                floor_description = ""
+                floor_reason = ""
+                if recommended != raw_recommended:
+                    floor_description = f" (Floored to minimum: {self.min_cpu_millicores}m CPU.)"
+                    floor_reason = (
+                        f" Recommended value was below the minimum of {self.min_cpu_millicores}m; "
+                        "floored to avoid impractically small requests."
+                    )
 
                 recs.append(
                     Recommendation(
@@ -345,16 +399,18 @@ class Recommender:
                             f"{target_label} uses avg {avg_usage:.0f}m and max {observed_max:.0f}m of "
                             f"{cpu_request}m CPU "
                             f"requested ({usage_ratio:.0%}). Recommend reducing to {recommended}m."
+                            f"{floor_description}"
                         ),
                         reason=(
                             f"Average CPU usage is {usage_ratio:.0%} of the request. "
                             f"P95 usage is {p95:.0f}m and observed max is {observed_max:.0f}m."
+                            f"{floor_reason}"
                         ),
                         priority="medium",
                         current_cpu_request_millicores=cpu_request,
                         recommended_cpu_request_millicores=recommended,
-                        potential_savings_cost=total_cost * savings_ratio,
-                        potential_savings_co2e_grams=total_co2 * savings_ratio,
+                        potential_savings_cost=annual_cost * savings_ratio,
+                        potential_savings_co2e_grams=annual_co2 * savings_ratio,
                     )
                 )
         return recs
@@ -421,13 +477,15 @@ class Recommender:
     # ------------------------------------------------------------------
 
     def _analyze_memory_rightsizing(
-        self, target_series: Dict[Tuple[str, str, str], List[CombinedMetric]]
+        self,
+        target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+        analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Identifies targets with memory requests much larger than actual usage."""
         recs = []
 
         for (ns, target_kind, target_name), series in target_series.items():
-            mem_request = max((m.memory_request or 0) for m in series)
+            mem_request = self._latest_request_value(series, "memory_request")
             if mem_request == 0:
                 continue
 
@@ -443,12 +501,33 @@ class Recommender:
 
             if usage_ratio < self.rightsizing_memory_threshold:
                 p95 = self._percentile(usages, 95)
-                recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                raw_recommended = self._balanced_rightsizing_target(avg_usage, observed_max, p95)
+                recommended = max(raw_recommended, self.min_memory_bytes)
+                savings_ratio = self._resource_savings_ratio(mem_request, recommended)
+                if savings_ratio is None:
+                    LOG.debug(
+                        "Skipping memory rightsizing for %s/%s: final %s bytes is not below current %s bytes.",
+                        ns,
+                        target_name,
+                        recommended,
+                        mem_request,
+                    )
+                    continue
 
                 total_cost = sum(m.total_cost for m in series)
                 total_co2 = sum(m.co2e_grams for m in series)
-                savings_ratio = max(0, 1.0 - (recommended / mem_request))
+                annual_cost = self._annualized_window_total(total_cost, analysis_window_seconds)
+                annual_co2 = self._annualized_window_total(total_co2, analysis_window_seconds)
                 target_label = self._target_label(target_kind, target_name)
+                floor_description = ""
+                floor_reason = ""
+                if recommended != raw_recommended:
+                    min_memory_mib = self.min_memory_bytes // (1024 * 1024)
+                    floor_description = f" (Floored to minimum: {min_memory_mib}MiB memory.)"
+                    floor_reason = (
+                        f" Recommended memory was below the minimum of {min_memory_mib}MiB; "
+                        "floored to avoid impractically small requests."
+                    )
 
                 recs.append(
                     Recommendation(
@@ -461,17 +540,19 @@ class Recommender:
                             f"{observed_max / (1024 * 1024):.0f}MiB of "
                             f"{mem_request / (1024 * 1024):.0f}MiB memory requested ({usage_ratio:.0%}). "
                             f"Recommend reducing to {recommended / (1024 * 1024):.0f}MiB."
+                            f"{floor_description}"
                         ),
                         reason=(
                             f"Average memory usage is {usage_ratio:.0%} of the request. "
                             f"P95 usage is {p95 / (1024 * 1024):.0f}MiB and observed max is "
                             f"{observed_max / (1024 * 1024):.0f}MiB."
+                            f"{floor_reason}"
                         ),
                         priority="medium",
                         current_memory_request_bytes=mem_request,
                         recommended_memory_request_bytes=recommended,
-                        potential_savings_cost=total_cost * savings_ratio,
-                        potential_savings_co2e_grams=total_co2 * savings_ratio,
+                        potential_savings_cost=annual_cost * savings_ratio,
+                        potential_savings_co2e_grams=annual_co2 * savings_ratio,
                     )
                 )
         return recs
@@ -501,7 +582,7 @@ class Recommender:
             if len(usages) < 3:
                 continue
 
-            cpu_request = max((m.cpu_request or 0) for m in series)
+            cpu_request = self._latest_request_value(series, "cpu_request")
             if cpu_request == 0:
                 continue
 
@@ -637,7 +718,11 @@ class Recommender:
     # IDLE_NAMESPACE
     # ------------------------------------------------------------------
 
-    def _analyze_idle_namespaces(self, metrics: List[CombinedMetric]) -> List[Recommendation]:
+    def _analyze_idle_namespaces(
+        self,
+        metrics: List[CombinedMetric],
+        analysis_window_seconds: Optional[float] = None,
+    ) -> List[Recommendation]:
         """Identifies namespaces with minimal total activity."""
         recs = []
         ns_agg: Dict[str, Dict] = defaultdict(lambda: {"joules": 0.0, "cost": 0.0, "co2e": 0.0})
@@ -661,6 +746,8 @@ class Recommender:
             if not self.recommend_system_namespaces and ns in system_namespaces:
                 continue
             if agg["joules"] < self.idle_namespace_energy_threshold and agg["cost"] > 0:
+                annual_cost = self._annualized_window_total(agg["cost"], analysis_window_seconds)
+                annual_co2e = self._annualized_window_total(agg["co2e"], analysis_window_seconds)
                 recs.append(
                     Recommendation(
                         namespace=ns,
@@ -675,8 +762,8 @@ class Recommender:
                             f"idle threshold ({self.idle_namespace_energy_threshold}J)."
                         ),
                         priority="low",
-                        potential_savings_cost=agg["cost"],
-                        potential_savings_co2e_grams=agg["co2e"],
+                        potential_savings_cost=annual_cost,
+                        potential_savings_co2e_grams=annual_co2e,
                     )
                 )
         return recs
@@ -689,6 +776,7 @@ class Recommender:
         self,
         metrics: List[CombinedMetric],
         target_series: Dict[Tuple[str, str, str], List[CombinedMetric]],
+        analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Identifies targets running during high carbon intensity periods."""
         recs = []
@@ -727,6 +815,7 @@ class Recommender:
             ratio = pod_avg_intensity / zone_average
             if ratio > self.carbon_aware_threshold:
                 target_label = self._target_label(target_kind, target_name)
+                annual_co2e = self._annualized_window_total(agg["co2e"], analysis_window_seconds)
                 recs.append(
                     Recommendation(
                         pod_name=target_name,
@@ -743,7 +832,7 @@ class Recommender:
                             f"(threshold: {self.carbon_aware_threshold}x)."
                         ),
                         priority="low",
-                        potential_savings_co2e_grams=agg["co2e"] * (1 - 1 / ratio),
+                        potential_savings_co2e_grams=annual_co2e * (1 - 1 / ratio),
                     )
                 )
         return recs

@@ -21,6 +21,7 @@ from greenkube.storage.base_repository import (
     SummaryRepository,
     TimeseriesCacheRepository,
 )
+from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,13 @@ async def get_recommendation_repository() -> RecommendationRepository:
     from greenkube.core.factory import get_recommendation_repository as factory_get_reco_repo
 
     return factory_get_reco_repo()
+
+
+async def get_savings_ledger_repository() -> SavingsLedgerRepository:
+    """Provides the SavingsLedgerRepository instance via the factory."""
+    from greenkube.core.factory import get_savings_ledger_repository as factory_get_savings_repo
+
+    return factory_get_savings_repo()
 
 
 async def get_summary_repository() -> SummaryRepository:

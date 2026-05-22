@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Grafana: Streamlined dashboard layout** — Dashboard rebuilt to 4 sections and 9 panels: *GreenKube Impact Command Center* (radar, footprint mix, impact ledger, action priorities), *CO₂e by Namespace* (pie charts, now promoted to second position above the map), *Regional Node Cleanliness* (geomap), and *Top Emitters & Spenders* (top-15 pods by CO₂e and cost). Eight rows and their associated panels removed.
+- **Recommendations: Annualised savings** — Each recommendation now exposes projected annual CO₂e savings (`annual_co2e_savings_grams`) and annual cost savings (`annual_cost_savings_usd`), extrapolated from the observation window. Values are surfaced in the API response, the frontend recommendations page, and CLI output.
+- **Report: Yearly and custom date ranges** — `GET /api/v1/report` now accepts a `1y` (calendar year-to-date) window and arbitrary `start`/`end` timestamps. Reports can additionally be grouped by namespace via the `group_by_namespace` query parameter.
+- **Recommendations: Savings ledger integration (#237)** — Applied recommendations now trigger a savings-ledger entry. A new flow updates `RecommendationRealization` records and kicks off a background refresh of the savings attribution so the `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` gauges stay consistent as metrics accumulate.
+
+### Changed
+- **Grafana: `$node` and `$region` template variables removed** — Both variables have been dropped from the dashboard.
+- **Grafana: Dashboard generator cleaned up** — Unused panel helpers removed from `scripts/build_grafana_dashboard.py`, together with the constants no longer referenced by any remaining panel.
+
+### Fixed
+- **Recommendations: CPU and memory rightsizing** - Stop displaying rightsizing recommendations that suggest increasing requests.
+- **Security: Frontend dependency updates** — `package.json` / `package-lock.json` updated to remediate Trivy-flagged vulnerabilities in transitive frontend dependencies.
+
 ## [0.2.10] — 2026-05-07
 
 ### Added
