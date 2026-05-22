@@ -65,7 +65,7 @@ def test_reduced_dashboard_section_order():
 
     assert [row["title"] for row in rows] == [
         "GreenKube Impact Command Center",
-        "CO₂e by Namespace",
+        "CO₂e and Cost by Namespace",
         "Regional Node Cleanliness",
         "Top Emitters & Spenders",
     ]

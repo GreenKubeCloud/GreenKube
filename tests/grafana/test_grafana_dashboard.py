@@ -124,7 +124,7 @@ class TestGrafanaDashboardFile:
         row_panels = [p for p in dashboard.get("panels", []) if p.get("type") == "row"]
         assert [row.get("title") for row in row_panels] == [
             "GreenKube Impact Command Center",
-            "CO₂e by Namespace",
+            "CO₂e and Cost by Namespace",
             "Regional Node Cleanliness",
             "Top Emitters & Spenders",
         ]
