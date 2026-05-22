@@ -79,6 +79,9 @@ jobs:
             greenkube/greenkube:${{ steps.version.outputs.version }}
             greenkube/greenkube:latest
           platforms: linux/amd64,linux/arm64
+          pull: true
+          build-args: |
+            APT_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
