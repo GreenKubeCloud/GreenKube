@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-05-26
+
 ### Added
 - **Grafana: Streamlined dashboard layout** — Dashboard rebuilt to 4 sections and 9 panels: *GreenKube Impact Command Center* (radar, footprint mix, impact ledger, action priorities), *CO₂e by Namespace* (pie charts, now promoted to second position above the map), *Regional Node Cleanliness* (geomap), and *Top Emitters & Spenders* (top-15 pods by CO₂e and cost). Eight rows and their associated panels removed.
 - **Recommendations: Annualised savings** — Each recommendation now exposes projected annual CO₂e savings (`annual_co2e_savings_grams`) and annual cost savings (`annual_cost_savings_usd`), extrapolated from the observation window. Values are surfaced in the API response, the frontend recommendations page, and CLI output.
