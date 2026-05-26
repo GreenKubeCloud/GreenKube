@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from greenkube.core.config import get_config
-from greenkube.models.metrics import RecommendationSavingsSummary
+from greenkube.models.metrics import RecommendationRecord, RecommendationSavingsSummary, RecommendationType
 
 
 class TestRecommendationsEndpoint:
@@ -206,3 +206,62 @@ class TestRecommendationsEndpoint:
         assert data["applied_count"] == 2
         mock_savings_repo.get_cumulative_totals.assert_not_awaited()
         mock_savings_repo.get_window_totals.assert_not_awaited()
+
+    def test_top_recommendations_defaults_to_co2_savings(self, client, mock_reco_repo):
+        """The actionable endpoint should return ranked recommendation DTOs by projected CO2 savings."""
+        mock_reco_repo.get_top_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=42,
+                    pod_name="checkout-api",
+                    namespace="production",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="Reduce checkout-api CPU request",
+                    priority="high",
+                    scope="workload",
+                    potential_savings_co2e_grams=6200.0,
+                    potential_savings_cost=148.5,
+                )
+            ]
+        )
+
+        response = client.get("/api/v1/recommendations/top")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data == [
+            {
+                "rank": 1,
+                "id": 42,
+                "type": "RIGHTSIZING_CPU",
+                "namespace": "production",
+                "resource": "checkout-api",
+                "scope": "workload",
+                "priority": "high",
+                "description": "Reduce checkout-api CPU request",
+                "reason": "",
+                "sort_metric": "co2",
+                "sort_value": 6200.0,
+                "projected_savings_co2e_grams": 6200.0,
+                "projected_savings_cost": 148.5,
+            }
+        ]
+        mock_reco_repo.get_top_recommendations.assert_awaited_once_with(
+            limit=5,
+            savings_metric="co2",
+            namespace=None,
+        )
+
+    def test_top_recommendations_supports_cost_limit_and_namespace(self, client, mock_reco_repo):
+        """The actionable endpoint should expose the requested ranking controls to repository storage."""
+        mock_reco_repo.get_top_recommendations = AsyncMock(return_value=[])
+
+        response = client.get("/api/v1/recommendations/top?metric=cost&limit=3&namespace=staging")
+
+        assert response.status_code == 200
+        assert response.json() == []
+        mock_reco_repo.get_top_recommendations.assert_awaited_once_with(
+            limit=3,
+            savings_metric="cost",
+            namespace="staging",
+        )

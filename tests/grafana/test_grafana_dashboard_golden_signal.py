@@ -61,7 +61,14 @@ class TestReducedDashboardVariables:
         dashboard = _load_dashboard()
         variable_names = {variable["name"] for variable in dashboard.get("templating", {}).get("list", [])}
 
-        assert variable_names == {"DS_PROMETHEUS", "cluster", "namespace", "dashboard_window"}
+        assert variable_names == {
+            "DS_PROMETHEUS",
+            "cluster",
+            "namespace",
+            "dashboard_window",
+            "recommendation_metric",
+            "recommendation_limit",
+        }
 
 
 class TestReducedGrafanaDashboardScope:
@@ -73,6 +80,7 @@ class TestReducedGrafanaDashboardScope:
 
         assert [row.get("title") for row in rows] == [
             "GreenKube Impact Command Center",
+            "Actionable Recommendations",
             "CO₂e and Cost by Namespace",
             "Regional Node Cleanliness",
             "Top Emitters & Spenders",

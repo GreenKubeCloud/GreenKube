@@ -591,6 +591,242 @@ return {
 )
 
 
+ECHARTS_ACTIONABLE_RECOMMENDATIONS_OPTION = (
+    ECHARTS_THEME
+    + """
+const rawLimit = context.grafana && context.grafana.replaceVariables
+    ? context.grafana.replaceVariables('$recommendation_limit')
+    : '5';
+const rawMetric = context.grafana && context.grafana.replaceVariables
+    ? context.grafana.replaceVariables('$recommendation_metric')
+    : 'co2';
+const limit = Math.max(1, Math.min(10, Number(String(rawLimit).replace(/[^0-9]/g, '')) || 5));
+const recommendationMetric = rawMetric === 'cost' ? 'cost' : 'co2';
+
+const rowsByKey = new Map();
+
+const upsertRow = (series, valueKey) => {
+    const numberField = series?.fields.find((field) => field.type === 'number');
+    const labels = numberField?.labels || {};
+    const rank = Number(labels.rank || 0);
+    if (!rank) {
+        return;
+    }
+
+    const key = [labels.sort_metric, labels.rank, labels.namespace, labels.type, labels.resource].join('|');
+    const existing = rowsByKey.get(key) || {
+        rank,
+        sortMetric: labels.sort_metric || recommendationMetric,
+        namespace: labels.namespace || '_cluster',
+        type: labels.type || 'UNKNOWN',
+        resource: labels.resource || '_cluster',
+        scope: labels.scope || 'pod',
+        priority: labels.priority || 'medium',
+        co2: 0,
+        cost: 0,
+    };
+    existing[valueKey] = lastNumber(series);
+    rowsByKey.set(key, existing);
+};
+
+context.panel.data.series.filter((series) => matchesRefId(series, 'A')).forEach((series) => upsertRow(series, 'co2'));
+context.panel.data.series.filter((series) => matchesRefId(series, 'B')).forEach((series) => upsertRow(series, 'cost'));
+
+const rows = Array.from(rowsByKey.values())
+    .filter((row) => row.sortMetric === recommendationMetric)
+    .filter((row) => row.co2 > 0 || row.cost > 0)
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, limit);
+
+const primaryValue = (row) => recommendationMetric === 'cost' ? row.cost : row.co2;
+const primaryUnit = recommendationMetric === 'cost' ? 'currencyUSD' : 'g CO₂e';
+const maxPrimary = Math.max(1, ...rows.map(primaryValue));
+
+if (!rows.length) {
+    return {
+        backgroundColor: 'transparent',
+        graphic: [{
+            type: 'text',
+            left: 'center',
+            top: 'middle',
+            style: {
+                text: 'No actionable recommendations with projected savings',
+                fill: palette.muted,
+                fontSize: 13,
+                fontWeight: 600,
+                textAlign: 'center',
+                textVerticalAlign: 'middle',
+            },
+        }],
+    };
+}
+
+return {
+    backgroundColor: 'transparent',
+    tooltip: {
+        trigger: 'item',
+        backgroundColor: 'rgba(15, 23, 42, 0.96)',
+        borderColor: palette.cyan,
+        borderWidth: 1,
+        textStyle: { color: palette.text },
+        formatter: (params) => {
+            const row = params.data;
+            return [
+                `<strong>#${row.rank} ${row.type.replace(/_/g, ' ')}</strong>`,
+                `${row.namespace} / ${row.resource}`,
+                `CO₂e: ${formatValue(row.co2, 'g CO₂e')}`,
+                `Cost: ${formatValue(row.cost, 'currencyUSD')}`,
+                `Ranked by ${recommendationMetric === 'cost' ? 'cost' : 'CO₂e'}`,
+            ].join('<br/>');
+        },
+    },
+    title: {
+        text: 'Projected annual savings',
+        subtext: `Top ${rows.length} ranked by ${recommendationMetric === 'cost' ? 'cost' : 'CO₂e'}`,
+        left: 12,
+        top: 4,
+        textStyle: { color: palette.text, fontSize: 13, fontWeight: 800 },
+        subtextStyle: { color: palette.muted, fontSize: 11, fontWeight: 600 },
+    },
+    grid: { top: 48, right: 12, bottom: 12, left: 12 },
+    xAxis: { type: 'value', min: 0, max: 1, show: false },
+    yAxis: { type: 'category', data: rows.map((row) => String(row.rank)), show: false },
+    series: [{
+        type: 'custom',
+        coordinateSystem: 'cartesian2d',
+        data: rows.map((row, index) => ({ ...row, value: [primaryValue(row), index] })),
+        renderItem: (params) => {
+            const row = rows[params.dataIndex];
+            const coord = params.coordSys;
+            const rowStep = coord.height / Math.max(rows.length, 1);
+            const cardHeight = Math.max(42, Math.min(58, rowStep - 8));
+            const x = coord.x;
+            const y = coord.y + params.dataIndex * rowStep + (rowStep - cardHeight) / 2;
+            const width = coord.width;
+            const barX = x + Math.min(430, width * 0.48);
+            const metricX = Math.max(barX + 124, x + width - 228);
+            const barWidth = Math.max(6, Math.min(width - (barX - x) - 250, 220) * (primaryValue(row) / maxPrimary));
+            const typeText = row.type.replace(/_/g, ' ');
+            const targetText = `${row.namespace} / ${row.resource}`;
+
+            return {
+                type: 'group',
+                children: [
+                    {
+                        type: 'rect',
+                        shape: { x, y, width, height: cardHeight, r: 8 },
+                        style: {
+                            fill: params.dataIndex % 2 === 0 ? palette.panel : palette.panelSoft,
+                            stroke: 'rgba(148, 163, 184, 0.18)',
+                            lineWidth: 1,
+                        },
+                    },
+                    {
+                        type: 'rect',
+                        shape: { x: x + 12, y: y + 13, width: 34, height: 22, r: 11 },
+                        style: { fill: 'rgba(0, 255, 212, 0.14)', stroke: palette.cyan, lineWidth: 1 },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: x + 29,
+                            y: y + 24,
+                            text: `#${row.rank}`,
+                            fill: palette.cyan,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            textAlign: 'center',
+                            textVerticalAlign: 'middle',
+                        },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: x + 58,
+                            y: y + 17,
+                            text: typeText,
+                            fill: palette.text,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            width: Math.max(160, barX - x - 82),
+                            overflow: 'truncate',
+                        },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: x + 58,
+                            y: y + 36,
+                            text: targetText,
+                            fill: palette.muted,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            width: Math.max(160, barX - x - 82),
+                            overflow: 'truncate',
+                        },
+                    },
+                    {
+                        type: 'rect',
+                        shape: { x: barX, y: y + 22, width: Math.min(220, width - (barX - x) - 250), height: 8, r: 4 },
+                        style: { fill: 'rgba(148, 163, 184, 0.16)' },
+                    },
+                    {
+                        type: 'rect',
+                        shape: { x: barX, y: y + 22, width: barWidth, height: 8, r: 4 },
+                        style: {
+                            fill: recommendationMetric === 'cost' ? palette.green : palette.cyan,
+                            shadowBlur: 12,
+                            shadowColor: recommendationMetric === 'cost'
+                                ? 'rgba(52, 211, 153, 0.35)'
+                                : 'rgba(0, 255, 212, 0.35)',
+                        },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: metricX,
+                            y: y + 18,
+                            text: formatValue(row.co2, 'g CO₂e'),
+                            fill: palette.cyan,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            width: 106,
+                            overflow: 'truncate',
+                        },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: metricX + 116,
+                            y: y + 18,
+                            text: formatValue(row.cost, 'currencyUSD'),
+                            fill: palette.green,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            width: 86,
+                            overflow: 'truncate',
+                        },
+                    },
+                    {
+                        type: 'text',
+                        style: {
+                            x: barX,
+                            y: y + 39,
+                            text: formatValue(primaryValue(row), primaryUnit),
+                            fill: palette.text,
+                            fontSize: 11,
+                            fontWeight: 700,
+                        },
+                    },
+                ],
+            };
+        },
+    }],
+};
+"""
+)
+
+
 def sustainability_radar(pid, gridpos=None):
     dimensions = [
         ("resource_efficiency", "Resource efficiency"),
@@ -895,7 +1131,46 @@ panels.append(
 )
 y += 12
 
-# ── Row 1: CO₂e and Cost by Namespace ─────────────────────────────────────────────
+# ── Row 1: Actionable Recommendations ─────────────────────────────────────
+panels.append({**row(400, "Actionable Recommendations", collapsed=False, y=y)})
+y += 1
+
+_top_recommendations_co2_expr = (
+    f'greenkube_top_recommendations{{{CLUSTER_FILTER}, namespace=~"$namespace", '
+    'sort_metric="$recommendation_metric", value_metric="co2e_grams"}'
+)
+_top_recommendations_cost_expr = (
+    f'greenkube_top_recommendations{{{CLUSTER_FILTER}, namespace=~"$namespace", '
+    'sort_metric="$recommendation_metric", value_metric="cost_dollars"}'
+)
+panels.append(
+    echarts_panel(
+        401,
+        "Top Actionable Recommendations",
+        [
+            {
+                "expr": _top_recommendations_co2_expr,
+                "legend": "#{{rank}} {{type}} {{namespace}}/{{resource}} CO₂e",
+                "refId": "A",
+                "range": False,
+                "instant": True,
+            },
+            {
+                "expr": _top_recommendations_cost_expr,
+                "legend": "#{{rank}} {{type}} {{namespace}}/{{resource}} cost",
+                "refId": "B",
+                "range": False,
+                "instant": True,
+            },
+        ],
+        ECHARTS_ACTIONABLE_RECOMMENDATIONS_OPTION,
+        gridpos={"x": 0, "y": y, "w": 24, "h": 8},
+        description="Ranked action cards for the active recommendations with the largest projected annual savings.",
+    )
+)
+y += 8
+
+# ── Row 2: CO₂e and Cost by Namespace ─────────────────────────────────────────────
 panels.append({**row(500, "CO₂e and Cost by Namespace", collapsed=False, y=y)})
 y += 1
 
@@ -1084,6 +1359,31 @@ DASHBOARD = {
                     {"text": "1y", "value": "31536000s", "selected": False},
                 ],
                 "current": {"text": "7d", "value": "604800s"},
+                "hide": 0,
+            },
+            {
+                "name": "recommendation_metric",
+                "type": "custom",
+                "label": "Recommendation ranking",
+                "query": "CO₂e : co2, Cost : cost",
+                "options": [
+                    {"text": "CO₂e", "value": "co2", "selected": True},
+                    {"text": "Cost", "value": "cost", "selected": False},
+                ],
+                "current": {"text": "CO₂e", "value": "co2"},
+                "hide": 0,
+            },
+            {
+                "name": "recommendation_limit",
+                "type": "custom",
+                "label": "Recommendation count",
+                "query": "3, 5, 10",
+                "options": [
+                    {"text": "3", "value": "3", "selected": False},
+                    {"text": "5", "value": "5", "selected": True},
+                    {"text": "10", "value": "10", "selected": False},
+                ],
+                "current": {"text": "5", "value": "5"},
                 "hide": 0,
             },
         ]

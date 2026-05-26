@@ -441,6 +441,25 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_top_recommendations(
+        self,
+        limit: int = 5,
+        savings_metric: str = "co2",
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns active recommendations ranked by projected annual savings.
+
+        Args:
+            limit: Maximum number of recommendations to return.
+            savings_metric: Ranking metric, either ``co2`` or ``cost``.
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of active RecommendationRecord objects ordered by projected savings.
+        """
+        pass
+
+    @abstractmethod
     async def get_ignored_recommendations(
         self,
         namespace: Optional[str] = None,

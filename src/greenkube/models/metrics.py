@@ -244,6 +244,24 @@ class RecommendationSavingsSummary(BaseModel):
     namespace_breakdown: List[dict] = Field(default_factory=list, description="Savings breakdown per namespace.")
 
 
+class TopRecommendation(BaseModel):
+    """Ranked actionable recommendation with projected annual savings."""
+
+    rank: int = Field(..., description="One-based rank for the selected savings metric.")
+    id: Optional[int] = Field(None, description="Persisted recommendation ID, when available.")
+    type: RecommendationType = Field(..., description="The category of the recommendation.")
+    namespace: Optional[str] = Field(None, description="The namespace targeted by the recommendation.")
+    resource: str = Field(..., description="Human-readable associated resource name.")
+    scope: str = Field("pod", description="Recommendation scope: pod, workload, namespace, or node.")
+    priority: str = Field("medium", description="Recommendation priority.")
+    description: str = Field(..., description="A human-readable description of the recommendation.")
+    reason: str = Field("", description="Human-readable explanation of why the recommendation was made.")
+    sort_metric: str = Field(..., description="Savings metric used for the rank: co2 or cost.")
+    sort_value: float = Field(..., description="Projected annual savings value used for the rank.")
+    projected_savings_co2e_grams: float = Field(0.0, description="Projected annual CO2e savings in grams.")
+    projected_savings_cost: float = Field(0.0, description="Projected annual cloud cost savings.")
+
+
 class MetricsSummaryRow(BaseModel):
     """
     A single pre-computed summary row for a specific time window.

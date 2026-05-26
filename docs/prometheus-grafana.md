@@ -163,6 +163,7 @@ All node metrics share labels `node`, `instance_type`, `zone`, `region`, `cloud_
 | `greenkube_recommendations_implemented_total` | `cluster`, `namespace`, `type` | Count of implemented recommendations — emitted per namespace and with `namespace="__all__"` |
 | `greenkube_recommendations_savings_co2e_grams` | `cluster`, `type` | Projected annual CO₂e savings per recommendation type (g) |
 | `greenkube_recommendations_savings_cost_dollars` | `cluster`, `type` | Projected annual cost savings per recommendation type ($) |
+| `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations. `sort_metric` is `co2` or `cost`; `value_metric` is `co2e_grams` or `cost_dollars` so Grafana can display both projected annual savings values for each ranked action |
 | `greenkube_co2e_savings_attributed_grams_total` | `cluster`, `recommendation_type` | Cumulative CO₂e savings since installation (g) — prefer `greenkube_dashboard_savings_co2e_grams_total` for windowed queries |
 | `greenkube_cost_savings_attributed_dollars_total` | `cluster`, `recommendation_type` | Cumulative cost savings since installation ($) — prefer `greenkube_dashboard_savings_cost_dollars_total` for windowed queries |
 
@@ -248,13 +249,16 @@ Prometheus instance → copy the UID from the URL.
 | `cluster` | query | `label_values(greenkube_cluster_co2e_grams_total, cluster)` | Filter by cluster name |
 | `namespace` | query | `label_values(greenkube_namespace_co2e_grams_total{cluster=~"$cluster"}, namespace)` | Filter by namespace (multi-select) |
 | `dashboard_window` | custom | `1h`, `6h`, `24h`, `7d` (default), `30d`, `YTD`, `1y` | Reporting window for pre-computed summary panels |
+| `recommendation_metric` | custom | `CO₂e` (default), `Cost` | Ranking basis for actionable recommendations |
+| `recommendation_limit` | custom | `3`, `5` (default), `10` | Number of ranked recommendations displayed |
 
 ### Dashboard rows
 
 | Row | Key panels | Notes |
 |---|---|---|
 | **GreenKube Impact Command Center** | Sustainability Score Radar, Footprint & Cost Mix (Scope 2 / Scope 3 / Cloud cost), GreenKube Impact (CO₂e avoided, cost avoided, implemented), Action Priorities (top-3 namespaces & recommendation types) | Always-visible summary; panels respect `$namespace` and `$dashboard_window` filters |
-| **CO₂e by Namespace** | CO₂e by Namespace, Cost by Namespace | Second row, above the regional map |
+| **Actionable Recommendations** | Top Actionable Recommendations | Ranked recommendation cards showing recommendation type, namespace, resource, projected annual CO₂e savings, and projected annual cost savings; respects `$recommendation_metric`, `$recommendation_limit`, and `$namespace` |
+| **CO₂e and Cost by Namespace** | CO₂e by Namespace, Cost by Namespace | Namespace analysis below actionable recommendations and above the regional map |
 | **Regional Node Cleanliness** | Node Region Cleanliness Map (Geomap) | Bubble map colored by grid carbon intensity per electricity zone — uses `greenkube_zone_grid_intensity_gco2_kwh` |
 | **Top Emitters & Spenders** | Top 15 Pods — CO₂e, Top 15 Pods — Cost | Pod-level emitters and spenders only |
 
