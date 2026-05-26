@@ -8,6 +8,7 @@ The API also serves the SvelteKit SPA frontend when the build
 directory is present in the image.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +35,7 @@ from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
+from greenkube.api.startup import run_startup_recommendation_scan
 from greenkube.core.config import get_config
 from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
 
@@ -83,6 +85,9 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
+
+    asyncio.ensure_future(run_startup_recommendation_scan())
+
     yield
     logger.info("🛑 Shutting down GreenKube API...")
     await get_db_manager().close()

@@ -702,7 +702,7 @@
         "x": 0,
         "y": 14,
         "w": 24,
-        "h": 8
+        "h": 12
       },
       "datasource": {
         "type": "datasource",

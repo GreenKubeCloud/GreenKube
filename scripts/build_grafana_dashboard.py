@@ -1164,7 +1164,7 @@ panels.append(
             },
         ],
         ECHARTS_ACTIONABLE_RECOMMENDATIONS_OPTION,
-        gridpos={"x": 0, "y": y, "w": 24, "h": 8},
+        gridpos={"x": 0, "y": y, "w": 24, "h": 12},
         description="Ranked action cards for the active recommendations with the largest projected annual savings.",
     )
 )

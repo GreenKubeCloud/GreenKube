@@ -110,7 +110,7 @@ def test_actionable_recommendations_section_sits_above_namespace_analysis():
     get_option = panel["options"]["getOption"]
 
     assert row["gridPos"]["y"] == 13
-    assert panel["gridPos"] == {"x": 0, "y": 14, "w": 24, "h": 8}
+    assert panel["gridPos"] == {"x": 0, "y": 14, "w": 24, "h": 12}
     assert panel["gridPos"]["y"] < namespace_row["gridPos"]["y"]
     assert panel["type"] == "volkovlabs-echarts-panel"
     assert variables["recommendation_metric"]["current"] == {"text": "CO₂e", "value": "co2"}
