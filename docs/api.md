@@ -16,6 +16,7 @@ The GreenKube REST API is available at `/api/v1`. Interactive documentation (Swa
 | `GET` | `/api/v1/nodes` | Cluster node inventory |
 | `GET` | `/api/v1/recommendations` | Generate and persist optimization recommendations (`?namespace=`) |
 | `GET` | `/api/v1/recommendations/active` | Active recommendation records (`?namespace=&refresh=true`) |
+| `GET` | `/api/v1/recommendations/top` | Highest-impact active recommendations (`?limit=5&metric=co2&namespace=&refresh=false`) |
 | `GET` | `/api/v1/report/summary` | Report preview — row count and totals (`?namespace=&last=24h&aggregate=true&granularity=daily`) |
 | `GET` | `/api/v1/report/export` | Download report as CSV or JSON (`?format=csv&last=7d&aggregate=true&granularity=daily`) |
 
@@ -66,6 +67,12 @@ curl "http://localhost:8000/api/v1/recommendations?namespace=production"
 # Active recommendation records, refreshed before returning
 curl "http://localhost:8000/api/v1/recommendations/active?namespace=production&refresh=true"
 
+# Top 5 actionable recommendations ranked by projected annual CO2e savings
+curl "http://localhost:8000/api/v1/recommendations/top?limit=5&metric=co2"
+
+# Top actionable recommendations for a namespace ranked by projected cost savings
+curl "http://localhost:8000/api/v1/recommendations/top?namespace=production&metric=cost&limit=5"
+
 # Preview a report before downloading
 curl "http://localhost:8000/api/v1/report/summary?last=ytd&aggregate=true&granularity=monthly"
 
@@ -99,5 +106,6 @@ Available metrics:
 | `greenkube_sustainability_dimension_score` | `cluster`, `dimension` | Per-dimension sustainability score |
 | `greenkube_carbon_intensity_score` | — | Energy-weighted average grid carbon intensity (gCO₂e/kWh) |
 | `greenkube_carbon_intensity_zone` | `zone` | Real-time grid carbon intensity per zone |
-| `greenkube_recommendation_total` | `type` | Recommendation counts by type |
+| `greenkube_recommendations_total` | `cluster`, `namespace`, `type`, `priority` | Recommendation counts by type and priority |
+| `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations by projected annual savings |
 | `greenkube_node_info` | `instance_type`, `zone`, `capacity` | Node metadata |

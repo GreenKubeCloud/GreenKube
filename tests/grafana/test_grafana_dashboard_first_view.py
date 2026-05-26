@@ -65,11 +65,12 @@ def test_reduced_dashboard_section_order():
 
     assert [row["title"] for row in rows] == [
         "GreenKube Impact Command Center",
+        "Actionable Recommendations",
         "CO₂e and Cost by Namespace",
         "Regional Node Cleanliness",
         "Top Emitters & Spenders",
     ]
-    assert [row["gridPos"]["y"] for row in rows] == [0, 13, 22, 32]
+    assert [row["gridPos"]["y"] for row in rows] == [0, 13, 22, 31, 41]
 
 
 def test_namespace_charts_are_second_section_above_map():
@@ -79,8 +80,8 @@ def test_namespace_charts_are_second_section_above_map():
 
     assert co2_panel["type"] == "piechart"
     assert cost_panel["type"] == "piechart"
-    assert co2_panel["gridPos"] == {"x": 0, "y": 14, "w": 12, "h": 8}
-    assert cost_panel["gridPos"] == {"x": 12, "y": 14, "w": 12, "h": 8}
+    assert co2_panel["gridPos"] == {"x": 0, "y": 23, "w": 12, "h": 8}
+    assert cost_panel["gridPos"] == {"x": 12, "y": 23, "w": 12, "h": 8}
     assert co2_panel["gridPos"]["y"] < map_row["gridPos"]["y"]
     assert "greenkube_namespace_co2e_grams_total" in co2_panel["targets"][0]["expr"]
     assert "greenkube_namespace_cost_dollars_total" in cost_panel["targets"][0]["expr"]
@@ -96,8 +97,32 @@ def test_top_emitters_keeps_only_co2e_and_cost_charts():
     ]
 
     assert top_panel_titles == ["Top 15 Pods — CO₂e", "Top 15 Pods — Cost"]
-    assert _panel("Top 15 Pods — CO₂e")["gridPos"] == {"x": 0, "y": 33, "w": 12, "h": 10}
-    assert _panel("Top 15 Pods — Cost")["gridPos"] == {"x": 12, "y": 33, "w": 12, "h": 10}
+    assert _panel("Top 15 Pods — CO₂e")["gridPos"] == {"x": 0, "y": 42, "w": 12, "h": 10}
+    assert _panel("Top 15 Pods — Cost")["gridPos"] == {"x": 12, "y": 42, "w": 12, "h": 10}
+
+
+def test_actionable_recommendations_section_sits_above_namespace_analysis():
+    panel = _panel("Top Actionable Recommendations")
+    row = _top_level_panel("Actionable Recommendations")
+    namespace_row = _top_level_panel("CO₂e and Cost by Namespace")
+    variables = {variable["name"]: variable for variable in _load_dashboard()["templating"]["list"]}
+    target_exprs = [target["expr"] for target in panel["targets"]]
+    get_option = panel["options"]["getOption"]
+
+    assert row["gridPos"]["y"] == 13
+    assert panel["gridPos"] == {"x": 0, "y": 14, "w": 24, "h": 12}
+    assert panel["gridPos"]["y"] < namespace_row["gridPos"]["y"]
+    assert panel["type"] == "volkovlabs-echarts-panel"
+    assert variables["recommendation_metric"]["current"] == {"text": "CO₂e", "value": "co2"}
+    assert variables["recommendation_limit"]["current"] == {"text": "5", "value": "5"}
+    assert all("greenkube_top_recommendations" in expr for expr in target_exprs)
+    assert 'sort_metric="$recommendation_metric"' in target_exprs[0]
+    assert 'value_metric="co2e_grams"' in target_exprs[0]
+    assert 'value_metric="cost_dollars"' in target_exprs[1]
+    assert 'namespace=~"$namespace"' in target_exprs[0]
+    assert "context.grafana.replaceVariables('$recommendation_limit')" in get_option
+    assert "type: 'custom'" in get_option
+    assert "Projected annual savings" in get_option
 
 
 def test_top_left_panel_is_sustainability_radar_chart():

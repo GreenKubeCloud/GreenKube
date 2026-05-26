@@ -19,6 +19,7 @@ from typing import List
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
+from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, Recommendation, RecommendationRecord
 from greenkube.models.node import NodeInfo
@@ -376,6 +377,13 @@ RECOMMENDATION_SAVINGS_CO2 = Gauge(
     "greenkube_recommendations_savings_co2e_grams",
     "Total potential CO2e savings from recommendations by type",
     ["cluster", "type"],
+    registry=REGISTRY,
+)
+TOP_RECOMMENDATIONS = Gauge(
+    "greenkube_top_recommendations",
+    "Ranked active recommendations by projected annual savings. "
+    "sort_metric is the ranking basis; value_metric is the exposed savings value.",
+    ["cluster", "rank", "sort_metric", "value_metric", "namespace", "type", "resource", "scope", "priority"],
     registry=REGISTRY,
 )
 
@@ -867,6 +875,7 @@ def update_recommendation_metrics(recommendations: List[Recommendation]) -> None
     _clear_gauge(RECOMMENDATION_COUNT)
     _clear_gauge(RECOMMENDATION_SAVINGS_COST)
     _clear_gauge(RECOMMENDATION_SAVINGS_CO2)
+    _clear_gauge(TOP_RECOMMENDATIONS)
     _clear_gauge(NS_REC_SAVINGS_CO2)
     _clear_gauge(NS_REC_SAVINGS_COST)
 
@@ -913,6 +922,21 @@ def update_recommendation_metrics(recommendations: List[Recommendation]) -> None
 
     for ns, cost in ns_savings_cost.items():
         NS_REC_SAVINGS_COST.labels(cluster=cluster, namespace=ns).set(cost)
+
+    for savings_metric in ("co2", "cost"):
+        for rec in rank_recommendations(recommendations, limit=None, savings_metric=savings_metric):
+            labels = {
+                "cluster": cluster,
+                "rank": str(rec.rank),
+                "sort_metric": rec.sort_metric,
+                "namespace": rec.namespace or DASHBOARD_NAMESPACE_CLUSTER,
+                "type": rec.type.value if hasattr(rec.type, "value") else str(rec.type),
+                "resource": rec.resource,
+                "scope": rec.scope,
+                "priority": rec.priority,
+            }
+            TOP_RECOMMENDATIONS.labels(**labels, value_metric="co2e_grams").set(rec.projected_savings_co2e_grams)
+            TOP_RECOMMENDATIONS.labels(**labels, value_metric="cost_dollars").set(rec.projected_savings_cost)
 
     logger.debug("Updated Prometheus metrics with %d recommendations.", len(recommendations))
 

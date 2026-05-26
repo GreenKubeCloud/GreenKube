@@ -213,6 +213,41 @@ class TestSQLiteRecommendationRepository:
         assert "applied_at < ?" in query
         assert params[-1:] == ["2026-02-08T00:00:00Z"]
 
+    @pytest.mark.asyncio
+    async def test_get_top_recommendations_orders_by_co2_savings(self, repo, mock_db_manager):
+        """SQLite top recommendations should rank active rows by the selected savings column."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        mock_conn.row_factory = None
+
+        await repo.get_top_recommendations(limit=3, savings_metric="co2", namespace="production")
+
+        query, params = mock_conn.execute.await_args.args
+        assert "status = 'active'" in query
+        assert "COALESCE(potential_savings_co2e_grams, 0) > 0" in query
+        assert "ORDER BY COALESCE(potential_savings_co2e_grams, 0) DESC" in query
+        assert "COALESCE(potential_savings_cost, 0) DESC" in query
+        assert params == ["production", 3]
+
+    @pytest.mark.asyncio
+    async def test_get_top_recommendations_orders_by_cost_savings(self, repo, mock_db_manager):
+        """SQLite top recommendations should support cost-first ranking."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        mock_conn.row_factory = None
+
+        await repo.get_top_recommendations(limit=2, savings_metric="cost")
+
+        query, params = mock_conn.execute.await_args.args
+        assert "COALESCE(potential_savings_cost, 0) > 0" in query
+        assert "ORDER BY COALESCE(potential_savings_cost, 0) DESC" in query
+        assert "COALESCE(potential_savings_co2e_grams, 0) DESC" in query
+        assert params == [2]
+
 
 class TestPostgresRecommendationRepository:
     """Tests for the Postgres recommendation repository."""
@@ -304,3 +339,34 @@ class TestPostgresRecommendationRepository:
         assert "applied_at >=" not in query
         assert "applied_at < $2" in query
         assert params == ("default", end)
+
+    @pytest.mark.asyncio
+    async def test_get_top_recommendations_orders_by_co2_savings(self, repo, mock_db_manager):
+        """Postgres top recommendations should rank active rows by projected CO2 savings."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        await repo.get_top_recommendations(limit=3, savings_metric="co2", namespace="production")
+
+        query = mock_conn.fetch.await_args.args[0]
+        params = mock_conn.fetch.await_args.args[1:]
+        assert "status = 'active'" in query
+        assert "COALESCE(potential_savings_co2e_grams, 0) > 0" in query
+        assert "ORDER BY COALESCE(potential_savings_co2e_grams, 0) DESC" in query
+        assert "COALESCE(potential_savings_cost, 0) DESC" in query
+        assert params == ("production", 3)
+
+    @pytest.mark.asyncio
+    async def test_get_top_recommendations_orders_by_cost_savings(self, repo, mock_db_manager):
+        """Postgres top recommendations should support cost-first ranking."""
+        mock_conn = mock_db_manager._mock_conn
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        await repo.get_top_recommendations(limit=2, savings_metric="cost")
+
+        query = mock_conn.fetch.await_args.args[0]
+        params = mock_conn.fetch.await_args.args[1:]
+        assert "COALESCE(potential_savings_cost, 0) > 0" in query
+        assert "ORDER BY COALESCE(potential_savings_cost, 0) DESC" in query
+        assert "COALESCE(potential_savings_co2e_grams, 0) DESC" in query
+        assert params == (2,)

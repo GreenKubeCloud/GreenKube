@@ -18,6 +18,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.models.metrics import (
     Recommendation,
+    RecommendationRecord,
     RecommendationType,
 )
 
@@ -160,3 +161,61 @@ class TestUpdateRecommendationMetrics:
         update_recommendation_metrics([])
         # After reset, all labeled gauges should be cleared
         # The gauge itself still exists but there should be no samples
+
+    def test_update_exposes_ranked_top_recommendations(self):
+        """Should expose per-recommendation projected savings for actionable Grafana panels."""
+        from unittest.mock import patch
+
+        from greenkube.api.metrics_endpoint import TOP_RECOMMENDATIONS, update_recommendation_metrics
+
+        recs = [
+            RecommendationRecord(
+                pod_name="checkout-api",
+                namespace="production",
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description="Reduce CPU request",
+                priority="high",
+                scope="workload",
+                potential_savings_co2e_grams=6200.0,
+                potential_savings_cost=148.5,
+            ),
+            RecommendationRecord(
+                pod_name="batch-worker",
+                namespace="staging",
+                type=RecommendationType.OFF_PEAK_SCALING,
+                description="Scale down off peak",
+                priority="medium",
+                scope="workload",
+                potential_savings_co2e_grams=1200.0,
+                potential_savings_cost=310.0,
+            ),
+        ]
+
+        with patch("greenkube.api.metrics_endpoint._get_cluster_name", return_value="test-cluster"):
+            update_recommendation_metrics(recs)
+
+        co2_rank_one = TOP_RECOMMENDATIONS.labels(
+            cluster="test-cluster",
+            rank="1",
+            sort_metric="co2",
+            value_metric="co2e_grams",
+            namespace="production",
+            type="RIGHTSIZING_CPU",
+            resource="checkout-api",
+            scope="workload",
+            priority="high",
+        )._value.get()
+        cost_rank_one = TOP_RECOMMENDATIONS.labels(
+            cluster="test-cluster",
+            rank="1",
+            sort_metric="cost",
+            value_metric="cost_dollars",
+            namespace="staging",
+            type="OFF_PEAK_SCALING",
+            resource="batch-worker",
+            scope="workload",
+            priority="medium",
+        )._value.get()
+
+        assert co2_rank_one == 6200.0
+        assert cost_rank_one == 310.0

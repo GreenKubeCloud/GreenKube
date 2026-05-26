@@ -64,6 +64,7 @@ class TestGrafanaDashboardFile:
             "Footprint & Cost Mix",
             "GreenKube Impact",
             "Action Priorities",
+            "Top Actionable Recommendations",
             "CO₂e by Namespace",
             "Cost by Namespace",
             "Node Region Cleanliness Map",
@@ -95,7 +96,7 @@ class TestGrafanaDashboardFile:
         """The dashboard should contain only the requested non-row panels."""
         dashboard = _load_dashboard()
         panels = _all_panels(dashboard)
-        assert len(panels) == 9
+        assert len(panels) == 10
 
     def test_all_panels_have_targets(self):
         """Every non-row panel must have at least one target (query)."""
@@ -124,6 +125,7 @@ class TestGrafanaDashboardFile:
         row_panels = [p for p in dashboard.get("panels", []) if p.get("type") == "row"]
         assert [row.get("title") for row in row_panels] == [
             "GreenKube Impact Command Center",
+            "Actionable Recommendations",
             "CO₂e and Cost by Namespace",
             "Regional Node Cleanliness",
             "Top Emitters & Spenders",

@@ -182,6 +182,57 @@
           "value": "604800s"
         },
         "hide": 0
+      },
+      {
+        "name": "recommendation_metric",
+        "type": "custom",
+        "label": "Recommendation ranking",
+        "query": "CO₂e : co2, Cost : cost",
+        "options": [
+          {
+            "text": "CO₂e",
+            "value": "co2",
+            "selected": true
+          },
+          {
+            "text": "Cost",
+            "value": "cost",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "CO₂e",
+          "value": "co2"
+        },
+        "hide": 0
+      },
+      {
+        "name": "recommendation_limit",
+        "type": "custom",
+        "label": "Recommendation count",
+        "query": "3, 5, 10",
+        "options": [
+          {
+            "text": "3",
+            "value": "3",
+            "selected": false
+          },
+          {
+            "text": "5",
+            "value": "5",
+            "selected": true
+          },
+          {
+            "text": "10",
+            "value": "10",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "5",
+          "value": "5"
+        },
+        "hide": 0
       }
     ]
   },
@@ -630,13 +681,102 @@
       "pluginVersion": "7.2.2"
     },
     {
+      "id": 400,
+      "type": "row",
+      "title": "Actionable Recommendations",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 401,
+      "type": "volkovlabs-echarts-panel",
+      "title": "Top Actionable Recommendations",
+      "description": "Ranked action cards for the active recommendations with the largest projected annual savings.",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 12
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "transparent": true,
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "greenkube_top_recommendations{cluster=~\"$cluster\", namespace=~\"$namespace\", sort_metric=\"$recommendation_metric\", value_metric=\"co2e_grams\"}",
+          "legendFormat": "#{{rank}} {{type}} {{namespace}}/{{resource}} CO₂e",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "greenkube_top_recommendations{cluster=~\"$cluster\", namespace=~\"$namespace\", sort_metric=\"$recommendation_metric\", value_metric=\"cost_dollars\"}",
+          "legendFormat": "#{{rank}} {{type}} {{namespace}}/{{resource}} cost",
+          "refId": "B",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "renderer": "canvas",
+        "map": "none",
+        "editorMode": "code",
+        "editor": {
+          "format": "auto"
+        },
+        "themeEditor": {
+          "name": "default",
+          "config": "{}"
+        },
+        "baidu": {
+          "key": "",
+          "callback": "bmapReady"
+        },
+        "gaode": {
+          "key": "",
+          "plugin": "AMap.Scale,AMap.ToolBar"
+        },
+        "google": {
+          "key": "",
+          "callback": "gmapReady"
+        },
+        "visualEditor": {
+          "dataset": [],
+          "series": [],
+          "code": "return {};"
+        },
+        "getOption": "\nconst palette = {\n    bg: '#020617',\n    panel: 'rgba(15, 23, 42, 0.74)',\n    panelSoft: 'rgba(15, 23, 42, 0.46)',\n    cyan: '#00FFD4',\n    teal: '#14B8A6',\n    blue: '#38BDF8',\n    green: '#34D399',\n    amber: '#F59E0B',\n    red: '#FB7185',\n    text: '#E5F6FF',\n    muted: '#94A3B8',\n    grid: 'rgba(148, 163, 184, 0.16)',\n};\n\nconst valuesOf = (field) => field?.values?.buffer || field?.values || [];\n\nconst matchesRefId = (series, refId) => series?.refId === refId\n    || series?.meta?.custom?.refId === refId\n    || series?.meta?.refId === refId\n    || series?.name === refId;\n\nconst seriesForRef = (refId) => {\n    const direct = context.panel.data.series.find((series) => matchesRefId(series, refId));\n    if (direct) {\n        return direct;\n    }\n\n    const fallbackIndex = refId.charCodeAt(0) - 'A'.charCodeAt(0);\n    return context.panel.data.series[fallbackIndex];\n};\n\nconst lastNumber = (series) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const values = valuesOf(numberField);\n    const rawValue = Number(values[values.length - 1] ?? 0);\n\n    return Number.isFinite(rawValue) ? rawValue : 0;\n};\n\nconst valueFor = (refId, clampToScore = false) => {\n    const series = seriesForRef(refId);\n    const value = lastNumber(series);\n\n    return clampToScore ? Math.max(0, Math.min(100, value)) : value;\n};\n\nconst pointsFor = (refId, labelKey, limit = 3) => context.panel.data.series\n    .filter((series) => matchesRefId(series, refId))\n    .map((series) => {\n        const numberField = series.fields.find((field) => field.type === 'number');\n        const label = numberField?.labels?.[labelKey] || series.name || labelKey;\n\n        return { name: label, value: lastNumber(series) };\n    })\n    .filter((point) => Number.isFinite(point.value))\n    .sort((a, b) => b.value - a.value)\n    .slice(0, limit);\n\nconst compactNumber = (value) => {\n    if (!Number.isFinite(value)) {\n        return '0';\n    }\n\n    const absolute = Math.abs(value);\n    if (absolute >= 1000000000) {\n        return `${(value / 1000000000).toFixed(1)}B`;\n    }\n    if (absolute >= 1000000) {\n        return `${(value / 1000000).toFixed(1)}M`;\n    }\n    if (absolute >= 1000) {\n        return `${(value / 1000).toFixed(1)}k`;\n    }\n\n    return absolute >= 10 ? value.toFixed(0) : value.toFixed(1);\n};\n\nconst formatValue = (value, unit) => {\n    if (unit === 'currencyUSD') {\n        const absolute = Math.abs(value);\n        if (absolute > 0 && absolute < 0.01) {\n            return '<$0.01';\n        }\n\n        const maximumFractionDigits = absolute >= 100 ? 0 : absolute >= 1 ? 2 : 3;\n        return `$${value.toLocaleString(undefined, { maximumFractionDigits })}`;\n    }\n    if (unit === 'percent') {\n        return `${value.toFixed(0)}%`;\n    }\n    if (unit === 'g CO₂e') {\n        const absolute = Math.abs(value);\n        if (absolute >= 1000000) {\n            return `${(value / 1000000).toFixed(1)} t CO₂e`;\n        }\n        if (absolute >= 1000) {\n            return `${(value / 1000).toFixed(1)} kg CO₂e`;\n        }\n        if (absolute >= 1) {\n            return `${value.toFixed(1)} g CO₂e`;\n        }\n        if (absolute > 0) {\n            return `${value.toFixed(3)} g CO₂e`;\n        }\n\n        return '0 g CO₂e';\n    }\n    if (unit === 'count') {\n        return value.toFixed(0);\n    }\n\n    return compactNumber(value);\n};\n\nconst rawLimit = context.grafana && context.grafana.replaceVariables\n    ? context.grafana.replaceVariables('$recommendation_limit')\n    : '5';\nconst rawMetric = context.grafana && context.grafana.replaceVariables\n    ? context.grafana.replaceVariables('$recommendation_metric')\n    : 'co2';\nconst limit = Math.max(1, Math.min(10, Number(String(rawLimit).replace(/[^0-9]/g, '')) || 5));\nconst recommendationMetric = rawMetric === 'cost' ? 'cost' : 'co2';\n\nconst rowsByKey = new Map();\n\nconst upsertRow = (series, valueKey) => {\n    const numberField = series?.fields.find((field) => field.type === 'number');\n    const labels = numberField?.labels || {};\n    const rank = Number(labels.rank || 0);\n    if (!rank) {\n        return;\n    }\n\n    const key = [labels.sort_metric, labels.rank, labels.namespace, labels.type, labels.resource].join('|');\n    const existing = rowsByKey.get(key) || {\n        rank,\n        sortMetric: labels.sort_metric || recommendationMetric,\n        namespace: labels.namespace || '_cluster',\n        type: labels.type || 'UNKNOWN',\n        resource: labels.resource || '_cluster',\n        scope: labels.scope || 'pod',\n        priority: labels.priority || 'medium',\n        co2: 0,\n        cost: 0,\n    };\n    existing[valueKey] = lastNumber(series);\n    rowsByKey.set(key, existing);\n};\n\ncontext.panel.data.series.filter((series) => matchesRefId(series, 'A')).forEach((series) => upsertRow(series, 'co2'));\ncontext.panel.data.series.filter((series) => matchesRefId(series, 'B')).forEach((series) => upsertRow(series, 'cost'));\n\nconst rows = Array.from(rowsByKey.values())\n    .filter((row) => row.sortMetric === recommendationMetric)\n    .filter((row) => row.co2 > 0 || row.cost > 0)\n    .sort((a, b) => a.rank - b.rank)\n    .slice(0, limit);\n\nconst primaryValue = (row) => recommendationMetric === 'cost' ? row.cost : row.co2;\nconst primaryUnit = recommendationMetric === 'cost' ? 'currencyUSD' : 'g CO₂e';\nconst maxPrimary = Math.max(1, ...rows.map(primaryValue));\n\nif (!rows.length) {\n    return {\n        backgroundColor: 'transparent',\n        graphic: [{\n            type: 'text',\n            left: 'center',\n            top: 'middle',\n            style: {\n                text: 'No actionable recommendations with projected savings',\n                fill: palette.muted,\n                fontSize: 13,\n                fontWeight: 600,\n                textAlign: 'center',\n                textVerticalAlign: 'middle',\n            },\n        }],\n    };\n}\n\nreturn {\n    backgroundColor: 'transparent',\n    tooltip: {\n        trigger: 'item',\n        backgroundColor: 'rgba(15, 23, 42, 0.96)',\n        borderColor: palette.cyan,\n        borderWidth: 1,\n        textStyle: { color: palette.text },\n        formatter: (params) => {\n            const row = params.data;\n            return [\n                `<strong>#${row.rank} ${row.type.replace(/_/g, ' ')}</strong>`,\n                `${row.namespace} / ${row.resource}`,\n                `CO₂e: ${formatValue(row.co2, 'g CO₂e')}`,\n                `Cost: ${formatValue(row.cost, 'currencyUSD')}`,\n                `Ranked by ${recommendationMetric === 'cost' ? 'cost' : 'CO₂e'}`,\n            ].join('<br/>');\n        },\n    },\n    title: {\n        text: 'Projected annual savings',\n        subtext: `Top ${rows.length} ranked by ${recommendationMetric === 'cost' ? 'cost' : 'CO₂e'}`,\n        left: 12,\n        top: 4,\n        textStyle: { color: palette.text, fontSize: 13, fontWeight: 800 },\n        subtextStyle: { color: palette.muted, fontSize: 11, fontWeight: 600 },\n    },\n    grid: { top: 48, right: 12, bottom: 12, left: 12 },\n    xAxis: { type: 'value', min: 0, max: 1, show: false },\n    yAxis: { type: 'category', data: rows.map((row) => String(row.rank)), show: false },\n    series: [{\n        type: 'custom',\n        coordinateSystem: 'cartesian2d',\n        data: rows.map((row, index) => ({ ...row, value: [primaryValue(row), index] })),\n        renderItem: (params) => {\n            const row = rows[params.dataIndex];\n            const coord = params.coordSys;\n            const rowStep = coord.height / Math.max(rows.length, 1);\n            const cardHeight = Math.max(42, Math.min(58, rowStep - 8));\n            const x = coord.x;\n            const y = coord.y + params.dataIndex * rowStep + (rowStep - cardHeight) / 2;\n            const width = coord.width;\n            const barX = x + Math.min(430, width * 0.48);\n            const metricX = Math.max(barX + 124, x + width - 228);\n            const barWidth = Math.max(6, Math.min(width - (barX - x) - 250, 220) * (primaryValue(row) / maxPrimary));\n            const typeText = row.type.replace(/_/g, ' ');\n            const targetText = `${row.namespace} / ${row.resource}`;\n\n            return {\n                type: 'group',\n                children: [\n                    {\n                        type: 'rect',\n                        shape: { x, y, width, height: cardHeight, r: 8 },\n                        style: {\n                            fill: params.dataIndex % 2 === 0 ? palette.panel : palette.panelSoft,\n                            stroke: 'rgba(148, 163, 184, 0.18)',\n                            lineWidth: 1,\n                        },\n                    },\n                    {\n                        type: 'rect',\n                        shape: { x: x + 12, y: y + 13, width: 34, height: 22, r: 11 },\n                        style: { fill: 'rgba(0, 255, 212, 0.14)', stroke: palette.cyan, lineWidth: 1 },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: x + 29,\n                            y: y + 24,\n                            text: `#${row.rank}`,\n                            fill: palette.cyan,\n                            fontSize: 12,\n                            fontWeight: 800,\n                            textAlign: 'center',\n                            textVerticalAlign: 'middle',\n                        },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: x + 58,\n                            y: y + 17,\n                            text: typeText,\n                            fill: palette.text,\n                            fontSize: 12,\n                            fontWeight: 800,\n                            width: Math.max(160, barX - x - 82),\n                            overflow: 'truncate',\n                        },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: x + 58,\n                            y: y + 36,\n                            text: targetText,\n                            fill: palette.muted,\n                            fontSize: 11,\n                            fontWeight: 600,\n                            width: Math.max(160, barX - x - 82),\n                            overflow: 'truncate',\n                        },\n                    },\n                    {\n                        type: 'rect',\n                        shape: { x: barX, y: y + 22, width: Math.min(220, width - (barX - x) - 250), height: 8, r: 4 },\n                        style: { fill: 'rgba(148, 163, 184, 0.16)' },\n                    },\n                    {\n                        type: 'rect',\n                        shape: { x: barX, y: y + 22, width: barWidth, height: 8, r: 4 },\n                        style: {\n                            fill: recommendationMetric === 'cost' ? palette.green : palette.cyan,\n                            shadowBlur: 12,\n                            shadowColor: recommendationMetric === 'cost'\n                                ? 'rgba(52, 211, 153, 0.35)'\n                                : 'rgba(0, 255, 212, 0.35)',\n                        },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: metricX,\n                            y: y + 18,\n                            text: formatValue(row.co2, 'g CO₂e'),\n                            fill: palette.cyan,\n                            fontSize: 12,\n                            fontWeight: 800,\n                            width: 106,\n                            overflow: 'truncate',\n                        },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: metricX + 116,\n                            y: y + 18,\n                            text: formatValue(row.cost, 'currencyUSD'),\n                            fill: palette.green,\n                            fontSize: 12,\n                            fontWeight: 800,\n                            width: 86,\n                            overflow: 'truncate',\n                        },\n                    },\n                    {\n                        type: 'text',\n                        style: {\n                            x: barX,\n                            y: y + 39,\n                            text: formatValue(primaryValue(row), primaryUnit),\n                            fill: palette.text,\n                            fontSize: 11,\n                            fontWeight: 700,\n                        },\n                    },\n                ],\n            };\n        },\n    }],\n};\n"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "pluginVersion": "7.2.2"
+    },
+    {
       "id": 500,
       "type": "row",
       "title": "CO₂e and Cost by Namespace",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 22,
         "w": 24,
         "h": 1
       },
@@ -648,7 +788,7 @@
       "title": "CO₂e by Namespace",
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 23,
         "w": 12,
         "h": 8
       },
@@ -693,7 +833,7 @@
       "title": "Cost by Namespace",
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 23,
         "w": 12,
         "h": 8
       },
@@ -739,7 +879,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 31,
         "w": 24,
         "h": 1
       },
@@ -752,7 +892,7 @@
       "description": "Regional node map colored by Electricity Maps grid intensity. Marker placement uses the EM zone country lookup, while node labels carry Kubernetes topology zone and region metadata.",
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 32,
         "w": 24,
         "h": 9
       },
@@ -900,7 +1040,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 41,
         "w": 24,
         "h": 1
       },
@@ -912,7 +1052,7 @@
       "title": "Top 15 Pods — CO₂e",
       "gridPos": {
         "x": 0,
-        "y": 33,
+        "y": 42,
         "w": 12,
         "h": 10
       },
@@ -989,7 +1129,7 @@
       "title": "Top 15 Pods — Cost",
       "gridPos": {
         "x": 12,
-        "y": 33,
+        "y": 42,
         "w": 12,
         "h": 10
       },

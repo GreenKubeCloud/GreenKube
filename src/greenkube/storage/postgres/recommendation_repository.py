@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from ...core.recommendation_ranking import normalize_savings_metric
 from ...core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
 from ...models.metrics import (
     ApplyRecommendationRequest,
@@ -64,6 +65,19 @@ def _type_value(record: RecommendationRecord) -> str:
 def _status_value(record: RecommendationRecord) -> str:
     """Returns the persisted recommendation status value."""
     return record.status.value if isinstance(record.status, RecommendationStatus) else record.status
+
+
+def _savings_columns(savings_metric: str) -> tuple[str, str]:
+    """Returns primary and secondary savings columns for a ranked query."""
+    metric = normalize_savings_metric(savings_metric)
+    if metric == "cost":
+        return "potential_savings_cost", "potential_savings_co2e_grams"
+    return "potential_savings_co2e_grams", "potential_savings_cost"
+
+
+def _bounded_limit(limit: int) -> int:
+    """Keep recommendation ranking limits in a practical range."""
+    return max(1, min(int(limit), 50))
 
 
 def _identity_key(record: RecommendationRecord) -> tuple:
@@ -412,6 +426,46 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
             where = " AND ".join(conditions)
             query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY priority DESC, created_at DESC"
+            rows = await conn.fetch(query, *params)
+            return [_row_to_record(r) for r in rows]
+
+    async def get_top_recommendations(
+        self,
+        limit: int = 5,
+        savings_metric: str = "co2",
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns active recommendations ranked by projected annual savings."""
+        primary_column, secondary_column = _savings_columns(savings_metric)
+        bounded_limit = _bounded_limit(limit)
+
+        async with self.db_manager.connection_scope() as conn:
+            params: list = []
+            conditions = ["status = 'active'", f"COALESCE({primary_column}, 0) > 0"]
+
+            if namespace:
+                params.append(namespace)
+                conditions.append(f"namespace = ${len(params)}")
+
+            params.append(bounded_limit)
+            limit_placeholder = f"${len(params)}"
+            where = " AND ".join(conditions)
+            query = f"""
+                SELECT * FROM recommendation_history
+                WHERE {where}
+                ORDER BY COALESCE({primary_column}, 0) DESC,
+                         COALESCE({secondary_column}, 0) DESC,
+                         CASE LOWER(COALESCE(priority, 'medium'))
+                            WHEN 'critical' THEN 4
+                            WHEN 'high' THEN 3
+                            WHEN 'medium' THEN 2
+                            WHEN 'low' THEN 1
+                            ELSE 0
+                         END DESC,
+                         COALESCE(updated_at, created_at) DESC,
+                         id DESC
+                LIMIT {limit_placeholder}
+            """
             rows = await conn.fetch(query, *params)
             return [_row_to_record(r) for r in rows]
 

@@ -5,6 +5,7 @@ API routes for the recommendation lifecycle.
 Endpoints:
   GET  /recommendations            - Live recommendations (runs recommender, upserts DB)
   GET  /recommendations/active     - Current active recommendations from DB
+    GET  /recommendations/top        - Ranked actionable recommendations by projected savings
   GET  /recommendations/ignored    - All permanently ignored recommendations
   GET  /recommendations/history    - Historical records filtered by time range
   GET  /recommendations/savings    - Aggregate CO2 and cost savings from applied recs
@@ -15,7 +16,7 @@ Endpoints:
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -29,6 +30,7 @@ from greenkube.api.dependencies import (
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
 from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.core.config import get_config
+from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
@@ -36,6 +38,7 @@ from greenkube.models.metrics import (
     Recommendation,
     RecommendationRecord,
     RecommendationSavingsSummary,
+    TopRecommendation,
 )
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
@@ -217,6 +220,31 @@ async def list_active_recommendations(
             logger.error("Failed to refresh active recommendations: %s", e)
 
     return await reco_repo.get_active_recommendations(namespace=namespace)
+
+
+@router.get("/recommendations/top", response_model=List[TopRecommendation])
+async def list_top_recommendations(
+    namespace: Optional[str] = Depends(validate_namespace),
+    limit: int = Query(5, ge=1, le=50, description="Number of recommendations to return."),
+    metric: Literal["co2", "cost"] = Query("co2", description="Savings metric used for ranking."),
+    refresh: bool = Query(False, description="Refresh recommendations before ranking active records."),
+    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
+    node_repo: NodeRepository = Depends(get_node_repository),
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Return the highest-impact active recommendations by projected annual savings.
+
+    The default ranking uses projected CO2e savings for the coming year. Pass
+    ``metric=cost`` to prioritize direct cloud cost savings instead.
+    """
+    if refresh:
+        try:
+            await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+        except Exception as e:
+            logger.error("Failed to refresh top recommendations: %s", e)
+
+    records = await reco_repo.get_top_recommendations(limit=limit, savings_metric=metric, namespace=namespace)
+    return rank_recommendations(records, limit=limit, savings_metric=metric)
 
 
 @router.get("/recommendations/ignored", response_model=List[RecommendationRecord])

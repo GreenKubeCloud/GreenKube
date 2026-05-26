@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recommendations: Annualised savings** — Each recommendation now exposes projected annual CO₂e savings (`annual_co2e_savings_grams`) and annual cost savings (`annual_cost_savings_usd`), extrapolated from the observation window. Values are surfaced in the API response, the frontend recommendations page, and CLI output.
 - **Report: Yearly and custom date ranges** — `GET /api/v1/report` now accepts a `1y` (calendar year-to-date) window and arbitrary `start`/`end` timestamps. Reports can additionally be grouped by namespace via the `group_by_namespace` query parameter.
 - **Recommendations: Savings ledger integration (#237)** — Applied recommendations now trigger a savings-ledger entry. A new flow updates `RecommendationRealization` records and kicks off a background refresh of the savings attribution so the `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` gauges stay consistent as metrics accumulate.
+- **Recommendations: `GET /api/v1/recommendations/top`** — New API endpoint returning the highest-impact active recommendations ranked by projected annual savings. Returns `TopRecommendation` DTOs with rank, projected annual CO₂e savings, and projected annual cost savings.
+- **Prometheus: `greenkube_top_recommendations` gauge** — New Prometheus gauge exposing ranked active recommendations.
+- **Grafana: Actionable Recommendations section** — New dashboard row showing the top-N ranked recommendations as horizontal bar cards with projected annual CO₂e and cost savings.
+- **App startup recommendation scan:** The API now triggers a full scan for recommendations on startup, ensuring the dashboard and API have immediate data to work with even if no new metrics have come in since the last scan.
 
 ### Changed
 - **Grafana: `$node` and `$region` template variables removed** — Both variables have been dropped from the dashboard.
