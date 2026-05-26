@@ -1168,7 +1168,7 @@ panels.append(
         description="Ranked action cards for the active recommendations with the largest projected annual savings.",
     )
 )
-y += 8
+y += 12
 
 # ── Row 2: CO₂e and Cost by Namespace ─────────────────────────────────────────────
 panels.append({**row(500, "CO₂e and Cost by Namespace", collapsed=False, y=y)})

@@ -70,7 +70,7 @@ def test_reduced_dashboard_section_order():
         "Regional Node Cleanliness",
         "Top Emitters & Spenders",
     ]
-    assert [row["gridPos"]["y"] for row in rows] == [0, 13, 22, 31, 41]
+    assert [row["gridPos"]["y"] for row in rows] == [0, 13, 26, 35, 45]
 
 
 def test_namespace_charts_are_second_section_above_map():
@@ -80,8 +80,8 @@ def test_namespace_charts_are_second_section_above_map():
 
     assert co2_panel["type"] == "piechart"
     assert cost_panel["type"] == "piechart"
-    assert co2_panel["gridPos"] == {"x": 0, "y": 23, "w": 12, "h": 8}
-    assert cost_panel["gridPos"] == {"x": 12, "y": 23, "w": 12, "h": 8}
+    assert co2_panel["gridPos"] == {"x": 0, "y": 27, "w": 12, "h": 8}
+    assert cost_panel["gridPos"] == {"x": 12, "y": 27, "w": 12, "h": 8}
     assert co2_panel["gridPos"]["y"] < map_row["gridPos"]["y"]
     assert "greenkube_namespace_co2e_grams_total" in co2_panel["targets"][0]["expr"]
     assert "greenkube_namespace_cost_dollars_total" in cost_panel["targets"][0]["expr"]
@@ -97,8 +97,8 @@ def test_top_emitters_keeps_only_co2e_and_cost_charts():
     ]
 
     assert top_panel_titles == ["Top 15 Pods — CO₂e", "Top 15 Pods — Cost"]
-    assert _panel("Top 15 Pods — CO₂e")["gridPos"] == {"x": 0, "y": 42, "w": 12, "h": 10}
-    assert _panel("Top 15 Pods — Cost")["gridPos"] == {"x": 12, "y": 42, "w": 12, "h": 10}
+    assert _panel("Top 15 Pods — CO₂e")["gridPos"] == {"x": 0, "y": 46, "w": 12, "h": 10}
+    assert _panel("Top 15 Pods — Cost")["gridPos"] == {"x": 12, "y": 46, "w": 12, "h": 10}
 
 
 def test_actionable_recommendations_section_sits_above_namespace_analysis():

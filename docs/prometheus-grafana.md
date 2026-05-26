@@ -4,6 +4,8 @@
 
 ![GreenKube Impact Command Center — Sustainability Score Radar, Footprint & Cost Mix, Impact Ledger, and Action Priorities panels](../assets/grafana-dashboard-top-panel.png)
 
+![Top recommendations — horizontal bar cards showing the top actionable recommendations ranked by projected annual CO₂e or cost savings](../assets/grafana-dashboard-top-reco.png)
+
 ![CO₂e by Namespace — pie charts breaking down operational and cost emissions per namespace](../assets/grafana-dashboard-by-namespace.png)
 
 ![Regional Node Cleanliness — bubble geomap colored by grid carbon intensity per electricity zone](../assets/grafana-dashboard-node-map.png)
