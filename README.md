@@ -58,6 +58,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 | [Configuration](docs/configuration.md) | All Helm values and environment variables |
 | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
 | [CLI Reference](docs/cli.md) | `greenkube report`, `recommend`, and other CLI commands |
+| [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, persisted, actioned, and measured |
 | [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
 | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
 | [Changelog](CHANGELOG.md) | Version history |

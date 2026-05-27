@@ -92,13 +92,15 @@ greenkube recommend [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--namespace TEXT` | Filter recommendations by namespace |
-| `--last TEXT` | Time window to analyse (default: `24h`) |
+| `--live` | Run the full processor pipeline live instead of reading stored metrics from the database |
+| `--fail-on-recommendations` | Exit with code 1 if any recommendations are found |
 
 **Example:**
 
 ```bash
 greenkube recommend
-greenkube recommend --namespace production --last 7d
+greenkube recommend --namespace production
+greenkube recommend --fail-on-recommendations
 ```
 
 ### `greenkube start`
