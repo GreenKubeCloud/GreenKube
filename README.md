@@ -65,6 +65,8 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 
 ---
 
+Published dashboard on Grafana.com: https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/
+
 ## Installation
 
 The recommended deployment method is the official Helm chart.

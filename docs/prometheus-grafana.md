@@ -228,6 +228,10 @@ payload = json.dumps({
     }]
 }).encode()
 
+    ### Published dashboard on Grafana.com
+
+    A published version of the GreenKube dashboard is available on Grafana.com's dashboard repository: https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/.
+
 req = urllib.request.Request(
     "http://<GRAFANA_HOST>/api/dashboards/import",
     data=payload,
