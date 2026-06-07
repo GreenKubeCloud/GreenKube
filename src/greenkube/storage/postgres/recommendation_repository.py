@@ -517,6 +517,26 @@ class PostgresRecommendationRepository(RecommendationRepository):
             rows = await conn.fetch(query, *params)
             return [_row_to_record(r) for r in rows]
 
+    async def get_applied_recommendations_stats(self) -> List[dict]:
+        """Return aggregated applied-recommendation stats via SQL GROUP BY.
+
+        Returns one dict per (type, namespace) pair with keys:
+        ``type``, ``namespace``, ``count``, ``total_co2e_grams``, ``total_cost_dollars``.
+        """
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch("""
+                SELECT
+                    type,
+                    COALESCE(namespace, '_cluster') AS namespace,
+                    COUNT(*) AS count,
+                    COALESCE(SUM(carbon_saved_co2e_grams), 0) AS total_co2e_grams,
+                    COALESCE(SUM(cost_saved), 0) AS total_cost_dollars
+                FROM recommendation_history
+                WHERE status = 'applied'
+                GROUP BY type, COALESCE(namespace, '_cluster')
+            """)
+            return [dict(r) for r in rows]
+
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
         """Returns a single recommendation by its database ID.
 

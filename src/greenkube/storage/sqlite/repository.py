@@ -410,6 +410,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         "total_energy_joules": 0.0,
                         "pod_count": 0,
                         "namespace_count": 0,
+                        "row_count": 0,
                     }
 
                 union_query = " UNION ALL ".join(parts)
@@ -420,7 +421,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         COALESCE(SUM(total_cost), 0)          AS total_cost,
                         COALESCE(SUM(joules), 0)              AS total_energy,
                         COUNT(DISTINCT pod_name)               AS pod_count,
-                        COUNT(DISTINCT namespace)              AS namespace_count
+                        COUNT(DISTINCT namespace)              AS namespace_count,
+                        COUNT(*)                               AS row_count
                     FROM ({union_query})
                 """
                 async with conn.execute(query, params) as cursor:
@@ -432,6 +434,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         "total_energy_joules": row["total_energy"] or 0.0,
                         "pod_count": row["pod_count"] or 0,
                         "namespace_count": row["namespace_count"] or 0,
+                        "row_count": row["row_count"] or 0,
                     }
         except sqlite3.Error as e:
             logging.error("aggregate_summary failed: %s", e)

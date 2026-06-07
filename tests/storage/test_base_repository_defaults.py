@@ -106,6 +106,7 @@ async def test_default_list_namespaces_and_aggregate_summary():
         "total_energy_joules": 300.0,
         "pod_count": 2,
         "namespace_count": 1,
+        "row_count": 2,
     }
 
 

@@ -10,11 +10,11 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 
 from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
 from greenkube.api.schemas import ReportSummaryResponse
@@ -111,6 +111,38 @@ async def _read_report_metrics(
     return metrics
 
 
+async def _aggregate_summary_for_ranges(
+    repo: CombinedMetricsRepository,
+    namespace: Optional[str],
+    ranges: list[tuple[datetime, datetime]],
+) -> dict:
+    """Merge SQL-level aggregate_summary results across one or more time ranges.
+
+    Scalars (CO2, cost, energy, row_count) are summed; pod/namespace uniqueness
+    counts use max() across ranges — slightly conservative but avoids a full
+    UNION query when multiple years are selected.
+    """
+    result: dict = {
+        "row_count": 0,
+        "total_co2e_grams": 0.0,
+        "total_embodied_co2e_grams": 0.0,
+        "total_cost": 0.0,
+        "total_energy_joules": 0.0,
+        "pod_count": 0,
+        "namespace_count": 0,
+    }
+    for range_start, range_end in ranges:
+        agg = await repo.aggregate_summary(start_time=range_start, end_time=range_end, namespace=namespace)
+        result["row_count"] += agg.get("row_count", 0)
+        result["total_co2e_grams"] += agg.get("total_co2e_grams", 0.0)
+        result["total_embodied_co2e_grams"] += agg.get("total_embodied_co2e_grams", 0.0)
+        result["total_cost"] += agg.get("total_cost", 0.0)
+        result["total_energy_joules"] += agg.get("total_energy_joules", 0.0)
+        result["pod_count"] = max(result["pod_count"], agg.get("pod_count", 0))
+        result["namespace_count"] = max(result["namespace_count"], agg.get("namespace_count", 0))
+    return result
+
+
 @router.get("/report/summary", response_model=ReportSummaryResponse)
 async def report_summary(
     namespace: Optional[str] = Depends(validate_namespace),
@@ -138,30 +170,41 @@ async def report_summary(
             detail=f"Invalid group_by '{group_by}'. Valid values: {', '.join(_VALID_GROUP_BY)}.",
         )
 
+    if not aggregate:
+        # Fast path: SQL-level aggregation avoids loading millions of rows into memory.
+        agg = await _aggregate_summary_for_ranges(repo, namespace, _get_time_ranges(last, start, end, years))
+        total_co2e = agg["total_co2e_grams"]
+        total_embodied = agg["total_embodied_co2e_grams"]
+        return ReportSummaryResponse(
+            total_rows=agg["row_count"],
+            total_co2e_grams=total_co2e,
+            total_embodied_co2e_grams=total_embodied,
+            total_co2e_all_scopes=total_co2e + total_embodied,
+            total_cost=agg["total_cost"],
+            total_energy_joules=agg["total_energy_joules"],
+            unique_pods=agg["pod_count"],
+            unique_namespaces=agg["namespace_count"],
+        )
+
+    # aggregate=True: load full data so Python can group by (pod, namespace, period).
     raw_metrics = await _read_report_metrics(repo, namespace, last, start, end, years)
-    metrics = raw_metrics
+    granularity_flags = _granularity_flags(granularity)
+    metrics = aggregate_metrics(raw_metrics, **granularity_flags, group_by=group_by)
 
-    if aggregate:
-        granularity_flags = _granularity_flags(granularity)
-        metrics = aggregate_metrics(metrics, **granularity_flags, group_by=group_by)
-
-    total_rows = len(metrics)
     total_co2e_grams = sum(m.co2e_grams for m in metrics)
     total_embodied_co2e_grams = sum(m.embodied_co2e_grams for m in metrics)
     total_cost = sum(m.total_cost for m in metrics)
     total_energy_joules = sum(m.joules for m in metrics)
-    unique_pods = len({m.pod_name for m in raw_metrics})
-    unique_namespaces = len({m.namespace for m in raw_metrics})
 
     return ReportSummaryResponse(
-        total_rows=total_rows,
+        total_rows=len(metrics),
         total_co2e_grams=total_co2e_grams,
         total_embodied_co2e_grams=total_embodied_co2e_grams,
         total_co2e_all_scopes=total_co2e_grams + total_embodied_co2e_grams,
         total_cost=total_cost,
         total_energy_joules=total_energy_joules,
-        unique_pods=unique_pods,
-        unique_namespaces=unique_namespaces,
+        unique_pods=len({m.pod_name for m in raw_metrics}),
+        unique_namespaces=len({m.namespace for m in raw_metrics}),
     )
 
 
@@ -210,29 +253,69 @@ async def report_export(
             detail=f"Invalid group_by '{group_by}'. Valid values: {', '.join(_VALID_GROUP_BY)}.",
         )
 
-    metrics = await _read_report_metrics(repo, namespace, last, start, end, years)
-
-    if aggregate:
-        granularity_flags = _granularity_flags(granularity)
-        metrics = aggregate_metrics(metrics, **granularity_flags, group_by=group_by)
-
-    rows = [m.model_dump(mode="json") for m in metrics]
-
+    # Stream results in chunks to avoid loading the whole dataset into memory.
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"greenkube-report-{timestamp_str}.{fmt}"
 
+    # Create an async generator that yields bytes
+    async def _iter_metrics_chunks(chunk_days: int = 7):
+        # Convert requested ranges into a sequence of (start, end) windows
+        ranges = _get_time_ranges(last, start, end, years)
+        for range_start, range_end in ranges:
+            # iterate in chunks of chunk_days
+            cursor = range_start
+            delta = timedelta(days=chunk_days)
+            while cursor <= range_end:
+                window_end = min(range_end, cursor + delta)
+                batch = await repo.read_combined_metrics_smart(
+                    start_time=cursor, end_time=window_end, namespace=namespace
+                )
+                if aggregate:
+                    granularity_flags = _granularity_flags(granularity)
+                    batch = aggregate_metrics(batch, **granularity_flags, group_by=group_by)
+                yield batch
+                cursor = window_end + timedelta(seconds=1)
+
     if fmt == "json":
-        content = json.dumps(rows, ensure_ascii=False, indent=2)
-        return Response(
-            content=content.encode("utf-8"),
+
+        async def _json_stream():
+            first = True
+            yield b"["
+            async for batch in _iter_metrics_chunks():
+                for m in batch:
+                    if not first:
+                        yield b","
+                    else:
+                        first = False
+                    yield json.dumps(m.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
+            yield b"]"
+
+        return StreamingResponse(
+            _json_stream(),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    # CSV export
-    content = _rows_to_csv(rows)
-    return Response(
-        content=content.encode("utf-8"),
+    # CSV streaming
+    async def _csv_stream():
+        header_written = False
+        async for batch in _iter_metrics_chunks():
+            rows = [m.model_dump(mode="json") for m in batch]
+            if not rows:
+                continue
+            output = io.StringIO()
+            headers = list(rows[0].keys())
+            writer = csv.DictWriter(output, fieldnames=headers)
+            if not header_written:
+                writer.writeheader()
+                header_written = True
+            for row in rows:
+                sanitized = {k: _sanitize_cell(v) for k, v in row.items()}
+                writer.writerow(sanitized)
+            yield output.getvalue().encode("utf-8")
+
+    return StreamingResponse(
+        _csv_stream(),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

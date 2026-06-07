@@ -539,6 +539,7 @@ async def test_combined_metrics_repository_namespace_cache_and_empty_ranges(real
         "total_energy_joules": 0.0,
         "pod_count": 0,
         "namespace_count": 0,
+        "row_count": 0,
     }
     assert await repo.aggregate_timeseries(inverted_start, inverted_end) == []
     assert await repo.aggregate_by_namespace(inverted_start, inverted_end) == []
