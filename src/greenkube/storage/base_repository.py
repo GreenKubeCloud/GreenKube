@@ -245,6 +245,7 @@ class CombinedMetricsRepository(ABC):
             "total_energy_joules": sum(m.joules for m in metrics),
             "pod_count": len({m.pod_name for m in metrics}),
             "namespace_count": len({m.namespace for m in metrics}),
+            "row_count": len(metrics),
         }
 
     async def aggregate_timeseries(
@@ -562,6 +563,31 @@ class RecommendationRepository(ABC):
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         pass
+
+    async def get_applied_recommendations_stats(self) -> List[dict]:
+        """Return aggregated applied-recommendation stats for Prometheus gauge updates.
+
+        Returns a lightweight list of dicts — one entry per (type, namespace) pair —
+        so callers never have to load full recommendation records just to update gauges.
+
+        Keys per dict: ``type``, ``namespace``, ``count``,
+        ``total_co2e_grams``, ``total_cost_dollars``.
+
+        The default implementation falls back to loading all records and aggregating
+        in Python.  Subclasses should override with a SQL GROUP BY query.
+        """
+        from collections import defaultdict
+
+        records = await self.get_applied_recommendations()
+        stats: dict[tuple, dict] = defaultdict(lambda: {"count": 0, "total_co2e_grams": 0.0, "total_cost_dollars": 0.0})
+        for r in records:
+            rec_type = r.type.value if hasattr(r.type, "value") else str(r.type)
+            ns = r.namespace or "_cluster"
+            key = (rec_type, ns)
+            stats[key]["count"] += 1
+            stats[key]["total_co2e_grams"] += r.carbon_saved_co2e_grams or 0.0
+            stats[key]["total_cost_dollars"] += r.cost_saved or 0.0
+        return [{"type": t, "namespace": ns, **v} for (t, ns), v in stats.items()]
 
 
 class SummaryRepository(ABC):

@@ -482,6 +482,7 @@ async def test_close_closes_cached_api_client():
     collector = NodeCollector()
     api_client = MagicMock()
     api_client.close = AsyncMock()
+    api_client._is_shared_k8s_client = False
     collector._api = MagicMock(api_client=api_client)
 
     await collector.close()

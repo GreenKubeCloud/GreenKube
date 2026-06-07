@@ -1018,6 +1018,55 @@ def update_realized_savings_metrics(applied_records: List[RecommendationRecord])
     )
 
 
+def update_realized_savings_from_stats(stats_rows: List[dict]) -> None:
+    """Update Prometheus gauges for realized savings from pre-aggregated SQL stats.
+
+    Accepts the output of ``RecommendationRepository.get_applied_recommendations_stats()``
+    — one dict per (type, namespace) pair — instead of loading full recommendation
+    records.  This avoids the memory cost of fetching all applied records on every
+    Prometheus scrape.
+
+    Args:
+        stats_rows: List of dicts with keys: type, namespace, count,
+                    total_co2e_grams, total_cost_dollars.
+    """
+    _clear_gauge(CLUSTER_CO2_SAVED)
+    _clear_gauge(CLUSTER_COST_SAVED)
+    _clear_gauge(RECOMMENDATIONS_IMPLEMENTED)
+
+    cluster = _get_cluster_name()
+
+    if not stats_rows:
+        CLUSTER_CO2_SAVED.labels(cluster=cluster).set(0)
+        CLUSTER_COST_SAVED.labels(cluster=cluster).set(0)
+        return
+
+    total_co2_saved = sum(r["total_co2e_grams"] for r in stats_rows)
+    total_cost_saved = sum(r["total_cost_dollars"] for r in stats_rows)
+
+    CLUSTER_CO2_SAVED.labels(cluster=cluster).set(total_co2_saved)
+    CLUSTER_COST_SAVED.labels(cluster=cluster).set(total_cost_saved)
+
+    implemented_by_type: dict[str, int] = defaultdict(int)
+    for r in stats_rows:
+        rec_type = r["type"]
+        ns = r["namespace"] or "_cluster"
+        count = int(r["count"])
+        implemented_by_type[rec_type] += count
+        RECOMMENDATIONS_IMPLEMENTED.labels(cluster=cluster, namespace=ns, type=rec_type).set(count)
+
+    for rec_type, count in implemented_by_type.items():
+        RECOMMENDATIONS_IMPLEMENTED.labels(cluster=cluster, namespace=DASHBOARD_NAMESPACE_ALL, type=rec_type).set(count)
+
+    total_applied = sum(int(r["count"]) for r in stats_rows)
+    logger.debug(
+        "Updated realized savings metrics: %.2f g CO2e saved, $%.2f saved, %d recommendations applied.",
+        total_co2_saved,
+        total_cost_saved,
+        total_applied,
+    )
+
+
 def get_metrics_output() -> bytes:
     """Generates the Prometheus text exposition format output.
 
@@ -1101,8 +1150,8 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
 
     # --- Realized savings metrics (applied recommendations, all time) ---
     try:
-        applied = await reco_repo.get_applied_recommendations()
-        update_realized_savings_metrics(applied)
+        stats = await reco_repo.get_applied_recommendations_stats()
+        update_realized_savings_from_stats(stats)
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh realized savings metrics: %s", exc)
 

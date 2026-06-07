@@ -116,6 +116,12 @@ class PodCollector(BaseCollector):
     async def close(self):
         """Close the Kubernetes API client if it exists."""
         if self._api:
-            await self._api.api_client.close()
-            logger.debug("PodCollector Kubernetes client closed.")
-            self._api = None
+            try:
+                api_client = getattr(self._api, "api_client", None)
+                if api_client and not getattr(api_client, "_is_shared_k8s_client", False):
+                    await api_client.close()
+                    logger.debug("PodCollector Kubernetes client closed.")
+            except Exception:
+                logger.exception("Error closing PodCollector Kubernetes client.")
+            finally:
+                self._api = None
