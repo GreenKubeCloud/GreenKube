@@ -150,6 +150,7 @@ class Config:
         self.CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
         self.API_KEY = os.getenv("GREENKUBE_API_KEY", "")
         self.API_RATE_LIMIT = os.getenv("API_RATE_LIMIT", "60/minute")
+        self.METRICS_LIST_MAX_RANGE_DAYS = int(os.getenv("METRICS_LIST_MAX_RANGE_DAYS", "30"))
 
         # --- Recommendation Engine variables ---
         self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (

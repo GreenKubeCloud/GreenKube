@@ -51,9 +51,16 @@ def mock_carbon_repo():
 
 @pytest.fixture
 def mock_combined_metrics_repo():
+    from greenkube.storage.base_repository import CombinedMetricsRepository as _Base
+
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.list_namespaces = AsyncMock(return_value=[])
+
+    async def _read_latest_per_pod(start_time, end_time):
+        return await _Base.read_latest_per_pod(repo, start_time, end_time)
+
+    repo.read_latest_per_pod = _read_latest_per_pod
     return repo
 
 

@@ -1117,20 +1117,26 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
         # ~11 minutes before the current time, so a 10-minute window would miss
         # the most recent batch.  20 minutes guarantees we always cover at least
         # one full scheduler cycle.
+        #
+        # Use read_latest_per_pod when available (SQL DISTINCT ON) to avoid
+        # loading the full 20-minute history just to find the latest snapshot
+        # per pod.  Falls back to Python deduplication on non-SQL backends.
         start = now - timedelta(minutes=20)
-        metrics = await combined_repo.read_combined_metrics(start_time=start, end_time=now)
-        # Deduplicate: keep only the latest snapshot per (namespace, pod_name) so
-        # that Prometheus gauges have exactly one time-series per pod and Grafana
-        # does not show the same pod multiple times.
-        latest: dict[tuple[str, str], CombinedMetric] = {}
-        for m in metrics:
-            key = (m.namespace, m.pod_name)
-            existing = latest.get(key)
-            if existing is None:
-                latest[key] = m
-            elif m.timestamp is not None and (existing.timestamp is None or m.timestamp > existing.timestamp):
-                latest[key] = m
-        update_cluster_metrics(list(latest.values()))
+        try:
+            latest_metrics = await combined_repo.read_latest_per_pod(start_time=start, end_time=now)
+        except Exception:
+            # Fallback: load all and deduplicate in Python
+            metrics = await combined_repo.read_combined_metrics(start_time=start, end_time=now)
+            latest: dict[tuple[str, str], CombinedMetric] = {}
+            for m in metrics:
+                key = (m.namespace, m.pod_name)
+                existing = latest.get(key)
+                if existing is None:
+                    latest[key] = m
+                elif m.timestamp is not None and (existing.timestamp is None or m.timestamp > existing.timestamp):
+                    latest[key] = m
+            latest_metrics = list(latest.values())
+        update_cluster_metrics(latest_metrics)
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh cluster metrics: %s", exc)
 

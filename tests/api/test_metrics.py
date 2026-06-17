@@ -22,7 +22,7 @@ class TestMetricsListEndpoint:
         assert data["total"] == 0
 
     def test_metrics_returns_data(self, client, mock_combined_metrics_repo, sample_combined_metrics):
-        """Should return metrics from the repository."""
+        """Should return metrics from the repository via DB-level pagination."""
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/metrics")
         data = response.json()
@@ -45,21 +45,21 @@ class TestMetricsListEndpoint:
         response = client.get("/api/v1/metrics?last=7d")
         assert response.status_code == 200
 
-    def test_metrics_supports_ytd_last(self, client, mock_combined_metrics_repo):
-        """YTD should resolve to January 1st of the current UTC year."""
-        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
-
+    def test_metrics_supports_ytd_last_returns_400(self, client):
+        """YTD spans > 30 days and must be rejected to avoid OOM."""
         response = client.get("/api/v1/metrics?last=ytd")
+        assert response.status_code == 400
 
+    def test_metrics_exceeds_max_range_returns_400(self, client):
+        """Requests wider than METRICS_LIST_MAX_RANGE_DAYS must return 400."""
+        response = client.get("/api/v1/metrics?last=90d")
+        assert response.status_code == 400
+
+    def test_metrics_within_max_range_returns_200(self, client, mock_combined_metrics_repo):
+        """Requests within METRICS_LIST_MAX_RANGE_DAYS should pass."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
+        response = client.get("/api/v1/metrics?last=7d")
         assert response.status_code == 200
-        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
-        start = kwargs["start_time"]
-        end = kwargs["end_time"]
-        assert start.year == end.year
-        assert start.month == 1
-        assert start.day == 1
-        assert start.hour == 0
-        assert start.tzinfo is not None
 
     def test_metrics_invalid_last_returns_400(self, client):
         """Should return 400 for invalid last parameter."""

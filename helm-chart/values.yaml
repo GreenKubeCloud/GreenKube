@@ -130,6 +130,10 @@ config:
   # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
   apiRateLimit: 60/minute
 
+  # Maximum time range (days) allowed for GET /metrics raw listing.
+  # Requests wider than this return HTTP 400 to prevent loading millions of rows.
+  metricsListMaxRangeDays: 30
+
   # API server configuration
   api:
     enabled: true

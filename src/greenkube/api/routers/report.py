@@ -186,25 +186,36 @@ async def report_summary(
             unique_namespaces=agg["namespace_count"],
         )
 
-    # aggregate=True: load full data so Python can group by (pod, namespace, period).
-    raw_metrics = await _read_report_metrics(repo, namespace, last, start, end, years)
-    granularity_flags = _granularity_flags(granularity)
-    metrics = aggregate_metrics(raw_metrics, **granularity_flags, group_by=group_by)
+    # aggregate=True: use SQL-level grouped COUNT — no CombinedMetric rows are
+    # loaded into memory regardless of the range width.
+    # Totals (CO2, cost, energy, unique pods/namespaces) are identical to the
+    # non-aggregate path and come from aggregate_summary.
+    # Only total_rows differs: it's the number of (group_key × time_bucket)
+    # combinations that the export would produce.
+    resolved_ranges = _get_time_ranges(last, start, end, years)
+    agg = await _aggregate_summary_for_ranges(repo, namespace, resolved_ranges)
+    total_co2e = agg["total_co2e_grams"]
+    total_embodied = agg["total_embodied_co2e_grams"]
 
-    total_co2e_grams = sum(m.co2e_grams for m in metrics)
-    total_embodied_co2e_grams = sum(m.embodied_co2e_grams for m in metrics)
-    total_cost = sum(m.total_cost for m in metrics)
-    total_energy_joules = sum(m.joules for m in metrics)
+    total_rows = 0
+    for r_start, r_end in resolved_ranges:
+        total_rows += await repo.aggregate_grouped_row_count(
+            start_time=r_start,
+            end_time=r_end,
+            namespace=namespace,
+            granularity=granularity,
+            group_by=group_by,
+        )
 
     return ReportSummaryResponse(
-        total_rows=len(metrics),
-        total_co2e_grams=total_co2e_grams,
-        total_embodied_co2e_grams=total_embodied_co2e_grams,
-        total_co2e_all_scopes=total_co2e_grams + total_embodied_co2e_grams,
-        total_cost=total_cost,
-        total_energy_joules=total_energy_joules,
-        unique_pods=len({m.pod_name for m in raw_metrics}),
-        unique_namespaces=len({m.namespace for m in raw_metrics}),
+        total_rows=total_rows,
+        total_co2e_grams=total_co2e,
+        total_embodied_co2e_grams=total_embodied,
+        total_co2e_all_scopes=total_co2e + total_embodied,
+        total_cost=agg["total_cost"],
+        total_energy_joules=agg["total_energy_joules"],
+        unique_pods=agg["pod_count"],
+        unique_namespaces=agg["namespace_count"],
     )
 
 

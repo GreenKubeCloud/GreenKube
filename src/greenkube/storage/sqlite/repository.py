@@ -440,6 +440,99 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
             logging.error("aggregate_summary failed: %s", e)
             raise QueryError(f"aggregate_summary failed: {e}") from e
 
+    async def aggregate_grouped_row_count(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        granularity: Optional[str] = None,
+        group_by: str = "pod",
+    ) -> int:
+        """SQL COUNT of distinct groups — no CombinedMetric rows loaded into memory."""
+        import sqlite3
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        import aiosqlite
+
+        from greenkube.core.config import get_config
+
+        _SQLITE_GRAN_FMTS = {
+            "hourly": "%Y-%m-%dT%H:00:00Z",
+            "daily": "%Y-%m-%dT00:00:00Z",
+            "weekly": "%Y-W%W-%w",
+            "monthly": "%Y-%m-01T00:00:00Z",
+            "yearly": "%Y-01-01T00:00:00Z",
+        }
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+
+        ts_fmt = _SQLITE_GRAN_FMTS.get(granularity or "", None)
+
+        if group_by == "namespace":
+            group_cols = "namespace"
+        else:
+            group_cols = "namespace, pod_name"
+
+        if ts_fmt:
+            raw_ts_expr = f"strftime('{ts_fmt}', \"timestamp\")"
+            hourly_ts_expr = f"strftime('{ts_fmt}', hour_bucket)"
+        else:
+            raw_ts_expr = "NULL"
+            hourly_ts_expr = "NULL"
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                parts: list[str] = []
+                params: list = []
+
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(
+                        f"SELECT {group_cols}, {raw_ts_expr} AS ts_bucket "
+                        f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" <= ?{ns_clause}'
+                    )
+                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    ns_clause = " AND namespace = ?" if namespace else ""
+                    parts.append(
+                        f"SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket "
+                        f"FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket <= ?{ns_clause}"
+                    )
+                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    if namespace:
+                        params.append(namespace)
+
+                if not parts:
+                    return 0
+
+                union_cte = " UNION ALL ".join(parts)
+                if group_by == "namespace":
+                    distinct_cols = "namespace, ts_bucket"
+                else:
+                    distinct_cols = "namespace, pod_name, ts_bucket"
+
+                query = (
+                    f"SELECT COUNT(*) AS group_count FROM "
+                    f"(SELECT DISTINCT {distinct_cols} FROM ({union_cte}) AS all_rows) AS groups"
+                )
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(query, params) as cursor:
+                    row = await cursor.fetchone()
+                    return int(row["group_count"]) if row else 0
+        except sqlite3.Error as e:
+            logging.error("aggregate_grouped_row_count failed: %s", e)
+            raise QueryError(f"aggregate_grouped_row_count failed: {e}") from e
+
     async def aggregate_timeseries(
         self,
         start_time: datetime,

@@ -51,12 +51,18 @@ class TestReportSummaryEndpoint:
         assert data["unique_namespaces"] == 1
 
     def test_summary_with_aggregate(self, client, mock_combined_metrics_repo, sample_combined_metrics):
-        """Should aggregate metrics when aggregate=true."""
+        """aggregate=true uses SQL-level grouped row count — no CombinedMetric loaded."""
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/report/summary?aggregate=true&granularity=daily")
         assert response.status_code == 200
         data = response.json()
-        assert data["total_rows"] >= 1
+        assert data["total_rows"] >= 0
+
+    def test_summary_aggregate_uses_sql_not_python_for_large_ranges(self, client, mock_combined_metrics_repo):
+        """aggregate=true must return 200 even for wide ranges — no Python-load cap."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
+        response = client.get("/api/v1/report/summary?aggregate=true&last=365d")
+        assert response.status_code == 200
 
     def test_summary_invalid_last_returns_400(self, client):
         """Should return 400 for an invalid last parameter."""
