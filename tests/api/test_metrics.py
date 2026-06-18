@@ -150,3 +150,77 @@ class TestMetricsSummaryEndpoint:
         assert start.day == 1
         assert start.hour == 0
         assert start.tzinfo is not None
+
+
+class TestMetricsByNamespaceEndpoint:
+    """Tests for GET /api/v1/metrics/by-namespace."""
+
+    def test_by_namespace_returns_200(self, client):
+        """Should return 200 with an empty list when no data."""
+        response = client.get("/api/v1/metrics/by-namespace")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_by_namespace_returns_aggregated_rows(self, client, mock_combined_metrics_repo):
+        """Should surface the aggregate_by_namespace repo rows as NamespaceBreakdownItems."""
+        mock_combined_metrics_repo.aggregate_by_namespace = AsyncMock(
+            return_value=[
+                {
+                    "namespace": "prod",
+                    "co2e_grams": 42.0,
+                    "embodied_co2e_grams": 4.2,
+                    "total_cost": 1.5,
+                    "energy_joules": 5000.0,
+                }
+            ]
+        )
+        response = client.get("/api/v1/metrics/by-namespace?last=7d")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["namespace"] == "prod"
+        assert data[0]["co2e_grams"] == 42.0
+
+    def test_by_namespace_invalid_last_returns_400(self, client):
+        response = client.get("/api/v1/metrics/by-namespace?last=bad_value")
+        assert response.status_code == 400
+
+
+class TestMetricsTopPodsEndpoint:
+    """Tests for GET /api/v1/metrics/top-pods."""
+
+    def test_top_pods_returns_200(self, client):
+        """Should return 200 with an empty list when no data."""
+        response = client.get("/api/v1/metrics/top-pods")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_top_pods_returns_ranked_rows(self, client, mock_combined_metrics_repo):
+        """Should surface the aggregate_top_pods repo rows as TopPodItems."""
+        mock_combined_metrics_repo.aggregate_top_pods = AsyncMock(
+            return_value=[
+                {
+                    "namespace": "prod",
+                    "pod_name": "heavy-api",
+                    "co2e_grams": 100.0,
+                    "embodied_co2e_grams": 10.0,
+                    "total_cost": 5.0,
+                    "energy_joules": 20000.0,
+                }
+            ]
+        )
+        response = client.get("/api/v1/metrics/top-pods?limit=5")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["pod_name"] == "heavy-api"
+        assert data[0]["co2e_grams"] == 100.0
+
+    def test_top_pods_limit_too_large_returns_422(self, client):
+        """Limit > 50 should be rejected by FastAPI validation."""
+        response = client.get("/api/v1/metrics/top-pods?limit=100")
+        assert response.status_code == 422
+
+    def test_top_pods_invalid_last_returns_400(self, client):
+        response = client.get("/api/v1/metrics/top-pods?last=bad_value")
+        assert response.status_code == 400

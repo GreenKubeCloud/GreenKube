@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Metrics: DB-level pagination for `GET /api/v1/metrics`** — The endpoint now uses SQL `COUNT(*) + LIMIT/OFFSET` instead of loading the full result set into Python. A new `METRICS_LIST_MAX_RANGE_DAYS` config (default 30, exposed in Helm `values.yaml` via `config.metricsListMaxRangeDays`) rejects requests wider than the limit with HTTP 400 to prevent accidental OOM on large clusters.
+- **Repository: `read_combined_metrics_page`** — New method on `CombinedMetricsRepository` (base Python fallback + optimised PostgreSQL `UNION ALL` implementation) for DB-level paginated reads.
+- **Repository: `read_latest_per_pod`** — New method returning the single most-recent metric snapshot for each `(namespace, pod_name)` pair. PostgreSQL implementation uses `DISTINCT ON` for efficiency; base class falls back to Python deduplication.
+- **Repository: `aggregate_grouped_row_count`** — New method returning the number of distinct `(group_key × time_bucket)` rows a grouped-aggregate export would produce, computed entirely in SQL (`COUNT DISTINCT`). Implemented for PostgreSQL and SQLite.
+- **Metrics endpoint: Prometheus gauge refresh via `read_latest_per_pod`** — `refresh_metrics_from_db` now calls `read_latest_per_pod` instead of loading the full metrics history and deduplicating in Python, eliminating a major OOM source for large clusters.
+
+### Fixed
+- **OOM (`OOMKilled`, exit code 137) in `greenkube-api`** — `GET /api/v1/metrics`, `GET /api/v1/report/summary?aggregate=true`, and the Prometheus gauge refresh all previously loaded up to 1 M+ `CombinedMetric` objects into memory. All three paths are now SQL-backed and never materialise full row sets in Python (#239).
+- **`report/summary?aggregate=true` uses pure SQL** — The aggregate summary path calls `aggregate_grouped_row_count` (SQL `COUNT DISTINCT`) instead of invoking `aggregate_metrics()` over loaded rows, making large date ranges safe regardless of dataset size.
+- **Memory leaks in Kubernetes API client** — `NodeCollector` and `PodCollector` now explicitly close the async `kubernetes_asyncio` API client after each collection cycle, preventing handle leaks on long-running pods.
+- **Security: frontend dependency updates** — `package.json` / `package-lock.json` updated to remediate Trivy-flagged vulnerabilities in transitive frontend dependencies.
+
 ## [0.2.11] — 2026-05-26
 
 ### Added

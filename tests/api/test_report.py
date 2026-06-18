@@ -330,3 +330,32 @@ class TestReportExportEndpoint:
         assert start.minute == 0
         assert start.second == 0
         assert start.tzinfo is not None
+
+    def test_export_invalid_group_by_returns_400(self, client):
+        """Exporting with an unsupported group_by value must be rejected."""
+        response = client.get("/api/v1/report/export?aggregate=true&group_by=node")
+        assert response.status_code == 400
+
+
+class TestReportInternalHelpers:
+    """Tests for the internal _get_time_ranges helpers (exercised via the API)."""
+
+    def test_summary_invalid_year_returns_400(self, client):
+        """A year outside [1, 9999] must return 400."""
+        response = client.get("/api/v1/report/summary?years=0")
+        assert response.status_code == 400
+
+    def test_summary_years_and_last_together_returns_400(self, client):
+        """Mixing years= and last= must be rejected."""
+        response = client.get("/api/v1/report/summary?years=2025&last=7d")
+        assert response.status_code == 400
+
+    def test_summary_start_and_last_together_returns_400(self, client):
+        """Mixing start= and last= must be rejected."""
+        response = client.get("/api/v1/report/summary?start=2025-01-01&last=7d")
+        assert response.status_code == 400
+
+    def test_summary_end_before_start_returns_400(self, client):
+        """When end is before start the summary endpoint must return 400."""
+        response = client.get("/api/v1/report/summary?start=2025-06-01&end=2025-01-01")
+        assert response.status_code == 400
