@@ -35,6 +35,16 @@ pip install -q toml ruamel.yaml 2>/dev/null
 python scripts/sync_version.py
 
 # 3. Update CHANGELOG.md — move [Unreleased] to [VERSION] — DATE
+# 2.5 Update frontend package-lock.json if frontend exists (keep lockfile in sync)
+if [ -d "frontend" ]; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "Updating frontend/package-lock.json..."
+    (cd frontend && npm install --package-lock-only)
+  else
+    echo "⚠️ npm not found; skipping frontend package-lock.json update"
+  fi
+fi
+
 if ! grep -q "## \[Unreleased\]" CHANGELOG.md; then
   echo "❌ No [Unreleased] section found in CHANGELOG.md"
   exit 1
