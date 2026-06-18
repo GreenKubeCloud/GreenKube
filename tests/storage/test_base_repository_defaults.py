@@ -106,6 +106,7 @@ async def test_default_list_namespaces_and_aggregate_summary():
         "total_energy_joules": 300.0,
         "pod_count": 2,
         "namespace_count": 1,
+        "row_count": 2,
     }
 
 
@@ -154,3 +155,165 @@ async def test_default_namespace_and_top_pod_aggregations_use_smart_reads():
             "energy_joules": 100.0,
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# read_combined_metrics_page — Python fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_combined_metrics_page_returns_total_and_page():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)
+    metrics = [_metric(f"pod-{i}", "prod", future, float(i)) for i in range(5)]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        total, page = await repo.read_combined_metrics_page(
+            future - timedelta(hours=1), future + timedelta(hours=1), offset=1, limit=2
+        )
+
+    assert total == 5
+    assert len(page) == 2
+    assert page[0].pod_name == "pod-1"
+    assert page[1].pod_name == "pod-2"
+
+
+@pytest.mark.asyncio
+async def test_read_combined_metrics_page_with_namespace_filter():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)
+    metrics = [
+        _metric("pod-a", "prod", future, 1.0),
+        _metric("pod-b", "dev", future, 2.0),
+        _metric("pod-c", "prod", future, 3.0),
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        total, page = await repo.read_combined_metrics_page(
+            future - timedelta(hours=1), future + timedelta(hours=1), namespace="prod", offset=0, limit=10
+        )
+
+    assert total == 2
+    assert all(m.namespace == "prod" for m in page)
+
+
+@pytest.mark.asyncio
+async def test_read_combined_metrics_page_offset_beyond_total_returns_empty_page():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)
+    repo = DummyCombinedMetricsRepository(raw_metrics=[_metric("pod-a", "prod", future, 1.0)])
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        total, page = await repo.read_combined_metrics_page(
+            future - timedelta(hours=1), future + timedelta(hours=1), offset=99, limit=10
+        )
+
+    assert total == 1
+    assert page == []
+
+
+# ---------------------------------------------------------------------------
+# read_latest_per_pod — Python fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_latest_per_pod_returns_newest_per_pod():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)
+    older = future - timedelta(minutes=5)
+    metrics = [
+        _metric("api", "prod", older, 1.0),
+        _metric("api", "prod", future, 2.0),  # latest for this pod
+        _metric("worker", "prod", older, 3.0),
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    result = await repo.read_latest_per_pod(future - timedelta(hours=1), future + timedelta(hours=1))
+
+    result_by_pod = {m.pod_name: m for m in result}
+    assert result_by_pod["api"].co2e_grams == 2.0
+    assert result_by_pod["worker"].co2e_grams == 3.0
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_read_latest_per_pod_handles_cross_namespace():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)
+    metrics = [
+        _metric("api", "prod", future, 1.0),
+        _metric("api", "dev", future, 2.0),  # same pod name, different namespace → separate
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    result = await repo.read_latest_per_pod(future - timedelta(hours=1), future + timedelta(hours=1))
+
+    assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# aggregate_grouped_row_count — Python fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aggregate_grouped_row_count_no_granularity_counts_distinct_pods():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)  # future timestamp always in raw path
+    metrics = [
+        _metric("api", "prod", future, 1.0),
+        _metric("api", "prod", future - timedelta(minutes=5), 1.0),  # same pod → one group
+        _metric("worker", "prod", future, 2.0),
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        count = await repo.aggregate_grouped_row_count(
+            future - timedelta(hours=1), future + timedelta(hours=1), group_by="pod"
+        )
+
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_aggregate_grouped_row_count_daily_granularity_counts_pod_day_combos():
+    # Use future dates so they always hit the raw path (start_time > now - compression_age).
+    now = datetime.now(timezone.utc)
+    day1 = now + timedelta(days=10)
+    day2 = now + timedelta(days=11)
+    metrics = [
+        _metric("api", "prod", day1, 1.0),
+        _metric("api", "prod", day2, 2.0),  # same pod, different day → 2 groups
+        _metric("worker", "prod", day1, 3.0),
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        count = await repo.aggregate_grouped_row_count(
+            day1 - timedelta(hours=1), day2 + timedelta(hours=1), granularity="daily", group_by="pod"
+        )
+
+    assert count == 3  # (api, day1), (api, day2), (worker, day1)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_grouped_row_count_namespace_grouping():
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=5)  # future timestamp always in raw path
+    metrics = [
+        _metric("api", "prod", future, 1.0),
+        _metric("worker", "prod", future, 2.0),  # same namespace → 1 group with group_by=namespace
+        _metric("api", "dev", future, 3.0),
+    ]
+    repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
+
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+        count = await repo.aggregate_grouped_row_count(
+            future - timedelta(hours=1), future + timedelta(hours=1), group_by="namespace"
+        )
+
+    assert count == 2  # prod and dev

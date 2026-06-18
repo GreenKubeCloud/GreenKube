@@ -51,9 +51,16 @@ def mock_carbon_repo():
 
 @pytest.fixture
 def mock_combined_metrics_repo():
+    from greenkube.storage.base_repository import CombinedMetricsRepository as _Base
+
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.list_namespaces = AsyncMock(return_value=[])
+
+    async def _read_latest_per_pod(start_time, end_time):
+        return await _Base.read_latest_per_pod(repo, start_time, end_time)
+
+    repo.read_latest_per_pod = _read_latest_per_pod
     return repo
 
 
@@ -1031,11 +1038,11 @@ class TestRealizedSavingsMetrics:
     def test_refresh_metrics_from_db_calls_applied_recommendations(
         self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_summary_repo
     ):
-        """Verify the /prometheus/metrics endpoint calls get_applied_recommendations."""
+        """Verify the /prometheus/metrics endpoint calls get_applied_recommendations_stats."""
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
         mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
         mock_reco_repo.get_recommendations = AsyncMock(return_value=[])
-        mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
+        mock_reco_repo.get_applied_recommendations_stats = AsyncMock(return_value=[])
 
         app = create_app()
         app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
@@ -1047,7 +1054,7 @@ class TestRealizedSavingsMetrics:
             response = c.get("/prometheus/metrics")
 
         assert response.status_code == 200
-        mock_reco_repo.get_applied_recommendations.assert_called_once()
+        mock_reco_repo.get_applied_recommendations_stats.assert_called_once()
         app.dependency_overrides.clear()
 
         app.dependency_overrides.clear()

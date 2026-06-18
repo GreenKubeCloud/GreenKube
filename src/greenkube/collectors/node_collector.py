@@ -124,9 +124,16 @@ class NodeCollector(BaseCollector):
     async def close(self):
         """Close the Kubernetes API client if it exists."""
         if self._api:
-            await self._api.api_client.close()
-            logger.debug("NodeCollector Kubernetes client closed.")
-            self._api = None
+            try:
+                api_client = getattr(self._api, "api_client", None)
+                # Only close if this collector owns the ApiClient (not the shared one)
+                if api_client and not getattr(api_client, "_is_shared_k8s_client", False):
+                    await api_client.close()
+                    logger.debug("NodeCollector Kubernetes client closed.")
+            except Exception:
+                logger.exception("Error closing NodeCollector Kubernetes client.")
+            finally:
+                self._api = None
 
     async def collect_detailed_info(self) -> dict:
         """Collect node information as plain dictionaries.

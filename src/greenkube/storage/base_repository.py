@@ -212,6 +212,55 @@ class CombinedMetricsRepository(ABC):
         metrics = await self.read_combined_metrics(start, end)
         return sorted({m.namespace for m in metrics})
 
+    async def read_combined_metrics_page(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> tuple[int, List[CombinedMetric]]:
+        """Return one page of metrics and the total row count for the range.
+
+        Uses DB-level COUNT + LIMIT/OFFSET when overridden by a SQL backend.
+        Default implementation loads all rows into memory — subclasses should
+        override this for production backends to avoid OOM on large datasets.
+
+        Returns:
+            Tuple of (total_count, page_items).
+        """
+        import logging as _log
+
+        _log.getLogger(__name__).warning(
+            "read_combined_metrics_page: using Python fallback; override in SQL backend to avoid OOM"
+        )
+        all_metrics = await self.read_combined_metrics_smart(
+            start_time=start_time, end_time=end_time, namespace=namespace
+        )
+        return len(all_metrics), all_metrics[offset : offset + limit]
+
+    async def read_latest_per_pod(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[CombinedMetric]:
+        """Return the latest metric snapshot for each (namespace, pod_name) pair.
+
+        Default implementation reads all rows and picks the most-recent per pod
+        in Python.  Subclasses should override with a SQL DISTINCT ON / window
+        function for efficiency on large datasets.
+        """
+        metrics = await self.read_combined_metrics(start_time=start_time, end_time=end_time)
+        latest: dict[tuple[str, str], CombinedMetric] = {}
+        for m in metrics:
+            key = (m.namespace, m.pod_name)
+            existing = latest.get(key)
+            if existing is None or (
+                m.timestamp is not None and (existing.timestamp is None or m.timestamp > existing.timestamp)
+            ):
+                latest[key] = m
+        return list(latest.values())
+
     async def list_metric_years(self, namespace: Optional[str] = None) -> List[int]:
         """Return calendar years that have persisted combined metric data."""
         start = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -245,7 +294,54 @@ class CombinedMetricsRepository(ABC):
             "total_energy_joules": sum(m.joules for m in metrics),
             "pod_count": len({m.pod_name for m in metrics}),
             "namespace_count": len({m.namespace for m in metrics}),
+            "row_count": len(metrics),
         }
+
+    async def aggregate_grouped_row_count(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        granularity: Optional[str] = None,
+        group_by: str = "pod",
+    ) -> int:
+        """Return the number of rows that a grouped export would produce.
+
+        This is the count of distinct (group_key, time_bucket) combinations
+        for the given range, equivalent to the row count of a report exported
+        with aggregate=true.
+
+        Default implementation loads all rows and counts groups in Python.
+        Subclasses should override with a SQL COUNT DISTINCT implementation.
+
+        Args:
+            granularity: Report granularity key — 'hourly', 'daily', 'weekly',
+                'monthly', 'yearly', or None (no time grouping).
+            group_by: 'pod' (groups by namespace+pod_name) or 'namespace'.
+        """
+
+        _GRAN_FORMATS = {
+            "hourly": "%Y-%m-%dT%H:00:00Z",
+            "daily": "%Y-%m-%dT00:00:00Z",
+            "weekly": "%Y-W%V",
+            "monthly": "%Y-%m-01T00:00:00Z",
+            "yearly": "%Y-01-01T00:00:00Z",
+        }
+        fmt = _GRAN_FORMATS.get(granularity or "", None)
+
+        metrics = await self.read_combined_metrics_smart(start_time=start_time, end_time=end_time, namespace=namespace)
+        groups: set = set()
+        for m in metrics:
+            if group_by == "namespace":
+                key_base = m.namespace
+            else:
+                key_base = (m.namespace, m.pod_name)
+            if fmt and m.timestamp:
+                key = (key_base, m.timestamp.strftime(fmt))
+            else:
+                key = key_base
+            groups.add(key)
+        return len(groups)
 
     async def aggregate_timeseries(
         self,
@@ -562,6 +658,31 @@ class RecommendationRepository(ABC):
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         pass
+
+    async def get_applied_recommendations_stats(self) -> List[dict]:
+        """Return aggregated applied-recommendation stats for Prometheus gauge updates.
+
+        Returns a lightweight list of dicts — one entry per (type, namespace) pair —
+        so callers never have to load full recommendation records just to update gauges.
+
+        Keys per dict: ``type``, ``namespace``, ``count``,
+        ``total_co2e_grams``, ``total_cost_dollars``.
+
+        The default implementation falls back to loading all records and aggregating
+        in Python.  Subclasses should override with a SQL GROUP BY query.
+        """
+        from collections import defaultdict
+
+        records = await self.get_applied_recommendations()
+        stats: dict[tuple, dict] = defaultdict(lambda: {"count": 0, "total_co2e_grams": 0.0, "total_cost_dollars": 0.0})
+        for r in records:
+            rec_type = r.type.value if hasattr(r.type, "value") else str(r.type)
+            ns = r.namespace or "_cluster"
+            key = (rec_type, ns)
+            stats[key]["count"] += 1
+            stats[key]["total_co2e_grams"] += r.carbon_saved_co2e_grams or 0.0
+            stats[key]["total_cost_dollars"] += r.cost_saved or 0.0
+        return [{"type": t, "namespace": ns, **v} for (t, ns), v in stats.items()]
 
 
 class SummaryRepository(ABC):

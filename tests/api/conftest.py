@@ -95,6 +95,23 @@ def mock_combined_metrics_repo():
     repo.read_hourly_metrics = _read_hourly_metrics
     repo.list_namespaces = _list_namespaces
     repo.list_metric_years = _list_metric_years
+
+    async def _read_combined_metrics_page(start_time, end_time, namespace=None, offset=0, limit=1000):
+        return await _Base.read_combined_metrics_page(
+            repo, start_time, end_time, namespace=namespace, offset=offset, limit=limit
+        )
+
+    async def _read_latest_per_pod(start_time, end_time):
+        return await _Base.read_latest_per_pod(repo, start_time, end_time)
+
+    async def _aggregate_grouped_row_count(start_time, end_time, namespace=None, granularity=None, group_by="pod"):
+        return await _Base.aggregate_grouped_row_count(
+            repo, start_time, end_time, namespace=namespace, granularity=granularity, group_by=group_by
+        )
+
+    repo.read_combined_metrics_page = _read_combined_metrics_page
+    repo.read_latest_per_pod = _read_latest_per_pod
+    repo.aggregate_grouped_row_count = _aggregate_grouped_row_count
     return repo
 
 

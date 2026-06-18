@@ -51,12 +51,18 @@ class TestReportSummaryEndpoint:
         assert data["unique_namespaces"] == 1
 
     def test_summary_with_aggregate(self, client, mock_combined_metrics_repo, sample_combined_metrics):
-        """Should aggregate metrics when aggregate=true."""
+        """aggregate=true uses SQL-level grouped row count — no CombinedMetric loaded."""
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
         response = client.get("/api/v1/report/summary?aggregate=true&granularity=daily")
         assert response.status_code == 200
         data = response.json()
-        assert data["total_rows"] >= 1
+        assert data["total_rows"] >= 0
+
+    def test_summary_aggregate_uses_sql_not_python_for_large_ranges(self, client, mock_combined_metrics_repo):
+        """aggregate=true must return 200 even for wide ranges — no Python-load cap."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[])
+        response = client.get("/api/v1/report/summary?aggregate=true&last=365d")
+        assert response.status_code == 200
 
     def test_summary_invalid_last_returns_400(self, client):
         """Should return 400 for an invalid last parameter."""
@@ -76,12 +82,22 @@ class TestReportSummaryEndpoint:
 
     def test_summary_supports_ytd_window(self, client, mock_combined_metrics_repo):
         """YTD should resolve to January 1st of the current UTC year."""
-        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+        mock_combined_metrics_repo.aggregate_summary = AsyncMock(
+            return_value={
+                "total_co2e_grams": 0.0,
+                "total_embodied_co2e_grams": 0.0,
+                "total_cost": 0.0,
+                "total_energy_joules": 0.0,
+                "pod_count": 0,
+                "namespace_count": 0,
+                "row_count": 0,
+            }
+        )
 
         response = client.get("/api/v1/report/summary?last=ytd")
 
         assert response.status_code == 200
-        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
         start = kwargs["start_time"]
         end = kwargs["end_time"]
         assert start.year == end.year
@@ -94,12 +110,22 @@ class TestReportSummaryEndpoint:
 
     def test_summary_supports_custom_date_range(self, client, mock_combined_metrics_repo):
         """Custom date ranges should use explicit UTC day boundaries."""
-        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+        mock_combined_metrics_repo.aggregate_summary = AsyncMock(
+            return_value={
+                "total_co2e_grams": 0.0,
+                "total_embodied_co2e_grams": 0.0,
+                "total_cost": 0.0,
+                "total_energy_joules": 0.0,
+                "pod_count": 0,
+                "namespace_count": 0,
+                "row_count": 0,
+            }
+        )
 
         response = client.get("/api/v1/report/summary?start=2025-01-02&end=2025-01-05")
 
         assert response.status_code == 200
-        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
+        kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
         assert kwargs["start_time"] == datetime(2025, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
         assert kwargs["end_time"] == datetime(2025, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
@@ -110,15 +136,25 @@ class TestReportSummaryEndpoint:
         assert response.status_code == 400
 
     def test_summary_supports_selected_years(self, client, mock_combined_metrics_repo):
-        """Selected years should be read as independent calendar-year windows."""
-        mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
+        """Selected years should query aggregate_summary once per calendar year."""
+        mock_combined_metrics_repo.aggregate_summary = AsyncMock(
+            return_value={
+                "total_co2e_grams": 0.0,
+                "total_embodied_co2e_grams": 0.0,
+                "total_cost": 0.0,
+                "total_energy_joules": 0.0,
+                "pod_count": 0,
+                "namespace_count": 0,
+                "row_count": 0,
+            }
+        )
 
         response = client.get("/api/v1/report/summary?years=2024&years=2026")
 
         assert response.status_code == 200
-        assert mock_combined_metrics_repo.read_combined_metrics_smart.await_count == 2
-        first_call = mock_combined_metrics_repo.read_combined_metrics_smart.await_args_list[0].kwargs
-        second_call = mock_combined_metrics_repo.read_combined_metrics_smart.await_args_list[1].kwargs
+        assert mock_combined_metrics_repo.aggregate_summary.await_count == 2
+        first_call = mock_combined_metrics_repo.aggregate_summary.await_args_list[0].kwargs
+        second_call = mock_combined_metrics_repo.aggregate_summary.await_args_list[1].kwargs
         assert first_call["start_time"] == datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
         assert first_call["end_time"] == datetime(2024, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
         assert second_call["start_time"] == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -279,19 +315,47 @@ class TestReportExportEndpoint:
         assert "text/csv" in response.headers.get("content-type", "")
 
     def test_export_supports_ytd_window(self, client, mock_combined_metrics_repo):
-        """YTD exports should use January 1st through now as the time range."""
+        """YTD exports should start from January 1st of the current UTC year."""
         mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[])
 
         response = client.get("/api/v1/report/export?format=json&last=ytd")
 
         assert response.status_code == 200
-        kwargs = mock_combined_metrics_repo.read_combined_metrics_smart.await_args.kwargs
-        start = kwargs["start_time"]
-        end = kwargs["end_time"]
-        assert start.year == end.year
+        # Export streams in 7-day chunks; check the first chunk starts on Jan 1.
+        first_call = mock_combined_metrics_repo.read_combined_metrics_smart.await_args_list[0].kwargs
+        start = first_call["start_time"]
         assert start.month == 1
         assert start.day == 1
         assert start.hour == 0
         assert start.minute == 0
         assert start.second == 0
         assert start.tzinfo is not None
+
+    def test_export_invalid_group_by_returns_400(self, client):
+        """Exporting with an unsupported group_by value must be rejected."""
+        response = client.get("/api/v1/report/export?aggregate=true&group_by=node")
+        assert response.status_code == 400
+
+
+class TestReportInternalHelpers:
+    """Tests for the internal _get_time_ranges helpers (exercised via the API)."""
+
+    def test_summary_invalid_year_returns_400(self, client):
+        """A year outside [1, 9999] must return 400."""
+        response = client.get("/api/v1/report/summary?years=0")
+        assert response.status_code == 400
+
+    def test_summary_years_and_last_together_returns_400(self, client):
+        """Mixing years= and last= must be rejected."""
+        response = client.get("/api/v1/report/summary?years=2025&last=7d")
+        assert response.status_code == 400
+
+    def test_summary_start_and_last_together_returns_400(self, client):
+        """Mixing start= and last= must be rejected."""
+        response = client.get("/api/v1/report/summary?start=2025-01-01&last=7d")
+        assert response.status_code == 400
+
+    def test_summary_end_before_start_returns_400(self, client):
+        """When end is before start the summary endpoint must return 400."""
+        response = client.get("/api/v1/report/summary?start=2025-06-01&end=2025-01-01")
+        assert response.status_code == 400

@@ -4,7 +4,7 @@ API routes for carbon/cost/energy metrics.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +17,7 @@ from greenkube.api.schemas import (
     TimeseriesPoint,
     TopPodItem,
 )
+from greenkube.core.config import get_config
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import time_range_from_last
 
@@ -41,11 +42,24 @@ async def list_metrics(
     limit: int = Query(1000, ge=1, le=10000, description="Maximum number of records to return."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
-    """List combined metrics for the given time range and optional namespace filter."""
+    """List combined metrics for the given time range and optional namespace filter.
+
+    Uses DB-level COUNT + LIMIT/OFFSET pagination to avoid loading the full
+    result set into memory.  The maximum allowed range is controlled by
+    METRICS_LIST_MAX_RANGE_DAYS (default 30 days).
+    """
     start, end = _get_time_range(last)
-    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
-    total = len(metrics)
-    page = metrics[offset : offset + limit]
+    cfg = get_config()
+    max_days = cfg.METRICS_LIST_MAX_RANGE_DAYS
+    if (end - start) > timedelta(days=max_days):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Requested range exceeds the {max_days}-day maximum for raw metric listing. "
+            "Use the /report/export endpoint for bulk data export.",
+        )
+    total, page = await repo.read_combined_metrics_page(
+        start_time=start, end_time=end, namespace=namespace, offset=offset, limit=limit
+    )
     return PaginatedMetricsResponse(total=total, offset=offset, limit=limit, items=page)
 
 

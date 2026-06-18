@@ -413,6 +413,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                         "total_energy_joules": 0.0,
                         "pod_count": 0,
                         "namespace_count": 0,
+                        "row_count": 0,
                     }
 
                 union_query = " UNION ALL ".join(parts)
@@ -423,7 +424,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                         COALESCE(SUM(total_cost), 0)          AS total_cost,
                         COALESCE(SUM(joules), 0)              AS total_energy,
                         COUNT(DISTINCT pod_name)               AS pod_count,
-                        COUNT(DISTINCT namespace)              AS namespace_count
+                        COUNT(DISTINCT namespace)              AS namespace_count,
+                        COUNT(*)                               AS row_count
                     FROM ({union_query}) AS combined
                 """
                 row = await conn.fetchrow(query, *params)
@@ -435,10 +437,117 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                     "total_energy_joules": row["total_energy"] or 0.0,
                     "pod_count": row["pod_count"] or 0,
                     "namespace_count": row["namespace_count"] or 0,
+                    "row_count": row["row_count"] or 0,
                 }
         except Exception as e:
             logger.error("Error in aggregate_summary: %s", e)
             raise QueryError(f"aggregate_summary failed: {e}") from e
+
+    async def aggregate_grouped_row_count(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        granularity: Optional[str] = None,
+        group_by: str = "pod",
+    ) -> int:
+        """SQL COUNT of distinct groups for a grouped report — no rows loaded.
+
+        Computes COUNT(DISTINCT (group_key, time_bucket)) in the DB so the
+        caller never materialises any CombinedMetric objects.
+
+        Handles the raw/hourly split the same way as aggregate_summary.
+        """
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        # Map report granularity names → PostgreSQL date_trunc units
+        _GRAN_TRUNC = {
+            "hourly": "hour",
+            "daily": "day",
+            "weekly": "week",
+            "monthly": "month",
+            "yearly": "year",
+        }
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                # Build the group expression common to both tables
+                if group_by == "namespace":
+                    group_cols = "namespace"
+                else:
+                    group_cols = "namespace, pod_name"
+
+                trunc_unit = _GRAN_TRUNC.get(granularity or "", None)
+                if trunc_unit:
+                    # Group by identity cols + time bucket
+                    raw_ts_expr = f"date_trunc('{trunc_unit}', timestamp)"
+                    hourly_ts_expr = f"date_trunc('{trunc_unit}', hour_bucket)"
+                else:
+                    raw_ts_expr = "NULL::timestamptz"
+                    hourly_ts_expr = "NULL::timestamptz"
+
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                    parts.append(f"""
+                        SELECT {group_cols}, {raw_ts_expr} AS ts_bucket
+                        FROM combined_metrics
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                    parts.append(f"""
+                        SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return 0
+
+                union_cte = " UNION ALL ".join(parts)
+                if group_by == "namespace":
+                    distinct_cols = "namespace, ts_bucket"
+                else:
+                    distinct_cols = "namespace, pod_name, ts_bucket"
+
+                query = f"""
+                    SELECT COUNT(*) AS group_count
+                    FROM (
+                        SELECT DISTINCT {distinct_cols}
+                        FROM ({union_cte}) AS all_rows
+                    ) AS groups
+                """
+                row = await conn.fetchrow(query, *params)
+                return int(row["group_count"]) if row else 0
+        except Exception as e:
+            logger.error("Error in aggregate_grouped_row_count: %s", e)
+            raise QueryError(f"aggregate_grouped_row_count failed: {e}") from e
 
     async def aggregate_timeseries(
         self,
@@ -724,3 +833,170 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logger.error("Error in aggregate_top_pods: %s", e)
             raise QueryError(f"aggregate_top_pods failed: {e}") from e
+
+    async def read_combined_metrics_page(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> tuple[int, List[CombinedMetric]]:
+        """DB-level paginated read: COUNT(total) + LIMIT/OFFSET in a single round-trip.
+
+        Handles the raw/hourly split:
+        - Recent data (within METRICS_COMPRESSION_AGE_HOURS): queries combined_metrics.
+        - Older data: queries combined_metrics_hourly.
+        - Mixed ranges: UNION ALL with column normalization.
+
+        Returns:
+            Tuple of (total_count, page_items).
+        """
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        now = datetime.now(tz.utc)
+        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                # --- Build UNION ALL parts with normalized columns ---
+                # Both tables expose the same set of fields; the hourly table
+                # renames a few columns (hour_bucket → timestamp, cpu/mem avg → usage).
+                parts: list[str] = []
+                params: list = []
+                idx = 1
+
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                    parts.append(f"""
+                        SELECT
+                            pod_name, namespace, total_cost, co2e_grams, pue,
+                            grid_intensity, joules, cpu_request, memory_request,
+                            cpu_usage_millicores, memory_usage_bytes,
+                            network_receive_bytes, network_transmit_bytes,
+                            disk_read_bytes, disk_write_bytes,
+                            storage_request_bytes, storage_usage_bytes,
+                            ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                            gpu_usage_millicores, restart_count,
+                            owner_kind, owner_name, period, timestamp,
+                            duration_seconds, grid_intensity_timestamp,
+                            node, node_instance_type, node_zone,
+                            emaps_zone, estimation_reasons, is_estimated,
+                            embodied_co2e_grams, calculation_version
+                        FROM combined_metrics
+                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([raw_start, end_time])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                    parts.append(f"""
+                        SELECT
+                            pod_name, namespace, total_cost, co2e_grams, pue,
+                            grid_intensity, joules, cpu_request, memory_request,
+                            cpu_usage_avg AS cpu_usage_millicores,
+                            memory_usage_avg AS memory_usage_bytes,
+                            network_receive_bytes, network_transmit_bytes,
+                            disk_read_bytes, disk_write_bytes,
+                            storage_request_bytes, storage_usage_bytes,
+                            ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                            gpu_usage_millicores, restart_count,
+                            owner_kind, owner_name, period, hour_bucket AS timestamp,
+                            duration_seconds, grid_intensity_timestamp,
+                            node, node_instance_type, node_zone,
+                            emaps_zone, estimation_reasons, is_estimated,
+                            embodied_co2e_grams, calculation_version
+                        FROM combined_metrics_hourly
+                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                    """)
+                    params.extend([start_time, hourly_end])
+                    idx += 2
+                    if namespace:
+                        params.append(namespace)
+                        idx += 1
+
+                if not parts:
+                    return 0, []
+
+                union_cte = " UNION ALL ".join(parts)
+
+                # COUNT and paged SELECT in a single CTE to avoid two round-trips.
+                count_query = f"SELECT COUNT(*) AS cnt FROM ({union_cte}) AS all_rows"
+                total_row = await conn.fetchrow(count_query, *params)
+                total = int(total_row["cnt"]) if total_row else 0
+
+                if total == 0 or offset >= total:
+                    return total, []
+
+                page_query = f"""
+                    SELECT * FROM ({union_cte}) AS all_rows
+                    ORDER BY timestamp
+                    LIMIT ${idx} OFFSET ${idx + 1}
+                """
+                params.extend([limit, offset])
+                rows = await conn.fetch(page_query, *params)
+
+                metrics = []
+                for row in rows:
+                    data = dict(row)
+                    if "estimation_reasons" in data and isinstance(data["estimation_reasons"], str):
+                        try:
+                            import json as _json
+
+                            data["estimation_reasons"] = _json.loads(data["estimation_reasons"])
+                        except Exception:
+                            data["estimation_reasons"] = []
+                    metrics.append(CombinedMetric(**data))
+
+                return total, metrics
+        except Exception as e:
+            logger.error("Error in read_combined_metrics_page: %s", e)
+            raise QueryError(f"read_combined_metrics_page failed: {e}") from e
+
+    async def read_latest_per_pod(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[CombinedMetric]:
+        """Return the single most-recent metric snapshot for each (namespace, pod_name).
+
+        Uses PostgreSQL DISTINCT ON to avoid loading full history into memory.
+        This replaces the pattern of reading all rows and deduplicating in Python.
+        """
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                query = """
+                    SELECT DISTINCT ON (namespace, pod_name) *
+                    FROM combined_metrics
+                    WHERE timestamp >= $1 AND timestamp <= $2
+                    ORDER BY namespace, pod_name, timestamp DESC
+                """
+                rows = await conn.fetch(query, start_time, end_time)
+                metrics = []
+                for row in rows:
+                    import json as _json
+
+                    data = dict(row)
+                    data.pop("id", None)
+                    if "estimation_reasons" in data and isinstance(data["estimation_reasons"], str):
+                        try:
+                            data["estimation_reasons"] = _json.loads(data["estimation_reasons"])
+                        except Exception:
+                            data["estimation_reasons"] = []
+                    metrics.append(CombinedMetric(**data))
+                return metrics
+        except Exception as e:
+            logger.error("Error in read_latest_per_pod: %s", e)
+            raise QueryError(f"read_latest_per_pod failed: {e}") from e

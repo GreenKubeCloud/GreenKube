@@ -86,12 +86,33 @@ async def lifespan(app: FastAPI):
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
 
-    asyncio.ensure_future(run_startup_recommendation_scan())
+    # Start tracked background startup tasks so we can cancel them on shutdown.
+    app.state._startup_tasks = []
+    task = asyncio.create_task(run_startup_recommendation_scan())
+    app.state._startup_tasks.append(task)
 
     yield
     logger.info("🛑 Shutting down GreenKube API...")
+    # Cancel any tracked startup/background tasks
+    try:
+        for t in getattr(app.state, "_startup_tasks", []) or []:
+            if not t.done():
+                t.cancel()
+        # Wait a short time for tasks to cancel
+        await asyncio.gather(*(t for t in getattr(app.state, "_startup_tasks", []) or []), return_exceptions=True)
+    except Exception:
+        logger.exception("Error while cancelling startup tasks")
+
     await get_db_manager().close()
     logger.info("Database connection closed.")
+    # Close shared Kubernetes ApiClient (if created during runtime)
+    try:
+        from greenkube.core.k8s_client import close_k8s_client
+
+        await close_k8s_client()
+        logger.info("Kubernetes ApiClient closed.")
+    except Exception:
+        logger.exception("Failed to close Kubernetes ApiClient during shutdown.")
 
 
 def create_app(use_lifespan: bool = False) -> FastAPI:
