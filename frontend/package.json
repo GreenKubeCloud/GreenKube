@@ -32,7 +32,8 @@
   "overrides": {
     "cookie": "0.7.2",
     "@babel/core": "^7.29.1",
-    "js-yaml": "^4.1.2"
+    "js-yaml": "^4.1.2",
+    "undici": "^7.27.3"
   },
   "type": "module"
 }
