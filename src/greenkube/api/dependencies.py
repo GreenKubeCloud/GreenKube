@@ -33,7 +33,11 @@ def verify_api_key(request: Request) -> None:
     """Verify the API key if ``GREENKUBE_API_KEY`` is configured.
 
     When the env var is empty the check is skipped (open access).
-    Public endpoints (``/health``, ``/metrics``, ``/docs``) are always exempt.
+    Only API routes (``/api/v1/*``) are subject to the key check; the
+    SPA frontend and static assets are always served without auth so the
+    browser-based dashboard renders correctly even when an API key is set.
+    Public endpoints (``/health``, ``/docs``, ``/openapi.json``) are always
+    exempt regardless.
     """
     from greenkube.core.config import get_config
 
@@ -41,9 +45,15 @@ def verify_api_key(request: Request) -> None:
     if not api_key:
         return  # no key configured → open access
 
-    # Allow public/operational endpoints without auth
     path = request.url.path
-    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json", "/prometheus/metrics")
+
+    # SPA frontend, static assets, and operational endpoints never require
+    # the API key — the key is only for programmatic access to /api/v1/*.
+    if not path.startswith("/api/v1/"):
+        return
+
+    # Allow public/operational API endpoints without auth
+    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
     if any(path.startswith(p) for p in exempt):
         return
 

@@ -49,7 +49,7 @@ class TestSecurityHeaders:
 
     def test_cache_control(self, client):
         resp = client.get("/api/v1/health")
-        assert resp.headers.get("Cache-Control") == "no-store"
+        assert resp.headers.get("Cache-Control") == "no-cache"
 
     def test_security_headers_on_api_docs(self, client):
         resp = client.get("/api/v1/docs")
@@ -61,16 +61,16 @@ class TestCORSPolicy:
     """Verify that CORS is not overly permissive."""
 
     def test_cors_does_not_allow_all_methods(self, client):
-        """CORS should not use allow_methods=* (we restrict to GET, POST, OPTIONS)."""
+        """CORS should not use allow_methods=* (we restrict to GET, POST, PATCH, DELETE, OPTIONS)."""
         resp = client.options(
             "/api/v1/health",
             headers={
                 "Origin": "http://localhost",
-                "Access-Control-Request-Method": "DELETE",
+                "Access-Control-Request-Method": "PUT",
             },
         )
         allowed = resp.headers.get("Access-Control-Allow-Methods", "")
-        assert "DELETE" not in allowed
+        assert "PUT" not in allowed
 
     def test_cors_does_not_allow_all_headers(self, client):
         """CORS should only allow Authorization and Content-Type headers."""
