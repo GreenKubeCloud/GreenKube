@@ -178,14 +178,23 @@ export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 /**
  * Build a namespace breakdown donut chart.
  */
-export function buildNamespaceDonutOption(metrics, { field = 'co2e_grams', title = 'CO₂ by Namespace' } = {}) {
+export function buildNamespaceDonutOption(metrics, { field = 'co2e_grams', title = 'CO₂ by Namespace', limit = 10 } = {}) {
 	const byNs = {};
 	for (const m of metrics) {
 		byNs[m.namespace] = (byNs[m.namespace] || 0) + (m[field] || 0);
 	}
-	const data = Object.entries(byNs)
+	const sorted = Object.entries(byNs)
 		.map(([name, value]) => ({ name, value: +value.toFixed(4) }))
 		.sort((a, b) => b.value - a.value);
+
+	let data;
+	if (sorted.length > limit) {
+		const top = sorted.slice(0, limit);
+		const otherValue = sorted.slice(limit).reduce((sum, d) => sum + d.value, 0);
+		data = [...top, { name: 'Other', value: +otherValue.toFixed(4) }];
+	} else {
+		data = sorted;
+	}
 
 	const palette = [COLORS.green, COLORS.blue, COLORS.yellow, COLORS.purple, COLORS.cyan, COLORS.orange, COLORS.red, COLORS.greenLight, COLORS.blueLight];
 
@@ -216,7 +225,10 @@ export function buildNamespaceDonutOption(metrics, { field = 'co2e_grams', title
 				label: { show: true, fontSize: 13, fontWeight: 'bold', color: '#e2e8f0' },
 				itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.3)' }
 			},
-			data: data.map((d, i) => ({ ...d, itemStyle: { color: palette[i % palette.length] } }))
+			data: data.map((d, i) => ({
+				...d,
+				itemStyle: { color: d.name === 'Other' ? '#475569' : palette[i % palette.length] }
+			}))
 		}]
 	};
 }
