@@ -114,9 +114,6 @@ class PostgresNodeRepository(NodeRepository):
                     )
                     new_records += 1
 
-                # Also write to legacy table for backward compatibility
-                await self._save_to_legacy(conn, ordered_nodes)
-
             if new_records:
                 logger.info("SCD2: created %d new node record(s).", new_records)
             else:
