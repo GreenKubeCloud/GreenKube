@@ -53,41 +53,48 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
-        response.headers["X-Robots-Tag"] = "noindex, nofollow"
-        # Only apply no-store to the SPA entry point (index.html), not to API
-        # responses or static assets. Setting Cache-Control: no-store on every
-        # response can interfere with reverse-proxy session cookies
-        # (e.g. Authentik) and prevents proper caching of hashed static assets.
         content_type = response.headers.get("content-type", "")
         is_spa_html = "text/html" in content_type and "/api/" not in request.url.path
         is_static_asset = request.url.path.startswith(("/_app/", "/static-frontend/"))
+        is_api = "/api/" in request.url.path
+
+        # Common security headers for all responses
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+        # Document-only headers — only meaningful for HTML pages, not for
+        # JSON API responses or static assets.  Setting them on every response
+        # bloats the header payload and can produce malformed responses when
+        # a reverse proxy (e.g. Caddy with forward_auth) merges headers from
+        # both the auth subrequest and the backend response.
+        if is_spa_html:
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-XSS-Protection"] = "1; mode=block"
+            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; "
+                "font-src 'self' https://fonts.gstatic.com; "
+                "connect-src 'self'; "
+                "frame-ancestors 'none'; "
+                "base-uri 'self'; "
+                "form-action 'self'"
+            )
+
+        # Caching: no-store on the SPA entry point ensures users always get
+        # the latest build.  API responses get no-cache (not no-store) to
+        # avoid interfering with reverse-proxy session cookies (e.g. Authentik
+        # forward-auth).  Hashed immutable static assets can be cached
+        # aggressively.
         if is_spa_html:
             response.headers["Cache-Control"] = "no-store"
-        elif not is_static_asset:
-            response.headers["Cache-Control"] = "no-cache"
-        else:
-            # Hashed immutable assets can be cached aggressively
+        elif is_static_asset:
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        # Content-Security-Policy: restrict resource loading for the SPA.
-        # 'unsafe-inline' is required for SvelteKit's inline bootstrap script
-        # and style injection. Without it the page is blank because the browser
-        # blocks the <script> tag that bootstraps the SPA.
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "font-src 'self' https://fonts.gstatic.com; "
-            "connect-src 'self'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self'"
-        )
+        elif is_api:
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
 
@@ -284,4 +291,6 @@ def main():
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
     app = create_app(use_lifespan=True)
-    uvicorn.run(app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*")
+    uvicorn.run(
+        app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*", timeout_keep_alive=65
+    )
