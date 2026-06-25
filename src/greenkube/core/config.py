@@ -214,8 +214,8 @@ class Config:
 
         # Slow path: use the Kubernetes Python client when available.
         try:
-            from kubernetes import client as k8s_client
-            from kubernetes import config as k8s_config
+            from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
+            from kubernetes import config as k8s_config  # pyrefly: ignore[missing-import]
 
             try:
                 k8s_config.load_incluster_config()
@@ -248,7 +248,7 @@ class Config:
         return "default"
 
     @staticmethod
-    def _get_secret(key: str, default: str = None) -> str:
+    def _get_secret(key: str, default: str | None = None) -> str | None:
         """
         Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
 
@@ -302,7 +302,7 @@ class Config:
             return fallback
         return pue
 
-    def get_pue_for_provider(self, provider: str) -> float:
+    def get_pue_for_provider(self, provider: str | None) -> float:
         """Retrieves the PUE for a specific cloud provider.
 
         Falls back to the DEFAULT_PUE environment variable (default 1.3) when

@@ -1,8 +1,8 @@
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 
-def parse_quantity(quantity: str) -> Decimal:
+def parse_quantity(quantity: Any) -> Decimal:
     """
     Parse kubernetes quantity to Decimal.
     Adapted from kubernetes-python utils.

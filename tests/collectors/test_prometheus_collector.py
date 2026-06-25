@@ -519,6 +519,7 @@ async def test_probe_url_tries_candidate_paths_and_uses_auth_headers(collector):
     client.get = AsyncMock(side_effect=[bad_response, good_response])
 
     assert await collector._probe_url(client, "http://prometheus") is True
+    assert client.get.await_args is not None
     assert client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer token"}
     assert client.get.await_args.kwargs["auth"] == ("user", "pass")
 

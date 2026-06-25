@@ -38,8 +38,8 @@ def test_get_normalized_window_aligns_to_configured_step(step, expected_delta):
 
     class FixedDateTime(datetime):
         @classmethod
-        def now(cls, tz=None):
-            return fixed_now if tz is None else fixed_now.astimezone(tz)
+        def now(cls, tz: timezone | None = None) -> "FixedDateTime":  # type: ignore[override]
+            return fixed_now if tz is None else fixed_now.astimezone(tz)  # type: ignore[return-value]
 
     with patch("greenkube.cli.utils.get_config", return_value=SimpleNamespace(PROMETHEUS_QUERY_RANGE_STEP=step)):
         with patch("greenkube.cli.utils.datetime", FixedDateTime):

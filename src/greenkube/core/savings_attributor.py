@@ -76,6 +76,10 @@ class SavingsAttributor:
             if not annual_co2e or annual_co2e <= 0:
                 continue
 
+            # Skip records without a database ID (not yet persisted).
+            if rec.id is None:
+                continue
+
             factor = period_seconds / _SECONDS_PER_YEAR
             rec_type = rec.type.value if hasattr(rec.type, "value") else str(rec.type)
 

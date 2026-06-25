@@ -20,7 +20,7 @@ class OpenCostDiscovery(BaseDiscovery):
     probing the top contenders for a valid health check response.
     """
 
-    async def discover(self) -> Optional[str]:
+    async def discover(self, hint: str = "") -> Optional[str]:
         candidates = await self._collect_candidates(
             "opencost",
             prefer_namespaces=("opencost",),

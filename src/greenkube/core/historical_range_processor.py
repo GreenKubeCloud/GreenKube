@@ -93,6 +93,8 @@ class HistoricalRangeProcessor:
         processed in day-sized chunks.
         """
         # Try to read from repository first
+        start_dt: datetime | None = None
+        end_dt: datetime | None = None
         try:
             if isinstance(start, str):
                 start_dt = parse_iso_date(start)
@@ -118,6 +120,12 @@ class HistoricalRangeProcessor:
                     return stored_metrics
         except Exception as e:
             logger.warning("Failed to read stored metrics: %s", e)
+
+        # Ensure start_dt and end_dt are resolved — fall back to parsing as datetime if still None
+        if start_dt is None:
+            raise ValueError(f"Could not parse start time: {start!r}")
+        if end_dt is None:
+            raise ValueError(f"Could not parse end time: {end!r}")
 
         cfg_step_str = self._config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = self._parse_duration_to_seconds(cfg_step_str)
@@ -427,8 +435,8 @@ class HistoricalRangeProcessor:
 
             # Prefetch carbon intensities
             for em in chunk_energy_metrics:
-                node_name = em.node
-                context = node_contexts.get(node_name)
+                node_name: str = em.node or ""
+                context = node_contexts.get(node_name) if node_name else None
                 zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
                 ts = em.timestamp
                 try:
@@ -442,12 +450,13 @@ class HistoricalRangeProcessor:
             for em in chunk_energy_metrics:
                 pod_name = em.pod_name
                 em_namespace = em.namespace
-                node_name = em.node
+                node_name: str = em.node or ""
                 joules = em.joules
                 ts = em.timestamp
-                node_context = node_contexts.get(node_name)
+                node_context = node_contexts.get(node_name) if node_name else None
                 zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
-                provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+                _ni_prov = nodes_info.get(node_name)
+                provider = _ni_prov.cloud_provider if _ni_prov else None
                 pue = self._config.get_pue_for_provider(provider)
                 try:
                     carbon_result = await calculator.calculate_emissions(
@@ -483,6 +492,7 @@ class HistoricalRangeProcessor:
                     cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
                 )
                 if carbon_result:
+                    _ni = nodes_info.get(node_name)
                     combined.append(
                         CombinedMetric(
                             pod_name=pod_name,
@@ -498,13 +508,9 @@ class HistoricalRangeProcessor:
                             joules=joules,
                             cpu_request=cpu_req,
                             memory_request=mem_req,
-                            node=node_name,
-                            node_instance_type=(
-                                nodes_info.get(node_name).instance_type
-                                if nodes_info.get(node_name)
-                                else current_node_map.get(node_name)
-                            ),
-                            node_zone=(nodes_info.get(node_name).zone if nodes_info.get(node_name) else None),
+                            node=node_name or None,
+                            node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
+                            node_zone=(_ni.zone if _ni else None),
                             emaps_zone=zone,
                             is_estimated=is_estimated,
                             estimation_reasons=estimation_reasons,

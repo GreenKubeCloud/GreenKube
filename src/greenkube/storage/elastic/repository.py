@@ -1,12 +1,12 @@
 import hashlib
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, List
 
 try:
-    from elasticsearch import AsyncElasticsearch
-    from elasticsearch.exceptions import ConnectionError, TransportError
-    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Text
+    from elasticsearch import AsyncElasticsearch  # pyrefly: ignore[missing-import]
+    from elasticsearch.exceptions import ConnectionError, TransportError  # pyrefly: ignore[missing-import]
+    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Text  # pyrefly: ignore[missing-import]
 except ImportError as _es_import_error:
     raise ImportError(
         "The 'elasticsearch' extra is required to use the Elasticsearch backend. "
@@ -16,13 +16,13 @@ except ImportError as _es_import_error:
 # Import connections conditionally
 if "connections" not in globals():
     try:
-        from elasticsearch_dsl import connections
+        from elasticsearch_dsl import connections  # pyrefly: ignore[missing-import]
     except Exception:
         connections = None
 
 # Import async_bulk helper
 try:
-    from elasticsearch.helpers import async_bulk
+    from elasticsearch.helpers import async_bulk  # pyrefly: ignore[missing-import]
 except ImportError:
     async_bulk = None
 
@@ -107,7 +107,7 @@ async def setup_elasticsearch():
     """
     try:
         cfg = get_config()
-        connection_args = {
+        connection_args: dict[str, Any] = {
             "hosts": [cfg.ELASTICSEARCH_HOSTS],
             "verify_certs": cfg.ELASTICSEARCH_VERIFY_CERTS,
         }
@@ -121,9 +121,11 @@ async def setup_elasticsearch():
             logging.info("Connecting to Elasticsearch without authentication.")
 
         # Create the connection alias 'default' using AsyncElasticsearch
-        connections.create_connection("default", class_=AsyncElasticsearch, **connection_args)
+        connections.create_connection(
+            "default", class_=AsyncElasticsearch, **connection_args
+        )  # pyrefly: ignore[missing-attribute]
 
-        conn = connections.get_connection("default")
+        conn = connections.get_connection("default")  # pyrefly: ignore[missing-attribute]
         if not await conn.ping():
             logging.error("Could not ping Elasticsearch.")
             raise ConnectionError("Failed to connect to Elasticsearch: Ping failed.")
@@ -237,12 +239,12 @@ class ElasticsearchCarbonIntensityRepository(CarbonIntensityRepository):
             return 0
 
         try:
-            conn = connections.get_connection("default")
+            conn = connections.get_connection("default")  # pyrefly: ignore[missing-attribute]
             # async_bulk returns (success_count, list_of_errors) if raise_on_error=False
             # or number of successes if raise_on_error=True (default) ?
             # Actually async_bulk signature matches bulk.
 
-            success_count, errors = await async_bulk(
+            success_count, errors = await async_bulk(  # pyrefly: ignore[not-callable]
                 client=conn,
                 actions=actions,
                 raise_on_error=True,
@@ -292,8 +294,8 @@ class ElasticsearchCombinedMetricsRepository(CombinedMetricsRepository):
             return 0
 
         try:
-            conn = connections.get_connection("default")
-            success_count, errors = await async_bulk(
+            conn = connections.get_connection("default")  # pyrefly: ignore[missing-attribute]
+            success_count, errors = await async_bulk(  # pyrefly: ignore[not-callable]
                 client=conn,
                 actions=actions,
                 raise_on_error=True,

@@ -754,7 +754,7 @@ class TestInvalidateHealthCache:
         """invalidate_health_cache should reset the cached result."""
         import greenkube.core.health as health_mod
 
-        health_mod._cached_result = "something"
+        health_mod._cached_result = "something"  # type: ignore[assignment]
         health_mod._cached_at = 9999.0
 
         invalidate_health_cache()

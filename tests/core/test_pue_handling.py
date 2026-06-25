@@ -4,10 +4,10 @@ from greenkube.storage.base_repository import CarbonIntensityRepository
 
 
 class DummyRepo(CarbonIntensityRepository):
-    def get_for_zone_at_time(self, zone, ts):
+    async def get_for_zone_at_time(self, zone: str, timestamp: str) -> float | None:
         return None
 
-    def save_history(self, records, zone=None):
+    async def save_history(self, history_data: list, zone: str) -> int:
         return 0
 
 

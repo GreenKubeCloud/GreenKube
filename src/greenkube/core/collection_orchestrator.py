@@ -121,8 +121,8 @@ class CollectionOrchestrator:
                         "cpu": 0,
                         "memory": 0,
                         "ephemeral_storage": 0,
-                        "owner_kind": None,
-                        "owner_name": None,
+                        "owner_kind": "",
+                        "owner_name": "",
                     }
                 )
                 for pm in pod_metrics:
@@ -131,8 +131,8 @@ class CollectionOrchestrator:
                     agg_map[key]["memory"] += pm.memory_request
                     agg_map[key]["ephemeral_storage"] += pm.ephemeral_storage_request
                     if pm.owner_kind and not agg_map[key]["owner_kind"]:
-                        agg_map[key]["owner_kind"] = pm.owner_kind
-                        agg_map[key]["owner_name"] = pm.owner_name
+                        agg_map[key]["owner_kind"] = pm.owner_kind or ""
+                        agg_map[key]["owner_name"] = pm.owner_name or ""
 
                 return pod_metrics, req_map, agg_map
             except Exception as e:

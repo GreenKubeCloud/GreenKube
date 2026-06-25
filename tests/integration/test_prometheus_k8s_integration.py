@@ -88,7 +88,7 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     repository = DummyRepo()
 
     # Mock calculator but use real CarbonCalculator to exercise normalization
-    calc = CarbonCalculator(repository=repository, pue=config.DEFAULT_PUE)
+    calc = CarbonCalculator(repository=repository, pue=config.DEFAULT_PUE)  # type: ignore[arg-type]
 
     # Instead of using the full estimator pipeline, mock the estimator to return
     # a single EnergyMetric with a known joules value and timestamp so we can
@@ -122,10 +122,10 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
     dp = DataProcessor(
         prometheus_collector=collector,
         opencost_collector=opencost,
-        node_collector=node_collector,
+        node_collector=node_collector,  # type: ignore[arg-type]
         pod_collector=pod_collector,
         electricity_maps_collector=emaps_collector,
-        repository=repository,
+        repository=repository,  # type: ignore[arg-type]
         combined_metrics_repository=AsyncMock(),
         node_repository=AsyncMock(),
         embodied_repository=AsyncMock(),
@@ -174,9 +174,10 @@ async def test_normalization_day_and_none(monkeypatch, dummy_config):
 
     # Day granularity (use monkeypatch to avoid global state leakage)
     monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "day")
-    calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE, config=core_config)
+    calc_day = CarbonCalculator(repository=DummyRepoDay(), pue=config.DEFAULT_PUE, config=core_config)  # type: ignore[arg-type]
     # Directly call calculate_emissions
     res = await calc_day.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
+    assert res is not None
     assert res.grid_intensity == 200.0
 
     # None granularity (no normalization) should call repository with exact timestamp
@@ -187,6 +188,7 @@ async def test_normalization_day_and_none(monkeypatch, dummy_config):
             return 250.0
 
     monkeypatch.setattr(core_config, "NORMALIZATION_GRANULARITY", "none")
-    calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE, config=core_config)
+    calc_none = CarbonCalculator(repository=DummyRepoNone(), pue=config.DEFAULT_PUE, config=core_config)  # type: ignore[arg-type]
     res2 = await calc_none.calculate_emissions(3.6e6, "FR", sample_dt.isoformat())
+    assert res2 is not None
     assert res2.grid_intensity == 250.0

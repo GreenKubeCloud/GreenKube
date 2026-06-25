@@ -14,6 +14,7 @@ For more accurate values, create a EM token and run the greenkube collect comman
 
 def _load_defaults():
     defaults = {}
+    csv_path = "<unknown>"
     try:
         # Resolve path relative to this file
         current_dir = Path(__file__).parent

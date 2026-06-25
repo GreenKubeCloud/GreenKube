@@ -20,8 +20,8 @@ def _ts(hour: int = 12) -> datetime:
 def _make_spiky_timeseries(
     pod_name: str = "spiky-pod",
     namespace: str = "default",
-    owner_kind: str = "Deployment",
-    owner_name: str = "spiky-deploy",
+    owner_kind: str | None = "Deployment",
+    owner_name: str | None = "spiky-deploy",
 ):
     """Creates a time series with spiky CPU patterns that triggers autoscaling recommendation."""
     # High variance: alternating low and high usage

@@ -142,6 +142,7 @@ class TestMetricsSummaryEndpoint:
         response = client.get("/api/v1/metrics/summary?last=ytd")
 
         assert response.status_code == 200
+        assert mock_combined_metrics_repo.aggregate_summary.await_args is not None
         kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
         start = kwargs["start_time"]
         end = kwargs["end_time"]

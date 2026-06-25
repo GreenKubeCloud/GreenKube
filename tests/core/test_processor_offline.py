@@ -258,7 +258,7 @@ async def test_processor_fallback_gracefully_when_both_fail(
 
     # Embodied emissions should use the fallback default (not 0.0)
     # since the API failed and cache missed, a fallback profile is injected.
-    assert metric.embodied_co2e_grams > 0.0
+    assert metric.embodied_co2e_grams is not None and metric.embodied_co2e_grams > 0.0
 
     # The metric should be flagged as estimated with a fallback reason
     assert metric.is_estimated is True

@@ -62,8 +62,8 @@ class MetricAssembler:
         """Group energy metrics by zone and prefetch carbon intensities."""
         zone_to_metrics: Dict[str, List[EnergyMetric]] = {}
         for em in energy_metrics:
-            node_name = em.node
-            context = node_contexts.get(node_name)
+            node_name: str = em.node or ""
+            context = node_contexts.get(node_name) if node_name else None
             emaps_zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
             zone_to_metrics.setdefault(emaps_zone, []).append(em)
 
@@ -218,10 +218,11 @@ class MetricAssembler:
             pod_requests = pod_request_map.get(pod_key, {"cpu": 0, "memory": 0})
 
             # Zone / PUE
-            node_name = energy_metric.node
-            node_context = node_contexts.get(node_name)
+            node_name: str = energy_metric.node or ""
+            node_context = node_contexts.get(node_name) if node_name else None
             emaps_zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
-            provider = nodes_info.get(node_name).cloud_provider if nodes_info.get(node_name) else None
+            _node_info = nodes_info.get(node_name) if node_name else None
+            provider = _node_info.cloud_provider if _node_info else None
             pue = self._config.get_pue_for_provider(provider)
 
             # Estimation flags
@@ -237,7 +238,7 @@ class MetricAssembler:
 
             # Embodied emissions
             embodied_emissions_grams = self.embodied_service.calculate_pod_embodied(
-                node_info=nodes_info.get(node_name),
+                node_info=_node_info,
                 boavizta_cache=boavizta_cache,
                 pod_requests=pod_requests,
                 cpu_usage_millicores=resource_maps.cpu_usage_map.get(pod_key),
@@ -245,7 +246,7 @@ class MetricAssembler:
 
             # Flag fallback embodied emissions
             if self.embodied_service.is_embodied_fallback(
-                node_info=nodes_info.get(node_name),
+                node_info=_node_info,
                 boavizta_cache=boavizta_cache,
             ):
                 is_estimated = True
@@ -313,13 +314,9 @@ class MetricAssembler:
                     timestamp=energy_metric.timestamp,
                     duration_seconds=self.estimator.query_range_step_sec,
                     grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
-                    node=node_name,
-                    node_instance_type=(
-                        nodes_info.get(node_name).instance_type
-                        if nodes_info.get(node_name)
-                        else node_instance_map.get(node_name)
-                    ),
-                    node_zone=(nodes_info.get(node_name).zone if nodes_info.get(node_name) else None),
+                    node=node_name or None,
+                    node_instance_type=(_node_info.instance_type if _node_info else node_instance_map.get(node_name)),
+                    node_zone=(_node_info.zone if _node_info else None),
                     emaps_zone=emaps_zone,
                     is_estimated=is_estimated,
                     estimation_reasons=estimation_reasons,

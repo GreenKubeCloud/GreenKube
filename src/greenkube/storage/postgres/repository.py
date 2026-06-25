@@ -102,9 +102,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]):
+    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
         if not metrics:
-            return
+            return 0
 
         try:
             async with self.db_manager.connection_scope() as conn:

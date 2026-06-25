@@ -33,6 +33,7 @@ async def test_collect_carbon_intensity_for_all_zones_saves_mapped_zones():
                     await start_module.collect_carbon_intensity_for_all_zones()
 
     repository.save_history.assert_awaited_once()
+    assert repository.save_history.await_args is not None
     assert repository.save_history.await_args.kwargs == {"zone": "FR"}
     node_collector.close.assert_awaited_once()
     em_collector.close.assert_awaited_once()

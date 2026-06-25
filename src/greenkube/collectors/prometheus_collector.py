@@ -111,7 +111,7 @@ class PrometheusCollector(BaseCollector):
             await self._client.aclose()
             self._client = None
 
-    async def collect(self) -> PrometheusMetric:
+    async def collect(self) -> PrometheusMetric:  # type: ignore[override]
         """
         Fetch all required metrics from Prometheus.
 
@@ -432,7 +432,7 @@ class PrometheusCollector(BaseCollector):
             f"{base}/query_range",
             f"{base}/prometheus/api/v1/query_range",
         ]
-        params = {"query": q, "start": None, "end": None, "step": step}
+        params: Dict[str, Any] = {"query": q, "start": None, "end": None, "step": step}
         try:
             params["start"] = to_iso_z(ensure_utc(start))
             params["end"] = to_iso_z(ensure_utc(end))

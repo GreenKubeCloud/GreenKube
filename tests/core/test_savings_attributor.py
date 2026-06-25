@@ -13,8 +13,8 @@ from greenkube.models.metrics import RecommendationRecord, RecommendationStatus,
 
 def _make_applied_rec(
     rec_id: int = 1,
-    co2e_annual: float = 150.5,
-    cost_annual: float = 12.3,
+    co2e_annual: float | None = 150.5,
+    cost_annual: float | None = 12.3,
     rec_type: RecommendationType = RecommendationType.OVERPROVISIONED_NODE,
     namespace: str = "default",
 ) -> RecommendationRecord:

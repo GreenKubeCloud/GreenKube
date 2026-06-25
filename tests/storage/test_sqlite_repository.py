@@ -105,7 +105,7 @@ async def test_save_history_new_records(sqlite_repo, db_connection):
 
     async with db_connection.execute(
         "SELECT carbon_intensity FROM carbon_intensity_history WHERE datetime=?",
-        (to_iso_z(ensure_utc(SAMPLE_HISTORY_DATA[1]["datetime"])),),
+        (to_iso_z(ensure_utc(str(SAMPLE_HISTORY_DATA[1]["datetime"]))),),
     ) as cursor:
         row = await cursor.fetchone()
         assert row[0] == 55.5
@@ -142,7 +142,7 @@ async def test_save_history_updates_duplicates(sqlite_repo, db_connection):
 
     async with db_connection.execute(
         "SELECT carbon_intensity FROM carbon_intensity_history WHERE datetime=?",
-        (to_iso_z(ensure_utc(modified_record["datetime"])),),
+        (to_iso_z(ensure_utc(str(modified_record["datetime"]))),),
     ) as cursor:
         row = await cursor.fetchone()
         assert row[0] == 999.9

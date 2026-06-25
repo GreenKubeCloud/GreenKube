@@ -21,7 +21,7 @@ class Scheduler:
 
     async def _run_periodically(
         self,
-        interval_seconds: int,
+        interval_seconds: int | float,
         job_func: Callable[[], Coroutine],
         skip_initial: bool = False,
     ):

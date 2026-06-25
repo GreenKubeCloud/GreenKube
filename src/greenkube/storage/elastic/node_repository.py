@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List
 
 try:
-    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Long
+    from elasticsearch_dsl import Boolean, Date, Document, Float, Keyword, Long  # pyrefly: ignore[missing-import]
 except ImportError as _es_import_error:
     raise ImportError(
         "The 'elasticsearch' extra is required to use the Elasticsearch backend. "
@@ -19,13 +19,13 @@ except ImportError as _es_import_error:
 # Import connections conditionally
 if "connections" not in globals():
     try:
-        from elasticsearch_dsl import connections
+        from elasticsearch_dsl import connections  # pyrefly: ignore[missing-import]
     except Exception:
         connections = None
 
 # Import async_bulk helper
 try:
-    from elasticsearch.helpers import async_bulk
+    from elasticsearch.helpers import async_bulk  # pyrefly: ignore[missing-import]
 except ImportError:
     async_bulk = None
 
@@ -109,8 +109,8 @@ class ElasticsearchNodeRepository(NodeRepository):
             return 0
 
         try:
-            conn = connections.get_connection("default")
-            success_count, errors = await async_bulk(
+            conn = connections.get_connection("default")  # pyrefly: ignore[missing-attribute]
+            success_count, errors = await async_bulk(  # pyrefly: ignore[not-callable]
                 client=conn,
                 actions=actions,
                 raise_on_error=True,

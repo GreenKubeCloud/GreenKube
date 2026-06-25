@@ -11,7 +11,7 @@ hardware profiles of the instances.
 
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from greenkube.core.config import Config, get_config
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
@@ -211,7 +211,7 @@ class BasicEstimator:
         node_total_cpu: float,
         pods_on_node: List[tuple],
         duration_seconds: float,
-        estimation_reasons: List[str] = None,
+        estimation_reasons: Optional[List[str]] = None,
     ) -> List[EnergyMetric]:
         """
         Calculates energy for all pods on a specific node.

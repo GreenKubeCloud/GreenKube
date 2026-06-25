@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from typing import Callable, Optional, Sequence
+from typing import Awaitable, Callable, Optional, Sequence
 
 from kubernetes_asyncio import client
 
@@ -84,7 +84,7 @@ class BaseDiscovery:
         except Exception:
             return False
 
-    async def discover(self, hint: str) -> Optional[str]:
+    async def discover(self, hint: str = "") -> Optional[str]:
         """Fallback discover implementation: delegates to generic collector with no
         special namespace or port preferences.
         """
@@ -99,7 +99,9 @@ class BaseDiscovery:
             return f"{scheme}://{host}:{port}"
         return None
 
-    async def probe_candidates(self, candidates: list, probe_func: Callable[[str, int], bool]) -> Optional[str]:
+    async def probe_candidates(
+        self, candidates: list, probe_func: Callable[[str, int], Awaitable[bool]]
+    ) -> Optional[str]:
         """
         Iterates over candidates and probes them using the provided function.
         Returns the base URL of the first successful candidate.

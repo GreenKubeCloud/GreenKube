@@ -294,7 +294,7 @@ class TestMigrationRunnerSQLite:
             await runner.run(conn_async)
 
             async with conn_async.execute("SELECT * FROM combined_metrics") as cur:
-                rows = await cur.fetchall()
+                rows = list(await cur.fetchall())
 
         assert len(rows) == 1
         assert rows[0]["pod_name"] == "app-pod"

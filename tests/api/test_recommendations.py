@@ -143,6 +143,7 @@ class TestRecommendationsEndpoint:
         response = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d")
 
         assert response.status_code == 200
+        assert mock_reco_repo.get_savings_summary.await_args is not None
         kwargs = mock_reco_repo.get_savings_summary.await_args.kwargs
         assert kwargs["namespace"] == "prod"
         assert kwargs["start"] < kwargs["end"]
@@ -156,6 +157,7 @@ class TestRecommendationsEndpoint:
         response = client.get("/api/v1/recommendations/savings?last=ytd")
 
         assert response.status_code == 200
+        assert mock_reco_repo.get_savings_summary.await_args is not None
         start = mock_reco_repo.get_savings_summary.await_args.kwargs["start"]
         assert start.month == 1
         assert start.day == 1

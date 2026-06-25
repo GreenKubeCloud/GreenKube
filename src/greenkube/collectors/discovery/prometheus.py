@@ -28,7 +28,7 @@ class PrometheusDiscovery(BaseDiscovery):
         "/prometheus/api/v1/query",  # Common when namespaced
     ]
 
-    async def discover(self) -> Optional[str]:
+    async def discover(self, hint: str = "") -> Optional[str]:
         """
         Attempts to find a valid, running Prometheus service endpoint.
         """

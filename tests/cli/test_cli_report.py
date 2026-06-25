@@ -162,4 +162,4 @@ def test_report_range_with_output_exports(monkeypatch, tmp_path):
 
     # Assert: exporter was invoked and wrote to data folder path
     assert "path" in written
-    assert written["path"].endswith("greenkube-report.csv")
+    assert written["path"] is not None and written["path"].endswith("greenkube-report.csv")
