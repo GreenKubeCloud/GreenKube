@@ -24,7 +24,7 @@ Thank you for your interest in GreenKube! We welcome contributions of all kinds 
    ```bash
    python -m venv .venv
    source .venv/bin/activate
-   pip install -e ".[dev,test]"
+   uv sync
    ```
 
 3. **Install pre-commit hooks:**

@@ -151,8 +151,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started
 ```bash
 git clone https://github.com/GreenKubeCloud/GreenKube.git
 cd GreenKube
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,test]"
+uv sync
 pytest
 ```
 

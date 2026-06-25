@@ -62,7 +62,7 @@ classifiers = [
 # Production dependencies
 # These are the libraries required for the tool to run
 dependencies = [
-    "typer[all]>=0.9.0", # For building a clean command-line interface (CLI)
+    "typer>=0.9.0", # For building a clean command-line interface (CLI)
     "httpx>=0.25.0",  # Async HTTP client
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
@@ -81,23 +81,10 @@ dependencies = [
 
 [project.optional-dependencies]
 # Elasticsearch storage backend (not yet production-ready; use postgres or sqlite).
-# Install with: pip install greenkube[elasticsearch]
+# Install with: uv pip install greenkube[elasticsearch]
 elasticsearch = [
     "elasticsearch>=8.10.0",
     "elasticsearch-dsl>=8.10.0",
-]
-test = [
-    "respx",
-    "pytest-asyncio",
-    "pytest>=7.0",
-    "pytest-mock",
-    "pytest-cov",
-]
-dev = [
-    "pre-commit", 
-    "ruff",
-    "toml",
-    "ruamel.yaml",
 ]
 
 [project.urls]
@@ -134,8 +121,23 @@ filterwarnings = [
     "ignore:coroutine 'run_demo' was never awaited:RuntimeWarning",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[dependency-groups]
+test = [
+    "respx",
+    "pytest-asyncio",
+    "pytest>=7.0",
+    "pytest-mock",
+    "pytest-cov",
+]
+dev = [
+    "pre-commit",
+    "ruff",
+    "toml",
+    "ruamel.yaml",
+]
+
+[tool.uv]
+default-groups = ["dev", "test"]
 
 [tool.hatch.version]
 path = "src/greenkube/__init__.py"

@@ -44,10 +44,13 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install '.[test]'
+        run: uv sync --group test
 
       - name: Lint for hardcoded secrets
         uses: gitleaks/gitleaks-action@v2
@@ -58,12 +61,11 @@ jobs:
 
       - name: Lint with Ruff
         run: |
-          pip install ruff
-          ruff check .
-          ruff format --check .
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Run tests with pytest
-        run: pytest --cov=greenkube --cov-report=term-missing --cov-report=json --tb=short --no-header --color=no 2>&1 | tee pytest_output.txt; exit ${PIPESTATUS[0]}
+        run: uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=json --tb=short --no-header --color=no 2>&1 | tee pytest_output.txt; exit ${PIPESTATUS[0]}
 
       - name: Update README badges
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')

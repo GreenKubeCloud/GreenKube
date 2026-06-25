@@ -26,8 +26,8 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Install build tools
-RUN pip install --no-cache-dir --upgrade pip build
+# Install uv for fast dependency resolution and installation
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Copy all project files required for the build
 COPY pyproject.toml .
@@ -35,13 +35,13 @@ COPY README.md .
 COPY LICENSE .
 COPY src /app/src
 
-# Build and install the package (and its dependencies) into a temporary prefix
-# Using 'pip install .' reads pyproject.toml and runs the hatchling build backend
-# We install into /install to easily copy it to the final stage
+# Build and install the package (and its dependencies) into a temporary prefix.
+# uv pip install reads pyproject.toml and runs the hatchling build backend.
+# We install into /install to easily copy it to the final stage.
 # Note: packaging is installed explicitly because limits 5.x uses it at runtime
-# but pip considers it satisfied by its own vendored copy.
-RUN pip install --no-cache-dir . --prefix=/install \
-    && pip install --no-cache-dir --ignore-installed --force-reinstall --no-deps packaging --prefix=/install
+# but uv considers it satisfied by its own vendored copy.
+RUN uv pip install --no-cache --system . --prefix=/install \
+    && uv pip install --no-cache --system --reinstall --no-deps packaging --prefix=/install
 
 # --- STAGE 3: Final Image ---
 # This stage creates the final, lean image.
@@ -83,7 +83,7 @@ WORKDIR /home/greenkube
 # Switch to the non-root user
 USER 10001
 
-# The 'pip install .' in the builder stage already created the
+# The 'uv pip install .' in the builder stage already created the
 # 'greenkube' entrypoint in /usr/local/bin
 
 # Health check for standalone Docker usage (when running the API).
