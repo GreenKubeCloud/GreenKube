@@ -46,7 +46,7 @@ class ElectricityMapsCollector(BaseCollector):
             await self._client.aclose()
             self._client = None
 
-    async def collect(self, zone: str, target_datetime: datetime = None) -> list:
+    async def collect(self, zone: str, target_datetime: datetime | None = None) -> list:  # type: ignore[override]
         """
         Retrieves historical data for a specific zone and returns it.
         If the token is missing or the API call fails, it returns the default value.

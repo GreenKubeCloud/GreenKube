@@ -198,3 +198,21 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
         count = int(result.split()[-1]) if result else 0
         logger.debug("Pruned %d old raw savings ledger records.", count)
         return count
+
+    async def prune_hourly(self, retention_days: int = -1) -> int:
+        """Delete hourly-compressed savings ledger rows older than retention_days.
+
+        Set retention_days to -1 to disable pruning (keep indefinitely).
+        """
+        if retention_days < 0:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        async with self._db.connection_scope() as conn:
+            result = await conn.execute(
+                "DELETE FROM recommendation_savings_ledger_hourly WHERE hour_bucket < $1",
+                cutoff,
+            )
+        count = int(result.split()[-1]) if result else 0
+        if count:
+            logger.info("Pruned %d hourly savings ledger rows older than %d days.", count, retention_days)
+        return count

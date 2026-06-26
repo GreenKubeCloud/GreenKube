@@ -84,6 +84,9 @@ async def collect_carbon_intensity_for_all_zones() -> None:
 
         # Parallelize zone history collection
         async def process_zone(zone):
+            import structlog as _structlog
+
+            _structlog.contextvars.bind_contextvars(collector="electricity_maps", zone=zone)
             try:
                 history_data = await em_collector.collect(zone=zone)
                 if history_data:
@@ -245,11 +248,12 @@ async def refresh_dashboard_summary() -> None:
 
 async def _async_start(last: Optional[str]):
     cfg = get_config()
-    logging.basicConfig(
-        level=cfg.LOG_LEVEL.upper(),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        force=True,
-    )
+    from ..utils.log import configure_logging
+
+    configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
+    import structlog
+
+    structlog.contextvars.bind_contextvars(cluster=cfg.CLUSTER_NAME or "default")
     logger.info("🚀 Initializing GreenKube (Async)...")
 
     # Establish the database connection and run schema migrations eagerly.

@@ -8,13 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auth-proxy routing (#245):** `TRUST_AUTH_PROXY` config flag enables forwarding authenticated requests through an external auth proxy (Authentik, Caddy). When enabled, the API reads the authenticated user identity from the `X-Forwarded-User` / `X-Auth-Request-User` headers instead of performing its own authentication, removing the need to expose credentials directly to the proxy. Special thanks to [@kahnwong](https://github.com/kahnwong) for the detailed reproduction information that led to this fix.
+- **Structured logging with `structlog`:** A new `LOG_FORMAT` config option (`json` or `text`, default `text`) controls the log output format. JSON mode emits machine-readable structured log lines suitable for log aggregation pipelines (e.g. Loki). Exposed in Helm `values.yaml` via `config.logFormat`.
+- **DB vacuuming and savings-ledger pruning:** `MetricsCompressor` now runs `VACUUM` on the main metrics tables after each compaction cycle. A dedicated pruning pass removes stale hourly-savings-ledger records older than the configured retention window, keeping storage usage bounded on long-running deployments.
 - **Metrics: DB-level pagination for `GET /api/v1/metrics`** — The endpoint now uses SQL `COUNT(*) + LIMIT/OFFSET` instead of loading the full result set into Python. A new `METRICS_LIST_MAX_RANGE_DAYS` config (default 30, exposed in Helm `values.yaml` via `config.metricsListMaxRangeDays`) rejects requests wider than the limit with HTTP 400 to prevent accidental OOM on large clusters.
 - **Repository: `read_combined_metrics_page`** — New method on `CombinedMetricsRepository` (base Python fallback + optimised PostgreSQL `UNION ALL` implementation) for DB-level paginated reads.
 - **Repository: `read_latest_per_pod`** — New method returning the single most-recent metric snapshot for each `(namespace, pod_name)` pair. PostgreSQL implementation uses `DISTINCT ON` for efficiency; base class falls back to Python deduplication.
 - **Repository: `aggregate_grouped_row_count`** — New method returning the number of distinct `(group_key × time_bucket)` rows a grouped-aggregate export would produce, computed entirely in SQL (`COUNT DISTINCT`). Implemented for PostgreSQL and SQLite.
 - **Metrics endpoint: Prometheus gauge refresh via `read_latest_per_pod`** — `refresh_metrics_from_db` now calls `read_latest_per_pod` instead of loading the full metrics history and deduplicating in Python, eliminating a major OOM source for large clusters.
 
+### Changed
+- **Toolchain: switched from `pip` to `uv`** — All CI workflows, the Dockerfile, and developer documentation now use `uv` for dependency management and virtual-environment creation. A `uv.lock` lockfile replaces the previous `requirements*.txt` files, ensuring fully reproducible builds across environments.
+- **Settings: replaced `python-dotenv` with `pydantic-settings`** — `config.py` is now driven by `pydantic-settings` `BaseSettings`, giving automatic environment-variable parsing with type coercion, validation, and cleaner secret handling. `python-dotenv` removed from dependencies.
+- **Type checking: Pyrefly added to pre-commit** — Pyrefly static type checker integrated into the pre-commit hook chain. Codebase cleaned up (dead code, redundant imports, incorrect annotations) as part of the initial Pyrefly pass.
+- **Frontend: metrics page removed** — The `/metrics` route and its associated Svelte page have been removed. Dashboard panels reordered accordingly.
+
 ### Fixed
+- **API: oversized response headers causing Caddy/Authentik 502/503 errors** — Bloated debug and CORS headers removed from all API responses; the fix resolves `upstream sent invalid header` 50x errors seen behind reverse-proxy setups.
+- **Frontend: donut chart legend overflow** — Namespaces beyond the top-N are now collapsed into an `other` slice, preventing the chart legend from overflowing the panel.
+- **Ruff version mismatch in CI** — Pinned `ruff` version in CI to match the local configuration, eliminating lint-step failures caused by version skew.
 - **OOM (`OOMKilled`, exit code 137) in `greenkube-api`** — `GET /api/v1/metrics`, `GET /api/v1/report/summary?aggregate=true`, and the Prometheus gauge refresh all previously loaded up to 1 M+ `CombinedMetric` objects into memory. All three paths are now SQL-backed and never materialise full row sets in Python (#239).
 - **`report/summary?aggregate=true` uses pure SQL** — The aggregate summary path calls `aggregate_grouped_row_count` (SQL `COUNT DISTINCT`) instead of invoking `aggregate_metrics()` over loaded rows, making large date ranges safe regardless of dataset size.
 - **Memory leaks in Kubernetes API client** — `NodeCollector` and `PodCollector` now explicitly close the async `kubernetes_asyncio` API client after each collection cycle, preventing handle leaks on long-running pods.

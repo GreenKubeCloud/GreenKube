@@ -210,7 +210,7 @@ class Recommender:
         if not timestamped:
             return max((getattr(metric, request_attr) or 0) for metric in series)
 
-        latest_timestamp = max(metric.timestamp for metric in timestamped)
+        latest_timestamp = max(metric.timestamp for metric in timestamped if metric.timestamp is not None)
         latest_metrics = [metric for metric in timestamped if metric.timestamp == latest_timestamp]
         return max((getattr(metric, request_attr) or 0) for metric in latest_metrics)
 
@@ -905,8 +905,8 @@ class Recommender:
             if cpu_is_low and mem_is_low:
                 mem_detail = (
                     f", memory {mem_utilization:.0%} ({avg_mem_usage / (1024**3):.1f} GiB / "
-                    f"{mem_capacity / (1024**3):.1f} GiB)"
-                    if mem_utilization is not None
+                    f"{(mem_capacity or 0) / (1024**3):.1f} GiB)"
+                    if mem_utilization is not None and mem_capacity is not None
                     else ""
                 )
                 recs.append(

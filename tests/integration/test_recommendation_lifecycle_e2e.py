@@ -145,6 +145,7 @@ class TestRecommenderGeneratesFromMetrics:
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
         assert len(cpu_recs) == 1
         assert cpu_recs[0].pod_name == "oversized-cpu"
+        assert cpu_recs[0].recommended_cpu_request_millicores is not None
         assert cpu_recs[0].recommended_cpu_request_millicores < 4000
 
 

@@ -226,7 +226,7 @@ annotations:
     git clone https://github.com/GreenKubeCloud/GreenKube.git
     cd GreenKube
     python -m venv .venv && source .venv/bin/activate
-    pip install -e ".[dev,test]"
+    uv sync
     pytest
     ```
 

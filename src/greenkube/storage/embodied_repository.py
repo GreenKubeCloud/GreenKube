@@ -10,7 +10,7 @@ from .base_embodied_repository import BaseEmbodiedRepository
 
 # Conditional imports for Elasticsearch
 try:
-    from elasticsearch_dsl import Date, Document, Float, Integer, Keyword
+    from elasticsearch_dsl import Date, Document, Float, Integer, Keyword  # pyrefly: ignore[missing-import]
 except ImportError:
     pass
 
@@ -24,12 +24,12 @@ if "Document" in globals():
         Elasticsearch Document representing an instance carbon profile.
         """
 
-        provider = Keyword(required=True)
-        instance_type = Keyword(required=True)
-        gwp_manufacture = Float(required=True)
-        lifespan_hours = Integer(required=True)
-        source = Keyword()
-        last_updated = Date()
+        provider = Keyword(required=True)  # pyrefly: ignore[unbound-name]
+        instance_type = Keyword(required=True)  # pyrefly: ignore[unbound-name]
+        gwp_manufacture = Float(required=True)  # pyrefly: ignore[unbound-name]
+        lifespan_hours = Integer(required=True)  # pyrefly: ignore[unbound-name]
+        source = Keyword()  # pyrefly: ignore[unbound-name]
+        last_updated = Date()  # pyrefly: ignore[unbound-name]
 
         class Index:
             name = "greenkube_instance_carbon_profiles"
@@ -122,7 +122,7 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
         """
         try:
             async with self.db_manager.connection_scope() as conn:
-                row = await conn.fetchrow(query, provider, instance_type)
+                row = await conn.fetchrow(query, provider, instance_type)  # type: ignore[union-attr]
                 if row:
                     return {
                         "gwp_manufacture": row["gwp_manufacture"],
@@ -170,7 +170,7 @@ class ElasticsearchEmbodiedRepository(BaseEmbodiedRepository):
     async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
         try:
             doc_id = f"{provider}-{instance_type}"
-            doc = await InstanceCarbonProfileDoc.get(id=doc_id, ignore=404)
+            doc = await InstanceCarbonProfileDoc.get(id=doc_id, ignore=404)  # pyrefly: ignore[missing-attribute]
             if doc:
                 return {
                     "gwp_manufacture": doc.gwp_manufacture,
@@ -190,15 +190,15 @@ class ElasticsearchEmbodiedRepository(BaseEmbodiedRepository):
         try:
             doc_id = f"{provider}-{instance_type}"
             doc = InstanceCarbonProfileDoc(
-                meta={"id": doc_id},
-                provider=provider,
-                instance_type=instance_type,
-                gwp_manufacture=gwp,
-                lifespan_hours=lifespan,
-                source=source,
-                last_updated=now_iso,
+                meta={"id": doc_id},  # pyrefly: ignore[unexpected-keyword]
+                provider=provider,  # pyrefly: ignore[unexpected-keyword]
+                instance_type=instance_type,  # pyrefly: ignore[unexpected-keyword]
+                gwp_manufacture=gwp,  # pyrefly: ignore[unexpected-keyword]
+                lifespan_hours=lifespan,  # pyrefly: ignore[unexpected-keyword]
+                source=source,  # pyrefly: ignore[unexpected-keyword]
+                last_updated=now_iso,  # pyrefly: ignore[unexpected-keyword]
             )
-            await doc.save()
+            await doc.save()  # pyrefly: ignore[missing-attribute]
             logger.info("Saved ES profile for %s", doc_id)
         except Exception as e:
             logger.error("Error saving embodied profile to ES for %s/%s: %s", provider, instance_type, e)

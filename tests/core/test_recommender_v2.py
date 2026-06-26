@@ -28,20 +28,20 @@ def _make_metric(
     namespace: str = "default",
     cpu_request: int = 1000,
     memory_request: int = 512 * 1024 * 1024,
-    cpu_usage_millicores: int = 500,
-    cpu_usage_max_millicores: int = None,
+    cpu_usage_millicores: int | None = 500,
+    cpu_usage_max_millicores: int | None = None,
     memory_usage_bytes: int = 256 * 1024 * 1024,
-    memory_usage_max_bytes: int = None,
+    memory_usage_max_bytes: int | None = None,
     joules: float = 50000.0,
     total_cost: float = 0.10,
     co2e_grams: float = 5.0,
-    timestamp: datetime = None,
+    timestamp: datetime | None = None,
     duration_seconds: int = 300,
     node: str = "node-1",
     grid_intensity: float = 100.0,
     emaps_zone: str = "FR",
-    owner_kind: str = None,
-    owner_name: str = None,
+    owner_kind: str | None = None,
+    owner_name: str | None = None,
 ) -> CombinedMetric:
     """Create a CombinedMetric for testing."""
     return CombinedMetric(
@@ -71,8 +71,8 @@ def _make_timeseries(
     namespace: str = "default",
     cpu_request: int = 2000,
     memory_request: int = 1024 * 1024 * 1024,
-    usages: list = None,
-    memory_usages: list = None,
+    usages: list | None = None,
+    memory_usages: list | None = None,
     start_hour: int = 0,
     interval_minutes: int = 5,
     node: str = "node-1",
@@ -80,8 +80,8 @@ def _make_timeseries(
     total_cost: float = 0.01,
     co2e_grams: float = 1.0,
     joules: float = 5000.0,
-    owner_kind: str = None,
-    owner_name: str = None,
+    owner_kind: str | None = None,
+    owner_name: str | None = None,
 ) -> List[CombinedMetric]:
     """Create a time-series of CombinedMetric objects for pattern analysis."""
     if usages is None:

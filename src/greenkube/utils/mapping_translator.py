@@ -2,6 +2,7 @@
 
 import logging
 import re
+from typing import Optional
 
 from ..data.region_mapping import CLOUD_REGION_TO_ELECTRICITY_MAPS_ZONE, PROVIDER_REGION_TO_EM_ZONE
 
@@ -16,7 +17,7 @@ _KNOWN_EM_ZONES: set[str] = set(CLOUD_REGION_TO_ELECTRICITY_MAPS_ZONE.values()) 
 }
 
 
-def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: str = None) -> str | None:
+def get_emaps_zone_from_cloud_zone(cloud_zone: str, provider: Optional[str] = None) -> str | None:
     """
     Translate a cloud zone (e.g. 'europe-west9-a') to an Electricity Maps
     zone code (e.g. 'FR') using the region mapping table.

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import httpx
 
@@ -8,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_async_http_client(
-    connect_timeout: float = None,
-    read_timeout: float = None,
+    connect_timeout: Optional[float] = None,
+    read_timeout: Optional[float] = None,
     verify: bool = True,
 ) -> httpx.AsyncClient:
     """

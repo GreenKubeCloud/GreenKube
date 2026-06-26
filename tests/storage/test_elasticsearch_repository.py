@@ -6,7 +6,7 @@ pytest.importorskip("elasticsearch", reason="elasticsearch extra not installed â
 
 # Import exceptions and config needed for tests
 # Make sure ApiError is imported if needed for RequestError construction
-from elasticsearch.exceptions import (
+from elasticsearch.exceptions import (  # pyrefly: ignore[missing-import]
     ConnectionError,
     NotFoundError,
     RequestError,

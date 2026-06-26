@@ -87,14 +87,14 @@ class TestPreInstallCRDCheck:
     def test_crd_check_has_pre_install_hook(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         job = find_manifest(docs, "Job", "crd-check")
-        annotations = job["metadata"]["annotations"]
+        annotations = job["metadata"]["annotations"]  # type: ignore[index]
         assert "pre-install" in annotations.get("helm.sh/hook", "")
         assert "pre-upgrade" in annotations.get("helm.sh/hook", "")
 
     def test_crd_check_runs_before_other_hooks(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         job = find_manifest(docs, "Job", "crd-check")
-        annotations = job["metadata"]["annotations"]
+        annotations = job["metadata"]["annotations"]  # type: ignore[index]
         assert annotations.get("helm.sh/hook-weight") == "-10"
 
     def test_crd_check_not_created_when_servicemonitor_disabled(self):
@@ -119,37 +119,37 @@ class TestServiceMonitor:
     def test_servicemonitor_namespace_is_monitoring(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        assert sm["metadata"]["namespace"] == "monitoring"
+        assert sm["metadata"]["namespace"] == "monitoring"  # type: ignore[index]
 
     def test_servicemonitor_has_kube_prometheus_label(self):
         """ServiceMonitor must have the label that the Prometheus Operator selects on."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        assert sm["metadata"]["labels"]["app.kubernetes.io/part-of"] == "kube-prometheus"
+        assert sm["metadata"]["labels"]["app.kubernetes.io/part-of"] == "kube-prometheus"  # type: ignore[index]
 
     def test_servicemonitor_targets_greenkube_namespace(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        ns_selector = sm["spec"]["namespaceSelector"]["matchNames"]
+        ns_selector = sm["spec"]["namespaceSelector"]["matchNames"]  # type: ignore[index]
         assert "greenkube" in ns_selector
 
     def test_servicemonitor_selects_api_service(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        labels = sm["spec"]["selector"]["matchLabels"]
+        labels = sm["spec"]["selector"]["matchLabels"]  # type: ignore[index]
         assert labels.get("app.kubernetes.io/component") == "api"
         assert labels.get("app.kubernetes.io/name") == "greenkube"
 
     def test_servicemonitor_endpoint_path(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        ep = sm["spec"]["endpoints"][0]
+        ep = sm["spec"]["endpoints"][0]  # type: ignore[index]
         assert ep["path"] == "/prometheus/metrics"
 
     def test_servicemonitor_endpoint_port(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        ep = sm["spec"]["endpoints"][0]
+        ep = sm["spec"]["endpoints"][0]  # type: ignore[index]
         assert ep["port"] == "http"
 
     def test_servicemonitor_custom_interval(self):
@@ -160,7 +160,7 @@ class TestServiceMonitor:
             ]
         )
         sm = find_manifest(docs, "ServiceMonitor")
-        assert sm["spec"]["endpoints"][0]["interval"] == "60s"
+        assert sm["spec"]["endpoints"][0]["interval"] == "60s"  # type: ignore[index]
 
     def test_servicemonitor_custom_namespace(self):
         docs = helm_template(
@@ -170,21 +170,21 @@ class TestServiceMonitor:
             ]
         )
         sm = find_manifest(docs, "ServiceMonitor")
-        assert sm["metadata"]["namespace"] == "custom-monitoring"
+        assert sm["metadata"]["namespace"] == "custom-monitoring"  # type: ignore[index]
 
     def test_servicemonitor_has_metric_relabelings(self):
         """ServiceMonitor must restore exported_namespace/exported_pod labels so that
         Grafana sees the real K8s namespace of the measured pod, not greenkube."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])
+        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         assert len(relabelings) >= 4, "ServiceMonitor should have at least 4 metricRelabelings"
 
     def test_servicemonitor_relabeling_restores_namespace(self):
         """exported_namespace must be copied back to namespace."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])
+        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         ns_rule = next(
             (r for r in relabelings if r.get("targetLabel") == "namespace"),
             None,
@@ -196,7 +196,7 @@ class TestServiceMonitor:
         """exported_pod must be copied back to pod."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = find_manifest(docs, "ServiceMonitor")
-        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])
+        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         pod_rule = next(
             (r for r in relabelings if r.get("targetLabel") == "pod"),
             None,
@@ -221,33 +221,33 @@ class TestNetworkPolicy:
     def test_networkpolicy_in_release_namespace(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        assert np["metadata"]["namespace"] == "greenkube"
+        assert np["metadata"]["namespace"] == "greenkube"  # type: ignore[index]
 
     def test_networkpolicy_selects_app_pods(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        labels = np["spec"]["podSelector"]["matchLabels"]
+        labels = np["spec"]["podSelector"]["matchLabels"]  # type: ignore[index]
         assert labels.get("app.kubernetes.io/name") == "greenkube"
         assert labels.get("app.kubernetes.io/component") == "app"
 
     def test_networkpolicy_allows_from_monitoring_namespace(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        ingress_from = np["spec"]["ingress"][0]["from"][0]
+        ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         ns_labels = ingress_from["namespaceSelector"]["matchLabels"]
         assert ns_labels["kubernetes.io/metadata.name"] == "monitoring"
 
     def test_networkpolicy_allows_from_prometheus_pods(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        ingress_from = np["spec"]["ingress"][0]["from"][0]
+        ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         pod_labels = ingress_from["podSelector"]["matchLabels"]
         assert pod_labels["app.kubernetes.io/name"] == "prometheus"
 
     def test_networkpolicy_port_matches_api_port(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        port = np["spec"]["ingress"][0]["ports"][0]
+        port = np["spec"]["ingress"][0]["ports"][0]  # type: ignore[index]
         assert port["port"] == 8000
         assert port["protocol"] == "TCP"
 
@@ -259,14 +259,14 @@ class TestNetworkPolicy:
             ]
         )
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        ingress_from = np["spec"]["ingress"][0]["from"][0]
+        ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         ns_labels = ingress_from["namespaceSelector"]["matchLabels"]
         assert ns_labels["kubernetes.io/metadata.name"] == "observability"
 
     def test_networkpolicy_only_ingress(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
         np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        assert np["spec"]["policyTypes"] == ["Ingress"]
+        assert np["spec"]["policyTypes"] == ["Ingress"]  # type: ignore[index]
 
 
 class TestPrometheusRBAC:
@@ -285,12 +285,12 @@ class TestPrometheusRBAC:
     def test_role_in_release_namespace(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         role = find_manifest(docs, "Role", "prometheus-k8s")
-        assert role["metadata"]["namespace"] == "greenkube"
+        assert role["metadata"]["namespace"] == "greenkube"  # type: ignore[index]
 
     def test_role_allows_services_pods(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         role = find_manifest(docs, "Role", "prometheus-k8s")
-        core_rule = next(r for r in role["rules"] if "" in r["apiGroups"])
+        core_rule = next(r for r in role["rules"] if "" in r["apiGroups"])  # type: ignore[index]
         assert "services" in core_rule["resources"]
         assert "pods" in core_rule["resources"]
         assert set(core_rule["verbs"]) == {"get", "list", "watch"}
@@ -298,7 +298,7 @@ class TestPrometheusRBAC:
     def test_role_allows_endpointslices(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         role = find_manifest(docs, "Role", "prometheus-k8s")
-        discovery_rule = next(r for r in role["rules"] if "discovery.k8s.io" in r["apiGroups"])
+        discovery_rule = next(r for r in role["rules"] if "discovery.k8s.io" in r["apiGroups"])  # type: ignore[index]
         assert "endpointslices" in discovery_rule["resources"]
         assert set(discovery_rule["verbs"]) == {"get", "list", "watch"}
 
@@ -315,13 +315,13 @@ class TestPrometheusRBAC:
     def test_rolebinding_references_correct_role(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         rb = find_manifest(docs, "RoleBinding", "prometheus-k8s")
-        assert rb["roleRef"]["kind"] == "Role"
-        assert rb["roleRef"]["name"] == "prometheus-k8s"
+        assert rb["roleRef"]["kind"] == "Role"  # type: ignore[index]
+        assert rb["roleRef"]["name"] == "prometheus-k8s"  # type: ignore[index]
 
     def test_rolebinding_subject_is_prometheus_sa(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         rb = find_manifest(docs, "RoleBinding", "prometheus-k8s")
-        subject = rb["subjects"][0]
+        subject = rb["subjects"][0]  # type: ignore[index]
         assert subject["kind"] == "ServiceAccount"
         assert subject["name"] == "prometheus-k8s"
         assert subject["namespace"] == "monitoring"
@@ -334,4 +334,4 @@ class TestPrometheusRBAC:
             ]
         )
         rb = find_manifest(docs, "RoleBinding", "prometheus-k8s")
-        assert rb["subjects"][0]["name"] == "custom-prom"
+        assert rb["subjects"][0]["name"] == "custom-prom"  # type: ignore[index]

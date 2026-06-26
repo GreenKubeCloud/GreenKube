@@ -97,6 +97,7 @@ class TestReportSummaryEndpoint:
         response = client.get("/api/v1/report/summary?last=ytd")
 
         assert response.status_code == 200
+        assert mock_combined_metrics_repo.aggregate_summary.await_args is not None
         kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
         start = kwargs["start_time"]
         end = kwargs["end_time"]
@@ -125,6 +126,7 @@ class TestReportSummaryEndpoint:
         response = client.get("/api/v1/report/summary?start=2025-01-02&end=2025-01-05")
 
         assert response.status_code == 200
+        assert mock_combined_metrics_repo.aggregate_summary.await_args is not None
         kwargs = mock_combined_metrics_repo.aggregate_summary.await_args.kwargs
         assert kwargs["start_time"] == datetime(2025, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
         assert kwargs["end_time"] == datetime(2025, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc)
@@ -176,6 +178,7 @@ class TestReportYearsEndpoint:
 
         assert response.status_code == 200
         assert response.json() == [2026, 2025]
+        assert mock_combined_metrics_repo.list_metric_years.await_args is not None
         assert mock_combined_metrics_repo.list_metric_years.await_args.kwargs == {"namespace": "default"}
 
 
@@ -203,6 +206,7 @@ class TestReportExportEndpoint:
         reader = csv.DictReader(io.StringIO(content))
         rows = list(reader)
         assert len(rows) == 2
+        assert reader.fieldnames is not None
         assert "pod_name" in reader.fieldnames
         assert "co2e_grams" in reader.fieldnames
         assert "total_cost" in reader.fieldnames

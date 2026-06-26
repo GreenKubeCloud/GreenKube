@@ -17,60 +17,52 @@ from greenkube.api.dependencies import (
 
 
 class TestSecurityHeaders:
-    """Verify that all OWASP-recommended security headers are present."""
+    """Verify that all OWASP-recommended security headers are present.
 
-    def test_x_content_type_options(self, client):
+    Document-only headers (X-Frame-Options, X-XSS-Protection, CSP,
+    Permissions-Policy, X-Robots-Tag) are only set on HTML responses (the
+    SPA entry point), not on JSON API responses.  This avoids bloat on
+    API responses that can produce malformed responses when a reverse proxy
+    merges headers from auth subrequests and backend responses.
+    """
+
+    def test_common_headers_on_api(self, client):
+        """Nosniff and Referrer-Policy must be on all responses."""
         resp = client.get("/api/v1/health")
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
-
-    def test_x_frame_options(self, client):
-        resp = client.get("/api/v1/health")
-        assert resp.headers.get("X-Frame-Options") == "DENY"
-
-    def test_x_xss_protection(self, client):
-        resp = client.get("/api/v1/health")
-        assert resp.headers.get("X-XSS-Protection") == "1; mode=block"
-
-    def test_referrer_policy(self, client):
-        resp = client.get("/api/v1/health")
         assert resp.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
 
-    def test_permissions_policy(self, client):
+    def test_document_headers_not_on_api(self, client):
+        """Document-only headers must NOT appear on JSON API responses."""
         resp = client.get("/api/v1/health")
-        policy = resp.headers.get("Permissions-Policy")
-        assert "camera=()" in policy
-        assert "microphone=()" in policy
-
-    def test_content_security_policy(self, client):
-        resp = client.get("/api/v1/health")
-        csp = resp.headers.get("Content-Security-Policy")
-        assert "default-src 'self'" in csp
-        assert "frame-ancestors 'none'" in csp
+        assert "X-Frame-Options" not in resp.headers
+        assert "Content-Security-Policy" not in resp.headers
+        assert "Permissions-Policy" not in resp.headers
+        assert "X-Robots-Tag" not in resp.headers
 
     def test_cache_control(self, client):
         resp = client.get("/api/v1/health")
-        assert resp.headers.get("Cache-Control") == "no-store"
+        assert resp.headers.get("Cache-Control") == "no-cache"
 
     def test_security_headers_on_api_docs(self, client):
         resp = client.get("/api/v1/docs")
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
-        assert resp.headers.get("X-Frame-Options") == "DENY"
 
 
 class TestCORSPolicy:
     """Verify that CORS is not overly permissive."""
 
     def test_cors_does_not_allow_all_methods(self, client):
-        """CORS should not use allow_methods=* (we restrict to GET, POST, OPTIONS)."""
+        """CORS should not use allow_methods=* (we restrict to GET, POST, PATCH, DELETE, OPTIONS)."""
         resp = client.options(
             "/api/v1/health",
             headers={
                 "Origin": "http://localhost",
-                "Access-Control-Request-Method": "DELETE",
+                "Access-Control-Request-Method": "PUT",
             },
         )
         allowed = resp.headers.get("Access-Control-Allow-Methods", "")
-        assert "DELETE" not in allowed
+        assert "PUT" not in allowed
 
     def test_cors_does_not_allow_all_headers(self, client):
         """CORS should only allow Authorization and Content-Type headers."""

@@ -7,6 +7,7 @@ metadata:
 data:
   # --- General Config ---
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   # Name of the Helm-managed Secret — used by the API to persist runtime
   # configuration overrides (UI-set tokens/URLs) back into the Secret.
   GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}
@@ -59,6 +60,7 @@ data:
   API_PORT: {{ .Values.config.api.port | quote }}
   CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   API_RATE_LIMIT: {{ .Values.config.apiRateLimit | quote }}
+  ROOT_PATH: {{ .Values.config.rootPath | default "" | quote }}
   METRICS_LIST_MAX_RANGE_DAYS: {{ .Values.config.metricsListMaxRangeDays | default 30 | int | quote }}
   {{- end }}
 

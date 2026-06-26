@@ -34,7 +34,7 @@ def _cached_stub(return_value=None, side_effect=None):
             raise side_effect
         return return_value
 
-    _stub.cache_clear = lambda: None
+    _stub.cache_clear = lambda: None  # type: ignore[attr-defined]
     return _stub
 
 

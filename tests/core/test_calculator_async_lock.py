@@ -49,7 +49,7 @@ async def test_calculator_concurrent_async_access():
 
     # All results should be valid
     assert all(r is not None for r in results)
-    assert all(r.co2e_grams > 0 for r in results)
+    assert all(r.co2e_grams > 0 for r in results if r is not None)
 
     # Repository should be called only once due to caching
     assert call_count == 1, f"Expected 1 repository call (cached), got {call_count}"

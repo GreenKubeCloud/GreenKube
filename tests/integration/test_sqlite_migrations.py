@@ -166,7 +166,7 @@ async def test_migration_preserves_existing_data(tmp_path):
     async with aiosqlite.connect(db_file) as conn:
         conn.row_factory = aiosqlite.Row
         async with conn.execute("SELECT * FROM combined_metrics") as cur:
-            rows = await cur.fetchall()
+            rows = list(await cur.fetchall())
 
     await mgr.close()
 

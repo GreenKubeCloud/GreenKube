@@ -413,6 +413,7 @@ class TestPostgresCompressionBranches:
         result = await compressor._compress_to_hourly()
 
         assert result == {"hours": 7, "rows": 7}
+        assert conn.execute.await_args is not None
         assert "INSERT INTO combined_metrics_hourly" in conn.execute.await_args.args[0]
         assert isinstance(conn.execute.await_args.args[1], datetime)
 

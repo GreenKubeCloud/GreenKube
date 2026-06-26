@@ -13,10 +13,9 @@
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard' },
-		{ href: '/metrics', label: 'Metrics' },
-		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/recommendations', label: 'Recommendations' },
 		{ href: '/report', label: 'Report' },
+		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/settings', label: 'Settings' }
 	];
 
@@ -111,7 +110,7 @@
 								? 'bg-green-600/15 text-green-400 font-medium'
 								: 'text-dark-400 hover:text-dark-200 hover:bg-dark-800'}"
 				>
-					<span class="text-base flex-shrink-0">{item.icon}</span>
+					<!-- no icons -->
 					{#if !$sidebarCollapsed}
 						<span class="truncate">{item.label}</span>
 					{/if}

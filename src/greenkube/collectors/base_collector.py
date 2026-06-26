@@ -7,7 +7,7 @@ core processing logic.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any
 
 
 class BaseCollector(ABC):
@@ -16,7 +16,7 @@ class BaseCollector(ABC):
     """
 
     @abstractmethod
-    async def collect(self) -> List[Any]:
+    async def collect(self) -> Any:
         """
         The main method for a collector. It should fetch data from its
         source (e.g., an API, a file), parse it, and return a list of

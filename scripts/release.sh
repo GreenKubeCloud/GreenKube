@@ -31,7 +31,7 @@ echo "🔖 Preparing release ${TAG}..."
 sed -i '' "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
 
 # 2. Run sync_version.py to propagate to all files
-pip install -q toml ruamel.yaml 2>/dev/null
+uv pip install -q toml ruamel.yaml 2>/dev/null
 python scripts/sync_version.py
 
 # 3. Update CHANGELOG.md — move [Unreleased] to [VERSION] — DATE

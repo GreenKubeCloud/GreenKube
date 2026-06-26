@@ -57,6 +57,12 @@ class MetricsCompressor:
         except Exception as e:
             logger.error("Hourly metrics pruning failed: %s", e)
 
+        # Reclaim dead tuple space so the PVC can be reused for new data.
+        try:
+            await self._vacuum_main_tables()
+        except Exception as e:
+            logger.error("Vacuum failed: %s", e)
+
         logger.info(
             "Compression cycle complete: %d hours, %d raw rows compressed, %d raw pruned, %d hourly pruned",
             stats["hours_compressed"],
@@ -325,3 +331,35 @@ class MetricsCompressor:
                 count = cursor.rowcount
                 await conn.commit()
                 return count
+
+    # ------------------------------------------------------------------
+    # PostgreSQL maintenance
+    # ------------------------------------------------------------------
+
+    async def _vacuum_main_tables(self) -> None:
+        """Run VACUUM on main tables to reclaim dead tuple space.
+
+        UPSERT-heavy tables accumulate dead tuples from UPDATE operations.
+        VACUUM marks this space as reusable, preventing unbounded table bloat.
+        """
+        if self._db.db_type != "postgres":
+            return
+
+        async with self._db.connection_scope() as conn:
+            # VACUUM (without FULL) does not lock the table and is safe for
+            # production. It reclaims dead tuple space for reuse by future
+            # INSERTs/UPDATEs.
+            for table in (
+                "combined_metrics",
+                "combined_metrics_hourly",
+                "carbon_intensity_history",
+                "node_snapshots",
+                "node_snapshots_scd",
+                "recommendation_history",
+                "recommendation_savings_ledger",
+                "recommendation_savings_ledger_hourly",
+            ):
+                try:
+                    await conn.execute(f"VACUUM {table}")
+                except Exception:
+                    logger.debug("VACUUM %s skipped (table may not exist yet)", table)

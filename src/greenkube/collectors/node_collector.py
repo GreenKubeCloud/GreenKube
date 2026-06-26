@@ -40,7 +40,7 @@ class NodeCollector(BaseCollector):
         self._api = await get_core_v1_api()
         return self._api
 
-    async def collect(self) -> dict:
+    async def collect(self) -> dict:  # type: ignore[override]
         """
         Collects comprehensive node information from Kubernetes.
 
@@ -241,7 +241,7 @@ class NodeCollector(BaseCollector):
 
         return "unknown"
 
-    def _extract_node_pool(self, labels: dict, cloud_provider: str) -> str:
+    def _extract_node_pool(self, labels: dict, cloud_provider: str) -> str | None:
         """
         Extract node pool name from cloud-specific labels.
         """

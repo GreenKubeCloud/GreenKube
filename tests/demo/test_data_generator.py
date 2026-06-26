@@ -95,8 +95,8 @@ class TestGenerateNodeSnapshots:
         """CPU and memory capacity must be positive."""
         nodes = generate_node_snapshots(days=1)
         for node in nodes:
-            assert node.cpu_capacity_cores > 0
-            assert node.memory_capacity_bytes > 0
+            assert node.cpu_capacity_cores is not None and node.cpu_capacity_cores > 0
+            assert node.memory_capacity_bytes is not None and node.memory_capacity_bytes > 0
 
 
 class TestGenerateCarbonIntensityHistory:
@@ -213,7 +213,7 @@ class TestGenerateCombinedMetrics:
         """CPU usage should be positive for all records."""
         metrics = generate_combined_metrics(days=1)
         for m in metrics:
-            assert m.cpu_usage_millicores >= 1
+            assert m.cpu_usage_millicores is not None and m.cpu_usage_millicores >= 1
 
     def test_timestamps_span_requested_period(self):
         """Timestamps should span the requested number of days."""

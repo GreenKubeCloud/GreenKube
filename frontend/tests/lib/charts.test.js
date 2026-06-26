@@ -163,6 +163,48 @@ describe('buildNamespaceDonutOption', () => {
 		const result = buildNamespaceDonutOption([]);
 		expect(result.series[0].data).toEqual([]);
 	});
+
+	it('groups remaining namespaces into "Other" when exceeding limit', () => {
+		const manyNs = [];
+		for (let i = 1; i <= 12; i++) {
+			manyNs.push({ namespace: `ns-${i}`, pod_name: 'pod', co2e_grams: 10 });
+		}
+		const result = buildNamespaceDonutOption(manyNs, { limit: 5 });
+		const pieData = result.series[0].data;
+		expect(pieData).toHaveLength(6); // top 5 + Other
+		const names = pieData.map(d => d.name);
+		expect(names).toContain('Other');
+		// Other should be last
+		expect(names[names.length - 1]).toBe('Other');
+		// Other value = 7 * 10 = 70
+		const other = pieData.find(d => d.name === 'Other');
+		expect(other.value).toBe(70);
+	});
+
+	it('uses gray color for "Other" slice', () => {
+		const manyNs = [];
+		for (let i = 1; i <= 12; i++) {
+			manyNs.push({ namespace: `ns-${i}`, pod_name: 'pod', co2e_grams: 10 });
+		}
+		const result = buildNamespaceDonutOption(manyNs, { limit: 5 });
+		const other = result.series[0].data.find(d => d.name === 'Other');
+		expect(other.itemStyle.color).toBe('#475569');
+	});
+
+	it('supports custom limit', () => {
+		const manyNs = [];
+		for (let i = 1; i <= 8; i++) {
+			manyNs.push({ namespace: `ns-${i}`, pod_name: 'pod', co2e_grams: 1 });
+		}
+		const result = buildNamespaceDonutOption(manyNs, { limit: 3 });
+		expect(result.series[0].data).toHaveLength(4); // top 3 + Other
+	});
+
+	it('does not create "Other" when namespaces are under the limit', () => {
+		const result = buildNamespaceDonutOption(METRICS_DATA, { limit: 10 });
+		const names = result.series[0].data.map(d => d.name);
+		expect(names).not.toContain('Other');
+	});
 });
 
 

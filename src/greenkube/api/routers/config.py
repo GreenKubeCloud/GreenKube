@@ -42,6 +42,7 @@ async def get_config_endpoint():
         default_intensity=cfg.DEFAULT_INTENSITY,
         default_pue=cfg.DEFAULT_PUE,
         log_level=cfg.LOG_LEVEL,
+        log_format=cfg.LOG_FORMAT,
         normalization_granularity=cfg.NORMALIZATION_GRANULARITY,
         prometheus_query_range_step=cfg.PROMETHEUS_QUERY_RANGE_STEP,
         api_host=cfg.API_HOST,

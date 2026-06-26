@@ -173,6 +173,9 @@ class EmbodiedEmissionsService:
             gwp_kg = profile.get("gwp_manufacture")
             lifespan = profile.get("lifespan_hours")
 
+            if gwp_kg is None or lifespan is None:
+                return 0.0
+
             node_capacity = 0
             if node_info.cpu_capacity_cores:
                 node_capacity = node_info.cpu_capacity_cores

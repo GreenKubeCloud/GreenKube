@@ -62,7 +62,7 @@ def _row_to_record(row) -> RecommendationRecord:
         cost_saved=row["cost_saved"],
         ignored_at=_dt(row["ignored_at"]),
         ignored_reason=row["ignored_reason"],
-        created_at=_dt(row["created_at"]),
+        created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
         updated_at=_dt(row["updated_at"]),
     )
 

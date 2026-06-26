@@ -22,7 +22,7 @@ def _make_record(
     namespace: str = "default",
     rec_type: RecommendationType = RecommendationType.ZOMBIE_POD,
     priority: str = "high",
-    created_at: datetime = None,
+    created_at: datetime | None = None,
     potential_savings_cost: float = 0.5,
     potential_savings_co2e_grams: float = 1.0,
 ) -> RecommendationRecord:
@@ -165,6 +165,7 @@ class TestSQLiteRecommendationRepository:
 
         await repo.save_recommendations([record])
 
+        assert mock_db_manager._mock_conn.execute.await_args is not None
         query, params = mock_db_manager._mock_conn.execute.await_args.args
         assert "applied_at" in query
         assert "actual_cpu_request_millicores" in query
@@ -208,6 +209,7 @@ class TestSQLiteRecommendationRepository:
         end = datetime(2026, 2, 8, tzinfo=timezone.utc)
         await repo.get_savings_summary(namespace="default", start=start, end=end)
 
+        assert mock_conn.execute.await_args is not None
         query, params = mock_conn.execute.await_args.args
         assert "applied_at >= ?" not in query
         assert "applied_at < ?" in query
@@ -224,6 +226,7 @@ class TestSQLiteRecommendationRepository:
 
         await repo.get_top_recommendations(limit=3, savings_metric="co2", namespace="production")
 
+        assert mock_conn.execute.await_args is not None
         query, params = mock_conn.execute.await_args.args
         assert "status = 'active'" in query
         assert "COALESCE(potential_savings_co2e_grams, 0) > 0" in query
@@ -242,6 +245,7 @@ class TestSQLiteRecommendationRepository:
 
         await repo.get_top_recommendations(limit=2, savings_metric="cost")
 
+        assert mock_conn.execute.await_args is not None
         query, params = mock_conn.execute.await_args.args
         assert "COALESCE(potential_savings_cost, 0) > 0" in query
         assert "ORDER BY COALESCE(potential_savings_cost, 0) DESC" in query
@@ -297,6 +301,7 @@ class TestPostgresRecommendationRepository:
 
         await repo.save_recommendations([record])
 
+        assert mock_db_manager._mock_conn.executemany.await_args is not None
         query, data = mock_db_manager._mock_conn.executemany.await_args.args
         saved = data[0]
         assert "applied_at" in query
@@ -334,6 +339,7 @@ class TestPostgresRecommendationRepository:
         end = datetime(2026, 2, 8, tzinfo=timezone.utc)
         await repo.get_savings_summary(namespace="default", start=start, end=end)
 
+        assert mock_conn.fetch.await_args is not None
         query = mock_conn.fetch.await_args.args[0]
         params = mock_conn.fetch.await_args.args[1:]
         assert "applied_at >=" not in query
@@ -348,6 +354,7 @@ class TestPostgresRecommendationRepository:
 
         await repo.get_top_recommendations(limit=3, savings_metric="co2", namespace="production")
 
+        assert mock_conn.fetch.await_args is not None
         query = mock_conn.fetch.await_args.args[0]
         params = mock_conn.fetch.await_args.args[1:]
         assert "status = 'active'" in query
@@ -364,6 +371,7 @@ class TestPostgresRecommendationRepository:
 
         await repo.get_top_recommendations(limit=2, savings_metric="cost")
 
+        assert mock_conn.fetch.await_args is not None
         query = mock_conn.fetch.await_args.args[0]
         params = mock_conn.fetch.await_args.args[1:]
         assert "COALESCE(potential_savings_cost, 0) > 0" in query

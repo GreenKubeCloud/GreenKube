@@ -47,7 +47,7 @@ async def test_is_available_success(mock_config):
 @pytest.mark.asyncio
 async def test_is_available_no_url_configured():
     cfg = Config()
-    cfg.PROMETHEUS_URL = None
+    cfg.PROMETHEUS_URL = None  # type: ignore[assignment]
     cfg.PROMETHEUS_QUERY_RANGE_STEP = "5m"
     collector = PrometheusCollector(settings=cfg)
     # With no base URL, is_available should return False

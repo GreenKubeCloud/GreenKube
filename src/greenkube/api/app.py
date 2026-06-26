@@ -53,27 +53,48 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        is_spa_html = "text/html" in content_type and "/api/" not in request.url.path
+        is_static_asset = request.url.path.startswith(("/_app/", "/static-frontend/"))
+        is_api = "/api/" in request.url.path
+
+        # Common security headers for all responses
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
-        response.headers["Cache-Control"] = "no-store"
-        # Content-Security-Policy: restrict resource loading for the SPA.
-        # 'unsafe-inline' is required for SvelteKit's inline bootstrap script
-        # and style injection. Without it the page is blank because the browser
-        # blocks the <script> tag that bootstraps the SPA.
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "font-src 'self' https://fonts.gstatic.com; "
-            "connect-src 'self'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self'"
-        )
+
+        # Document-only headers — only meaningful for HTML pages, not for
+        # JSON API responses or static assets.  Setting them on every response
+        # bloats the header payload and can produce malformed responses when
+        # a reverse proxy (e.g. Caddy with forward_auth) merges headers from
+        # both the auth subrequest and the backend response.
+        if is_spa_html:
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-XSS-Protection"] = "1; mode=block"
+            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; "
+                "font-src 'self' https://fonts.gstatic.com; "
+                "connect-src 'self'; "
+                "frame-ancestors 'none'; "
+                "base-uri 'self'; "
+                "form-action 'self'"
+            )
+
+        # Caching: no-store on the SPA entry point ensures users always get
+        # the latest build.  API responses get no-cache (not no-store) to
+        # avoid interfering with reverse-proxy session cookies (e.g. Authentik
+        # forward-auth).  Hashed immutable static assets can be cached
+        # aggressively.
+        if is_spa_html:
+            response.headers["Cache-Control"] = "no-store"
+        elif is_static_asset:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif is_api:
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
 
@@ -125,6 +146,9 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     Returns:
         A configured FastAPI application instance.
     """
+    cfg = get_config()
+    root_path = getattr(cfg, "ROOT_PATH", "") or ""
+
     app = FastAPI(
         title="GreenKube API",
         description="FinGreenOps platform API — measure, report, and optimize carbon emissions and cloud costs.",
@@ -133,11 +157,11 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         openapi_url="/api/v1/openapi.json",
         lifespan=lifespan if use_lifespan else None,
         dependencies=[Depends(verify_api_key)],
+        root_path=root_path,
     )
 
     # --- Rate limiting ---
     # Configurable via API_RATE_LIMIT env var (default "60/minute").
-    cfg = get_config()
     rate_limit = getattr(cfg, "API_RATE_LIMIT", "60/minute") or "60/minute"
     limiter = Limiter(key_func=get_remote_address, default_limits=[rate_limit])
     app.state.limiter = limiter
@@ -152,13 +176,19 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     # CORS — configurable via CORS_ORIGINS env var (comma-separated).
     # Defaults to ["*"] for in-cluster use where the SPA is served from
     # the same origin. Override when the API is exposed via an ingress.
+    #
+    # IMPORTANT: when the API is served behind a reverse-proxy that injects
+    # cookies (e.g. Authentik forward-auth with a session cookie), the
+    # browser may send credentials even on same-origin requests.
+    # allow_credentials=True paired with allow_origins=["*"] violates the
+    # CORS specification and causes intermittent failures.
     cors_origins_str = cfg.CORS_ORIGINS if hasattr(cfg, "CORS_ORIGINS") else "*"
     cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()] or ["*"]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_credentials=False if "*" in cors_origins else True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -230,10 +260,23 @@ def _mount_frontend(app: FastAPI) -> None:
     # Serve other static files (favicon, etc.)
     app.mount("/static-frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend-root")
 
-    # SPA catch-all: any route not matched by /api/* returns index.html
+    # SPA catch-all: any route not matched by /api/* returns index.html.
+    # Excludes well-known proxy/ingress paths so they return 404 instead
+    # of serving the SPA when the reverse proxy misroutes them.
+    _PROXY_PATHS = (
+        "/outpost.goauthentik.io",
+        "/.well-known/",
+        "/oauth2/",
+        "/oidc/",
+        "/sso/",
+        "/auth/",
+    )
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
         """Serve the SPA index.html for all non-API routes."""
+        if any(full_path.startswith(p) for p in _PROXY_PATHS):
+            return Response(status_code=404)
         file_path = FRONTEND_DIR / full_path
         if file_path.is_file() and not full_path.startswith("api/"):
             return FileResponse(str(file_path))
@@ -242,10 +285,11 @@ def _mount_frontend(app: FastAPI) -> None:
 
 def main():
     """Entry point for the greenkube-api console script."""
+    from greenkube.utils.log import configure_logging
+
     cfg = get_config()
-    logging.basicConfig(
-        level=cfg.LOG_LEVEL.upper(),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
-    uvicorn.run(app, host=cfg.API_HOST, port=cfg.API_PORT)
+    uvicorn.run(
+        app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*", timeout_keep_alive=65
+    )

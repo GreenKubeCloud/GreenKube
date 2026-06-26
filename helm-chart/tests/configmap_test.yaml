@@ -112,6 +112,12 @@ tests:
           path: data.API_RATE_LIMIT
           value: "60/minute"
 
+  - it: should set ROOT_PATH to empty by default
+    asserts:
+      - equal:
+          path: data.ROOT_PATH
+          value: ""
+
   - it: should omit API keys when api.enabled is false
     set:
       config.api.enabled: false

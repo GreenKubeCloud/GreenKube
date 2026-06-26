@@ -23,8 +23,8 @@ class DatabaseManager:
 
     def __init__(self, config: Config | None = None):
         self._config = config
-        self.connection = None
-        self.pool = None
+        self.connection: aiosqlite.Connection | None = None
+        self.pool: asyncpg.Pool | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -90,10 +90,12 @@ class DatabaseManager:
         if self.db_type == "postgres":
             if not self.pool:
                 await self.connect()
+            assert self.pool is not None
             async with self.pool.acquire() as conn:
                 yield conn
         else:
             await self.ensure_connection()
+            assert self.connection is not None
             yield self.connection
 
     async def ensure_connection(self):
@@ -126,7 +128,7 @@ class DatabaseManager:
             await self.connection.close()
             logger.info("Database connection closed.")
 
-    async def setup_sqlite(self, db_path: str = None):
+    async def setup_sqlite(self, db_path: str | None = None):
         """
         Creates the necessary tables for SQLite if they don't exist.
         """

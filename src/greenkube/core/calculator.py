@@ -91,7 +91,7 @@ class CarbonCalculator:
                 self._intensity_cache[cache_key] = intensity
 
     async def calculate_emissions(
-        self, joules: float, zone: str, timestamp: str, pue: Optional[float] = None
+        self, joules: float, zone: str, timestamp: str | datetime, pue: Optional[float] = None
     ) -> Optional[CarbonCalculationResult]:
         """Calculate CO2e grams and return it with the grid intensity used.
 

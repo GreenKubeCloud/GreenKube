@@ -14,6 +14,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import structlog
+
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
@@ -67,6 +69,7 @@ class CollectionOrchestrator:
         nodes_info = nodes_info or {}
 
         async def fetch_prometheus():
+            structlog.contextvars.bind_contextvars(collector="prometheus")
             try:
                 prom_metrics = await self.prometheus_collector.collect()
                 node_instance_map: Dict[str, str] = {}
@@ -103,6 +106,7 @@ class CollectionOrchestrator:
                 return None, {}
 
         async def fetch_opencost():
+            structlog.contextvars.bind_contextvars(collector="opencost")
             try:
                 cost_metrics = await self.opencost_collector.collect()
                 logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
@@ -112,6 +116,7 @@ class CollectionOrchestrator:
                 return {}
 
         async def fetch_pods():
+            structlog.contextvars.bind_contextvars(collector="pods")
             try:
                 pod_metrics = await self.pod_collector.collect()
                 req_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
@@ -121,8 +126,8 @@ class CollectionOrchestrator:
                         "cpu": 0,
                         "memory": 0,
                         "ephemeral_storage": 0,
-                        "owner_kind": None,
-                        "owner_name": None,
+                        "owner_kind": "",
+                        "owner_name": "",
                     }
                 )
                 for pm in pod_metrics:
@@ -131,8 +136,8 @@ class CollectionOrchestrator:
                     agg_map[key]["memory"] += pm.memory_request
                     agg_map[key]["ephemeral_storage"] += pm.ephemeral_storage_request
                     if pm.owner_kind and not agg_map[key]["owner_kind"]:
-                        agg_map[key]["owner_kind"] = pm.owner_kind
-                        agg_map[key]["owner_name"] = pm.owner_name
+                        agg_map[key]["owner_kind"] = pm.owner_kind or ""
+                        agg_map[key]["owner_name"] = pm.owner_name or ""
 
                 return pod_metrics, req_map, agg_map
             except Exception as e:

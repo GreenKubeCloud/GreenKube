@@ -14,7 +14,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import log2
-from typing import List
+from typing import List, Sequence
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
@@ -864,7 +864,7 @@ def update_node_metrics(nodes: List[NodeInfo]) -> None:
     logger.debug("Updated Prometheus node metrics with %d nodes.", len(nodes))
 
 
-def update_recommendation_metrics(recommendations: List[Recommendation]) -> None:
+def update_recommendation_metrics(recommendations: Sequence[Recommendation | RecommendationRecord]) -> None:
     """Updates Prometheus gauges with current recommendation counts and savings.
 
     Clears previous values and sets new ones based on the provided list.

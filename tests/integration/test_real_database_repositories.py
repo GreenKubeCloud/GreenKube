@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import AsyncGenerator
 from uuid import uuid4
 
 import asyncpg
@@ -88,7 +89,7 @@ class RealDatabase:
 
 
 @pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
-async def real_database(request, tmp_path, monkeypatch) -> RealDatabase:
+async def real_database(request, tmp_path, monkeypatch) -> AsyncGenerator[RealDatabase, None]:
     """Create an isolated real database for each storage contract test."""
     backend = request.param
     postgres_dsn = None
@@ -135,7 +136,7 @@ async def real_database(request, tmp_path, monkeypatch) -> RealDatabase:
 async def _table_names(database: RealDatabase) -> set[str]:
     async with database.manager.connection_scope() as conn:
         if database.backend == "postgres":
-            rows = await conn.fetch(
+            rows = await conn.fetch(  # type: ignore[union-attr]
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = $1",
                 database.schema,
             )
@@ -148,7 +149,7 @@ async def _table_names(database: RealDatabase) -> set[str]:
 async def _migration_versions(database: RealDatabase) -> set[int]:
     async with database.manager.connection_scope() as conn:
         if database.backend == "postgres":
-            rows = await conn.fetch("SELECT version FROM schema_migrations")
+            rows = await conn.fetch("SELECT version FROM schema_migrations")  # type: ignore[union-attr]
             return {row["version"] for row in rows}
 
         cursor = await conn.execute("SELECT version FROM schema_migrations")
@@ -593,6 +594,7 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     active = await repo.get_active_recommendations(namespace="prod")
     assert len(active) == 1
     assert active[0].description == "Updated recommendation"
+    assert active[0].id is not None
 
     applied = await repo.apply_recommendation(
         active[0].id,
@@ -639,6 +641,7 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     worker = (await repo.get_recommendations(now - timedelta(minutes=1), now + timedelta(minutes=1), namespace="prod"))[
         0
     ]
+    assert worker.id is not None
     ignored = await repo.ignore_recommendation(worker.id, IgnoreRecommendationRequest(reason="intentional"))
     assert ignored.status == RecommendationStatus.IGNORED
     assert len(await repo.get_ignored_recommendations(namespace="prod")) == 1

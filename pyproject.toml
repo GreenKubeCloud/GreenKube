@@ -62,11 +62,11 @@ classifiers = [
 # Production dependencies
 # These are the libraries required for the tool to run
 dependencies = [
-    "typer[all]>=0.9.0", # For building a clean command-line interface (CLI)
+    "typer>=0.9.0", # For building a clean command-line interface (CLI)
     "httpx>=0.25.0",  # Async HTTP client
     "pydantic>=2.4.0",   # For data validation and modeling
     "rich>=13.5.0",      # For displaying beautiful tables and text in the terminal
-    "python-dotenv>=1.0.0", # For loading environment variables from .env files
+    "pydantic-settings>=2.3.0", # For settings management via env vars, .env files, and secrets
     "asyncpg>=0.28.0", # Async PostgreSQL database adapter
     "aiosqlite>=0.19.0", # Async SQLite driver
     "kubernetes_asyncio>=28.0.0", # Async Kubernetes client
@@ -77,27 +77,16 @@ dependencies = [
     "prometheus_client>=0.19.0", # Prometheus metrics exposition
     "slowapi>=0.1.9", # Rate limiting for FastAPI
     "packaging>=23.0", # Required by limits/slowapi on Python 3.14+
+    "pyrefly>=1.1.1",
+    "structlog>=24.1.0",
 ]
 
 [project.optional-dependencies]
 # Elasticsearch storage backend (not yet production-ready; use postgres or sqlite).
-# Install with: pip install greenkube[elasticsearch]
+# Install with: uv pip install greenkube[elasticsearch]
 elasticsearch = [
     "elasticsearch>=8.10.0",
     "elasticsearch-dsl>=8.10.0",
-]
-test = [
-    "respx",
-    "pytest-asyncio",
-    "pytest>=7.0",
-    "pytest-mock",
-    "pytest-cov",
-]
-dev = [
-    "pre-commit", 
-    "ruff",
-    "toml",
-    "ruamel.yaml",
 ]
 
 [project.urls]
@@ -134,8 +123,23 @@ filterwarnings = [
     "ignore:coroutine 'run_demo' was never awaited:RuntimeWarning",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[dependency-groups]
+test = [
+    "respx",
+    "pytest-asyncio",
+    "pytest>=7.0",
+    "pytest-mock",
+    "pytest-cov",
+]
+dev = [
+    "pre-commit",
+    "ruff",
+    "toml",
+    "ruamel.yaml",
+]
+
+[tool.uv]
+default-groups = ["dev", "test"]
 
 [tool.hatch.version]
 path = "src/greenkube/__init__.py"
@@ -165,3 +169,9 @@ omit = [
 fail_under = 70
 show_missing = true
 skip_covered = false
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]

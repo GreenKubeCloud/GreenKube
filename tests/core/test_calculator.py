@@ -50,6 +50,7 @@ async def test_calculate_emissions_success(mock_repository):
     # Energy after PUE = 2 kWh * config.DEFAULT_PUE (e.g., 1.5) = 3 kWh
     # CO2e = 3 kWh * 150 gCO2e/kWh = 450 g
     expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * TEST_INTENSITY
+    assert result is not None
     assert result.co2e_grams == pytest.approx(expected_co2e)  # Use approx for floats
     assert result.grid_intensity == TEST_INTENSITY
 
@@ -71,6 +72,7 @@ async def test_calculate_emissions_no_intensity_data_zone_default(mock_repositor
     # Assert
     mock_repository.get_for_zone_at_time.assert_called_once_with(TEST_ZONE, TEST_TIMESTAMP)
     expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * zone_default_intensity
+    assert result is not None
     assert result.co2e_grams == pytest.approx(expected_co2e)
     assert result.grid_intensity == zone_default_intensity
 
@@ -91,6 +93,7 @@ async def test_calculate_emissions_no_intensity_data_global_fallback(mock_reposi
 
     # Assert
     expected_co2e = (TEST_JOULES / config.JOULES_PER_KWH) * config.DEFAULT_PUE * config.DEFAULT_INTENSITY
+    assert result is not None
     assert result.co2e_grams == pytest.approx(expected_co2e)
     assert result.grid_intensity == config.DEFAULT_INTENSITY
 
@@ -119,6 +122,7 @@ async def test_calculate_emissions_zero_joules(mock_repository):
 
     # CO2e result must be calculated
     expected_co2e_zero_joules = (0.1 / config.JOULES_PER_KWH) * config.DEFAULT_PUE * TEST_INTENSITY
+    assert result is not None
     assert result.co2e_grams == pytest.approx(expected_co2e_zero_joules)
     # Grid intensity is still reported
     assert result.grid_intensity == TEST_INTENSITY

@@ -33,6 +33,7 @@ async def test_collect_carbon_intensity_for_all_zones_saves_mapped_zones():
                     await start_module.collect_carbon_intensity_for_all_zones()
 
     repository.save_history.assert_awaited_once()
+    assert repository.save_history.await_args is not None
     assert repository.save_history.await_args.kwargs == {"zone": "FR"}
     node_collector.close.assert_awaited_once()
     em_collector.close.assert_awaited_once()
@@ -243,6 +244,8 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks():
         "greenkube.cli.start.get_config",
         return_value=SimpleNamespace(
             LOG_LEVEL="INFO",
+            LOG_FORMAT="console",
+            CLUSTER_NAME="test-cluster",
             DB_TYPE="sqlite",
             PROMETHEUS_QUERY_RANGE_STEP="5m",
             NODE_ANALYSIS_INTERVAL="1h",

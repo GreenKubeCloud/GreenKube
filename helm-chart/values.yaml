@@ -26,6 +26,8 @@ rbac:
 # These values will be stored in a ConfigMap.
 config:
   logLevel: INFO
+  # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
+  logFormat: json
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
@@ -129,6 +131,10 @@ config:
 
   # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
   apiRateLimit: 60/minute
+
+  # Root path prefix when the API is served behind a reverse proxy at a
+  # sub-path (e.g. "/greenkube").  Leave empty for root deployments.
+  rootPath: ""
 
   # Maximum time range (days) allowed for GET /metrics raw listing.
   # Requests wider than this return HTTP 400 to prevent loading millions of rows.
