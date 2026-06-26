@@ -244,6 +244,8 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks():
         "greenkube.cli.start.get_config",
         return_value=SimpleNamespace(
             LOG_LEVEL="INFO",
+            LOG_FORMAT="console",
+            CLUSTER_NAME="test-cluster",
             DB_TYPE="sqlite",
             PROMETHEUS_QUERY_RANGE_STEP="5m",
             NODE_ANALYSIS_INTERVAL="1h",

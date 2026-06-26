@@ -11,17 +11,11 @@ import os
 import typer
 
 from ..core.config import get_config
+from ..utils.log import configure_logging
 from . import demo, recommend, report, start
 
-# --- Setup Logger ---
-# force=True ensures basicConfig wins even if logging.warning() was already
-# called (e.g. from Config.__init__) which may have pre-installed a lastResort
-# handler at WARNING level before this point.
-logging.basicConfig(
-    level=get_config().LOG_LEVEL.upper(),
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    force=True,
-)
+_cfg = get_config()
+configure_logging(level=_cfg.LOG_LEVEL, log_format=_cfg.LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 

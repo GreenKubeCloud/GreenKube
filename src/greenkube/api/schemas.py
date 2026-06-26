@@ -66,6 +66,7 @@ class ConfigResponse(BaseModel):
     default_intensity: float
     default_pue: float
     log_level: str
+    log_format: str
     normalization_granularity: str
     prometheus_query_range_step: str
     api_host: str

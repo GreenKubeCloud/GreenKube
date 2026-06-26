@@ -8,6 +8,16 @@ repos:
       - id: ruff-format
         name: Ruff (Formatting Check)
 
+  - repo: local
+    hooks:
+      - id: pyrefly
+        name: Pyrefly (Type Checking)
+        entry: .venv/bin/pyrefly check
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.29.0
     hooks:

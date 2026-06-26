@@ -26,6 +26,8 @@ rbac:
 # These values will be stored in a ConfigMap.
 config:
   logLevel: INFO
+  # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
+  logFormat: json
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:

@@ -4,181 +4,319 @@ import logging
 import os
 import re
 from datetime import timedelta
+from typing import Any, ClassVar, Optional
 
-from dotenv import load_dotenv
+from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Import datacenter PUE profiles
 from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
 
-# Load environment variables from a .env file located in the project root
-dotenv_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
-load_dotenv(dotenv_path=dotenv_path)
 
-
-class Config:
+def _read_secret(key: str, default: str | None = None) -> str | None:
     """
-    Handles the application's configuration by loading values from environment variables.
+    Read a secret from a mounted file or fall back to an environment variable.
 
-    All values are resolved at instantiation time so that tests can override
-    environment variables before creating a new Config and get deterministic
-    behaviour. Properties are used only for values that must be dynamically
-    derived from other instance attributes.
+    Resolution order:
+    1. ``/etc/greenkube/secrets/<key>`` (Docker secret / K8s volume mount).
+    2. Environment variable ``<key>``.
+    3. ``default``.
+
+    Raises:
+        PermissionError: If the secret file exists but cannot be read due to permissions.
+        IOError: If the secret file exists but cannot be read due to I/O errors.
+    """
+    secret_file = f"/etc/greenkube/secrets/{key}"
+    if os.path.exists(secret_file):
+        try:
+            with open(secret_file, "r") as f:
+                value = f.read().strip()
+            logging.getLogger(__name__).debug("Loaded secret '%s' from %s", key, secret_file)
+            return value
+        except PermissionError as e:
+            raise PermissionError(
+                f"Secret file '{secret_file}' exists but cannot be read due to permission denied. "
+                f"Please check file permissions or run with appropriate privileges."
+            ) from e
+        except (IOError, OSError) as e:
+            raise IOError(
+                f"Secret file '{secret_file}' exists but cannot be read: {e}. "
+                f"Please check the file integrity and system resources."
+            ) from e
+    return os.getenv(key, default)
+
+
+class _GreenkubeSecretsSource(PydanticBaseSettingsSource):
+    """Custom settings source that reads secrets from /etc/greenkube/secrets/.
+
+    Secret files take priority over environment variables for all fields.
+    Files must be named after the field's environment variable name (uppercase).
+    Unreadable files raise immediately (fail-fast).
     """
 
-    # Constants that never change at runtime.
-    JOULES_PER_KWH = 3.6e6
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        # Required by the abstract base; actual loading happens in __call__.
+        return None, field_name, False
 
-    def __init__(self):
-        # --- Secrets (files or env vars) ---
-        self.ELECTRICITY_MAPS_TOKEN = self._get_secret("ELECTRICITY_MAPS_TOKEN")
-        self.BOAVIZTA_TOKEN = self._get_secret("BOAVIZTA_TOKEN")
-        self.ELASTICSEARCH_USER = self._get_secret("ELASTICSEARCH_USER")
-        self.ELASTICSEARCH_PASSWORD = self._get_secret("ELASTICSEARCH_PASSWORD")
-        self.PROMETHEUS_BEARER_TOKEN = self._get_secret("PROMETHEUS_BEARER_TOKEN")
-        self.PROMETHEUS_USERNAME = self._get_secret("PROMETHEUS_USERNAME")
-        self.PROMETHEUS_PASSWORD = self._get_secret("PROMETHEUS_PASSWORD")
+    def __call__(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        for field_name, field_info in self.settings_cls.model_fields.items():
+            # Use validation_alias (e.g. GREENKUBE_API_KEY) if defined, else the field name.
+            alias = field_info.validation_alias
+            secret_key = alias if isinstance(alias, str) else field_name
+            val = _read_secret(secret_key)
+            if val is not None:
+                d[field_name] = val
+        return d
 
-        # --- Cluster identification ---
-        self.CLUSTER_NAME = os.getenv("CLUSTER_NAME", "") or self._auto_detect_cluster_name()
 
-        # --- Default variables ---
-        self.DEFAULT_COST = 0.0
-        self.DEFAULT_ZONE = os.getenv("DEFAULT_ZONE", "unknown")
-        self.DEFAULT_INTENSITY = float(os.getenv("DEFAULT_INTENSITY", 500))
-        self.DEFAULT_HARDWARE_LIFESPAN_YEARS = int(os.getenv("DEFAULT_HARDWARE_LIFESPAN_YEARS", "4"))
-        # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
-        # recognise the cloud provider/instance type.  Boavizta returns per-instance
-        # allocated values (typically 50–170 kg for common cloud VMs such as aws/m5.large).
-        # 100 kg is a conservative midpoint; 350 kg (the former default) represents a full
-        # physical server and would over-estimate Scope 3 by 2–7×, producing misleadingly
-        # high Scope 3/Scope 2 ratios on low-carbon grids (e.g. France ~20 g CO₂/kWh).
-        self.DEFAULT_EMBODIED_EMISSIONS_KG = float(os.getenv("DEFAULT_EMBODIED_EMISSIONS_KG", "100"))
+class Config(BaseSettings):
+    """
+    Application configuration loaded from environment variables and a .env file.
 
-        # --- Network variables ---
-        self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-        self.USER_AGENT = os.getenv("USER_AGENT", f"GreenKube/{self._get_version()} (+https://github.com/greenkube)")
-        self.DEFAULT_TIMEOUT_CONNECT = float(os.getenv("DEFAULT_TIMEOUT_CONNECT", "5.0"))
-        self.DEFAULT_TIMEOUT_READ = float(os.getenv("DEFAULT_TIMEOUT_READ", "15.0"))
+    All settings are validated at instantiation time (fail-fast). Field names
+    match environment variable names exactly (case-sensitive, uppercase).
 
-        # --- Database variables ---
-        self.DB_TYPE = os.getenv("DB_TYPE", "postgres")
-        self.DB_PATH = os.getenv("DB_PATH", "greenkube_data.db")
-        self.DB_CONNECTION_STRING = os.getenv(
-            "DB_CONNECTION_STRING", "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
-        )
-        self.DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
-        self.DB_SSL_MODE = os.getenv("DB_SSL_MODE", "disable")
-        self.DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
-        self.DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
-        self.DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "30000"))
+    Source priority (highest → lowest):
+      init kwargs > secrets files (/etc/greenkube/secrets/) > env vars > .env file > defaults
+    """
 
-        # --- Elasticsearch variables ---
-        self.ELASTICSEARCH_HOSTS = os.getenv("ELASTICSEARCH_HOSTS", "http://localhost:9200")
-        self.ELASTICSEARCH_VERIFY_CERTS = os.getenv("ELASTICSEARCH_VERIFY_CERTS", "True").lower() in (
-            "true",
-            "1",
-            "t",
-            "y",
-            "yes",
-        )
-        self.ELASTICSEARCH_INDEX_NAME = os.getenv("ELASTICSEARCH_INDEX_NAME", "carbon_intensity")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
-        # --- Prometheus variables ---
-        self.PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "")
-        self.PROMETHEUS_QUERY_RANGE_STEP = os.getenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
-        self.PROMETHEUS_QUERY_RANGE_MAX_SAMPLES = int(os.getenv("PROMETHEUS_QUERY_RANGE_MAX_SAMPLES", "10000"))
-        self.PROMETHEUS_VERIFY_CERTS = os.getenv("PROMETHEUS_VERIFY_CERTS", "True").lower() in (
-            "true",
-            "1",
-            "t",
-            "y",
-            "yes",
-        )
-        self.PROMETHEUS_NODE_INSTANCE_LABEL = os.getenv(
-            "PROMETHEUS_NODE_INSTANCE_LABEL", "label_node_kubernetes_io_instance_type"
-        )
+    # --- Class constant (not loaded from env) ---
+    JOULES_PER_KWH: ClassVar[float] = 3.6e6
 
-        # --- OpenCost variables ---
-        self.OPENCOST_API_URL = os.getenv("OPENCOST_API_URL")
-        self.OPENCOST_VERIFY_CERTS = os.getenv("OPENCOST_VERIFY_CERTS", "True").lower() in (
-            "true",
-            "1",
-            "t",
-            "y",
-            "yes",
-        )
+    # --- Secrets ---
+    ELECTRICITY_MAPS_TOKEN: Optional[str] = None
+    BOAVIZTA_TOKEN: Optional[str] = None
+    ELASTICSEARCH_USER: Optional[str] = None
+    ELASTICSEARCH_PASSWORD: Optional[str] = None
+    PROMETHEUS_BEARER_TOKEN: Optional[str] = None
+    PROMETHEUS_USERNAME: Optional[str] = None
+    PROMETHEUS_PASSWORD: Optional[str] = None
 
-        # --- Boavizta variables ---
-        self.BOAVIZTA_API_URL = os.getenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
+    # --- Cluster identification ---
+    CLUSTER_NAME: str = ""
 
-        # --- Default instance profile (used when instance type unknown) ---
-        self.DEFAULT_INSTANCE_VCORES = int(os.getenv("DEFAULT_INSTANCE_VCORES", "1"))
-        self.DEFAULT_INSTANCE_MIN_WATTS = float(os.getenv("DEFAULT_INSTANCE_MIN_WATTS", "1.0"))
-        self.DEFAULT_INSTANCE_MAX_WATTS = float(os.getenv("DEFAULT_INSTANCE_MAX_WATTS", "10.0"))
+    # --- Default variables ---
+    DEFAULT_COST: float = 0.0
+    DEFAULT_ZONE: str = "unknown"
+    DEFAULT_INTENSITY: float = 500
+    DEFAULT_HARDWARE_LIFESPAN_YEARS: int = 4
+    # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
+    # recognise the cloud provider/instance type. 100 kg is a conservative midpoint.
+    DEFAULT_EMBODIED_EMISSIONS_KG: float = 100.0
 
-        # Threshold in cores below which Prometheus totals are considered too small
-        self.LOW_NODE_CPU_THRESHOLD = float(os.getenv("LOW_NODE_CPU_THRESHOLD", "0.05"))
+    # --- Network variables ---
+    LOG_LEVEL: str = "INFO"
+    # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
+    LOG_FORMAT: str = "json"
+    USER_AGENT: str = Field(
+        default_factory=lambda: f"GreenKube/{Config._get_version()} (+https://github.com/greenkube)"
+    )
+    DEFAULT_TIMEOUT_CONNECT: float = 5.0
+    DEFAULT_TIMEOUT_READ: float = 15.0
 
-        # Normalization granularity for carbon intensity lookups and cache keys.
-        # Allowed values: 'hour', 'day', 'none'
-        self.NORMALIZATION_GRANULARITY = os.getenv("NORMALIZATION_GRANULARITY", "hour").lower()
+    # --- Database variables ---
+    DB_TYPE: str = "postgres"
+    DB_PATH: str = "greenkube_data.db"
+    DB_CONNECTION_STRING: str = "postgresql://greenkube:greenkube_password@localhost:5432/greenkube"
+    DB_SCHEMA: str = "public"
+    DB_SSL_MODE: str = "disable"
+    DB_POOL_MIN_SIZE: int = 1
+    DB_POOL_MAX_SIZE: int = 10
+    DB_STATEMENT_TIMEOUT_MS: int = 30000
 
-        # --- Node Analysis variables ---
-        self.NODE_ANALYSIS_INTERVAL = os.getenv("NODE_ANALYSIS_INTERVAL", "5m")
-        self.NODE_DATA_MAX_AGE_DAYS = int(os.getenv("NODE_DATA_MAX_AGE_DAYS", "30"))
+    # --- Elasticsearch variables ---
+    ELASTICSEARCH_HOSTS: str = "http://localhost:9200"
+    ELASTICSEARCH_VERIFY_CERTS: bool = True
+    ELASTICSEARCH_INDEX_NAME: str = "carbon_intensity"
 
-        # --- Metrics Retention & Compression ---
-        # Age threshold (hours) after which raw 5-min metrics are compressed
-        # into hourly aggregates. Default 24h aligns with Electricity Maps granularity.
-        self.METRICS_COMPRESSION_AGE_HOURS = int(os.getenv("METRICS_COMPRESSION_AGE_HOURS", "24"))
-        # Maximum number of raw (uncompressed) metrics days to retain.
-        # Older raw rows are deleted after compression. Set -1 to disable deletion.
-        self.METRICS_RAW_RETENTION_DAYS = int(os.getenv("METRICS_RAW_RETENTION_DAYS", "7"))
-        # Maximum total retention in days for hourly aggregated data.
-        # Set -1 (default) to keep data indefinitely — required for multi-year
-        # comparison and CSRD/ESRS E1 yearly reporting.
-        self.METRICS_AGGREGATED_RETENTION_DAYS = int(os.getenv("METRICS_AGGREGATED_RETENTION_DAYS", "-1"))
+    # --- Prometheus variables ---
+    PROMETHEUS_URL: str = ""
+    PROMETHEUS_QUERY_RANGE_STEP: str = "5m"
+    PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: int = 10000
+    PROMETHEUS_VERIFY_CERTS: bool = True
+    PROMETHEUS_NODE_INSTANCE_LABEL: str = "label_node_kubernetes_io_instance_type"
 
-        # --- Kubernetes client variables ---
-        # Timeout (seconds) for individual Kubernetes API calls (e.g. list_node).
-        # Set to 0 to disable. Override with K8S_REQUEST_TIMEOUT env var.
-        self.K8S_REQUEST_TIMEOUT = int(os.getenv("K8S_REQUEST_TIMEOUT", "30"))
+    # --- OpenCost variables ---
+    OPENCOST_API_URL: Optional[str] = None
+    OPENCOST_VERIFY_CERTS: bool = True
 
-        # --- API variables ---
-        self.API_HOST = os.getenv("API_HOST", "0.0.0.0")
-        self.API_PORT = int(os.getenv("API_PORT", "8000"))
-        self.CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
-        self.API_KEY = os.getenv("GREENKUBE_API_KEY", "")
-        self.API_RATE_LIMIT = os.getenv("API_RATE_LIMIT", "60/minute")
-        self.ROOT_PATH = os.getenv("ROOT_PATH", "")
-        self.METRICS_LIST_MAX_RANGE_DAYS = int(os.getenv("METRICS_LIST_MAX_RANGE_DAYS", "30"))
+    # --- Boavizta variables ---
+    BOAVIZTA_API_URL: str = "https://api.boavizta.org"
 
-        # --- Recommendation Engine variables ---
-        self.RECOMMEND_SYSTEM_NAMESPACES = os.getenv("RECOMMEND_SYSTEM_NAMESPACES", "false").lower() in (
-            "true",
-            "1",
-            "t",
-            "y",
-            "yes",
-        )
-        self.RECOMMENDATION_LOOKBACK_DAYS = int(os.getenv("RECOMMENDATION_LOOKBACK_DAYS", "7"))
-        self.RIGHTSIZING_CPU_THRESHOLD = float(os.getenv("RIGHTSIZING_CPU_THRESHOLD", "0.3"))
-        self.RIGHTSIZING_MEMORY_THRESHOLD = float(os.getenv("RIGHTSIZING_MEMORY_THRESHOLD", "0.3"))
-        self.RIGHTSIZING_HEADROOM = float(os.getenv("RIGHTSIZING_HEADROOM", "1.2"))
-        self.ZOMBIE_COST_THRESHOLD = float(os.getenv("ZOMBIE_COST_THRESHOLD", "0.01"))
-        self.ZOMBIE_ENERGY_THRESHOLD = float(os.getenv("ZOMBIE_ENERGY_THRESHOLD", "1000"))
-        self.AUTOSCALING_CV_THRESHOLD = float(os.getenv("AUTOSCALING_CV_THRESHOLD", "0.7"))
-        self.AUTOSCALING_SPIKE_RATIO = float(os.getenv("AUTOSCALING_SPIKE_RATIO", "3.0"))
-        self.OFF_PEAK_IDLE_THRESHOLD = float(os.getenv("OFF_PEAK_IDLE_THRESHOLD", "0.05"))
-        self.OFF_PEAK_MIN_IDLE_HOURS = int(os.getenv("OFF_PEAK_MIN_IDLE_HOURS", "4"))
-        self.IDLE_NAMESPACE_ENERGY_THRESHOLD = float(os.getenv("IDLE_NAMESPACE_ENERGY_THRESHOLD", "1000"))
-        self.CARBON_AWARE_THRESHOLD = float(os.getenv("CARBON_AWARE_THRESHOLD", "1.5"))
-        self.NODE_UTILIZATION_THRESHOLD = float(os.getenv("NODE_UTILIZATION_THRESHOLD", "0.2"))
-        # Minimum realistic values — recommendations below these are flagged as unrealistic
-        self.RECOMMENDATION_MIN_CPU_MILLICORES = int(os.getenv("RECOMMENDATION_MIN_CPU_MILLICORES", "10"))
-        self.RECOMMENDATION_MIN_MEMORY_BYTES = int(os.getenv("RECOMMENDATION_MIN_MEMORY_BYTES", str(16 * 1024 * 1024)))
-        # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
-        self.RECOMMENDATION_APPLY_TOLERANCE = float(os.getenv("RECOMMENDATION_APPLY_TOLERANCE", "0.25"))
+    # --- Default instance profile (used when instance type is unknown) ---
+    DEFAULT_INSTANCE_VCORES: int = 1
+    DEFAULT_INSTANCE_MIN_WATTS: float = 1.0
+    DEFAULT_INSTANCE_MAX_WATTS: float = 10.0
+
+    # Threshold in cores below which Prometheus totals are considered too small
+    LOW_NODE_CPU_THRESHOLD: float = 0.05
+
+    # Normalization granularity for carbon intensity lookups and cache keys.
+    # Allowed values: 'hour', 'day', 'none'
+    NORMALIZATION_GRANULARITY: str = "hour"
+
+    # --- Node Analysis variables ---
+    NODE_ANALYSIS_INTERVAL: str = "5m"
+    NODE_DATA_MAX_AGE_DAYS: int = 30
+
+    # --- Metrics Retention & Compression ---
+    # Age threshold (hours) after which raw 5-min metrics are compressed into hourly aggregates.
+    METRICS_COMPRESSION_AGE_HOURS: int = 24
+    # Maximum number of raw (uncompressed) metrics days to retain.
+    METRICS_RAW_RETENTION_DAYS: int = 7
+    # Maximum total retention in days for hourly aggregated data. -1 = keep indefinitely.
+    METRICS_AGGREGATED_RETENTION_DAYS: int = -1
+
+    # --- Kubernetes client variables ---
+    # Timeout (seconds) for individual Kubernetes API calls. 0 = no timeout.
+    K8S_REQUEST_TIMEOUT: int = 30
+
+    # --- API variables ---
+    API_HOST: str = "0.0.0.0"
+    API_PORT: int = 8000
+    CORS_ORIGINS: str = "*"
+    API_KEY: str = Field(default="", validation_alias="GREENKUBE_API_KEY")
+    API_RATE_LIMIT: str = "60/minute"
+    ROOT_PATH: str = ""
+    METRICS_LIST_MAX_RANGE_DAYS: int = 30
+
+    # --- Recommendation Engine variables ---
+    RECOMMEND_SYSTEM_NAMESPACES: bool = False
+    RECOMMENDATION_LOOKBACK_DAYS: int = 7
+    RIGHTSIZING_CPU_THRESHOLD: float = 0.3
+    RIGHTSIZING_MEMORY_THRESHOLD: float = 0.3
+    RIGHTSIZING_HEADROOM: float = 1.2
+    ZOMBIE_COST_THRESHOLD: float = 0.01
+    ZOMBIE_ENERGY_THRESHOLD: float = 1000.0
+    AUTOSCALING_CV_THRESHOLD: float = 0.7
+    AUTOSCALING_SPIKE_RATIO: float = 3.0
+    OFF_PEAK_IDLE_THRESHOLD: float = 0.05
+    OFF_PEAK_MIN_IDLE_HOURS: int = 4
+    IDLE_NAMESPACE_ENERGY_THRESHOLD: float = 1000.0
+    CARBON_AWARE_THRESHOLD: float = 1.5
+    NODE_UTILIZATION_THRESHOLD: float = 0.2
+    # Minimum realistic values — recommendations below these are flagged as unrealistic
+    RECOMMENDATION_MIN_CPU_MILLICORES: int = 10
+    RECOMMENDATION_MIN_MEMORY_BYTES: int = 16 * 1024 * 1024
+    # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
+    RECOMMENDATION_APPLY_TOLERANCE: float = 0.25
+
+    # --- Cloud provider & PUE ---
+    # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
+    # (see _compute_and_validate model validator). The raw env-var value is preserved in
+    # _raw_default_pue and used by get_pue_for_provider as the per-node fallback.
+    CLOUD_PROVIDER: str = "unknown"
+    DEFAULT_PUE: float = 1.3
+    # Private: stores the user-configured DEFAULT_PUE before CLOUD_PROVIDER profile override.
+    _raw_default_pue: float = PrivateAttr(default=1.3)
+
+    # ------------------------------------------------------------------ #
+    # Field validators                                                     #
+    # ------------------------------------------------------------------ #
+
+    @field_validator("CLOUD_PROVIDER", mode="after")
+    @classmethod
+    def _lowercase_cloud_provider(cls, v: str) -> str:
+        return v.lower()
+
+    @field_validator("NORMALIZATION_GRANULARITY", mode="after")
+    @classmethod
+    def _validate_normalization_granularity(cls, v: str) -> str:
+        v = v.lower()
+        if v not in ("hour", "day", "none"):
+            raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
+        return v
+
+    @field_validator("DB_TYPE", mode="after")
+    @classmethod
+    def _validate_db_type(cls, v: str) -> str:
+        if v not in ["sqlite", "postgres", "elasticsearch"]:
+            raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
+        return v
+
+    @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")
+    @classmethod
+    def _validate_prometheus_step(cls, v: str) -> str:
+        if v:
+            match = re.match(r"^(\d+)([smh])$", v.lower())
+            if not match:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
+            value, unit = int(match.group(1)), match.group(2)
+            unit_map = {"s": "seconds", "m": "minutes", "h": "hours"}
+            delta = timedelta(**{unit_map[unit]: value})
+            if (24 * 3600) % delta.total_seconds() != 0:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
+        return v
+
+    # ------------------------------------------------------------------ #
+    # Model validators (cross-field & computed fields)                    #
+    # ------------------------------------------------------------------ #
+
+    @model_validator(mode="after")
+    def _compute_and_validate(self) -> "Config":
+        # Auto-detect cluster name when not explicitly configured
+        if not self.CLUSTER_NAME:
+            self.CLUSTER_NAME = self._auto_detect_cluster_name()
+
+        # Preserve the raw user-configured DEFAULT_PUE before any profile override.
+        # get_pue_for_provider uses this as the per-node fallback so that an unknown
+        # node provider receives the explicit human-configured value rather than the
+        # cluster-wide CLOUD_PROVIDER's profile PUE.
+        object.__setattr__(self, "_raw_default_pue", self.DEFAULT_PUE)
+
+        # Resolve DEFAULT_PUE from the datacenter profile for the configured cloud provider.
+        # This overrides any value supplied via the DEFAULT_PUE env var when the provider
+        # has a known profile entry.
+        profile_key = f"default_{self.CLOUD_PROVIDER}"
+        pue = DATACENTER_PUE_PROFILES.get(profile_key)
+        if pue is not None:
+            self.DEFAULT_PUE = pue
+        else:
+            logging.getLogger(__name__).warning(
+                "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
+                self.CLOUD_PROVIDER,
+                self.DEFAULT_PUE,
+            )
+
+        # Cross-field validation
+        if self.DB_TYPE == "postgres" and not self.DB_CONNECTION_STRING:
+            raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
+
+        if not self.ELECTRICITY_MAPS_TOKEN:
+            logging.warning(
+                "⚠️  ELECTRICITY_MAPS_TOKEN is not set. CO2 figures will use static fallback data "
+                "which may be inaccurate. Get a free token at https://www.electricitymaps.com/"
+            )
+
+        return self
+
+    # ------------------------------------------------------------------ #
+    # Custom settings sources                                             #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # Priority: init kwargs > secret files > env vars > .env file > defaults
+        return (init_settings, _GreenkubeSecretsSource(settings_cls), env_settings, dotenv_settings)
+
+    # ------------------------------------------------------------------ #
+    # Static helpers                                                      #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _get_version() -> str:
@@ -250,118 +388,66 @@ class Config:
     @staticmethod
     def _get_secret(key: str, default: str | None = None) -> str | None:
         """
-        Retrieves a secret from a file (Docker secret/volume) or falls back to environment variable.
+        Read a secret from a mounted file or fall back to an environment variable.
+
+        Delegates to the module-level :func:`_read_secret` function.
 
         Raises:
             PermissionError: If the secret file exists but cannot be read due to permissions.
             IOError: If the secret file exists but cannot be read due to I/O errors.
         """
-        # Check for secret file first (mounted volume)
-        secret_file = f"/etc/greenkube/secrets/{key}"
-        if os.path.exists(secret_file):
-            try:
-                with open(secret_file, "r") as f:
-                    value = f.read().strip()
-                    logging.getLogger(__name__).debug("Loaded secret '%s' from %s", key, secret_file)
-                    return value
-            except PermissionError as e:
-                # Fail fast with clear error message for permission issues
-                raise PermissionError(
-                    f"Secret file '{secret_file}' exists but cannot be read due to permission denied. "
-                    f"Please check file permissions or run with appropriate privileges."
-                ) from e
-            except (IOError, OSError) as e:
-                # Fail fast for other I/O errors (disk issues, etc.)
-                raise IOError(
-                    f"Secret file '{secret_file}' exists but cannot be read: {e}. "
-                    f"Please check the file integrity and system resources."
-                ) from e
-        # Fallback to environment variable
-        return os.getenv(key, default)
+        return _read_secret(key, default)
 
-    # CLOUD_PROVIDER and DEFAULT_PUE are provided as properties so their
-    # values are resolved at access time (reading environment variables and
-    # DATACENTER_PUE_PROFILES). This avoids binding a stale value at import
-    # time and lets callers create calculators after changing env vars.
-    @property
-    def CLOUD_PROVIDER(self) -> str:
-        return os.getenv("CLOUD_PROVIDER", "unknown").lower()
-
-    @property
-    def DEFAULT_PUE(self) -> float:
-        # Resolve profile key dynamically
-        profile_key = f"default_{self.CLOUD_PROVIDER}"
-        pue = DATACENTER_PUE_PROFILES.get(profile_key)
-        if pue is None:
-            fallback = float(os.getenv("DEFAULT_PUE", 1.3))
-            logging.getLogger(__name__).warning(
-                "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
-                self.CLOUD_PROVIDER,
-                fallback,
-            )
-            return fallback
-        return pue
+    # ------------------------------------------------------------------ #
+    # Public API                                                          #
+    # ------------------------------------------------------------------ #
 
     def get_pue_for_provider(self, provider: str | None) -> float:
-        """Retrieves the PUE for a specific cloud provider.
+        """Retrieve the PUE for a specific cloud provider.
 
-        Falls back to the DEFAULT_PUE environment variable (default 1.3) when
-        the provider is absent or has no entry in DATACENTER_PUE_PROFILES.
-        This is intentionally *not* ``self.DEFAULT_PUE`` (which resolves the
-        configured CLOUD_PROVIDER's profile) so that an unknown node provider
-        receives the explicit human-configured fallback rather than an
-        unrelated cloud provider's profile value.
+        Falls back to the raw user-configured ``DEFAULT_PUE`` when the provider is
+        absent or has no entry in DATACENTER_PUE_PROFILES. This is intentionally
+        *not* ``self.DEFAULT_PUE`` (which may reflect the cluster CLOUD_PROVIDER
+        profile) so that an unknown node provider receives the explicit
+        human-configured fallback rather than an unrelated provider's profile value.
         """
         if provider:
             profile_key = f"default_{provider.lower()}"
             pue = DATACENTER_PUE_PROFILES.get(profile_key)
             if pue is not None:
                 return pue
-        return float(os.getenv("DEFAULT_PUE", 1.3))
+        return self._raw_default_pue
 
     @property
-    def DATACENTER_PUE_PROFILES(self):
+    def DATACENTER_PUE_PROFILES(self) -> dict:
+        """Expose the datacenter PUE profiles dict for look-up by callers."""
         return DATACENTER_PUE_PROFILES
 
-    def validate_instance(self):
-        if self.DB_TYPE not in ["sqlite", "postgres", "elasticsearch"]:
-            raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
-        if self.DB_TYPE == "postgres" and not self.DB_CONNECTION_STRING:
-            raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
-        if self.PROMETHEUS_QUERY_RANGE_STEP:
-            match = re.match(r"^(\d+)([smh])$", self.PROMETHEUS_QUERY_RANGE_STEP.lower())
-            if not match:
-                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
+    def validate_instance(self) -> None:
+        """No-op retained for backward compatibility.
 
-            value, unit = int(match.group(1)), match.group(2)
-            unit_map = {"s": "seconds", "m": "minutes", "h": "hours"}
-            delta = timedelta(**{unit_map[unit]: value})
-            step_seconds = delta.total_seconds()
-
-            if (24 * 3600) % step_seconds != 0:
-                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
-        if not self.ELECTRICITY_MAPS_TOKEN:
-            logging.warning(
-                "⚠️  ELECTRICITY_MAPS_TOKEN is not set. CO2 figures will use static fallback data "
-                "which may be inaccurate. Get a free token at https://www.electricitymaps.com/"
-            )
-        if self.NORMALIZATION_GRANULARITY not in ("hour", "day", "none"):
-            raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
+        All validation is now performed automatically by pydantic validators
+        during instantiation. Calling this method explicitly is safe but redundant.
+        """
 
     def reload(self) -> None:
         """Re-read all configuration from the current environment variables.
 
         Useful in tests where ``monkeypatch.setenv`` has been called after the
-        singleton was first created.  Call ``config.reload()`` instead of
-        manually patching individual attributes.
+        singleton was first created. Updates all fields in-place so that
+        existing references to the singleton remain valid.
         """
-        self.__init__()  # type: ignore[misc]
+        fresh = self.__class__()
+        for field_name in self.__class__.model_fields:
+            object.__setattr__(self, field_name, getattr(fresh, field_name))
+        # Also sync private attributes (e.g. _raw_default_pue)
+        for attr_name in self.__class__.__private_attributes__:
+            object.__setattr__(self, attr_name, getattr(fresh, attr_name))
 
 
 # Module-level singleton – kept for backward compatibility.
 # Prefer :func:`get_config` for explicit dependency injection.
 config = Config()
-config.validate_instance()
 
 
 def get_config() -> Config:
