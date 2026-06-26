@@ -135,13 +135,13 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.12
-    created: "2026-06-26T18:06:08.559953422Z"
+    created: "2026-06-26T18:09:45.313336151Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
       cost optimization recommendations, Grafana dashboard, and a REST API — deployable
       in minutes with a single Helm install.
-    digest: 50d7397be039f009df93f187fa95b08d0949bad74433e4c91cd6cfdb8bb74471
+    digest: c75b58e2b491b83a9191de1ff48e2c0cdef08a98d3b479eddb58a5ad5ff50b28
     home: https://greenkube.cloud
     icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
     keywords:
@@ -307,7 +307,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.11
-    created: "2026-06-26T18:06:08.558413178Z"
+    created: "2026-06-26T18:09:45.311771997Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -479,7 +479,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.10
-    created: "2026-06-26T18:06:08.556856263Z"
+    created: "2026-06-26T18:09:45.310261734Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -910,7 +910,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.9
-    created: "2026-06-26T18:06:08.565581147Z"
+    created: "2026-06-26T18:09:45.318537964Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1335,7 +1335,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.8
-    created: "2026-06-26T18:06:08.562064702Z"
+    created: "2026-06-26T18:09:45.316279597Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1373,4 +1373,4 @@ entries:
     urls:
     - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.2.8.tgz
     version: 0.2.8
-generated: "2026-06-26T18:06:08.554247365Z"
+generated: "2026-06-26T18:09:45.308576445Z"
