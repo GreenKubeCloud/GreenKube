@@ -285,11 +285,10 @@ def _mount_frontend(app: FastAPI) -> None:
 
 def main():
     """Entry point for the greenkube-api console script."""
+    from greenkube.utils.log import configure_logging
+
     cfg = get_config()
-    logging.basicConfig(
-        level=cfg.LOG_LEVEL.upper(),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
     uvicorn.run(
         app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*", timeout_keep_alive=65

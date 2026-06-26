@@ -78,6 +78,7 @@ dependencies = [
     "slowapi>=0.1.9", # Rate limiting for FastAPI
     "packaging>=23.0", # Required by limits/slowapi on Python 3.14+
     "pyrefly>=1.1.1",
+    "structlog>=24.1.0",
 ]
 
 [project.optional-dependencies]

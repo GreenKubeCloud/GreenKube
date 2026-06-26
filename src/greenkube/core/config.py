@@ -114,6 +114,8 @@ class Config(BaseSettings):
 
     # --- Network variables ---
     LOG_LEVEL: str = "INFO"
+    # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
+    LOG_FORMAT: str = "json"
     USER_AGENT: str = Field(
         default_factory=lambda: f"GreenKube/{Config._get_version()} (+https://github.com/greenkube)"
     )

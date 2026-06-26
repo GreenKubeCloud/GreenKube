@@ -38,6 +38,7 @@ class TestConfigEndpoint:
             "default_intensity",
             "default_pue",
             "log_level",
+            "log_format",
             "normalization_granularity",
             "prometheus_query_range_step",
         ]
