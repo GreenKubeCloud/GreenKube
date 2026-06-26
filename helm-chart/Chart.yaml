@@ -9,8 +9,8 @@ description: >-
 type: application
 icon: 
   https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.2.11
-appVersion: 0.2.11
+version: 0.2.12
+appVersion: 0.2.12
 keywords:
 - greenkube
 - finops
@@ -57,7 +57,7 @@ annotations:
       email: hugo.lelievre@greenkube.cloud
   artifacthub.io/images: |
     - name: greenkube
-      image: greenkube/greenkube:0.2.11
+      image: greenkube/greenkube:0.2.12
       platforms:
         - linux/amd64
         - linux/arm64
@@ -85,9 +85,9 @@ annotations:
 
     [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
     [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
-    [![Python Coverage](https://img.shields.io/badge/coverage%20python-89%25-green)](tests/)
+    [![Python Coverage](https://img.shields.io/badge/coverage%20python-87%25-green)](tests/)
     [![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-    [![Tests](https://img.shields.io/badge/tests-1097%20passed-brightgreen)](tests/)
+    [![Tests](https://img.shields.io/badge/tests-1143%20passed-brightgreen)](tests/)
     [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
     >**Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the full dashboard with realistic sample data, no install required.
@@ -135,11 +135,14 @@ annotations:
     | [Configuration](docs/configuration.md) | All Helm values and environment variables |
     | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
     | [CLI Reference](docs/cli.md) | `greenkube report`, `recommend`, and other CLI commands |
+    | [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, persisted, actioned, and measured |
     | [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
     | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
     | [Changelog](CHANGELOG.md) | Version history |
 
     ---
+
+    Published dashboard on Grafana.com: https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/
 
     ## Installation
 
@@ -225,7 +228,6 @@ annotations:
     ```bash
     git clone https://github.com/GreenKubeCloud/GreenKube.git
     cd GreenKube
-    python -m venv .venv && source .venv/bin/activate
     uv sync
     pytest
     ```

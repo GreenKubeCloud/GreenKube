@@ -9,7 +9,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.2.11
+  tag: 0.2.12
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -134,7 +134,7 @@ config:
 
   # Root path prefix when the API is served behind a reverse proxy at a
   # sub-path (e.g. "/greenkube").  Leave empty for root deployments.
-  rootPath: ""
+  rootPath: ''
 
   # Maximum time range (days) allowed for GET /metrics raw listing.
   # Requests wider than this return HTTP 400 to prevent loading millions of rows.
