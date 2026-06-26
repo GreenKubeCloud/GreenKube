@@ -121,9 +121,7 @@ async def setup_elasticsearch():
             logging.info("Connecting to Elasticsearch without authentication.")
 
         # Create the connection alias 'default' using AsyncElasticsearch
-        connections.create_connection(
-            "default", class_=AsyncElasticsearch, **connection_args
-        )  # pyrefly: ignore[missing-attribute]
+        connections.create_connection("default", class_=AsyncElasticsearch, **connection_args)  # pyrefly: ignore[missing-attribute]
 
         conn = connections.get_connection("default")  # pyrefly: ignore[missing-attribute]
         if not await conn.ping():
