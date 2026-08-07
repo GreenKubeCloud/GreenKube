@@ -19,6 +19,7 @@ data:
   DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}
   {{- end }}
   NORMALIZATION_GRANULARITY: {{ .Values.config.normalizationGranularity | quote }}
+  ELECTRICITY_PROVIDER: {{ .Values.config.electricityProvider | quote }}
   NODE_ANALYSIS_INTERVAL: {{ .Values.config.nodeAnalysisInterval | quote }}
   NODE_DATA_MAX_AGE_DAYS: {{ .Values.config.nodeDataMaxAgeDays | quote }}
   METRICS_COMPRESSION_AGE_HOURS: {{ .Values.config.metricsCompressionAgeHours | quote }}
