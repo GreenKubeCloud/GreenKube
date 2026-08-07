@@ -93,20 +93,43 @@ WATTNET_ZONES = frozenset(
 
 # Translation of Electricity Maps zone codes to Wattnet zone codes.
 # Most EU country codes are identical in both naming schemes and are passed
-# through unchanged. The entries below cover the country-level and
-# sub-national codes that differ.
+# through unchanged. The entries below cover every country-level and
+# sub-national code used by Electricity Maps in Europe.
+#
+# Sub-national defaults for country-level codes (no Wattnet aggregate exists):
+#   - IT  -> IT_NORTH (Milan area, largest demand zone)
+#   - SE  -> SE3     (Stockholm area, ~70 % of Swedish demand)
+#   - NO  -> NO2     (Oslo/Southern Norway, largest demand zone)
+#   - DK  -> DK1     (mainland Denmark / Jutland)
 EM_TO_WATTNET_ZONE = {
+    # Italy (EM sub-zones -> ENTSO-E bidding zones)
     "IT": "IT_NORTH",
     "IT-NO": "IT_NORTH",
     "IT-CNO": "IT_CNORTH",
-    "IT-CS": "IT_CSOUTH",
+    "IT-CSO": "IT_CSOUTH",
     "IT-SO": "IT_SOUTH",
-    "IT-SARD": "IT_SARDINIA",
-    "IT-SICI": "IT_SICILY",
-    "IT-CALA": "IT_CALABRIA",
+    "IT-SAR": "IT_SARDINIA",
+    "IT-SIC": "IT_SICILY",
+    # Sweden
     "SE": "SE3",
+    "SE-SE1": "SE1",
+    "SE-SE2": "SE2",
+    "SE-SE3": "SE3",
+    "SE-SE4": "SE4",
+    # Norway
     "NO": "NO2",
+    "NO-NO1": "NO1",
+    "NO-NO2": "NO2",
+    "NO-NO3": "NO3",
+    "NO-NO4": "NO4",
+    "NO-NO5": "NO5",
+    # Denmark
     "DK": "DK1",
+    "DK-DK1": "DK1",
+    "DK-DK2": "DK2",
+    # Northern Ireland
+    "NI": "NIE",
+    "GB-NIR": "NIE",
 }
 
 # Priority of the series groups returned by the footprints endpoint when the
@@ -136,6 +159,13 @@ def to_wattnet_zone(zone: str) -> Optional[str]:
     Translate a GreenKube (Electricity Maps style) zone code to a Wattnet zone
     code.
 
+    Resolution order:
+    1. Zones already using the Wattnet naming (identical country codes).
+    2. Explicit translation table (covers all sub-national European codes).
+    3. Safety net: sub-national codes that differ only by separator, e.g.
+       ``SE-SE3`` -> ``SE3`` (never used for codes with no Wattnet counterpart
+       such as ``US-CAL-CISO``, since the last segment would not match).
+
     Returns ``None`` when no Wattnet zone corresponds to the given code
     (e.g. non-European zones such as ``US-CAL-CISO``).
     """
@@ -143,8 +173,7 @@ def to_wattnet_zone(zone: str) -> Optional[str]:
         return zone
     if zone in EM_TO_WATTNET_ZONE:
         return EM_TO_WATTNET_ZONE[zone]
-    # Sub-national codes that differ only by separator, e.g. "SE-SE3" -> "SE3"
-    # or "NO-NO1" -> "NO1".
+    # Safety net for future sub-national codes, e.g. "NO-NO1" -> "NO1".
     if "-" in zone:
         candidate = zone.rsplit("-", 1)[-1]
         if candidate in WATTNET_ZONES:

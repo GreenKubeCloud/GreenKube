@@ -66,18 +66,182 @@ def _configure_collector(mock_config, email="user@example.com", password="pass12
         ("DE", "DE"),
         ("IT", "IT_NORTH"),
         ("IT-NO", "IT_NORTH"),
-        ("IT-CALA", "IT_CALABRIA"),
+        ("IT-CNO", "IT_CNORTH"),
+        ("IT-CSO", "IT_CSOUTH"),
+        ("IT-SO", "IT_SOUTH"),
+        ("IT-SAR", "IT_SARDINIA"),
+        ("IT-SIC", "IT_SICILY"),
         ("SE", "SE3"),
+        ("SE-SE1", "SE1"),
+        ("SE-SE2", "SE2"),
         ("SE-SE3", "SE3"),
+        ("SE-SE4", "SE4"),
         ("NO", "NO2"),
         ("NO-NO1", "NO1"),
+        ("NO-NO2", "NO2"),
+        ("NO-NO3", "NO3"),
+        ("NO-NO4", "NO4"),
+        ("NO-NO5", "NO5"),
         ("DK", "DK1"),
+        ("DK-DK1", "DK1"),
+        ("DK-DK2", "DK2"),
+        ("NI", "NIE"),
+        ("GB-NIR", "NIE"),
         ("US-CAL-CISO", None),
         ("unknown", None),
     ],
 )
 def test_to_wattnet_zone(em_zone, expected):
     assert to_wattnet_zone(em_zone) == expected
+
+
+def test_all_eu_em_codes_from_default_map_are_translated():
+    """Every EU zone code in the default intensity map must map to a real
+    Wattnet zone or deliberately fall back to None (islands not covered)."""
+    from greenkube.collectors.wattnet_collector import EM_TO_WATTNET_ZONE, WATTNET_ZONES
+    from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
+
+    wattnet_countries = {
+        "AT",
+        "BA",
+        "BE",
+        "BG",
+        "CH",
+        "CY",
+        "CZ",
+        "DE",
+        "DK",
+        "EE",
+        "ES",
+        "FI",
+        "FR",
+        "GB",
+        "GE",
+        "GR",
+        "HR",
+        "HU",
+        "IE",
+        "IT",
+        "LT",
+        "LU",
+        "LV",
+        "MD",
+        "ME",
+        "MK",
+        "NI",
+        "NL",
+        "NO",
+        "PL",
+        "PT",
+        "RO",
+        "RS",
+        "SE",
+        "SI",
+        "SK",
+        "TR",
+        "XK",
+    }
+    # Islands / exclaves with no Wattnet counterpart — expected to fall back.
+    no_wattnet_equivalent = {
+        "DK-BHM",  # Bornholm
+        "ES-CE",  # Ceuta
+        "ES-CN-FV",
+        "ES-CN-GC",
+        "ES-CN-HI",
+        "ES-CN-IG",
+        "ES-CN-LP",
+        "ES-CN-LZ",
+        "ES-CN-TE",  # Canary Islands
+        "ES-IB-FO",
+        "ES-IB-IZ",
+        "ES-IB-MA",
+        "ES-IB-ME",  # Balearic Islands
+        "ES-ML",  # Melilla
+        "FR-COR",  # Corsica
+        "GB-ORK",  # Orkney
+        "PT-MA",  # Madeira
+    }
+
+    for zone in DEFAULT_GRID_INTENSITY_BY_ZONE:
+        if zone.split("-")[0] not in wattnet_countries:
+            continue
+        result = to_wattnet_zone(zone)
+        if zone in no_wattnet_equivalent:
+            assert result is None, f"{zone} should have no Wattnet equivalent, got {result}"
+            continue
+        assert result is not None, f"{zone} has no translation"
+        assert result in WATTNET_ZONES, f"{zone} -> {result} is not a Wattnet zone"
+        # Every explicit entry in the table must be a real Wattnet zone.
+    for em_zone, wn_zone in EM_TO_WATTNET_ZONE.items():
+        assert wn_zone in WATTNET_ZONES, f"{em_zone} maps to unknown Wattnet zone {wn_zone}"
+
+
+def test_all_cloud_regions_map_automatically():
+    """Every EU cloud region in the mapping CSV resolves to a valid Wattnet
+    zone; every non-EU region gracefully falls back to None."""
+    import csv
+    from pathlib import Path
+
+    from greenkube.collectors.wattnet_collector import WATTNET_ZONES
+
+    wattnet_countries = {
+        "AT",
+        "BA",
+        "BE",
+        "BG",
+        "CH",
+        "CY",
+        "CZ",
+        "DE",
+        "DK",
+        "EE",
+        "ES",
+        "FI",
+        "FR",
+        "GB",
+        "GE",
+        "GR",
+        "HR",
+        "HU",
+        "IE",
+        "IT",
+        "LT",
+        "LU",
+        "LV",
+        "MD",
+        "ME",
+        "MK",
+        "NI",
+        "NL",
+        "NO",
+        "PL",
+        "PT",
+        "RO",
+        "RS",
+        "SE",
+        "SI",
+        "SK",
+        "TR",
+        "XK",
+    }
+    mapping_file = (
+        Path(__file__).parents[2] / "src" / "greenkube" / "data" / ("cloud_region_electricity_maps_mapping.csv")
+    )
+    with open(mapping_file) as f:
+        rows = list(csv.DictReader(f))
+
+    assert rows, "mapping CSV is empty"
+    for row in rows:
+        em_zone = row["electricity_maps_zone"].strip()
+        is_eu = em_zone.split("-")[0] in wattnet_countries
+        result = to_wattnet_zone(em_zone)
+        if is_eu:
+            assert result in WATTNET_ZONES, (
+                f"{row['cloud_provider']} {row['region_id']} -> EM {em_zone} "
+                f"did not resolve to a Wattnet zone (got {result})"
+            )
+        else:
+            assert result is None, f"non-EU zone {em_zone} unexpectedly mapped to {result}"
 
 
 # --------------------------------------------------------------------------
