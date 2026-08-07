@@ -1000,3 +1000,53 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logger.error("Error in read_latest_per_pod: %s", e)
             raise QueryError(f"read_latest_per_pod failed: {e}") from e
+
+    async def recompute_carbon_with_latest_intensities(
+        self,
+        carbon_intensity_repo: CarbonIntensityRepository,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Bulk SQL recompute of ``grid_intensity``/``co2e_grams``.
+
+        Single UPDATE that joins each combined metric to the most recent
+        carbon intensity point at or before its timestamp. See the base-class
+        docstring for the full semantics.
+        """
+        from ...core.config import get_config as _get_cfg
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                default_pue = _get_cfg().DEFAULT_PUE
+                ns_clause = "AND cm.namespace = $4" if namespace else ""
+                query = f"""
+                    WITH updated AS (
+                        UPDATE combined_metrics AS cm
+                        SET grid_intensity = ci.carbon_intensity,
+                            co2e_grams = (cm.joules / 3600000.0)
+                                         * COALESCE(cm.pue, $1)
+                                         * ci.carbon_intensity
+                        FROM carbon_intensity_history AS ci
+                        WHERE cm.emaps_zone = ci.zone
+                          AND cm.timestamp >= $2
+                          AND cm.timestamp <= $3
+                          {ns_clause}
+                          AND ci.datetime = (
+                              SELECT MAX(c.datetime)
+                              FROM carbon_intensity_history c
+                              WHERE c.zone = cm.emaps_zone AND c.datetime <= cm.timestamp
+                          )
+                          AND cm.grid_intensity IS DISTINCT FROM ci.carbon_intensity
+                        RETURNING cm.id
+                    )
+                    SELECT count(*) FROM updated
+                """
+                params: list = [default_pue, start_time, end_time]
+                if namespace:
+                    params.append(namespace)
+                count = await conn.fetchval(query, *params)
+                return int(count or 0)
+        except Exception as e:
+            logger.error("Error recomputing combined metrics carbon: %s", e)
+            raise QueryError(f"Error recomputing combined metrics carbon: {e}") from e

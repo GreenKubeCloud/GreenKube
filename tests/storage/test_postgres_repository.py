@@ -162,3 +162,43 @@ async def test_read_combined_metrics_success(combined_repository, connection_moc
     assert len(metrics) == 1
     assert metrics[0].pod_name == "pod1"
     assert metrics[0].estimation_reasons == ["default_profile"]
+
+
+@pytest.mark.asyncio
+async def test_recompute_carbon_with_latest_intensities(combined_repository, connection_mock):
+    start = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2023, 1, 1, 23, 59, tzinfo=timezone.utc)
+    connection_mock.fetchval.return_value = "7"  # asyncpg returns a status string
+
+    result = await combined_repository.recompute_carbon_with_latest_intensities(
+        None,
+        start,
+        end,  # type: ignore[arg-type]  # SQL path ignores the carbon repo
+    )
+
+    assert result == 7
+    connection_mock.fetchval.assert_awaited_once()
+    query, params = connection_mock.fetchval.await_args.args[0], connection_mock.fetchval.await_args.args[1:]
+    assert "UPDATE combined_metrics" in query
+    assert "carbon_intensity_history" in query
+    assert params[1] == start
+    assert params[2] == end
+
+
+@pytest.mark.asyncio
+async def test_recompute_carbon_with_namespace(combined_repository, connection_mock):
+    start = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2023, 1, 1, 23, 59, tzinfo=timezone.utc)
+    connection_mock.fetchval.return_value = "2"
+
+    result = await combined_repository.recompute_carbon_with_latest_intensities(
+        None,
+        start,
+        end,
+        namespace="target-ns",  # type: ignore[arg-type]
+    )
+
+    assert result == 2
+    query, params = connection_mock.fetchval.await_args.args[0], connection_mock.fetchval.await_args.args[1:]
+    assert "cm.namespace = $4" in query
+    assert params[3] == "target-ns"
