@@ -292,3 +292,151 @@ async def test_probe_and_close_behaviour():
     collector._client.aclose = AsyncMock()
     await collector.close()
     assert collector._client is None
+
+
+# ---------------------------------------------------------------------------
+# collect_pv_costs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_pv_costs_returns_window_costs():
+    """Should return per-PV window costs from the aggregate-by-volume endpoint."""
+    fixed_url = "http://opencost:9003"
+    payload = {
+        "code": 200,
+        "data": [
+            {
+                "pvc-aaa": {"properties": {"persistentVolume": "pvc-aaa"}, "storageCost": 2.5},
+                "pvc-bbb": {"properties": {"persistentVolume": "pvc-bbb"}, "storageCost": 1.25},
+            }
+        ],
+    }
+    respx.get(
+        f"{fixed_url}/api/v1/allocation/aggregate",
+        params={"aggregateBy": "persistentvolume", "window": "7d"},
+    ).mock(return_value=Response(200, json=payload))
+
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value=fixed_url)
+
+    costs = await collector.collect_pv_costs(["pvc-aaa", "pvc-bbb"], window_days=7)
+
+    assert costs == {"pvc-aaa": 2.5, "pvc-bbb": 1.25}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_pv_costs_reads_pv_costs_map():
+    """Should prefer the pvCosts map over storageCost when both are present."""
+    fixed_url = "http://opencost:9003"
+    payload = {
+        "code": 200,
+        "data": [
+            {
+                "pvc-aaa": {
+                    "properties": {"persistentVolume": "pvc-aaa"},
+                    "storageCost": 9.9,
+                    "pvCosts": {"pvc-aaa": 3.75},
+                }
+            }
+        ],
+    }
+    respx.get(f"{fixed_url}/api/v1/allocation/aggregate").mock(return_value=Response(200, json=payload))
+
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value=fixed_url)
+
+    costs = await collector.collect_pv_costs(["pvc-aaa"])
+
+    assert costs == {"pvc-aaa": 3.75}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_pv_costs_falls_back_to_properties_lookup():
+    """Should locate a PV via properties.persistentVolume when keys are not PV names."""
+    fixed_url = "http://opencost:9003"
+    payload = {
+        "code": 200,
+        "data": [
+            {
+                "some-other-key": {"properties": {"persistentVolume": "pvc-xyz"}, "storageCost": 5.0},
+            }
+        ],
+    }
+    respx.get(f"{fixed_url}/api/v1/allocation/aggregate").mock(return_value=Response(200, json=payload))
+
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value=fixed_url)
+
+    costs = await collector.collect_pv_costs(["pvc-xyz"])
+
+    assert costs == {"pvc-xyz": 5.0}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_pv_costs_tries_legacy_allocation_path():
+    """Should fall back to the legacy /allocation path when aggregate endpoints 404."""
+    fixed_url = "http://opencost:9003"
+    payload = {"code": 200, "data": [{"pvc-aaa": {"properties": {}, "storageCost": 1.0}}]}
+    respx.get(f"{fixed_url}/api/v1/allocation/aggregate").mock(return_value=Response(404, text="404 page not found"))
+    respx.get(f"{fixed_url}/allocation/aggregate").mock(return_value=Response(404, text="404 page not found"))
+    respx.get(f"{fixed_url}/allocation").mock(return_value=Response(200, json=payload))
+
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value=fixed_url)
+
+    costs = await collector.collect_pv_costs(["pvc-aaa"])
+
+    assert costs == {"pvc-aaa": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_collect_pv_costs_returns_empty_when_url_resolution_fails():
+    """Should return an empty dict when no OpenCost URL can be resolved."""
+    collector = OpenCostCollector()
+    collector._get_client = AsyncMock(return_value=AsyncMock())
+    collector._resolve_url = AsyncMock(return_value=None)
+
+    costs = await collector.collect_pv_costs(["pvc-aaa"])
+
+    assert costs == {}
+
+
+@pytest.mark.asyncio
+async def test_collect_pv_costs_returns_empty_without_names():
+    """Should skip the API call entirely when no PV names are requested."""
+    collector = OpenCostCollector()
+    collector._get_client = AsyncMock()
+
+    costs = await collector.collect_pv_costs([])
+
+    assert costs == {}
+    collector._get_client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_pv_costs_ignores_zero_or_missing_costs():
+    """Volumes without cost data should be omitted from the result."""
+    fixed_url = "http://opencost:9003"
+    payload = {
+        "code": 200,
+        "data": [
+            {
+                "pvc-aaa": {"properties": {}, "storageCost": 0.0},
+                "pvc-bbb": {"properties": {}, "storageCost": None},
+            }
+        ],
+    }
+    respx.get(f"{fixed_url}/api/v1/allocation/aggregate").mock(return_value=Response(200, json=payload))
+
+    collector = OpenCostCollector()
+    collector._resolve_url = AsyncMock(return_value=fixed_url)
+
+    costs = await collector.collect_pv_costs(["pvc-aaa", "pvc-bbb"])
+
+    assert costs == {}

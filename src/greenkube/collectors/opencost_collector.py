@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import httpx
 
@@ -126,6 +126,89 @@ class OpenCostCollector(BaseCollector):
 
         logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
+
+    async def collect_pv_costs(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, float]:
+        """Fetch the storage cost of specific PersistentVolumes from OpenCost.
+
+        Queries the OpenCost allocation API aggregated by ``persistentvolume``
+        over the given window and extracts the per-volume storage cost.
+
+        Args:
+            pv_names: Names of the PersistentVolumes to look up.
+            window_days: Observation window in days used for the allocation query.
+
+        Returns:
+            A mapping of ``{pv_name: window_cost_usd}`` for volumes OpenCost has
+            cost data for. Returns an empty dict when OpenCost is unreachable,
+            unconfigured, or has no cost data for the requested volumes.
+        """
+        if not pv_names:
+            return {}
+
+        verify_certs = config.OPENCOST_VERIFY_CERTS
+        client = await self._get_client(verify=verify_certs)
+        url = await self._resolve_url(client)
+
+        if not url:
+            logger.warning("OpenCost API URL is not configured and discovery failed; cannot fetch real PV costs.")
+            return {}
+
+        base = url.rstrip("/")
+        if base.endswith("/allocation/compute"):
+            base = base[: -len("/allocation/compute")]
+        params = {"aggregateBy": "persistentvolume", "window": f"{window_days}d"}
+
+        async def _fetch(u: str) -> Optional[dict]:
+            try:
+                resp = await client.get(u, params=params)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.debug("OpenCost PV cost request to %s failed: %s", u, exc)
+                return None
+            try:
+                payload = resp.json()
+                data = payload.get("data")
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    return data[0]
+            except Exception:
+                logger.debug("Failed to decode OpenCost PV cost response from %s", u)
+            return None
+
+        # OpenCost deployments expose the allocation endpoint under different
+        # paths; try each until one responds.
+        for candidate in (
+            base + "/api/v1/allocation/aggregate",
+            base + "/allocation/aggregate",
+            base + "/allocation",
+        ):
+            allocations = await _fetch(candidate)
+            if allocations is not None:
+                break
+        else:
+            allocations = None
+
+        if not allocations:
+            return {}
+
+        costs: Dict[str, float] = {}
+        for name in pv_names:
+            entry = allocations.get(name)
+            if entry is None:
+                entry = next(
+                    (a for a in allocations.values() if (a.get("properties") or {}).get("persistentVolume") == name),
+                    None,
+                )
+            if not entry:
+                continue
+            window_cost = (entry.get("pvCosts") or {}).get(name)
+            if window_cost is None:
+                window_cost = entry.get("storageCost")
+            if window_cost:
+                costs[name] = float(window_cost)
+
+        if costs:
+            logger.info("Retrieved real OpenCost storage costs for %d PersistentVolumes.", len(costs))
+        return costs
 
     async def collect_range(self, start, end) -> List[CostMetric]:
         """Collect cost allocation data for a time range."""

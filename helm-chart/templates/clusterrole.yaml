@@ -15,6 +15,8 @@ rules:
   - pods
   - services
   - configmaps
+  - persistentvolumes
+  - persistentvolumeclaims
   verbs:
   - get
   - list

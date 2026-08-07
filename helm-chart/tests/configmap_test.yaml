@@ -156,6 +156,20 @@ tests:
           path: data.RIGHTSIZING_CPU_THRESHOLD
           value: "0.3"
 
+  - it: should set STORAGE_COST_PER_GIB_MONTH
+    asserts:
+      - equal:
+          path: data.STORAGE_COST_PER_GIB_MONTH
+          value: "0.1"
+
+  - it: should reflect a custom storage cost per GiB-month
+    set:
+      config.recommendations.storageCostPerGibMonth: 0.25
+    asserts:
+      - equal:
+          path: data.STORAGE_COST_PER_GIB_MONTH
+          value: "0.25"
+
   # --------------------------------------------------------------------------
   # Default zone (conditional key)
   # --------------------------------------------------------------------------

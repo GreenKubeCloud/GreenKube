@@ -61,6 +61,7 @@ def recommend(
     async def _recommend_async():
         processor = None
         analysis_window_seconds = None
+        lookback_days = None
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -110,12 +111,28 @@ def recommend(
             except Exception as e:
                 logger.warning("Could not collect HPA targets: %s. Proceeding without HPA filtering.", e)
 
+            # Detect orphaned PersistentVolumes for cleanup recommendations
+            orphaned_volumes = None
+            try:
+                from ..collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
+
+                pv_collector = PVCollector()
+                orphaned_volumes = await pv_collector.collect()
+                if orphaned_volumes:
+                    orphaned_volumes = await enrich_orphaned_pv_costs(orphaned_volumes, window_days=lookback_days or 7)
+            except Exception as e:
+                logger.warning(
+                    "Could not collect orphaned PersistentVolumes: %s. Proceeding without PV cleanup recommendations.",
+                    e,
+                )
+
             # Generate all recommendation types via the unified engine
             recommender = Recommender()
             recommendations = recommender.generate_recommendations(
                 combined_data,
                 node_infos=node_infos,
                 hpa_targets=hpa_targets,
+                persistent_volumes=orphaned_volumes,
                 analysis_window_seconds=analysis_window_seconds,
             )
 

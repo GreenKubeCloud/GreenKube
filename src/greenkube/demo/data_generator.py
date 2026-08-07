@@ -1613,6 +1613,23 @@ def generate_recommendations() -> list[RecommendationRecord]:
             created_at=now - timedelta(days=200),
             applied_at=now - timedelta(days=175),
         ),
+        _applied_recommendation(
+            pod_name="pvc-optic-analytics-data",
+            namespace=None,
+            type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+            description="The abandoned analytics snapshot volume was deleted after its claim had been gone for months.",
+            reason=(
+                "The volume sat in Released phase for 60+ days after its PVC was removed under a Retain reclaim policy."
+            ),
+            priority="medium",
+            scope="cluster",
+            potential_savings_cost=310.0,
+            potential_savings_co2e_grams=18000.0,
+            carbon_saved_co2e_grams=16000.0,
+            cost_saved=290.0,
+            created_at=now - timedelta(days=150),
+            applied_at=now - timedelta(days=130),
+        ),
         _active_recommendation(
             pod_name="catalog-search-0",
             namespace="platform",

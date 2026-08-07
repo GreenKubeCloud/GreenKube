@@ -1,7 +1,7 @@
 # tests/core/test_recommender_v2.py
 """
 Comprehensive tests for the enhanced recommendation engine.
-Tests cover all 9 recommendation types using TDD methodology.
+Tests cover all 10 recommendation types using TDD methodology.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from greenkube.collectors.pv_collector import OrphanedPV
 from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 
@@ -1208,3 +1209,151 @@ class TestUnderutilizedNodeReason:
 
         assert len(node_recs) == 1
         assert "%" in node_recs[0].reason, "Reason should contain a utilization percentage"
+
+
+# ---------------------------------------------------------------------------
+# Test: ORPHANED_PERSISTENT_VOLUME
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedPersistentVolume:
+    """Tests for orphaned PersistentVolume detection."""
+
+    def _pv_recs(self, recommender, volumes):
+        metrics = [_make_metric(pod_name="unrelated-pod")]
+        return [
+            r
+            for r in recommender.generate_recommendations(metrics, persistent_volumes=volumes)
+            if r.type == RecommendationType.ORPHANED_PERSISTENT_VOLUME
+        ]
+
+    def test_detects_released_volume(self, recommender):
+        """A released PV with a deleted claim should be flagged with estimated cost savings."""
+        volumes = [
+            OrphanedPV(
+                name="pvc-dead",
+                phase="Released",
+                capacity_bytes=100 * 1024**3,
+                claim_namespace="default",
+                claim_name="gone-claim",
+                reclaim_policy="Retain",
+            )
+        ]
+        recs = self._pv_recs(recommender, volumes)
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec.pod_name == "pvc-dead"
+        assert rec.namespace is None
+        assert rec.scope == "cluster"
+        assert rec.priority == "medium"
+        assert "100.0GiB" in rec.description
+        assert "Released" in rec.reason
+        # 100 GiB at $0.10/GiB-month → $120/year in annualized cost savings
+        assert rec.potential_savings_cost == pytest.approx(100 * 0.10 * 12)
+        assert "120.00" in rec.description
+        # CO2e savings are not projected: energy estimation only covers CPU usage today
+        assert rec.potential_savings_co2e_grams is None
+
+    def test_no_cost_savings_when_capacity_unknown(self, recommender):
+        """A PV with unknown capacity should not report fabricated cost savings."""
+        volumes = [
+            OrphanedPV(
+                name="pvc-no-cap",
+                phase="Released",
+                capacity_bytes=0,
+                claim_namespace="default",
+                claim_name="gone-claim",
+            )
+        ]
+        recs = self._pv_recs(recommender, volumes)
+        assert len(recs) == 1
+        assert recs[0].potential_savings_cost is None
+
+    def test_cost_savings_use_configured_storage_price(self):
+        """The storage price per GiB-month must be configurable."""
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.STORAGE_COST_PER_GIB_MONTH = 0.25
+        custom_recommender = Recommender(config=cfg)
+
+        volumes = [
+            OrphanedPV(
+                name="pvc-pricey",
+                phase="Released",
+                capacity_bytes=10 * 1024**3,
+                claim_namespace="default",
+                claim_name="gone-claim",
+            )
+        ]
+        metrics = [_make_metric(pod_name="unrelated-pod")]
+        recs = [
+            r
+            for r in custom_recommender.generate_recommendations(metrics, persistent_volumes=volumes)
+            if r.type == RecommendationType.ORPHANED_PERSISTENT_VOLUME
+        ]
+        # 10 GiB at $0.25/GiB-month → $30/year
+        assert len(recs) == 1
+        assert recs[0].potential_savings_cost == pytest.approx(10 * 0.25 * 12)
+
+    def test_prefers_real_opencost_cost_when_available(self, recommender):
+        """A real OpenCost annual cost must take precedence over the capacity estimate."""
+        volumes = [
+            OrphanedPV(
+                name="pvc-real",
+                phase="Released",
+                capacity_bytes=100 * 1024**3,
+                claim_namespace="default",
+                claim_name="gone-claim",
+                annual_cost=87.5,
+            )
+        ]
+        recs = self._pv_recs(recommender, volumes)
+        assert len(recs) == 1
+        assert recs[0].potential_savings_cost == pytest.approx(87.5)
+        assert "OpenCost-reported cost savings: $87.50/year" in recs[0].description
+        assert "$0.10/GiB-month" not in recs[0].description
+
+    def test_detects_volume_with_missing_claim(self, recommender):
+        """A PV whose claim no longer exists should be flagged regardless of phase."""
+        volumes = [
+            OrphanedPV(
+                name="pvc-stale",
+                phase="Bound",
+                capacity_bytes=50 * 1024**3,
+                claim_namespace="prod",
+                claim_name="deleted-pvc",
+            )
+        ]
+        recs = self._pv_recs(recommender, volumes)
+        assert len(recs) == 1
+        assert "prod/deleted-pvc" in recs[0].reason
+        assert "no longer exists" in recs[0].reason
+
+    def test_multiple_volumes_produce_separate_recommendations(self, recommender):
+        """Each orphaned PV should produce its own recommendation."""
+        volumes = [
+            OrphanedPV(name="pvc-a", phase="Released", capacity_bytes=10 * 1024**3),
+            OrphanedPV(name="pvc-b", phase="Released", capacity_bytes=20 * 1024**3),
+        ]
+        recs = self._pv_recs(recommender, volumes)
+        assert len(recs) == 2
+        assert {r.pod_name for r in recs} == {"pvc-a", "pvc-b"}
+
+    def test_no_recommendations_without_volumes(self, recommender):
+        """No PV input should produce no PV recommendations."""
+        assert self._pv_recs(recommender, None) == []
+        assert self._pv_recs(recommender, []) == []
+
+    def test_accepts_mock_objects(self, recommender):
+        """The analyzer should tolerate duck-typed descriptors (e.g. mocks)."""
+        mock_pv = MagicMock()
+        mock_pv.name = "pvc-mocked"
+        mock_pv.phase = "Released"
+        mock_pv.capacity_bytes = 30 * 1024**3
+        mock_pv.claim_namespace = "default"
+        mock_pv.claim_name = "gone"
+        mock_pv.reclaim_policy = "Retain"
+        recs = self._pv_recs(recommender, [mock_pv])
+        assert len(recs) == 1
+        assert recs[0].pod_name == "pvc-mocked"

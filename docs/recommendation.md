@@ -8,12 +8,13 @@ Recommendations are derived from stored `CombinedMetric` records. These records 
 
 The API and startup scan use `RECOMMENDATION_LOOKBACK_DAYS` to read the recent metrics window from the combined metrics repository. The default is 7 days. When the recommender receives the analysis window length, projected savings are annualized from the observed window.
 
-The recommender can also use two optional inputs:
+The recommender can also use three optional inputs:
 
 | Input | Purpose |
 |---|---|
 | Latest node snapshots | Enables node-level recommendations such as overprovisioned or underutilized nodes. |
 | HPA targets | Prevents autoscaling recommendations for workloads that already have a HorizontalPodAutoscaler. |
+| Orphaned PersistentVolumes | Enables delete-orphaned-PV recommendations. The `PVCollector` lists all PVs and PVCs from the Kubernetes API and reports volumes whose claim is gone or released. Requires read access to `persistentvolumes` and `persistentvolumeclaims` at cluster scope; the Helm chart's `ClusterRole` includes these resources by default. When OpenCost is reachable, real per-volume storage costs are fetched via `OpenCostCollector.collect_pv_costs()` and used for the projected savings; otherwise the capacity-based estimate applies. |
 
 During API and startup scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever.
 
@@ -33,7 +34,7 @@ The current code does not implement `open`, `in_progress`, `resolved`, `dismisse
 ## Generation Flow
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
-2. The recommendation scan reads a recent metrics window and, when available, node snapshots and HPA targets.
+2. The recommendation scan reads a recent metrics window and, when available, node snapshots, HPA targets, and orphaned PersistentVolumes.
 3. `Recommender.generate_recommendations()` groups metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name.
 4. The recommender runs all recommendation analyzers and deduplicates by scope, namespace, target, type, and node.
 5. Recommended CPU and memory requests are floored to configured minimums before being returned.
@@ -43,7 +44,7 @@ The CLI `greenkube recommend` uses the same `Recommender` engine, but it is a re
 
 ## Recommendation Types
 
-GreenKube currently has nine recommendation types.
+GreenKube currently has ten recommendation types.
 
 | Type | Scope | Current trigger |
 |---|---|---|
@@ -56,6 +57,7 @@ GreenKube currently has nine recommendation types.
 | `CARBON_AWARE_SCHEDULING` | pod or workload | Target average grid intensity is more than `CARBON_AWARE_THRESHOLD` times the average for its electricity zone. Projected CO2e savings are estimated from the high-carbon share. |
 | `OVERPROVISIONED_NODE` | node | Node average CPU utilization, and memory utilization when capacity is available, are below `NODE_UTILIZATION_THRESHOLD`. |
 | `UNDERUTILIZED_NODE` | node | Node has fewer than three pods and average CPU utilization below 15%. |
+| `ORPHANED_PERSISTENT_VOLUME` | cluster | A PersistentVolume is in `Released` phase (its PVC was deleted but the volume was not reclaimed) or its `claimRef` references a PVC that no longer exists. The PV name is stored in the `pod_name` field because PVs are cluster-scoped. Deleting the volume releases the provisioned storage. Projected cost savings prefer the real storage cost reported by OpenCost for the volume (annualized from the observation window); when OpenCost has no cost data (e.g. on-premises or local storage), the estimate falls back to the provisioned capacity and `STORAGE_COST_PER_GIB_MONTH` (default `$0.10`/GiB-month). CO2e savings are not projected because energy estimation currently only covers CPU usage, not disk usage. |
 
 Not every recommendation type has projected savings today. The top recommendations API and Grafana actionable cards only rank active recommendations with a positive projected value for the selected metric.
 
@@ -201,6 +203,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RECOMMENDATION_MIN_CPU_MILLICORES` | `config.recommendations.minCpuMillicores` | `10` |
 | `RECOMMENDATION_MIN_MEMORY_BYTES` | `config.recommendations.minMemoryBytes` | `16777216` |
 | `RECOMMENDATION_APPLY_TOLERANCE` | `config.recommendations.applyTolerance` | `0.25` |
+| `STORAGE_COST_PER_GIB_MONTH` | `config.recommendations.storageCostPerGibMonth` | `0.1` |
 
 `RECOMMENDATION_APPLY_TOLERANCE` is present in configuration and Helm values, but the current apply endpoint marks a recommendation as applied only when the API is called. There is no automatic apply-detection path using this tolerance in the current code.
 
@@ -210,6 +213,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 |---|---|
 | DTOs and lifecycle fields | `src/greenkube/models/metrics.py` |
 | Recommendation generation | `src/greenkube/core/recommender.py` |
+| Orphaned PV discovery | `src/greenkube/collectors/pv_collector.py` |
 | Ranking | `src/greenkube/core/recommendation_ranking.py` |
 | Realized savings estimation | `src/greenkube/core/recommendation_realization.py` |
 | Savings ledger attribution | `src/greenkube/core/savings_attributor.py` |

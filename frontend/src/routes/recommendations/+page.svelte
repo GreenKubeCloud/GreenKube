@@ -129,6 +129,7 @@
 		CARBON_AWARE_SCHEDULING: { icon: '🌍', label: 'Carbon-Aware',         color: 'green',  desc: 'Could run in a lower-carbon zone' },
 		OVERPROVISIONED_NODE:    { icon: '🖥️', label: 'Overprovisioned Node', color: 'blue',   desc: 'Node with very low utilization' },
 		UNDERUTILIZED_NODE:      { icon: '🔻', label: 'Underutilized Node',   color: 'blue',   desc: 'Node with few pods — consider draining' },
+		ORPHANED_PERSISTENT_VOLUME: { icon: '💾', label: 'Orphaned PV',      color: 'orange', desc: 'PersistentVolume with no bound claim' },
 	};
 
 	function getTypeConfig(type) {

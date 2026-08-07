@@ -91,6 +91,7 @@ class RecommendationType(str, Enum):
     CARBON_AWARE_SCHEDULING = "CARBON_AWARE_SCHEDULING"
     OVERPROVISIONED_NODE = "OVERPROVISIONED_NODE"
     UNDERUTILIZED_NODE = "UNDERUTILIZED_NODE"
+    ORPHANED_PERSISTENT_VOLUME = "ORPHANED_PERSISTENT_VOLUME"
 
 
 class RecommendationStatus(str, Enum):
@@ -115,7 +116,7 @@ class Recommendation(BaseModel):
     priority: str = Field("medium", description="Priority level: high, medium, or low.")
     scope: str = Field(
         "pod",
-        description="Recommendation scope: 'pod', 'workload', 'namespace', or 'node'.",
+        description="Recommendation scope: 'pod', 'workload', 'namespace', 'node', or 'cluster'.",
     )
     potential_savings_co2e_grams: Optional[float] = Field(
         None, description="Estimated annual CO2e savings in grams if implemented."

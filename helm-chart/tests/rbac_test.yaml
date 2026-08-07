@@ -70,6 +70,20 @@ tests:
           path: rules[0].verbs
           content: list
 
+  - it: ClusterRole should grant read access to persistent volumes and claims
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules[0].resources
+          content: persistentvolumes
+      - contains:
+          path: rules[0].resources
+          content: persistentvolumeclaims
+      - contains:
+          path: rules[0].verbs
+          content: list
+
   - it: ClusterRole should grant read access to HPAs
     templates:
       - templates/clusterrole.yaml

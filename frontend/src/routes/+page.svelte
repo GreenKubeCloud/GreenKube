@@ -23,6 +23,16 @@
 	// Slugs served by the pre-computed summary / timeseries cache tables
 	const PRECOMPUTED_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);
 
+	// Badge styling for the recommendation preview cards
+	const RECO_BADGES = {
+		ZOMBIE_POD: { color: 'red', icon: '💀' },
+		RIGHTSIZING_CPU: { color: 'yellow', icon: '📐' },
+		ORPHANED_PERSISTENT_VOLUME: { color: 'orange', icon: '💾' }
+	};
+	function recoBadge(type) {
+		return RECO_BADGES[type] ?? { color: 'yellow', icon: '📐' };
+	}
+
 	let summary = null;
 	let timeseries = [];
 	let nsBreakdown = [];
@@ -333,10 +343,9 @@
 				</div>
 				<div class="divide-y divide-dark-700/50">
 					{#each recommendations.slice(0, 3) as rec}
+						{@const badge = recoBadge(rec.type)}
 						<div class="py-3 flex items-start gap-3">
-							<span class="badge-{rec.type === 'ZOMBIE_POD' ? 'red' : 'yellow'} mt-0.5">
-								{rec.type === 'ZOMBIE_POD' ? '💀' : '📐'}
-							</span>
+							<span class="badge-{badge.color} mt-0.5">{badge.icon}</span>
 							<div class="flex-1 min-w-0">
 								<p class="text-sm text-dark-200 font-medium truncate">{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}</p>
 								<p class="text-xs text-dark-500 mt-0.5">{rec.reason}</p>
