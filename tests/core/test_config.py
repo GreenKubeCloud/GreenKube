@@ -13,6 +13,50 @@ import pytest
 from greenkube.core.config import Config
 
 
+class TestElectricityProviderConfig:
+    """Tests for the electricity provider configuration."""
+
+    def test_default_provider_is_electricity_maps(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config()
+        assert cfg.ELECTRICITY_PROVIDER == "electricity_maps"
+
+    def test_wattnet_provider_accepted(self):
+        with patch.dict(os.environ, {"ELECTRICITY_PROVIDER": "WATTNET"}, clear=True):
+            cfg = Config()
+        assert cfg.ELECTRICITY_PROVIDER == "wattnet"
+
+    def test_invalid_provider_rejected(self):
+        with patch.dict(os.environ, {"ELECTRICITY_PROVIDER": "nonsense"}, clear=True):
+            with pytest.raises(ValueError, match="ELECTRICITY_PROVIDER"):
+                Config()
+
+    def test_wattnet_fields_loaded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WATTNET_EMAIL": "user@example.com",
+                "WATTNET_PASSWORD": "secret",
+                "WATTNET_API_BASE_URL": "https://custom.example.com/v1",
+                "WATTNET_TOKEN_SERVICE_URL": "https://custom.example.com/token",
+            },
+            clear=True,
+        ):
+            cfg = Config()
+        assert cfg.WATTNET_EMAIL == "user@example.com"
+        assert cfg.WATTNET_PASSWORD == "secret"
+        assert cfg.WATTNET_API_BASE_URL == "https://custom.example.com/v1"
+        assert cfg.WATTNET_TOKEN_SERVICE_URL == "https://custom.example.com/token"
+
+    def test_wattnet_defaults(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config()
+        assert cfg.WATTNET_EMAIL is None
+        assert cfg.WATTNET_PASSWORD is None
+        assert cfg.WATTNET_API_BASE_URL == "https://api.wattnet.eu/v1"
+        assert cfg.WATTNET_TOKEN_SERVICE_URL == "https://api.wattnet.eu/token-request"
+
+
 class TestGetSecret:
     """Tests for the Config._get_secret method."""
 

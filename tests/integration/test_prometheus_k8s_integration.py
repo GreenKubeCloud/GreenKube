@@ -124,7 +124,7 @@ async def test_integration_prometheus_and_k8s(monkeypatch, dummy_config):
         opencost_collector=opencost,
         node_collector=node_collector,  # type: ignore[arg-type]
         pod_collector=pod_collector,
-        electricity_maps_collector=emaps_collector,
+        electricity_provider=emaps_collector,
         repository=repository,  # type: ignore[arg-type]
         combined_metrics_repository=AsyncMock(),
         node_repository=AsyncMock(),

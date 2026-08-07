@@ -39,6 +39,10 @@ config:
                   # Leave empty to let GreenKube auto-discover the zone from node labels.
                   # Falls back to DEFAULT_INTENSITY (gCO2/kWh) if zone cannot be determined.
   defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
+  # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
+  # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
+  # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
+  electricityProvider: electricity_maps
   # Normalization granularity for carbon intensity lookups.
   # Supported: "hour", "day", "none"
   normalizationGranularity: hour
@@ -240,6 +244,12 @@ secrets:
   # Electricity Maps API Token — get yours at https://www.electricitymaps.com/
   # Without it, GreenKube uses the default carbon intensity (config.defaultIntensity).
   electricityMapsToken: ''
+
+  # Wattnet account credentials — used when config.electricityProvider is "wattnet".
+  # Register for free at https://api.wattnet.eu/token-request/register
+  # (Wattnet is an EU-funded service covering 52 European zones).
+  wattnetEmail: ''
+  wattnetPassword: ''
 
   # Boavizta API Token (optional)
   boaviztaToken: ''

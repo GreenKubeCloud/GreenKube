@@ -448,6 +448,69 @@ class CombinedMetricsRepository(ABC):
         )
         return results[:limit]
 
+    async def recompute_carbon_with_latest_intensities(
+        self,
+        carbon_intensity_repo: CarbonIntensityRepository,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Recompute ``grid_intensity`` and ``co2e_grams`` for combined metrics
+        in the given window using the latest stored carbon intensities.
+
+        Providers such as Wattnet publish provisional values that are
+        consolidated a few hours later (``valid=false`` → ``valid=true``).
+        This method refreshes **every** metric in the window — not only those
+        without an intensity — so rows calculated from provisional data are
+        corrected in place once the final values are available.
+
+        The recomputation reuses :class:`CarbonCalculator` so the result is
+        identical to the original calculation (same formula, same timestamp
+        normalization). Rows whose intensity is unchanged are left untouched.
+
+        Default implementation loads rows and recomputes in Python. SQL
+        backends override this with a single bulk UPDATE for efficiency.
+
+        Args:
+            carbon_intensity_repo: The carbon intensity data source.
+            start_time: Start of the window (inclusive).
+            end_time: End of the window (inclusive).
+            namespace: Optional namespace filter.
+
+        Returns:
+            The number of rows whose carbon figures were updated.
+        """
+        from ..core.calculator import CarbonCalculator
+
+        calculator = CarbonCalculator(carbon_intensity_repo)
+
+        metrics = await self.read_combined_metrics(start_time, end_time)
+        if namespace:
+            metrics = [m for m in metrics if m.namespace == namespace]
+
+        updated: List[CombinedMetric] = []
+        for m in metrics:
+            if not m.emaps_zone or m.timestamp is None:
+                continue
+            try:
+                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, m.timestamp.isoformat())
+            except Exception:
+                intensity = None
+            if intensity is None:
+                continue
+            await calculator.prefetch_intensity(m.emaps_zone, m.timestamp.isoformat(), intensity)
+            result = await calculator.calculate_emissions(
+                joules=m.joules, zone=m.emaps_zone, timestamp=m.timestamp, pue=m.pue
+            )
+            if result is not None and result.grid_intensity != m.grid_intensity:
+                m.co2e_grams = result.co2e_grams
+                m.grid_intensity = result.grid_intensity
+                updated.append(m)
+
+        if not updated:
+            return 0
+        return await self.write_combined_metrics(updated)
+
 
 class RecommendationRepository(ABC):
     """

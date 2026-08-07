@@ -11,6 +11,7 @@ flowchart TB
         OC["OpenCost"]
         K8sAPI["K8s API"]
         EM["Electricity Maps API"]
+        WN["Wattnet API"]
         Boavizta["Boavizta API"]
     end
 
@@ -22,6 +23,7 @@ flowchart TB
             NC["NodeCollector"]
             PodC["PodCollector"]
             EMC["ElectricityMapsCollector"]
+            WNC["WattnetCollector"]
             BC["BoaviztaCollector"]
         end
 
@@ -58,6 +60,7 @@ flowchart TB
     K8sAPI --> NC
     K8sAPI --> PodC
     EM --> EMC
+    WN --> WNC
     Boavizta --> BC
 
     PC --> CO
@@ -67,6 +70,7 @@ flowchart TB
 
     CO --> DP
     EMC --> DP
+    WNC --> DP
     BC --> ESvc
 
     DP --> Est
@@ -178,10 +182,21 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Emits:** `List[CostMetric]`
 
 #### **ElectricityMapsCollector**
-- **Purpose:** Retrieve real-time carbon intensity data
+- **Purpose:** Retrieve real-time carbon intensity data (default provider)
 - **API:** Electricity Maps v3 API
 - **Caching:** Stores results in repository for future queries
 - **Implementation:** Async HTTP with error handling (graceful degradation to default intensity)
+
+#### **WattnetCollector**
+- **Purpose:** Retrieve carbon intensity data from Wattnet (EU-funded, 52 European zones)
+- **API:** Wattnet REST API (`/v1/footprints`), token-based auth (`/token-request/get_token`)
+- **Caching:** Bearer tokens cached and auto-refreshed; results stored in repository
+- **Fallback:** Zones outside Europe or API failures degrade gracefully to default intensity
+- **Note:** Water footprint data (`footprint_type=water`) is not consumed yet — see [docs/wattnet.md](wattnet.md)
+
+#### **BaseElectricityProvider**
+- **Purpose:** Abstract contract shared by all grid carbon-intensity providers (`collect(zone, target_datetime)`)
+- **Selection:** `ELECTRICITY_PROVIDER` config (`electricity_maps` | `wattnet`), instantiated by the factory
 
 #### **BoaviztaCollector**
 - **Purpose:** Fetch hardware embodied emissions data
@@ -368,7 +383,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 **Endpoints:**
 - `GET /api/v1/health` — Health check and version
-- `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Boavizta, Kubernetes)
+- `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Wattnet, Boavizta, Kubernetes)
 - `GET /api/v1/health/services/{name}` — Health status for a single data source
 - `POST /api/v1/config/services` — Update service URLs or tokens at runtime
 - `GET /api/v1/config` — Current configuration (sanitized secrets)

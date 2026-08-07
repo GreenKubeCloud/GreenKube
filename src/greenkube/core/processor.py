@@ -16,8 +16,8 @@ import asyncio
 import logging
 from typing import Dict, List, Set
 
+from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..collectors.boavizta_collector import BoaviztaCollector
-from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -50,7 +50,7 @@ class DataProcessor:
         opencost_collector: OpenCostCollector,
         node_collector: NodeCollector,
         pod_collector: PodCollector,
-        electricity_maps_collector: ElectricityMapsCollector,
+        electricity_provider: BaseElectricityProvider,
         boavizta_collector: BoaviztaCollector,
         repository: CarbonIntensityRepository,
         combined_metrics_repository: CombinedMetricsRepository,
@@ -64,7 +64,7 @@ class DataProcessor:
         self.calculator = calculator
         self.estimator = estimator
         self.node_collector = node_collector
-        self.electricity_maps_collector = electricity_maps_collector
+        self.electricity_provider = electricity_provider
         self.boavizta_collector = boavizta_collector
         self.repository = repository
         self.embodied_repository = embodied_repository
@@ -88,7 +88,7 @@ class DataProcessor:
             calculator=calculator,
             estimator=estimator,
             repository=repository,
-            electricity_maps_collector=electricity_maps_collector,
+            electricity_provider=electricity_provider,
             zone_mapper=self._zone_mapper,
             embodied_service=self._embodied_service,
             config=self._config,
@@ -288,6 +288,6 @@ class DataProcessor:
         """Close all collectors to release resources."""
         await self._orchestrator.close()
         await self.node_collector.close()
-        await self.electricity_maps_collector.close()
+        await self.electricity_provider.close()
         await self.boavizta_collector.close()
         logger.debug("DataProcessor closed all collectors.")

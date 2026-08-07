@@ -131,7 +131,7 @@ def assembler(
         calculator=mock_calculator,
         estimator=mock_estimator,
         repository=mock_repository,
-        electricity_maps_collector=mock_electricity_maps,
+        electricity_provider=mock_electricity_maps,
         zone_mapper=mock_zone_mapper,
         embodied_service=mock_embodied_service,
     )

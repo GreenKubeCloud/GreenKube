@@ -13,11 +13,13 @@
 	let prometheusUrl = '';
 	let opencostUrl = '';
 	let electricityMapsToken = '';
+	let wattnetEmail = '';
+	let wattnetPassword = '';
 	let saving = false;
 	let saveError = '';
 
 	$: issues = services ? Object.values(services).filter(
-		s => s.status === 'unreachable' || s.status === 'unconfigured'
+		s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
 	) : [];
 
 	$: hasIssues = issues.length > 0;
@@ -30,6 +32,8 @@
 			if (prometheusUrl) update.prometheus_url = prometheusUrl;
 			if (opencostUrl) update.opencost_url = opencostUrl;
 			if (electricityMapsToken) update.electricity_maps_token = electricityMapsToken;
+			if (wattnetEmail) update.wattnet_email = wattnetEmail;
+			if (wattnetPassword) update.wattnet_password = wattnetPassword;
 
 			if (Object.keys(update).length === 0) {
 				dispatch('dismiss');
@@ -130,6 +134,38 @@
 							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
 							       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 						/>
+					</div>
+				{/if}
+
+				{#if services?.wattnet?.status === 'unconfigured'}
+					<div class="grid grid-cols-1 gap-3">
+						<div>
+							<label for="wattnet-email" class="block text-xs font-medium text-dark-400 mb-1">
+								Wattnet Email
+								<a href="https://wattnet.eu" target="_blank" class="text-green-400 hover:text-green-300 ml-1">
+									(Learn more ↗)
+								</a>
+							</label>
+							<input
+								id="wattnet-email"
+								type="email"
+								bind:value={wattnetEmail}
+								placeholder="you@example.com"
+								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
+								       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+							/>
+						</div>
+						<div>
+							<label for="wattnet-password" class="block text-xs font-medium text-dark-400 mb-1">Wattnet Password</label>
+							<input
+								id="wattnet-password"
+								type="password"
+								bind:value={wattnetPassword}
+								placeholder="Wattnet account password"
+								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
+								       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+							/>
+						</div>
 					</div>
 				{/if}
 

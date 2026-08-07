@@ -19,6 +19,8 @@
 	let editOpencostUrl = '';
 	let editEmapsToken = '';
 	let editBoaviztaUrl = '';
+	let editWattnetEmail = '';
+	let editWattnetPassword = '';
 	let saving = false;
 	let saveMessage = '';
 	let saveError = '';
@@ -65,6 +67,8 @@
 			if (editOpencostUrl) update.opencost_url = editOpencostUrl;
 			if (editEmapsToken) update.electricity_maps_token = editEmapsToken;
 			if (editBoaviztaUrl) update.boavizta_url = editBoaviztaUrl;
+			if (editWattnetEmail) update.wattnet_email = editWattnetEmail;
+			if (editWattnetPassword) update.wattnet_password = editWattnetPassword;
 
 			if (Object.keys(update).length === 0) {
 				saveError = 'No changes to save.';
@@ -80,6 +84,8 @@
 			editOpencostUrl = '';
 			editEmapsToken = '';
 			editBoaviztaUrl = '';
+			editWattnetEmail = '';
+			editWattnetPassword = '';
 			saveMessage = 'Configuration updated successfully. Health checks refreshed.';
 
 			// Refresh config
@@ -258,6 +264,34 @@
 						type="url"
 						bind:value={editBoaviztaUrl}
 						placeholder={services.boavizta?.url || 'https://api.boavizta.org'}
+						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
+						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+					/>
+				</div>
+				<div>
+					<label for="edit-wattnet-email" class="block text-xs font-medium text-dark-400 mb-1">
+						Wattnet Email
+						<a href="https://wattnet.eu" target="_blank"
+						   class="text-green-400 hover:text-green-300 ml-1 text-[10px]">(Learn more ↗)</a>
+					</label>
+					<input
+						id="edit-wattnet-email"
+						type="email"
+						bind:value={editWattnetEmail}
+						placeholder="you@example.com"
+						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
+						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+					/>
+				</div>
+				<div>
+					<label for="edit-wattnet-password" class="block text-xs font-medium text-dark-400 mb-1">
+						Wattnet Password
+					</label>
+					<input
+						id="edit-wattnet-password"
+						type="password"
+						bind:value={editWattnetPassword}
+						placeholder="Wattnet account password"
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
 						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
 					/>

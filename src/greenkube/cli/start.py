@@ -11,15 +11,20 @@ import asyncio
 import logging
 import signal
 import traceback
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Set
 
 import typer
 from typing_extensions import Annotated
 
-from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..core.config import get_config
-from ..core.factory import get_node_repository, get_repository
+from ..core.factory import (
+    get_combined_metrics_repository,
+    get_electricity_provider,
+    get_node_repository,
+    get_repository,
+)
 from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from .utils import write_combined_metrics_to_database
@@ -42,7 +47,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
     try:
         repository = get_repository()
         node_collector = NodeCollector()
-        em_collector = ElectricityMapsCollector()
+        em_collector = get_electricity_provider()
     except Exception as e:
         logger.error("Failed to initialize components for intensity collection: %s", e)
         return
@@ -86,7 +91,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         async def process_zone(zone):
             import structlog as _structlog
 
-            _structlog.contextvars.bind_contextvars(collector="electricity_maps", zone=zone)
+            _structlog.contextvars.bind_contextvars(collector=get_config().ELECTRICITY_PROVIDER, zone=zone)
             try:
                 history_data = await em_collector.collect(zone=zone)
                 if history_data:
@@ -99,6 +104,8 @@ async def collect_carbon_intensity_for_all_zones() -> None:
 
         await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
 
+        await _recompute_combined_metrics(repository)
+
     except Exception as e:
         logger.error("Failed to collect node zones: %s", e)
     finally:
@@ -106,6 +113,36 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         await em_collector.close()
 
     logger.info("--- Finished carbon intensity collection task ---")
+
+
+# Window (hours) for which combined metrics are recomputed after each
+# intensity refresh. Must cover the upstream consolidation horizon (Wattnet
+# data is final ~4h after measurement) with margin; matches the 24h history
+# window fetched by the providers.
+CARBON_RECOMPUTE_WINDOW_HOURS = 24
+
+
+async def _recompute_combined_metrics(carbon_intensity_repository) -> None:
+    """
+    Recompute combined metrics against the refreshed carbon intensities.
+
+    Providers such as Wattnet publish provisional intensity values that are
+    consolidated (made final) a few hours later. This recomputes **all**
+    combined metrics in the last ``CARBON_RECOMPUTE_WINDOW_HOURS`` — not only
+    those without an intensity — so rows calculated from provisional data are
+    corrected in place.
+    """
+    try:
+        combined_repo = get_combined_metrics_repository()
+        now = datetime.now(timezone.utc)
+        updated = await combined_repo.recompute_carbon_with_latest_intensities(
+            carbon_intensity_repository,
+            now - timedelta(hours=CARBON_RECOMPUTE_WINDOW_HOURS),
+            now,
+        )
+        logger.info("Recomputed %d combined metrics with consolidated intensities.", updated)
+    except Exception as e:
+        logger.error("Failed to recompute combined metrics with latest intensities: %s", e)
 
 
 async def analyze_nodes() -> None:

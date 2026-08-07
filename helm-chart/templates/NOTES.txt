@@ -25,5 +25,6 @@ Welcome to
 
 * No Electricity Maps token? GreenKube uses default intensity ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
    For accurate data, set: secrets.electricityMapsToken
+   Or switch the provider to Wattnet (EU-only, free): config.electricityProvider=wattnet + secrets.wattnetEmail/wattnetPassword
 
 * https://github.com/GreenKubeCloud/GreenKube

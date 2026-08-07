@@ -68,6 +68,20 @@ tests:
           path: data.NORMALIZATION_GRANULARITY
           value: "hour"
 
+  - it: should set ELECTRICITY_PROVIDER to electricity_maps by default
+    asserts:
+      - equal:
+          path: data.ELECTRICITY_PROVIDER
+          value: "electricity_maps"
+
+  - it: should set ELECTRICITY_PROVIDER to wattnet when configured
+    set:
+      config.electricityProvider: wattnet
+    asserts:
+      - equal:
+          path: data.ELECTRICITY_PROVIDER
+          value: "wattnet"
+
   # --------------------------------------------------------------------------
   # Prometheus config
   # --------------------------------------------------------------------------

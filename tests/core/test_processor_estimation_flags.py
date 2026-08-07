@@ -67,7 +67,7 @@ def processor(mock_components):
         opencost_collector=mock_components["opencost"],
         node_collector=mock_components["node"],
         pod_collector=mock_components["pod"],
-        electricity_maps_collector=mock_components["emaps"],
+        electricity_provider=mock_components["emaps"],
         repository=mock_components["repo"],
         combined_metrics_repository=AsyncMock(),
         node_repository=mock_components["node_repo"],

@@ -109,7 +109,7 @@ def _make_processor(
         opencost_collector=mock_opencost,
         node_collector=mock_node,
         pod_collector=mock_pod,
-        electricity_maps_collector=mock_emaps,
+        electricity_provider=mock_emaps,
         boavizta_collector=mock_boavizta,
         repository=mock_repository,
         combined_metrics_repository=mock_combined_repo,

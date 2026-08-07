@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Carbon intensity consolidation refresh:** After each hourly intensity collection, all combined metrics in the last 24 hours are recomputed against the refreshed history (`CombinedMetricsRepository.recompute_carbon_with_latest_intensities`, with a single bulk `UPDATE` on PostgreSQL). Provisional provider values (e.g. Wattnet data younger than ~4h, `valid=false`) are corrected in place once consolidated — metrics that already had an intensity are updated too, not only those without one.
+- **Wattnet electricity provider:** Grid carbon intensity is now provider-agnostic via a new `BaseElectricityProvider` abstraction. A `WattnetCollector` fetches 15-minute carbon footprint data for 52 European zones from the EU-funded [Wattnet](https://wattnet.eu) API (Bearer token auth with automatic refresh). Select it with `ELECTRICITY_PROVIDER=wattnet` plus `WATTNET_EMAIL`/`WATTNET_PASSWORD` (Helm: `config.electricityProvider`, `secrets.wattnetEmail`, `secrets.wattnetPassword`). Zones outside Europe gracefully fall back to the default intensity map. See [docs/wattnet.md](docs/wattnet.md) for full details and the water-footprint roadmap.
+- **Wattnet health check & runtime config:** `wattnet` service in `GET /api/v1/health/services`; Wattnet credentials can be updated at runtime from the Settings page and are persisted to the Kubernetes Secret (`wattnet_email`/`wattnet_password` in `POST /api/v1/config/services`).
+- **Frontend:** Settings page and health popup now expose Wattnet credential fields.
+
 ## [0.2.12] — 2026-06-26
 
 ### Added

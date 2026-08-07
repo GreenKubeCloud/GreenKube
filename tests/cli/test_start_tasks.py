@@ -26,17 +26,30 @@ async def test_collect_carbon_intensity_for_all_zones_saves_mapped_zones():
     em_collector.collect = AsyncMock(return_value=[{"datetime": "2026-04-30T12:00:00Z", "carbonIntensity": 50}])
     em_collector.close = AsyncMock()
 
+    combined_repo = MagicMock()
+    combined_repo.recompute_carbon_with_latest_intensities = AsyncMock(return_value=3)
+
     with patch("greenkube.cli.start.get_repository", return_value=repository):
-        with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
-                with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
-                    await start_module.collect_carbon_intensity_for_all_zones()
+        with patch("greenkube.cli.start.get_combined_metrics_repository", return_value=combined_repo):
+            with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
+                with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
+                    with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
+                        await start_module.collect_carbon_intensity_for_all_zones()
 
     repository.save_history.assert_awaited_once()
     assert repository.save_history.await_args is not None
     assert repository.save_history.await_args.kwargs == {"zone": "FR"}
     node_collector.close.assert_awaited_once()
     em_collector.close.assert_awaited_once()
+
+    # After saving the refreshed history, combined metrics are recomputed over
+    # a ~24h window so provisional intensities are replaced by consolidated ones.
+    combined_repo.recompute_carbon_with_latest_intensities.assert_awaited_once()
+    rec_args = combined_repo.recompute_carbon_with_latest_intensities.await_args
+    assert rec_args is not None
+    assert rec_args.args[0] is repository
+    window_hours = (rec_args.args[2] - rec_args.args[1]).total_seconds() / 3600
+    assert 23.9 < window_hours <= 24
 
 
 @pytest.mark.asyncio
@@ -53,10 +66,14 @@ async def test_collect_carbon_intensity_for_all_zones_handles_no_nodes():
     em_collector = MagicMock()
     em_collector.close = AsyncMock()
 
+    combined_repo = MagicMock()
+    combined_repo.recompute_carbon_with_latest_intensities = AsyncMock(return_value=0)
+
     with patch("greenkube.cli.start.get_repository", return_value=MagicMock()):
-        with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
-                await start_module.collect_carbon_intensity_for_all_zones()
+        with patch("greenkube.cli.start.get_combined_metrics_repository", return_value=combined_repo):
+            with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
+                with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
+                    await start_module.collect_carbon_intensity_for_all_zones()
 
     node_collector.close.assert_awaited_once()
     em_collector.close.assert_awaited_once()
@@ -74,13 +91,19 @@ async def test_collect_carbon_intensity_for_all_zones_handles_unmapped_zones():
     em_collector = MagicMock()
     em_collector.close = AsyncMock()
 
+    combined_repo = MagicMock()
+    combined_repo.recompute_carbon_with_latest_intensities = AsyncMock(return_value=0)
+
     with patch("greenkube.cli.start.get_repository", return_value=repository):
-        with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
-                with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="unknown"):
-                    await start_module.collect_carbon_intensity_for_all_zones()
+        with patch("greenkube.cli.start.get_combined_metrics_repository", return_value=combined_repo):
+            with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
+                with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
+                    with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="unknown"):
+                        await start_module.collect_carbon_intensity_for_all_zones()
 
     repository.save_history.assert_not_awaited()
+    # No mappable zones -> task returns early, recompute is not invoked.
+    combined_repo.recompute_carbon_with_latest_intensities.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -96,11 +119,15 @@ async def test_collect_carbon_intensity_for_all_zones_keeps_going_when_zone_fail
     em_collector.collect = AsyncMock(return_value=[{"datetime": "2026-04-30T12:00:00Z", "carbonIntensity": 50}])
     em_collector.close = AsyncMock()
 
+    combined_repo = MagicMock()
+    combined_repo.recompute_carbon_with_latest_intensities = AsyncMock(return_value=0)
+
     with patch("greenkube.cli.start.get_repository", return_value=repository):
-        with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
-                with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
-                    await start_module.collect_carbon_intensity_for_all_zones()
+        with patch("greenkube.cli.start.get_combined_metrics_repository", return_value=combined_repo):
+            with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
+                with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
+                    with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
+                        await start_module.collect_carbon_intensity_for_all_zones()
 
     repository.save_history.assert_awaited_once()
     node_collector.close.assert_awaited_once()

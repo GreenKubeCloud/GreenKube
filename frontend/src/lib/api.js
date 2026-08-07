@@ -60,6 +60,8 @@ export function getServiceHealth(serviceName, force = false) {
  * @param {string} [config.opencost_url]
  * @param {string} [config.electricity_maps_token]
  * @param {string} [config.boavizta_url]
+ * @param {string} [config.wattnet_email]
+ * @param {string} [config.wattnet_password]
  * @returns {Promise<Object>}
  */
 export async function updateServiceConfig(config) {
