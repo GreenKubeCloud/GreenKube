@@ -185,6 +185,16 @@ async def check_electricity_maps(cfg: Config) -> ServiceHealth:
     """Check Electricity Maps API token and connectivity."""
     name = "electricity_maps"
 
+    if getattr(cfg, "ELECTRICITY_PROVIDER", "electricity_maps") != "electricity_maps":
+        return ServiceHealth(
+            name=name,
+            status=ServiceStatus.UNCONFIGURED,
+            url="https://api.electricitymaps.com/v3",
+            message="Electricity Maps is not the active electricity provider (ELECTRICITY_PROVIDER).",
+            last_check=datetime.now(timezone.utc),
+            inactive=True,
+        )
+
     if not cfg.ELECTRICITY_MAPS_TOKEN:
         return ServiceHealth(
             name=name,
@@ -258,6 +268,7 @@ async def check_wattnet(cfg: Config) -> ServiceHealth:
             url=api_url,
             message="Wattnet is not the active electricity provider (ELECTRICITY_PROVIDER).",
             last_check=datetime.now(timezone.utc),
+            inactive=True,
         )
 
     if not cfg.WATTNET_EMAIL or not cfg.WATTNET_PASSWORD:
@@ -470,8 +481,8 @@ async def run_health_checks(force: bool = False) -> HealthCheckResponse:
         if isinstance(result, ServiceHealth):
             services[result.name] = result
 
-    # Determine overall status
-    statuses = [s.status for s in services.values()]
+    # Determine overall status — inactive (non-selected) providers are excluded.
+    statuses = [s.status for s in services.values() if not s.inactive]
     if all(s == ServiceStatus.HEALTHY for s in statuses):
         overall = "ok"
     elif any(s == ServiceStatus.UNREACHABLE for s in statuses):

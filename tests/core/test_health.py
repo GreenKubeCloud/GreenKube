@@ -279,6 +279,20 @@ class TestCheckElectricityMaps:
     """Tests for the Electricity Maps health check."""
 
     @pytest.mark.asyncio
+    async def test_inactive_provider_reported_as_inactive(self, monkeypatch):
+        """When ELECTRICITY_PROVIDER is wattnet, EM check is inactive."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "wattnet")
+        monkeypatch.setenv("ELECTRICITY_MAPS_TOKEN", "token")
+        config.reload()
+
+        result = await check_electricity_maps(config)
+        assert result.status == ServiceStatus.UNCONFIGURED
+        assert result.inactive is True
+        assert "not the active" in result.message.lower()
+
+    @pytest.mark.asyncio
     async def test_unconfigured_no_token(self, monkeypatch):
         """When token is not set, status is UNCONFIGURED."""
         from greenkube.core.config import config
@@ -397,6 +411,7 @@ class TestCheckWattnet:
 
         result = await check_wattnet(config)
         assert result.status == ServiceStatus.UNCONFIGURED
+        assert result.inactive is True
         assert "not the active" in result.message.lower()
 
     @pytest.mark.asyncio
@@ -411,6 +426,7 @@ class TestCheckWattnet:
 
         result = await check_wattnet(config)
         assert result.status == ServiceStatus.UNCONFIGURED
+        assert result.inactive is False
 
     @pytest.mark.asyncio
     async def test_healthy_with_valid_credentials(self, monkeypatch):
@@ -832,6 +848,37 @@ class TestRunHealthChecks:
             await run_health_checks(force=True)
             await run_health_checks(force=True)
             assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_inactive_providers_do_not_degrade_overall_status(self):
+        """Overall status stays 'ok' when only inactive providers are unconfigured."""
+        invalidate_health_cache()
+        healthy = ServiceHealth(
+            name="prometheus",
+            status=ServiceStatus.HEALTHY,
+            message="OK",
+            last_check=datetime.now(timezone.utc),
+        )
+        inactive = ServiceHealth(
+            name="electricity_maps",
+            status=ServiceStatus.UNCONFIGURED,
+            message="not the active provider",
+            last_check=datetime.now(timezone.utc),
+            inactive=True,
+        )
+
+        with (
+            patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, return_value=healthy),
+            patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, return_value=healthy),
+            patch("greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, return_value=inactive),
+            patch("greenkube.core.health.check_wattnet", new_callable=AsyncMock, return_value=healthy),
+            patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, return_value=healthy),
+            patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, return_value=healthy),
+        ):
+            result = await run_health_checks(force=True)
+
+        assert result.status == "ok"
+        assert "electricity_maps" in result.services
 
     @pytest.mark.asyncio
     async def test_runner_skips_exceptions_and_reports_ok_when_remaining_services_are_healthy(self):

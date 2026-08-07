@@ -19,7 +19,7 @@
 	let saveError = '';
 
 	$: issues = services ? Object.values(services).filter(
-		s => s.status === 'unreachable' || s.status === 'unconfigured'
+		s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
 	) : [];
 
 	$: hasIssues = issues.length > 0;

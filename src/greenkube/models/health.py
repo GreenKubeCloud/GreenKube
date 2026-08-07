@@ -30,6 +30,10 @@ class ServiceHealth(BaseModel):
     last_check: Optional[datetime] = Field(None, description="Timestamp of the last health check.")
     configured: bool = Field(False, description="Whether the service URL is explicitly configured.")
     discovered: bool = Field(False, description="Whether the service was discovered via K8s service discovery.")
+    inactive: bool = Field(
+        False,
+        description="Whether the service is present but not the selected provider (excluded from overall status).",
+    )
 
 
 class HealthCheckResponse(BaseModel):
