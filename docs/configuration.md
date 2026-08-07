@@ -24,6 +24,7 @@ image:
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
 | `config.defaultZone` | `""` | Electricity Maps zone code (e.g. `FR`, `DE`, `US-CAL-CISO`). Auto-discovered from node labels if empty. |
 | `config.defaultIntensity` | `500.0` | Fallback grid carbon intensity in gCO₂e/kWh when zone cannot be determined |
+| `config.electricityProvider` | `electricity_maps` | Grid intensity data provider: `electricity_maps` (default) or `wattnet` (EU-only, free — see [docs/wattnet.md](wattnet.md)) |
 | `config.normalizationGranularity` | `hour` | Carbon intensity lookup granularity (`hour`, `day`, `none`) |
 | `config.nodeAnalysisInterval` | `5m` | Interval for analysing node state |
 | `config.nodeDataMaxAgeDays` | `30` | Maximum age for historical node snapshots |
@@ -68,6 +69,8 @@ config:
 | Key | Description |
 |-----|-------------|
 | `secrets.electricityMapsToken` | Electricity Maps API token for real-time grid intensity. Without it, the default intensity is used. Get a free token at [electricitymaps.com](https://www.electricitymaps.com/) |
+| `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
+| `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
 | `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml` |
 
 ### Monitoring (`monitoring`)
