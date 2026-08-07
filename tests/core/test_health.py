@@ -15,6 +15,7 @@ from greenkube.core.health import (
     check_kubernetes,
     check_opencost,
     check_prometheus,
+    check_wattnet,
     invalidate_health_cache,
     run_health_checks,
 )
@@ -381,6 +382,110 @@ class TestCheckElectricityMaps:
         assert result.status == ServiceStatus.UNREACHABLE
 
 
+class TestCheckWattnet:
+    """Tests for the Wattnet health check."""
+
+    @pytest.mark.asyncio
+    async def test_inactive_provider_unconfigured(self, monkeypatch):
+        """When ELECTRICITY_PROVIDER is not wattnet, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "electricity_maps")
+        monkeypatch.setenv("WATTNET_EMAIL", "user@example.com")
+        monkeypatch.setenv("WATTNET_PASSWORD", "pass")
+        config.reload()
+
+        result = await check_wattnet(config)
+        assert result.status == ServiceStatus.UNCONFIGURED
+        assert "not the active" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_unconfigured(self, monkeypatch):
+        """When Wattnet credentials are missing, status is UNCONFIGURED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "wattnet")
+        monkeypatch.setenv("WATTNET_EMAIL", "")
+        monkeypatch.setenv("WATTNET_PASSWORD", "")
+        config.reload()
+
+        result = await check_wattnet(config)
+        assert result.status == ServiceStatus.UNCONFIGURED
+
+    @pytest.mark.asyncio
+    async def test_healthy_with_valid_credentials(self, monkeypatch):
+        """When token and API calls succeed, status is HEALTHY."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "wattnet")
+        monkeypatch.setenv("WATTNET_EMAIL", "user@example.com")
+        monkeypatch.setenv("WATTNET_PASSWORD", "pass")
+        config.reload()
+
+        token_response = MagicMock()
+        token_response.status_code = 200
+        token_response.json = MagicMock(return_value={"access_token": "tok"})
+
+        zones_response = MagicMock()
+        zones_response.status_code = 200
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=token_response)
+        mock_client.get = AsyncMock(return_value=zones_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_wattnet(config)
+
+        assert result.status == ServiceStatus.HEALTHY
+        assert mock_client.post.call_args[0][0].endswith("/token-request/get_token")
+        assert mock_client.get.call_args[0][0].endswith("/v1/zones")
+
+    @pytest.mark.asyncio
+    async def test_bad_credentials_degraded(self, monkeypatch):
+        """When the token service rejects the credentials, status is DEGRADED."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "wattnet")
+        monkeypatch.setenv("WATTNET_EMAIL", "user@example.com")
+        monkeypatch.setenv("WATTNET_PASSWORD", "wrong")
+        config.reload()
+
+        token_response = MagicMock()
+        token_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=token_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_wattnet(config)
+
+        assert result.status == ServiceStatus.DEGRADED
+
+    @pytest.mark.asyncio
+    async def test_unreachable(self, monkeypatch):
+        """When the API is unreachable, status is UNREACHABLE."""
+        from greenkube.core.config import config
+
+        monkeypatch.setenv("ELECTRICITY_PROVIDER", "wattnet")
+        monkeypatch.setenv("WATTNET_EMAIL", "user@example.com")
+        monkeypatch.setenv("WATTNET_PASSWORD", "pass")
+        config.reload()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("greenkube.core.health.get_async_http_client", return_value=mock_client):
+            result = await check_wattnet(config)
+
+        assert result.status == ServiceStatus.UNREACHABLE
+
+
 class TestCheckBoavizta:
     """Tests for the Boavizta health check."""
 
@@ -559,6 +664,11 @@ class TestRunHealthChecks:
             patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, return_value=prom_health),
             patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, return_value=oc_health),
             patch("greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, return_value=emaps_health),
+            patch(
+                "greenkube.core.health.check_wattnet",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(name="wattnet", status=ServiceStatus.UNCONFIGURED),
+            ),
             patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, return_value=boavizta_health),
             patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, return_value=k8s_health),
         ):
@@ -608,6 +718,16 @@ class TestRunHealthChecks:
                 new_callable=AsyncMock,
                 return_value=ServiceHealth(
                     name="electricity_maps",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
+                "greenkube.core.health.check_wattnet",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="wattnet",
                     status=ServiceStatus.UNCONFIGURED,
                     message="",
                     last_check=datetime.now(timezone.utc),
@@ -679,6 +799,16 @@ class TestRunHealthChecks:
                 ),
             ),
             patch(
+                "greenkube.core.health.check_wattnet",
+                new_callable=AsyncMock,
+                return_value=ServiceHealth(
+                    name="wattnet",
+                    status=ServiceStatus.UNCONFIGURED,
+                    message="",
+                    last_check=datetime.now(timezone.utc),
+                ),
+            ),
+            patch(
                 "greenkube.core.health.check_boavizta",
                 new_callable=AsyncMock,
                 return_value=ServiceHealth(
@@ -717,6 +847,7 @@ class TestRunHealthChecks:
             patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, return_value=healthy),
             patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
             patch("greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, return_value=healthy),
+            patch("greenkube.core.health.check_wattnet", new_callable=AsyncMock, return_value=healthy),
             patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, return_value=healthy),
             patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, return_value=healthy),
         ):
@@ -739,6 +870,7 @@ class TestRunHealthChecks:
             patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, return_value=service),
             patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, return_value=service),
             patch("greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, return_value=service),
+            patch("greenkube.core.health.check_wattnet", new_callable=AsyncMock, return_value=service),
             patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, return_value=service),
             patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, return_value=service),
         ):

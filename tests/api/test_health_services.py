@@ -205,6 +205,27 @@ class TestUpdateServiceConfig:
 
         assert response.status_code == 200
 
+    def test_update_wattnet_credentials(self, client, monkeypatch):
+        """Should update WATTNET_EMAIL/WATTNET_PASSWORD and persist to the K8s secret."""
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock) as patch_secret,
+        ):
+            response = client.post(
+                "/api/v1/config/services",
+                json={"wattnet_email": "user@example.com", "wattnet_password": "watt-secret"},
+            )
+
+        assert response.status_code == 200
+        patch_secret.assert_awaited_once()
+        k8s_updates = patch_secret.await_args.args[0]
+        assert k8s_updates["WATTNET_EMAIL"] == "user@example.com"
+        assert k8s_updates["WATTNET_PASSWORD"] == "watt-secret"
+
     def test_update_multiple_fields(self, client, monkeypatch):
         """Should accept multiple fields in a single request."""
         with (

@@ -47,3 +47,5 @@ class ServiceConfigUpdate(BaseModel):
     opencost_url: Optional[str] = Field(None, description="OpenCost API URL to set.")
     electricity_maps_token: Optional[str] = Field(None, description="Electricity Maps API token to set.")
     boavizta_url: Optional[str] = Field(None, description="Boavizta API URL to set.")
+    wattnet_email: Optional[str] = Field(None, description="Wattnet account email to set.")
+    wattnet_password: Optional[str] = Field(None, description="Wattnet account password to set.")

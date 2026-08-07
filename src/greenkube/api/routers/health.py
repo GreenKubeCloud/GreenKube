@@ -84,6 +84,16 @@ async def update_service_config(update: ServiceConfigUpdate):
         logger.info("Boavizta URL updated to: %s", update.boavizta_url)
         changed = True
 
+    if update.wattnet_email is not None:
+        os.environ["WATTNET_EMAIL"] = update.wattnet_email
+        logger.info("Wattnet email updated.")
+        changed = True
+
+    if update.wattnet_password is not None:
+        os.environ["WATTNET_PASSWORD"] = update.wattnet_password
+        logger.info("Wattnet password updated.")
+        changed = True
+
     if changed:
         cfg.reload()
         invalidate_health_cache()
@@ -101,5 +111,9 @@ async def update_service_config(update: ServiceConfigUpdate):
             k8s_updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
         if update.boavizta_url is not None:
             k8s_updates["BOAVIZTA_API_URL"] = update.boavizta_url
+        if update.wattnet_email is not None:
+            k8s_updates["WATTNET_EMAIL"] = update.wattnet_email
+        if update.wattnet_password is not None:
+            k8s_updates["WATTNET_PASSWORD"] = update.wattnet_password
         await patch_k8s_secret(k8s_updates)
     return await run_health_checks(force=True)

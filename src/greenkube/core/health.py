@@ -245,6 +245,103 @@ async def check_electricity_maps(cfg: Config) -> ServiceHealth:
         )
 
 
+async def check_wattnet(cfg: Config) -> ServiceHealth:
+    """Check Wattnet API connectivity and credentials."""
+    name = "wattnet"
+    api_url = getattr(cfg, "WATTNET_API_BASE_URL", "https://api.wattnet.eu/v1").rstrip("/")
+    token_url = getattr(cfg, "WATTNET_TOKEN_SERVICE_URL", "https://api.wattnet.eu/token-request").rstrip("/")
+
+    if cfg.ELECTRICITY_PROVIDER != "wattnet":
+        return ServiceHealth(
+            name=name,
+            status=ServiceStatus.UNCONFIGURED,
+            url=api_url,
+            message="Wattnet is not the active electricity provider (ELECTRICITY_PROVIDER).",
+            last_check=datetime.now(timezone.utc),
+        )
+
+    if not cfg.WATTNET_EMAIL or not cfg.WATTNET_PASSWORD:
+        return ServiceHealth(
+            name=name,
+            status=ServiceStatus.UNCONFIGURED,
+            url=api_url,
+            message="Wattnet email/password are not set. Using static fallback data.",
+            last_check=datetime.now(timezone.utc),
+        )
+
+    start = time.monotonic()
+    try:
+        async with get_async_http_client() as client:
+            # 1. Obtain a token with the configured credentials.
+            token_resp = await client.post(
+                f"{token_url}/get_token",
+                json={"email": cfg.WATTNET_EMAIL, "password": cfg.WATTNET_PASSWORD},
+                timeout=5.0,
+            )
+            if token_resp.status_code != 200:
+                return ServiceHealth(
+                    name=name,
+                    status=ServiceStatus.DEGRADED,
+                    url=api_url,
+                    message=(
+                        f"Wattnet token service returned status {token_resp.status_code} — credentials may be invalid."
+                    ),
+                    latency_ms=round((time.monotonic() - start) * 1000, 1),
+                    last_check=datetime.now(timezone.utc),
+                    configured=True,
+                )
+            token = token_resp.json().get("access_token")
+
+            # 2. Probe a lightweight authenticated endpoint.
+            resp = await client.get(
+                f"{api_url}/zones",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=5.0,
+            )
+            latency = (time.monotonic() - start) * 1000
+
+            if resp.status_code == 200:
+                return ServiceHealth(
+                    name=name,
+                    status=ServiceStatus.HEALTHY,
+                    url=api_url,
+                    message="Wattnet API is reachable with valid credentials.",
+                    latency_ms=round(latency, 1),
+                    last_check=datetime.now(timezone.utc),
+                    configured=True,
+                )
+            if resp.status_code in (401, 403):
+                return ServiceHealth(
+                    name=name,
+                    status=ServiceStatus.DEGRADED,
+                    url=api_url,
+                    message="Wattnet API returned 401/403 — token may be invalid.",
+                    latency_ms=round(latency, 1),
+                    last_check=datetime.now(timezone.utc),
+                    configured=True,
+                )
+            return ServiceHealth(
+                name=name,
+                status=ServiceStatus.DEGRADED,
+                url=api_url,
+                message=f"Wattnet API returned status {resp.status_code}.",
+                latency_ms=round(latency, 1),
+                last_check=datetime.now(timezone.utc),
+                configured=True,
+            )
+    except Exception as exc:
+        latency = (time.monotonic() - start) * 1000
+        return ServiceHealth(
+            name=name,
+            status=ServiceStatus.UNREACHABLE,
+            url=api_url,
+            message=f"Cannot reach Wattnet API: {exc}",
+            latency_ms=round(latency, 1),
+            last_check=datetime.now(timezone.utc),
+            configured=True,
+        )
+
+
 async def check_boavizta(cfg: Config) -> ServiceHealth:
     """Check Boavizta API connectivity."""
     name = "boavizta"
@@ -359,6 +456,7 @@ async def run_health_checks(force: bool = False) -> HealthCheckResponse:
         check_prometheus(cfg),
         check_opencost(cfg),
         check_electricity_maps(cfg),
+        check_wattnet(cfg),
         check_boavizta(cfg),
         check_kubernetes(),
         return_exceptions=True,
