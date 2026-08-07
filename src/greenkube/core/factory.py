@@ -17,6 +17,7 @@ from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
+from ..collectors.wattnet_collector import WattnetCollector
 from ..core.calculator import CarbonCalculator
 from ..core.config import get_config
 from ..core.processor import DataProcessor
@@ -242,6 +243,26 @@ def get_timeseries_cache_repository() -> TimeseriesCacheRepository:
 
 
 @lru_cache(maxsize=1)
+def get_electricity_provider():
+    """
+    Factory function to get the electricity (grid carbon intensity) provider
+    based on config. Uses lru_cache to act as a singleton.
+
+    The provider is selected through the ``ELECTRICITY_PROVIDER`` config
+    variable: ``electricity_maps`` (default) or ``wattnet``.
+    """
+    cfg = get_config()
+    provider = cfg.ELECTRICITY_PROVIDER
+
+    if provider == "wattnet":
+        logger.info("Using Wattnet electricity provider.")
+        return WattnetCollector()
+
+    logger.info("Using Electricity Maps electricity provider.")
+    return ElectricityMapsCollector()
+
+
+@lru_cache(maxsize=1)
 def get_processor() -> DataProcessor:
     """
     Factory function to instantiate and return a fully configured DataProcessor.
@@ -261,7 +282,7 @@ def get_processor() -> DataProcessor:
         opencost_collector = OpenCostCollector()
         node_collector = NodeCollector()
         pod_collector = PodCollector()
-        electricity_maps_collector = ElectricityMapsCollector()
+        electricity_provider = get_electricity_provider()
         boavizta_collector = BoaviztaCollector()
 
         # 3. Instantiate Calculator and Estimator
@@ -274,7 +295,7 @@ def get_processor() -> DataProcessor:
             opencost_collector=opencost_collector,
             node_collector=node_collector,
             pod_collector=pod_collector,
-            electricity_maps_collector=electricity_maps_collector,
+            electricity_provider=electricity_provider,
             boavizta_collector=boavizta_collector,
             repository=repository,
             combined_metrics_repository=combined_metrics_repository,
@@ -307,4 +328,5 @@ def clear_caches():
     get_savings_ledger_repository.cache_clear()
     get_summary_repository.cache_clear()
     get_timeseries_cache_repository.cache_clear()
+    get_electricity_provider.cache_clear()
     get_processor.cache_clear()

@@ -79,7 +79,7 @@ async def test_run_range_uses_old_snapshot():
         opencost_collector=MagicMock(collect=AsyncMock()),
         node_collector=mock_node_collector,
         pod_collector=MagicMock(collect=AsyncMock()),
-        electricity_maps_collector=MagicMock(collect=AsyncMock()),
+        electricity_provider=MagicMock(collect=AsyncMock()),
         repository=mock_repo,
         combined_metrics_repository=MagicMock(read_combined_metrics=AsyncMock(return_value=[])),
         node_repository=mock_node_repo,

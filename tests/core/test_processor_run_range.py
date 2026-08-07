@@ -34,7 +34,7 @@ async def test_run_range_uses_repository():
         opencost_collector=AsyncMock(),
         node_collector=AsyncMock(),
         pod_collector=AsyncMock(),
-        electricity_maps_collector=AsyncMock(),
+        electricity_provider=AsyncMock(),
         repository=AsyncMock(),
         combined_metrics_repository=mock_repo,
         node_repository=AsyncMock(),

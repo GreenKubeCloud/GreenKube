@@ -16,10 +16,9 @@ from typing import Optional, Set
 import typer
 from typing_extensions import Annotated
 
-from ..collectors.electricity_maps_collector import ElectricityMapsCollector
 from ..collectors.node_collector import NodeCollector
 from ..core.config import get_config
-from ..core.factory import get_node_repository, get_repository
+from ..core.factory import get_electricity_provider, get_node_repository, get_repository
 from ..core.scheduler import Scheduler
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from .utils import write_combined_metrics_to_database
@@ -42,7 +41,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
     try:
         repository = get_repository()
         node_collector = NodeCollector()
-        em_collector = ElectricityMapsCollector()
+        em_collector = get_electricity_provider()
     except Exception as e:
         logger.error("Failed to initialize components for intensity collection: %s", e)
         return
@@ -86,7 +85,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         async def process_zone(zone):
             import structlog as _structlog
 
-            _structlog.contextvars.bind_contextvars(collector="electricity_maps", zone=zone)
+            _structlog.contextvars.bind_contextvars(collector=get_config().ELECTRICITY_PROVIDER, zone=zone)
             try:
                 history_data = await em_collector.collect(zone=zone)
                 if history_data:

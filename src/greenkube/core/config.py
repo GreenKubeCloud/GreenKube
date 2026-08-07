@@ -99,6 +99,14 @@ class Config(BaseSettings):
     PROMETHEUS_BEARER_TOKEN: Optional[str] = None
     PROMETHEUS_USERNAME: Optional[str] = None
     PROMETHEUS_PASSWORD: Optional[str] = None
+    WATTNET_EMAIL: Optional[str] = None
+    WATTNET_PASSWORD: Optional[str] = None
+
+    # --- Electricity data provider ---
+    # Which data source provides grid carbon intensity: 'electricity_maps' or 'wattnet'.
+    ELECTRICITY_PROVIDER: str = "electricity_maps"
+    WATTNET_API_BASE_URL: str = "https://api.wattnet.eu/v1"
+    WATTNET_TOKEN_SERVICE_URL: str = "https://api.wattnet.eu/token-request"
 
     # --- Cluster identification ---
     CLUSTER_NAME: str = ""
@@ -235,6 +243,14 @@ class Config(BaseSettings):
             raise ValueError("NORMALIZATION_GRANULARITY must be one of 'hour', 'day' or 'none'.")
         return v
 
+    @field_validator("ELECTRICITY_PROVIDER", mode="after")
+    @classmethod
+    def _validate_electricity_provider(cls, v: str) -> str:
+        v = v.lower()
+        if v not in ("electricity_maps", "wattnet"):
+            raise ValueError("ELECTRICITY_PROVIDER must be 'electricity_maps' or 'wattnet'.")
+        return v
+
     @field_validator("DB_TYPE", mode="after")
     @classmethod
     def _validate_db_type(cls, v: str) -> str:
@@ -294,6 +310,12 @@ class Config(BaseSettings):
             logging.warning(
                 "⚠️  ELECTRICITY_MAPS_TOKEN is not set. CO2 figures will use static fallback data "
                 "which may be inaccurate. Get a free token at https://www.electricitymaps.com/"
+            )
+
+        if self.ELECTRICITY_PROVIDER == "wattnet" and (not self.WATTNET_EMAIL or not self.WATTNET_PASSWORD):
+            logging.warning(
+                "⚠️  ELECTRICITY_PROVIDER is set to 'wattnet' but WATTNET_EMAIL/WATTNET_PASSWORD are not set. "
+                "CO2 figures will use static fallback data. Register at https://wattnet.eu to get credentials."
             )
 
         return self

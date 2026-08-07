@@ -28,7 +28,7 @@ async def test_collect_carbon_intensity_for_all_zones_saves_mapped_zones():
 
     with patch("greenkube.cli.start.get_repository", return_value=repository):
         with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
+            with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
                 with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
                     await start_module.collect_carbon_intensity_for_all_zones()
 
@@ -55,7 +55,7 @@ async def test_collect_carbon_intensity_for_all_zones_handles_no_nodes():
 
     with patch("greenkube.cli.start.get_repository", return_value=MagicMock()):
         with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
+            with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
                 await start_module.collect_carbon_intensity_for_all_zones()
 
     node_collector.close.assert_awaited_once()
@@ -76,7 +76,7 @@ async def test_collect_carbon_intensity_for_all_zones_handles_unmapped_zones():
 
     with patch("greenkube.cli.start.get_repository", return_value=repository):
         with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
+            with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
                 with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="unknown"):
                     await start_module.collect_carbon_intensity_for_all_zones()
 
@@ -98,7 +98,7 @@ async def test_collect_carbon_intensity_for_all_zones_keeps_going_when_zone_fail
 
     with patch("greenkube.cli.start.get_repository", return_value=repository):
         with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-            with patch("greenkube.cli.start.ElectricityMapsCollector", return_value=em_collector):
+            with patch("greenkube.cli.start.get_electricity_provider", return_value=em_collector):
                 with patch("greenkube.cli.start.get_emaps_zone_from_cloud_zone", return_value="FR"):
                     await start_module.collect_carbon_intensity_for_all_zones()
 

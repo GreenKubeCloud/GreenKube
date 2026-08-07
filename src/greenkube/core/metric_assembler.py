@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from .. import __version__
-from ..collectors.electricity_maps_collector import ElectricityMapsCollector
+from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..core.calculator import CarbonCalculator
 from ..core.config import Config, get_config
 from ..core.cost_normalizer import CostNormalizer
@@ -37,7 +37,7 @@ class MetricAssembler:
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
         repository: CarbonIntensityRepository,
-        electricity_maps_collector: ElectricityMapsCollector,
+        electricity_provider: BaseElectricityProvider,
         zone_mapper: NodeZoneMapper,
         embodied_service: EmbodiedEmissionsService,
         config: Config | None = None,
@@ -45,7 +45,7 @@ class MetricAssembler:
         self.calculator = calculator
         self.estimator = estimator
         self.repository = repository
-        self.electricity_maps_collector = electricity_maps_collector
+        self.electricity_provider = electricity_provider
         self.zone_mapper = zone_mapper
         self.embodied_service = embodied_service
         self._config = config if config is not None else get_config()
@@ -94,9 +94,7 @@ class MetricAssembler:
                         zone,
                         rep_normalized_plus,
                     )
-                    history = await self.electricity_maps_collector.collect(
-                        zone=zone, target_datetime=rep_normalized_dt
-                    )
+                    history = await self.electricity_provider.collect(zone=zone, target_datetime=rep_normalized_dt)
                     if history:
                         await self.repository.save_history(history, zone)
                     intensity = await self.repository.get_for_zone_at_time(zone, rep_normalized_plus)

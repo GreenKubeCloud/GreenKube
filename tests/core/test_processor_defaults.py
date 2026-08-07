@@ -45,7 +45,7 @@ async def test_pue_and_zone_fallback():
         opencost_collector=MagicMock(),
         node_collector=mock_node_collector,
         pod_collector=MagicMock(),
-        electricity_maps_collector=MagicMock(),
+        electricity_provider=MagicMock(),
         repository=mock_repo,
         combined_metrics_repository=MagicMock(),
         node_repository=mock_node_repo,

@@ -197,7 +197,7 @@ class TestFactoryProcessor:
         monkeypatch.setattr(factory, "OpenCostCollector", lambda: "opencost")
         monkeypatch.setattr(factory, "NodeCollector", lambda: "node")
         monkeypatch.setattr(factory, "PodCollector", lambda: "pod")
-        monkeypatch.setattr(factory, "ElectricityMapsCollector", lambda: "electricity")
+        monkeypatch.setattr(factory, "get_electricity_provider", _cached_stub("electricity"))
         monkeypatch.setattr(factory, "BoaviztaCollector", lambda: "boavizta")
         monkeypatch.setattr(factory, "CarbonCalculator", lambda repository, config: "calculator")
         monkeypatch.setattr(factory, "BasicEstimator", lambda cfg: "estimator")
