@@ -5,6 +5,7 @@ from .node_collector import NodeCollector
 from .opencost_collector import OpenCostCollector
 from .pod_collector import PodCollector
 from .prometheus_collector import PrometheusCollector
+from .wattnet_collector import WattnetCollector
 
 __all__ = [
     "BaseCollector",
@@ -14,4 +15,5 @@ __all__ = [
     "OpenCostCollector",
     "PodCollector",
     "PrometheusCollector",
+    "WattnetCollector",
 ]
