@@ -222,6 +222,7 @@ class TestUpdateServiceConfig:
 
         assert response.status_code == 200
         patch_secret.assert_awaited_once()
+        assert patch_secret.await_args is not None
         k8s_updates = patch_secret.await_args.args[0]
         assert k8s_updates["WATTNET_EMAIL"] == "user@example.com"
         assert k8s_updates["WATTNET_PASSWORD"] == "watt-secret"

@@ -46,6 +46,7 @@ async def test_collect_carbon_intensity_for_all_zones_saves_mapped_zones():
     # a ~24h window so provisional intensities are replaced by consolidated ones.
     combined_repo.recompute_carbon_with_latest_intensities.assert_awaited_once()
     rec_args = combined_repo.recompute_carbon_with_latest_intensities.await_args
+    assert rec_args is not None
     assert rec_args.args[0] is repository
     window_hours = (rec_args.args[2] - rec_args.args[1]).total_seconds() / 3600
     assert 23.9 < window_hours <= 24

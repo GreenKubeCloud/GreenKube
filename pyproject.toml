@@ -175,3 +175,5 @@ project-includes = [
     "**/*.py*",
     "**/*.ipynb",
 ]
+# scripts/leads is a local, gitignored commercial tool — not part of the project.
+project-excludes = ["scripts/leads/**"]
