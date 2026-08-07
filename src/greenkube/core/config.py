@@ -306,13 +306,12 @@ class Config(BaseSettings):
         if self.DB_TYPE == "postgres" and not self.DB_CONNECTION_STRING:
             raise ValueError("DB_CONNECTION_STRING must be set for postgres database")
 
-        if not self.ELECTRICITY_MAPS_TOKEN:
+        if self.ELECTRICITY_PROVIDER == "electricity_maps" and not self.ELECTRICITY_MAPS_TOKEN:
             logging.warning(
                 "⚠️  ELECTRICITY_MAPS_TOKEN is not set. CO2 figures will use static fallback data "
                 "which may be inaccurate. Get a free token at https://www.electricitymaps.com/"
             )
-
-        if self.ELECTRICITY_PROVIDER == "wattnet" and (not self.WATTNET_EMAIL or not self.WATTNET_PASSWORD):
+        elif self.ELECTRICITY_PROVIDER == "wattnet" and (not self.WATTNET_EMAIL or not self.WATTNET_PASSWORD):
             logging.warning(
                 "⚠️  ELECTRICITY_PROVIDER is set to 'wattnet' but WATTNET_EMAIL/WATTNET_PASSWORD are not set. "
                 "CO2 figures will use static fallback data. Register at https://wattnet.eu to get credentials."
