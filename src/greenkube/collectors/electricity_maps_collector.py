@@ -6,14 +6,14 @@ import httpx
 from ..core.config import config
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from ..utils.http_client import get_async_http_client
-from .base_collector import BaseCollector
+from .base_electricity_provider import BaseElectricityProvider
 
 logger = logging.getLogger(__name__)
 
 API_BASE_URL = "https://api.electricitymaps.com/v3"
 
 
-class ElectricityMapsCollector(BaseCollector):
+class ElectricityMapsCollector(BaseElectricityProvider):
     """
     A collector to retrieve carbon intensity data from the Electricity Maps API.
     It no longer handles saving to the database.
