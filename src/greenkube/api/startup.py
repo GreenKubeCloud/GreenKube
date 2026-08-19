@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
 from greenkube.api.routers.recommendations import _get_active_k8s_namespaces
 from greenkube.collectors.hpa_collector import HPACollector
+from greenkube.collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
 from greenkube.collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
 from greenkube.core.config import get_config
 from greenkube.core.factory import (
@@ -89,12 +90,28 @@ async def run_startup_recommendation_scan() -> None:
             except Exception as exc:
                 logger.warning("Startup scan: could not enrich orphaned PV costs from OpenCost: %s", exc)
 
+        orphaned_load_balancers = None
+        try:
+            lb_collector = LoadBalancerCollector()
+            orphaned_load_balancers = await lb_collector.collect()
+        except Exception as exc:
+            logger.warning("Startup scan: could not collect orphaned LoadBalancer Services: %s", exc)
+
+        if orphaned_load_balancers:
+            try:
+                orphaned_load_balancers = await enrich_orphaned_lb_costs(
+                    orphaned_load_balancers, window_days=lookback_days
+                )
+            except Exception as exc:
+                logger.warning("Startup scan: could not enrich orphaned LoadBalancer costs from OpenCost: %s", exc)
+
         recommender = Recommender()
         recommendations = recommender.generate_recommendations(
             metrics,
             node_infos=node_infos,
             hpa_targets=hpa_targets,
             persistent_volumes=orphaned_volumes,
+            load_balancers=orphaned_load_balancers,
             analysis_window_seconds=analysis_window_seconds,
         )
 

@@ -1,7 +1,7 @@
 # tests/core/test_recommender_v2.py
 """
 Comprehensive tests for the enhanced recommendation engine.
-Tests cover all 10 recommendation types using TDD methodology.
+Tests cover all 11 recommendation types using TDD methodology.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -1357,3 +1357,115 @@ class TestOrphanedPersistentVolume:
         recs = self._pv_recs(recommender, [mock_pv])
         assert len(recs) == 1
         assert recs[0].pod_name == "pvc-mocked"
+
+
+# ---------------------------------------------------------------------------
+# Test: ORPHANED_LOAD_BALANCER
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedLoadBalancer:
+    """Tests for orphaned LoadBalancer detection."""
+
+    def _lb_recs(self, recommender, load_balancers):
+        metrics = [_make_metric(pod_name="unrelated-pod")]
+        return [
+            r
+            for r in recommender.generate_recommendations(metrics, load_balancers=load_balancers)
+            if r.type == RecommendationType.ORPHANED_LOAD_BALANCER
+        ]
+
+    def test_detects_orphaned_load_balancer(self, recommender):
+        """A LoadBalancer Service with no endpoints should be flagged with estimated cost savings."""
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+
+        services = [
+            OrphanedLoadBalancer(
+                name="dead-lb",
+                namespace="legacy",
+                endpoint_count=0,
+                external_ip="1.2.3.4",
+            )
+        ]
+        recs = self._lb_recs(recommender, services)
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec.pod_name == "dead-lb"
+        assert rec.namespace == "legacy"
+        assert rec.scope == "cluster"
+        assert rec.priority == "medium"
+        assert "no backing endpoints" in rec.description
+        assert "1.2.3.4" in rec.description
+        assert "has 0 ready endpoints" in rec.reason
+        # Flat estimate at $18.00/month → $216/year
+        assert rec.potential_savings_cost == pytest.approx(216.0)
+        assert "216.00" in rec.description
+        # CO2e savings are not projected: energy estimation only covers CPU usage today
+        assert rec.potential_savings_co2e_grams is None
+
+    def test_no_recommendations_without_load_balancers(self, recommender):
+        """No LoadBalancer input should produce no LoadBalancer recommendations."""
+        assert self._lb_recs(recommender, None) == []
+        assert self._lb_recs(recommender, []) == []
+
+    def test_prefers_real_opencost_cost_when_available(self, recommender):
+        """A real OpenCost annual cost must take precedence over the flat estimate."""
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+
+        services = [
+            OrphanedLoadBalancer(
+                name="lb-real",
+                namespace="default",
+                endpoint_count=0,
+                annual_cost=97.3,
+            )
+        ]
+        recs = self._lb_recs(recommender, services)
+        assert len(recs) == 1
+        assert recs[0].potential_savings_cost == pytest.approx(97.3)
+        assert "OpenCost-reported cost savings: $97.30/year" in recs[0].description
+        assert "$18.00/month" not in recs[0].description
+
+    def test_cost_savings_use_configured_lb_price(self):
+        """The LoadBalancer price per month must be configurable."""
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.LOAD_BALANCER_COST_PER_MONTH = 25.0
+        custom_recommender = Recommender(config=cfg)
+
+        services = [OrphanedLoadBalancer(name="lb-pricey", namespace="default", endpoint_count=0)]
+        metrics = [_make_metric(pod_name="unrelated-pod")]
+        recs = [
+            r
+            for r in custom_recommender.generate_recommendations(metrics, load_balancers=services)
+            if r.type == RecommendationType.ORPHANED_LOAD_BALANCER
+        ]
+        # $25/month → $300/year
+        assert len(recs) == 1
+        assert recs[0].potential_savings_cost == pytest.approx(300.0)
+
+    def test_multiple_services_produce_separate_recommendations(self, recommender):
+        """Each orphaned LoadBalancer should produce its own recommendation."""
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+
+        services = [
+            OrphanedLoadBalancer(name="lb-a", namespace="default", endpoint_count=0),
+            OrphanedLoadBalancer(name="lb-b", namespace="default", endpoint_count=0),
+        ]
+        recs = self._lb_recs(recommender, services)
+        assert len(recs) == 2
+        assert {r.pod_name for r in recs} == {"lb-a", "lb-b"}
+
+    def test_accepts_mock_objects(self, recommender):
+        """The analyzer should tolerate duck-typed descriptors (e.g. mocks)."""
+        mock_lb = MagicMock()
+        mock_lb.name = "lb-mocked"
+        mock_lb.namespace = "default"
+        mock_lb.endpoint_count = 0
+        mock_lb.external_ip = ""
+        mock_lb.ports = "80/TCP"
+        recs = self._lb_recs(recommender, [mock_lb])
+        assert len(recs) == 1
+        assert recs[0].pod_name == "lb-mocked"

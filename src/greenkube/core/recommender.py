@@ -3,10 +3,11 @@
 Enhanced recommendation engine for GreenKube.
 
 Analyzes historical CombinedMetric time-series data to generate
-actionable optimization recommendations across 10 categories:
+actionable optimization recommendations across 11 categories:
 zombie pods, CPU/memory rightsizing, autoscaling candidates,
 off-peak scaling, idle namespaces, carbon-aware scheduling,
-node-level optimizations, and orphaned PersistentVolumes.
+node-level optimizations, orphaned PersistentVolumes, and
+orphaned LoadBalancers.
 """
 
 import logging
@@ -48,6 +49,7 @@ class Recommender:
         self.carbon_aware_threshold = cfg.CARBON_AWARE_THRESHOLD
         self.node_utilization_threshold = cfg.NODE_UTILIZATION_THRESHOLD
         self.storage_cost_per_gib_month = cfg.STORAGE_COST_PER_GIB_MONTH
+        self.load_balancer_cost_per_month = cfg.LOAD_BALANCER_COST_PER_MONTH
         self.recommend_system_namespaces = cfg.RECOMMEND_SYSTEM_NAMESPACES
         self.default_instance_min_watts = cfg.DEFAULT_INSTANCE_MIN_WATTS
         self.default_instance_max_watts = cfg.DEFAULT_INSTANCE_MAX_WATTS
@@ -61,6 +63,7 @@ class Recommender:
         node_infos: Optional[List] = None,
         hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
         persistent_volumes: Optional[List] = None,
+        load_balancers: Optional[List] = None,
         analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Generates all recommendation types from metrics.
@@ -73,6 +76,9 @@ class Recommender:
                          skipped for these workloads.
             persistent_volumes: Optional list of orphaned PersistentVolume descriptors
                                 (e.g. PVCollector output) for PV cleanup recommendations.
+            load_balancers: Optional list of orphaned LoadBalancer descriptors
+                            (e.g. LoadBalancerCollector output) for LB cleanup
+                            recommendations.
             analysis_window_seconds: Optional duration represented by the metrics.
                                      When provided, potential savings are projected
                                      to yearly values from this analysis window.
@@ -95,6 +101,7 @@ class Recommender:
         recs.extend(self._analyze_carbon_aware(metrics, target_series, analysis_window_seconds))
         recs.extend(self._analyze_nodes(metrics, node_infos))
         recs.extend(self._analyze_orphaned_persistent_volumes(persistent_volumes))
+        recs.extend(self._analyze_orphaned_load_balancers(load_balancers))
 
         deduped = self._deduplicate(recs)
         return [self._apply_minimum_thresholds(r) for r in deduped]
@@ -1027,6 +1034,79 @@ class Recommender:
                         f"{description_savings}"
                     ),
                     reason=reason,
+                    priority="medium",
+                    potential_savings_cost=annual_cost,
+                )
+            )
+        return recs
+
+    # ------------------------------------------------------------------
+    # ORPHANED_LOAD_BALANCER
+    # ------------------------------------------------------------------
+
+    def _analyze_orphaned_load_balancers(
+        self,
+        load_balancers: Optional[List] = None,
+    ) -> List[Recommendation]:
+        """Identifies LoadBalancer Services that have no backing endpoints.
+
+        Args:
+            load_balancers: Optional list of orphaned LoadBalancer descriptors
+                            (e.g. LoadBalancerCollector output). Each item is read
+                            with getattr so plain mocks and dataclasses
+                            are accepted.
+
+        Returns:
+            A list of ORPHANED_LOAD_BALANCER recommendations.
+        """
+        recs = []
+        if not load_balancers:
+            return recs
+
+        for lb in load_balancers:
+            name = getattr(lb, "name", None)
+            if not name:
+                continue
+
+            namespace = getattr(lb, "namespace", None) or ""
+            endpoint_count = getattr(lb, "endpoint_count", 0) or 0
+            external_ip = getattr(lb, "external_ip", None) or ""
+            ports = getattr(lb, "ports", "") or ""
+
+            external_label = f" ({external_ip})" if external_ip else ""
+            ports_label = f" Ports: {ports}." if ports else ""
+
+            # CO2e savings are intentionally not projected: energy estimation
+            # currently only covers CPU usage, not cloud LoadBalancer overhead.
+            annual_cost = getattr(lb, "annual_cost", None)
+            if not isinstance(annual_cost, (int, float)) or annual_cost <= 0:
+                annual_cost = None
+            description_savings = ""
+            if annual_cost is not None:
+                description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
+            else:
+                annual_cost = self.load_balancer_cost_per_month * 12
+                description_savings = (
+                    f" Estimated cost savings: ${annual_cost:.2f}/year "
+                    f"(at ${self.load_balancer_cost_per_month:.2f}/month)."
+                )
+
+            recs.append(
+                Recommendation(
+                    pod_name=name,
+                    namespace=namespace or None,
+                    type=RecommendationType.ORPHANED_LOAD_BALANCER,
+                    scope="cluster",
+                    description=(
+                        f"LoadBalancer Service '{name}' in namespace '{namespace or 'unknown'}' has no "
+                        f"backing endpoints ({endpoint_count} ready){external_label}. Deleting it removes "
+                        f"the cloud LoadBalancer and stops its hourly billing.{ports_label}"
+                        f"{description_savings}"
+                    ),
+                    reason=(
+                        f"The Service of type LoadBalancer has {endpoint_count} ready endpoints, so the "
+                        f"provisioned cloud LoadBalancer routes traffic to nothing."
+                    ),
                     priority="medium",
                     potential_savings_cost=annual_cost,
                 )

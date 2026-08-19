@@ -171,6 +171,46 @@ class TestRecommendationsEndpoint:
         assert pv_recs[0]["potential_savings_cost"] == pytest.approx(120.0)
         assert pv_recs[0]["potential_savings_co2e_grams"] is None
 
+    def test_recommendations_include_orphaned_load_balancers(
+        self, client, mock_combined_metrics_repo, mock_lb_collector
+    ):
+        """Orphaned LoadBalancer Services collected from the cluster should surface as recommendations."""
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+        from greenkube.models.metrics import CombinedMetric
+
+        metric = CombinedMetric(
+            pod_name="app-pod",
+            namespace="default",
+            total_cost=0.05,
+            co2e_grams=0.02,
+            joules=5000.0,
+            cpu_request=100,
+            memory_request=128 * 1024 * 1024,
+            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
+            duration_seconds=300,
+        )
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[metric])
+        mock_lb_collector.return_value.collect.return_value = [
+            OrphanedLoadBalancer(
+                name="dead-lb",
+                namespace="legacy",
+                endpoint_count=0,
+                external_ip="1.2.3.4",
+            )
+        ]
+
+        response = client.get("/api/v1/recommendations")
+
+        assert response.status_code == 200
+        lb_recs = [r for r in response.json() if r["type"] == "ORPHANED_LOAD_BALANCER"]
+        assert len(lb_recs) == 1
+        assert lb_recs[0]["pod_name"] == "dead-lb"
+        assert lb_recs[0]["namespace"] == "legacy"
+        assert lb_recs[0]["scope"] == "cluster"
+        # Flat estimate at the default $18.00/month → $216/year (OpenCost enrichment is mocked off)
+        assert lb_recs[0]["potential_savings_cost"] == pytest.approx(216.0)
+        assert lb_recs[0]["potential_savings_co2e_grams"] is None
+
     def test_savings_summary_passes_last_time_window_to_repository(self, client, mock_reco_repo):
         """Savings should be filtered by the selected dashboard time window."""
         mock_reco_repo.get_savings_summary = AsyncMock(

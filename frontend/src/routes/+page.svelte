@@ -27,7 +27,8 @@
 	const RECO_BADGES = {
 		ZOMBIE_POD: { color: 'red', icon: '💀' },
 		RIGHTSIZING_CPU: { color: 'yellow', icon: '📐' },
-		ORPHANED_PERSISTENT_VOLUME: { color: 'orange', icon: '💾' }
+		ORPHANED_PERSISTENT_VOLUME: { color: 'orange', icon: '💾' },
+		ORPHANED_LOAD_BALANCER: { color: 'orange', icon: '🌐' }
 	};
 	function recoBadge(type) {
 		return RECO_BADGES[type] ?? { color: 'yellow', icon: '📐' };

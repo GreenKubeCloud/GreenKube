@@ -210,6 +210,97 @@ class OpenCostCollector(BaseCollector):
             logger.info("Retrieved real OpenCost storage costs for %d PersistentVolumes.", len(costs))
         return costs
 
+    async def collect_lb_costs(self, service_keys: Sequence[str], window_days: int = 7) -> Dict[str, float]:
+        """Fetch the LoadBalancer cost of specific Services from OpenCost.
+
+        Queries the OpenCost allocation API aggregated by ``service`` over the
+        given window and extracts the per-service ``loadBalancerCosts`` map.
+
+        Args:
+            service_keys: Keys of the Services to look up, formatted as
+                          ``namespace/name``.
+            window_days: Observation window in days used for the allocation query.
+
+        Returns:
+            A mapping of ``{service_key: window_cost_usd}`` for Services OpenCost
+            has LoadBalancer cost data for. Returns an empty dict when OpenCost
+            is unreachable, unconfigured, or has no cost data for the requested
+            Services.
+        """
+        if not service_keys:
+            return {}
+
+        verify_certs = config.OPENCOST_VERIFY_CERTS
+        client = await self._get_client(verify=verify_certs)
+        url = await self._resolve_url(client)
+
+        if not url:
+            logger.warning("OpenCost API URL is not configured and discovery failed; cannot fetch real LB costs.")
+            return {}
+
+        base = url.rstrip("/")
+        if base.endswith("/allocation/compute"):
+            base = base[: -len("/allocation/compute")]
+        params = {"aggregateBy": "service", "window": f"{window_days}d"}
+
+        async def _fetch(u: str) -> Optional[dict]:
+            try:
+                resp = await client.get(u, params=params)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.debug("OpenCost LB cost request to %s failed: %s", u, exc)
+                return None
+            try:
+                payload = resp.json()
+                data = payload.get("data")
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    return data[0]
+            except Exception:
+                logger.debug("Failed to decode OpenCost LB cost response from %s", u)
+            return None
+
+        # OpenCost deployments expose the allocation endpoint under different
+        # paths; try each until one responds.
+        for candidate in (
+            base + "/api/v1/allocation/aggregate",
+            base + "/allocation/aggregate",
+            base + "/allocation",
+        ):
+            allocations = await _fetch(candidate)
+            if allocations is not None:
+                break
+        else:
+            allocations = None
+
+        if not allocations:
+            return {}
+
+        costs: Dict[str, float] = {}
+        wanted = set(service_keys)
+        for entry in allocations.values():
+            if not isinstance(entry, dict):
+                continue
+            lb_costs = entry.get("loadBalancerCosts") or {}
+            if not isinstance(lb_costs, dict):
+                continue
+            for key, window_cost in lb_costs.items():
+                key = str(key)
+                if not window_cost:
+                    continue
+                # OpenCost keys LB costs by "namespace/service-name". Match
+                # requested keys directly or by the service name suffix.
+                if key in wanted:
+                    costs[key] = float(window_cost)
+                else:
+                    service_name = key.rsplit("/", 1)[-1]
+                    matches = [k for k in wanted if k.rsplit("/", 1)[-1] == service_name]
+                    for match in matches:
+                        costs[match] = float(window_cost)
+
+        if costs:
+            logger.info("Retrieved real OpenCost LoadBalancer costs for %d Services.", len(costs))
+        return costs
+
     async def collect_range(self, start, end) -> List[CostMetric]:
         """Collect cost allocation data for a time range."""
         start_ts = int(start.timestamp())

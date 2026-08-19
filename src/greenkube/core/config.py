@@ -219,6 +219,9 @@ class Config(BaseSettings):
     # Assumed monthly cost per GiB of provisioned storage (USD), used to estimate
     # the annual cost savings of deleting orphaned PersistentVolumes.
     STORAGE_COST_PER_GIB_MONTH: float = 0.10
+    # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
+    # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
+    LOAD_BALANCER_COST_PER_MONTH: float = 18.0
 
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER

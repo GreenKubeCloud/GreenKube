@@ -84,6 +84,17 @@ tests:
           path: rules[0].verbs
           content: list
 
+  - it: ClusterRole should grant read access to endpoints for LoadBalancer detection
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules[0].resources
+          content: endpoints
+      - contains:
+          path: rules[0].verbs
+          content: list
+
   - it: ClusterRole should grant read access to HPAs
     templates:
       - templates/clusterrole.yaml

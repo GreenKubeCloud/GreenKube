@@ -54,6 +54,27 @@ def mock_pv_cost_enrichment():
 
 
 @pytest.fixture(autouse=True)
+def mock_lb_collector():
+    """Mock LoadBalancer collector to avoid K8s API calls in tests."""
+    with patch("greenkube.api.routers.recommendations.LoadBalancerCollector") as mock_cls:
+        instance = AsyncMock()
+        instance.collect = AsyncMock(return_value=[])
+        mock_cls.return_value = instance
+        yield mock_cls
+
+
+@pytest.fixture(autouse=True)
+def mock_lb_cost_enrichment():
+    """Mock the OpenCost LoadBalancer cost enrichment to avoid HTTP calls in tests."""
+
+    async def _identity(services, window_days=7):
+        return services
+
+    with patch("greenkube.api.routers.recommendations.enrich_orphaned_lb_costs", new=_identity):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def mock_k8s_namespaces():
     """Mock Kubernetes namespace listing to avoid real K8s API calls in tests.
 

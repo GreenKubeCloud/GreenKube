@@ -170,6 +170,20 @@ tests:
           path: data.STORAGE_COST_PER_GIB_MONTH
           value: "0.25"
 
+  - it: should set LOAD_BALANCER_COST_PER_MONTH
+    asserts:
+      - equal:
+          path: data.LOAD_BALANCER_COST_PER_MONTH
+          value: "18"
+
+  - it: should reflect a custom LoadBalancer cost per month
+    set:
+      config.recommendations.loadBalancerCostPerMonth: 25.0
+    asserts:
+      - equal:
+          path: data.LOAD_BALANCER_COST_PER_MONTH
+          value: "25"
+
   # --------------------------------------------------------------------------
   # Default zone (conditional key)
   # --------------------------------------------------------------------------
