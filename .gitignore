@@ -229,3 +229,4 @@ __marimo__/
 .github/instructions/
 current_task.md
 scripts/leads/
+openapi-wattnet.json
