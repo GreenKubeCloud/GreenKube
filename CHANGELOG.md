@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-30
+
+## [v0.3.0] — 2026-08-30
+
+### Added
+- **Orphaned LoadBalancer recommendation:** New `ORPHANED_LOAD_BALANCER` recommendation type that flags Services of type `LoadBalancer` that have no ready backing endpoints. A new `LoadBalancerCollector` lists all Services and Endpoints from the Kubernetes API and reports LoadBalancer Services whose selector matches no pods — the provisioned cloud LoadBalancer keeps billing hourly while routing traffic to nothing. Recommendations carry the Service name (`pod_name`) and namespace and suggest deleting the Service. Projected cost savings prefer the real per-Service LoadBalancer cost reported by OpenCost (`OpenCostCollector.collect_lb_costs()` aggregates allocations by `service` and reads the `loadBalancerCosts` map, annualized from the observation window); when OpenCost is unreachable or has no cost data, they fall back to the new `LOAD_BALANCER_COST_PER_MONTH` config (Helm: `config.recommendations.loadBalancerCostPerMonth`, default `$18.00`/month). CO2e savings are not projected because energy estimation currently only covers CPU usage. Wired into the API, startup scan, CLI, demo data, and the frontend (new type badge on the recommendations page and dashboard). The Helm chart `ClusterRole` now also grants read access to `endpoints`; existing releases need `helm upgrade` to pick up the new RBAC rule.
+- **Orphaned PersistentVolume recommendation (#244):** New `ORPHANED_PERSISTENT_VOLUME` recommendation type that flags PersistentVolumes whose claim is gone. A new `PVCollector` lists all PVs and PVCs from the Kubernetes API and reports volumes that are in `Released` phase (PVC deleted but not reclaimed) or whose `claimRef` references a non-existent PVC. Recommendations carry the PV name (cluster scope) and suggest deleting the volume to release provisioned storage. Projected cost savings prefer the real per-volume storage cost reported by OpenCost (`OpenCostCollector.collect_pv_costs()` aggregates allocations by `persistentvolume` and annualizes the window cost); when OpenCost is unreachable or has no cost data, they fall back to the provisioned capacity using the new `STORAGE_COST_PER_GIB_MONTH` config (Helm: `config.recommendations.storageCostPerGibMonth`, default `$0.10`/GiB-month). CO2e savings are not projected because energy estimation currently only covers CPU usage. Wired into the API, startup scan, CLI, demo data, and the frontend (new type badge on the recommendations page and dashboard). The Helm chart `ClusterRole` now grants read access to `persistentvolumes` and `persistentvolumeclaims`; existing releases need `helm upgrade` to pick up the new RBAC rule.
+- **Carbon intensity consolidation refresh:** After each hourly intensity collection, all combined metrics in the last 24 hours are recomputed against the refreshed history (`CombinedMetricsRepository.recompute_carbon_with_latest_intensities`, with a single bulk `UPDATE` on PostgreSQL). Provisional provider values (e.g. Wattnet data younger than ~4h, `valid=false`) are corrected in place once consolidated — metrics that already had an intensity are updated too, not only those without one.
+- **Wattnet electricity provider:** Grid carbon intensity is now provider-agnostic via a new `BaseElectricityProvider` abstraction. A `WattnetCollector` fetches 15-minute carbon footprint data for 52 European zones from the EU-funded [Wattnet](https://wattnet.eu) API (Bearer token auth with automatic refresh). Select it with `ELECTRICITY_PROVIDER=wattnet` plus `WATTNET_EMAIL`/`WATTNET_PASSWORD` (Helm: `config.electricityProvider`, `secrets.wattnetEmail`, `secrets.wattnetPassword`). Zones outside Europe gracefully fall back to the default intensity map. See [docs/wattnet.md](docs/wattnet.md) for full details and the water-footprint roadmap.
+- **Wattnet health check & runtime config:** `wattnet` service in `GET /api/v1/health/services`; Wattnet credentials can be updated at runtime from the Settings page and are persisted to the Kubernetes Secret (`wattnet_email`/`wattnet_password` in `POST /api/v1/config/services`).
+- **Frontend:** Settings page and health popup now expose Wattnet credential fields.
+
+### Fixed
+- **Health status: inactive providers excluded** — Health checks for non-selected electricity providers (e.g. Electricity Maps while `ELECTRICITY_PROVIDER=wattnet`) now report as `inactive` and are excluded from the overall health status and from the frontend startup health popup, so users are no longer nagged to configure a provider they are not using.
+- **Config: token warnings only for the active provider** — The startup warning for a missing `ELECTRICITY_MAPS_TOKEN` is now emitted only when Electricity Maps is the active provider; the Wattnet credentials warning only fires when Wattnet is selected.
+- **Security: dependency upgrades to fix Trivy scan errors** — `aiohttp` upgraded `3.14.1` → `3.14.3`; `structlog` promoted to a runtime dependency (`26.1.0`); frontend transitive dependencies upgraded (`@sveltejs/acorn-typescript`, `acorn`, `brace-expansion`, `js-yaml`, `nanoid`, `postcss`, and others) to remediate Trivy-flagged vulnerabilities.
+
+## [0.2.12] — 2026-06-26
+
+### Added
+- **Auth-proxy routing (#245):** `TRUST_AUTH_PROXY` config flag enables forwarding authenticated requests through an external auth proxy (Authentik, Caddy). When enabled, the API reads the authenticated user identity from the `X-Forwarded-User` / `X-Auth-Request-User` headers instead of performing its own authentication, removing the need to expose credentials directly to the proxy. Special thanks to [@kahnwong](https://github.com/kahnwong) for the detailed reproduction information that led to this fix.
+- **Structured logging with `structlog`:** A new `LOG_FORMAT` config option (`json` or `text`, default `text`) controls the log output format. JSON mode emits machine-readable structured log lines suitable for log aggregation pipelines (e.g. Loki). Exposed in Helm `values.yaml` via `config.logFormat`.
+- **DB vacuuming and savings-ledger pruning:** `MetricsCompressor` now runs `VACUUM` on the main metrics tables after each compaction cycle. A dedicated pruning pass removes stale hourly-savings-ledger records older than the configured retention window, keeping storage usage bounded on long-running deployments.
+- **Metrics: DB-level pagination for `GET /api/v1/metrics`** — The endpoint now uses SQL `COUNT(*) + LIMIT/OFFSET` instead of loading the full result set into Python. A new `METRICS_LIST_MAX_RANGE_DAYS` config (default 30, exposed in Helm `values.yaml` via `config.metricsListMaxRangeDays`) rejects requests wider than the limit with HTTP 400 to prevent accidental OOM on large clusters.
+- **Repository: `read_combined_metrics_page`** — New method on `CombinedMetricsRepository` (base Python fallback + optimised PostgreSQL `UNION ALL` implementation) for DB-level paginated reads.
+- **Repository: `read_latest_per_pod`** — New method returning the single most-recent metric snapshot for each `(namespace, pod_name)` pair. PostgreSQL implementation uses `DISTINCT ON` for efficiency; base class falls back to Python deduplication.
+- **Repository: `aggregate_grouped_row_count`** — New method returning the number of distinct `(group_key × time_bucket)` rows a grouped-aggregate export would produce, computed entirely in SQL (`COUNT DISTINCT`). Implemented for PostgreSQL and SQLite.
+- **Metrics endpoint: Prometheus gauge refresh via `read_latest_per_pod`** — `refresh_metrics_from_db` now calls `read_latest_per_pod` instead of loading the full metrics history and deduplicating in Python, eliminating a major OOM source for large clusters.
+
+### Changed
+- **Toolchain: switched from `pip` to `uv`** — All CI workflows, the Dockerfile, and developer documentation now use `uv` for dependency management and virtual-environment creation. A `uv.lock` lockfile replaces the previous `requirements*.txt` files, ensuring fully reproducible builds across environments.
+- **Settings: replaced `python-dotenv` with `pydantic-settings`** — `config.py` is now driven by `pydantic-settings` `BaseSettings`, giving automatic environment-variable parsing with type coercion, validation, and cleaner secret handling. `python-dotenv` removed from dependencies.
+- **Type checking: Pyrefly added to pre-commit** — Pyrefly static type checker integrated into the pre-commit hook chain. Codebase cleaned up (dead code, redundant imports, incorrect annotations) as part of the initial Pyrefly pass.
+- **Frontend: metrics page removed** — The `/metrics` route and its associated Svelte page have been removed. Dashboard panels reordered accordingly.
+
+### Fixed
+- **API: oversized response headers causing Caddy/Authentik 502/503 errors** — Bloated debug and CORS headers removed from all API responses; the fix resolves `upstream sent invalid header` 50x errors seen behind reverse-proxy setups.
+- **Frontend: donut chart legend overflow** — Namespaces beyond the top-N are now collapsed into an `other` slice, preventing the chart legend from overflowing the panel.
+- **Ruff version mismatch in CI** — Pinned `ruff` version in CI to match the local configuration, eliminating lint-step failures caused by version skew.
+- **OOM (`OOMKilled`, exit code 137) in `greenkube-api`** — `GET /api/v1/metrics`, `GET /api/v1/report/summary?aggregate=true`, and the Prometheus gauge refresh all previously loaded up to 1 M+ `CombinedMetric` objects into memory. All three paths are now SQL-backed and never materialise full row sets in Python (#239).
+- **`report/summary?aggregate=true` uses pure SQL** — The aggregate summary path calls `aggregate_grouped_row_count` (SQL `COUNT DISTINCT`) instead of invoking `aggregate_metrics()` over loaded rows, making large date ranges safe regardless of dataset size.
+- **Memory leaks in Kubernetes API client** — `NodeCollector` and `PodCollector` now explicitly close the async `kubernetes_asyncio` API client after each collection cycle, preventing handle leaks on long-running pods.
+- **Security: frontend dependency updates** — `package.json` / `package-lock.json` updated to remediate Trivy-flagged vulnerabilities in transitive frontend dependencies.
+
+## [0.2.11] — 2026-05-26
+
+### Added
+- **Grafana: Streamlined dashboard layout** — Dashboard rebuilt to 4 sections and 9 panels: *GreenKube Impact Command Center* (radar, footprint mix, impact ledger, action priorities), *CO₂e by Namespace* (pie charts, now promoted to second position above the map), *Regional Node Cleanliness* (geomap), and *Top Emitters & Spenders* (top-15 pods by CO₂e and cost). Eight rows and their associated panels removed.
+- **Recommendations: Annualised savings** — Each recommendation now exposes projected annual CO₂e savings (`annual_co2e_savings_grams`) and annual cost savings (`annual_cost_savings_usd`), extrapolated from the observation window. Values are surfaced in the API response, the frontend recommendations page, and CLI output.
+- **Report: Yearly and custom date ranges** — `GET /api/v1/report` now accepts a `1y` (calendar year-to-date) window and arbitrary `start`/`end` timestamps. Reports can additionally be grouped by namespace via the `group_by_namespace` query parameter.
+- **Recommendations: Savings ledger integration (#237)** — Applied recommendations now trigger a savings-ledger entry. A new flow updates `RecommendationRealization` records and kicks off a background refresh of the savings attribution so the `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` gauges stay consistent as metrics accumulate.
+- **Recommendations: `GET /api/v1/recommendations/top`** — New API endpoint returning the highest-impact active recommendations ranked by projected annual savings. Returns `TopRecommendation` DTOs with rank, projected annual CO₂e savings, and projected annual cost savings.
+- **Prometheus: `greenkube_top_recommendations` gauge** — New Prometheus gauge exposing ranked active recommendations.
+- **Grafana: Actionable Recommendations section** — New dashboard row showing the top-N ranked recommendations as horizontal bar cards with projected annual CO₂e and cost savings.
+- **App startup recommendation scan:** The API now triggers a full scan for recommendations on startup, ensuring the dashboard and API have immediate data to work with even if no new metrics have come in since the last scan.
+
+### Changed
+- **Grafana: `$node` and `$region` template variables removed** — Both variables have been dropped from the dashboard.
+- **Grafana: Dashboard generator cleaned up** — Unused panel helpers removed from `scripts/build_grafana_dashboard.py`, together with the constants no longer referenced by any remaining panel.
+
+### Fixed
+- **Recommendations: CPU and memory rightsizing** - Stop displaying rightsizing recommendations that suggest increasing requests.
+- **Security: Frontend dependency updates** — `package.json` / `package-lock.json` updated to remediate Trivy-flagged vulnerabilities in transitive frontend dependencies.
+
+## [0.2.10] — 2026-05-07
+
+### Added
+- **Recommendation full lifecycle:** Recommendations now support a complete status lifecycle (`open`, `in_progress`, `resolved`, `dismissed`, `snoozed`). New API endpoints allow updating status, bulk-dismissing, and snoozing recommendations. DB migrations `0006` (lifecycle columns) and `0007` (upsert null-fix) applied for both PostgreSQL and SQLite.
+- **Frontend recommendation lifecycle UI:** The recommendations page now exposes status filters, per-recommendation status controls (dismiss, snooze, mark in-progress/resolved), and a lifecycle summary on the dashboard.
+- **Recommendation deduplication by deployment:** The recommender now groups pods by their parent Deployment (via regex matching the standard ReplicaSet pod-name suffix) before generating rightsizing and off-peak recommendations. This avoids duplicate entries for every pod in a Deployment and produces one consolidated recommendation per workload.
+- **Expanded test coverage:** Test suite extended with new files covering `CollectionOrchestrator`, `MetricAssembler`, `MetricsCompressor`, `Scheduler`, recommender v2, factory, `SummaryRepository` (SQLite), `TimeseriesCacheRepository` (SQLite), a full recommendation lifecycle end-to-end suite, and additional node repository / recommendation repository unit tests.
+- **Real database integration tests:** New `tests/integration/test_real_database_repositories.py` runs the full repository layer against live SQLite and PostgreSQL instances. `docker-compose.test.yml` spins up a throwaway PostgreSQL container for CI. Documentation added in `docs/testing.md`.
+- **Grafana dashboard overhaul (`scripts/build_grafana_dashboard.py`):** Complete rebuild of the Grafana JSON dashboard generation script with full PromQL aggregation correctness, instant-query bargauges for Top 3 panels, and a `reduce` transformation to fix bar-scale inflation from historical data.
+- **New Prometheus metrics:** Additional Prometheus gauges for recommendation counts by status, attributed savings, and node activity; exposed via `src/greenkube/api/metrics_endpoint.py`. `ServiceMonitor` updated to include the new scrape path. Grafana dashboard v2 built on these metrics with corrected PromQL and consistent namespace/cluster filters across all panels.
+- **Savings attribution system:** New `SavingsAttributor` service (`src/greenkube/core/savings_attributor.py`) prorates projected annual CO₂e and cost savings to the actual observation window. New `SavingsLedger` Pydantic model, abstract `BaseSavingsRepository`, and PostgreSQL/SQLite implementations. DB migrations `0008` applied for both engines. Two new Prometheus gauges: `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total`.
+- **Grafana dashboard: Sustainability Command Center row** with Sustainability Score gauge, CO₂e/Cost/Energy stats, attributed savings window panels, active-recommendation counters, and three sorted Top-3 bargauges (CO₂e by namespace, Cost by namespace, Recommendation Types).
+- **Demo mode "GreenOptic":** New comprehensive demo mode simulating a fictional `GreenOptic` company with a fully pre-populated dataset — realistic node topology, multi-namespace workloads, historical metrics, and a backfilled savings ledger aligned with resolved demo recommendations. DB migration `0009` adds an `is_active` activity-status column to node records. New `RecommendationRealization` service (`src/greenkube/core/recommendation_realization.py`) links realised savings to specific recommendations in the ledger.
+- **Redesigned frontend report page:** The `/report` page rebuilt with a new `reportOptions.js` module for configurable report parameters and a new `date_utils.py` helper on the backend. Report layout and export logic simplified.
+
+### Fixed
+- **Node recommendation memory usage:** The underutilised-node recommender now correctly factors in memory utilisation alongside CPU, preventing false positives on memory-heavy workloads.
+- **Node-level recommendation persistence:** `pod_name` and `namespace` are now allowed to be `NULL` in the DB schema for node-scope recommendations, fixing an integrity error on save.
+- **Embodied emissions default reduced to 100 kg:** `DEFAULT_EMBODIED_EMISSIONS_KG` lowered from 350 kg to 100 kg to better match the average embodied footprint of a cloud VM vCPU slice, producing more accurate Scope 3 estimates when Boavizta returns no data.
+- **Settings page stale warning removed:** The frontend settings page no longer displays a warning about configuration not persisting, since settings are now written to the Kubernetes Secret and survive pod restarts.
+- **Grafana: coverage metrics removed from GreenKube impact panel:** Test-coverage Prometheus metrics were incorrectly included in the GreenKube impact/emissions panel and have been removed.
+- **Grafana dashboard: filters applied to all charts:** Namespace and cluster variable filters are now consistently wired to every panel in the dashboard, so selecting a namespace correctly scopes all charts rather than only some.
+
+### Changed
+- **CI: automated test-coverage badge update:** The README test-coverage shields are now refreshed automatically by CI on each push to `dev`.
+- **All Grafana PromQL expressions deduplicated:** Every expression across all rows uses the appropriate aggregation (`sum(max by (cluster)(…))` for cluster-level scalars, `sum by (namespace)(…)` for namespace breakdowns, `max by (namespace, pod)(…)` for pod-level topk, `max by (node)(…)` for node metrics) to prevent value multiplication from multiple scrape instances.
+- **Documentation restructured:** `README.md` streamlined to a project overview; detailed reference content moved to dedicated files — `docs/api.md`, `docs/cli.md`, `docs/configuration.md`, and `docs/prometheus-grafana.md`.
+
+## [0.2.9] — 2026-04-21
+
+### Added
+- **Frontend config persistence via K8s Secret (#219):** UI-applied settings (`PROMETHEUS_URL`, `OPENCOST_API_URL`, `ELECTRICITY_MAPS_TOKEN`, `BOAVIZTA_API_URL`) are now patched into the GreenKube Kubernetes Secret immediately after being saved, so they survive pod restarts and `helm upgrade --reuse-values` without manual intervention. A namespaced `Role`/`RoleBinding` grants the service account `get`+`patch` access to exactly the GreenKube Secret (no cluster-wide secret access).
+- **GreenKube favicon:** The browser tab now displays the real GreenKube logo (`favicon.ico`) instead of the Svelte placeholder SVG. The SVG favicon reference has been removed from `app.html` and `build/index.html`; `favicon.ico` is served with the correct `image/vnd.microsoft.icon` MIME type.
+- **`GET /api/v1/metrics/by-namespace`:** New lightweight endpoint returning CO2e, embodied emissions, energy, and cost aggregated by namespace over a time window. Queries both `combined_metrics` (raw) and `combined_metrics_hourly` (archived) tables via a single `UNION ALL + GROUP BY` — avoids loading full row sets into memory.
+- **`GET /api/v1/metrics/top-pods`:** New lightweight endpoint returning the top-N pods by CO2e over a time window, also using the dual-table `UNION ALL + GROUP BY` pattern. Dashboard donut and top-pods charts now call these two endpoints instead of the expensive `GET /metrics` route, eliminating OOM restarts when browsing large time ranges.
+- **GHG Scope 2 / Scope 3 carbon classification:** Emissions are now formally categorised per the GHG Protocol Corporate Standard.
+- **Pre-computed dashboard cache (`metrics_summary` + `metrics_timeseries_cache`):** Two new database tables (migrations `0004` and `0005` for PostgreSQL and SQLite) store pre-aggregated KPI scalars and time-series buckets for five fixed windows (`24h`, `7d`, `30d`, `1y`, `ytd`). Tables are refreshed hourly by the background scheduler, eliminating full-table scans on every dashboard load and preventing OOM errors on large datasets.
+- **`SummaryRefresher`:** New `src/greenkube/core/summary_refresher.py` service that computes cluster-wide and per-namespace KPI totals and time-series buckets, then upserts them into the two cache tables. Supports adaptive granularity per window (hourly / daily / weekly / monthly buckets).
+- **`SummaryRepository` and `TimeseriesCacheRepository`:** New abstract base classes in `storage/base_repository.py` with PostgreSQL and SQLite implementations.
+- **Dashboard API endpoints:** Three new FastAPI routes for the pre-computed tables:
+  - `GET /api/v1/metrics/dashboard-summary` — cached KPI scalars, optionally filtered by namespace.
+  - `GET /api/v1/metrics/dashboard-timeseries/{window_slug}` — cached time-series buckets for `24h`, `7d`, `30d`, `1y`, or `ytd`.
+  - `POST /api/v1/metrics/dashboard-summary/refresh` — trigger an on-demand background refresh (HTTP 202 Accepted).
+- **`MetricsSummaryRow` and `TimeseriesCachePoint` Pydantic models:** New DTOs in `src/greenkube/models/metrics.py` representing rows from the two cache tables.
+- **Adaptive chart granularity (frontend):** Dashboard charts now select the optimal time bucket per window — hourly for `24h`, daily for `7d`/`30d`, weekly for `1y`, monthly for `ytd` — resulting in consistently readable x-axes regardless of the selected range.
+- **Boavizta fallback with configurable default:** When the Boavizta API does not recognise a cloud provider or instance type (returns no data), `EmbodiedEmissionsService` now injects a fallback embodied-emissions profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **350 kg CO2e**) instead of silently using 0 g, which was incorrect. The resulting `CombinedMetric` is flagged `is_estimated=True` with a descriptive `estimation_reasons` entry. Exposed as `config.boavizta.defaultEmbodiedEmissionsKg` in `values.yaml` and `DEFAULT_EMBODIED_EMISSIONS_KG` in `configmap.yaml`.
+- **`EmbodiedEmissionsService.is_embodied_fallback()`:** New helper method returns `True` when a node's cached profile was produced by the fallback rather than a real Boavizta response, enabling the metric assembler to set estimation flags accurately.
+
+### Fixed
+- **Async K8s Secret patching (`kubernetes_asyncio`):** The in-cluster Secret patch now correctly uses `kubernetes_asyncio` (the async client that is actually installed) instead of the sync `kubernetes` package. `load_incluster_config()` is called without `await` (it reads files synchronously); failures are caught and logged without interrupting the API response.
+- **Elasticsearch removed from production dependencies:** `elasticsearch` and `elasticsearch-dsl` packages moved to an optional extra (`pip install greenkube[elasticsearch]`). All imports are now lazy (loaded only when the ES storage backend is actually selected), removing heavy transitive dependencies and startup warnings for users on PostgreSQL or SQLite.
+- **Trivy KSV-0109 false positive:** `GREENKUBE_SECRET_NAME` is a resource name, not a secret value — suppressed in `.trivyignore` with justification. `KSV-0113` (Role granting secret access) also documented as intentional for the UI persistence feature.
+- **Electricity Maps API not called for OpenStack-based providers (zone = `nova`):** The scheduler's carbon-intensity collection loop now falls back to the node's geographic region when the provider-specific zone identifier is not a recognised Electricity Maps zone code. This restores carbon-intensity data collection on OVH, Infomaniak, and similar OpenStack-based clouds where the K8s node zone label is set to `nova` rather than a country/region code.
+- **Race condition in collection orchestrator:** `CollectionOrchestrator` no longer collects nodes internally. Node collection is now an explicit Phase 1 in `DataProcessor.run()` that runs alone before any concurrent collection, preventing shared Kubernetes API client races and the cascade of Electricity Maps API errors they caused.
+- **`DEFAULT_ZONE` spurious warning:** The `NodeZoneMapper` no longer emits a warning when the zone was actually resolved correctly — the warning was incorrectly triggered even when a valid `DEFAULT_ZONE` was set.
+- **Pod CPU utilisation aggregation per node:** `CollectionOrchestrator` was averaging pod CPU usage per node across timestamps instead of summing, causing underestimated energy figures on nodes with multiple measured pods.
+- **Chart legends overlapping (frontend):** ECharts legend layout fixed to prevent label overlap on small viewports.
+
+### Changed
+- **`DataProcessor.run()` pipeline restructured into four explicit phases:** Phase 1 (node discovery, sequential), Phase 2 (zone resolution), Phase 3 (parallel metrics + Boavizta), Phase 4 (carbon-intensity prefetch + assembly). This eliminates the previous race condition and removes the redundant second `collect_instance_types()` K8s call that used to happen at the end of the pipeline.
+- **`CollectionOrchestrator` simplified:** `NodeCollector` dependency removed; node enrichment for Prometheus instance-type labels now uses the `nodes_info` dict passed in from Phase 1, avoiding any duplicate K8s API calls.
+
 ## [0.2.8] — 2026-04-11
 
 ### Security
