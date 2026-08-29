@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wattnet health check & runtime config:** `wattnet` service in `GET /api/v1/health/services`; Wattnet credentials can be updated at runtime from the Settings page and are persisted to the Kubernetes Secret (`wattnet_email`/`wattnet_password` in `POST /api/v1/config/services`).
 - **Frontend:** Settings page and health popup now expose Wattnet credential fields.
 
+### Fixed
+- **Health status: inactive providers excluded** — Health checks for non-selected electricity providers (e.g. Electricity Maps while `ELECTRICITY_PROVIDER=wattnet`) now report as `inactive` and are excluded from the overall health status and from the frontend startup health popup, so users are no longer nagged to configure a provider they are not using.
+- **Config: token warnings only for the active provider** — The startup warning for a missing `ELECTRICITY_MAPS_TOKEN` is now emitted only when Electricity Maps is the active provider; the Wattnet credentials warning only fires when Wattnet is selected.
+- **Security: dependency upgrades to fix Trivy scan errors** — `aiohttp` upgraded `3.14.1` → `3.14.3`; `structlog` promoted to a runtime dependency (`26.1.0`); frontend transitive dependencies upgraded (`@sveltejs/acorn-typescript`, `acorn`, `brace-expansion`, `js-yaml`, `nanoid`, `postcss`, and others) to remediate Trivy-flagged vulnerabilities.
+
 ## [0.2.12] — 2026-06-26
 
 ### Added

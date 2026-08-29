@@ -32,6 +32,12 @@ describe('HealthBadge', () => {
 		expect(elements.length).toBeGreaterThanOrEqual(1);
 	});
 
+	it('renders inactive status label', () => {
+		render(HealthBadge, { props: { status: 'inactive' } });
+		const elements = screen.getAllByText('Inactive');
+		expect(elements.length).toBeGreaterThanOrEqual(1);
+	});
+
 	it('renders label when provided', () => {
 		render(HealthBadge, { props: { status: 'healthy', label: 'Prometheus' } });
 		expect(screen.getByText('Prometheus')).toBeInTheDocument();

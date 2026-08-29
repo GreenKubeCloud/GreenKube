@@ -118,7 +118,7 @@
 					</div>
 				{/if}
 
-				{#if services?.electricity_maps?.status === 'unconfigured'}
+				{#if services?.electricity_maps?.status === 'unconfigured' && !services?.electricity_maps?.inactive}
 					<div>
 						<label for="emaps-token" class="block text-xs font-medium text-dark-400 mb-1">
 							Electricity Maps Token
@@ -137,7 +137,7 @@
 					</div>
 				{/if}
 
-				{#if services?.wattnet?.status === 'unconfigured'}
+				{#if services?.wattnet?.status === 'unconfigured' && !services?.wattnet?.inactive}
 					<div class="grid grid-cols-1 gap-3">
 						<div>
 							<label for="wattnet-email" class="block text-xs font-medium text-dark-400 mb-1">
