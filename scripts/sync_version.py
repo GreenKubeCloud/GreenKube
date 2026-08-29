@@ -47,12 +47,6 @@ def update_helm_chart_yaml(version):
         "  platforms:\n    - linux/amd64\n    - linux/arm64\n"
     )
 
-    # Embed the README content so Artifact Hub displays it on the package page.
-    # The annotation value must be the Markdown text itself, not a URL.
-    with open("README.md", "r") as f:
-        readme_content = f.read()
-    chart["annotations"]["artifacthub.io/readme"] = readme_content
-
     with open("helm-chart/Chart.yaml", "w") as f:
         yaml.dump(chart, f)
 
