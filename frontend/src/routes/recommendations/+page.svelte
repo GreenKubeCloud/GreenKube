@@ -82,14 +82,10 @@
 	}
 
 	async function confirmIgnore() {
-		if (!ignoreReason.trim()) {
-			ignoreError = 'A reason is required.';
-			return;
-		}
 		ignoreLoading = true;
 		ignoreError = null;
 		try {
-			await ignoreRecommendation(ignoreModal.rec.id, { reason: ignoreReason.trim() });
+			await ignoreRecommendation(ignoreModal.rec.id, { reason: ignoreReason.trim() || null });
 			closeIgnoreModal();
 			await loadData();
 		} catch (e) {
@@ -129,6 +125,8 @@
 		CARBON_AWARE_SCHEDULING: { icon: '🌍', label: 'Carbon-Aware',         color: 'green',  desc: 'Could run in a lower-carbon zone' },
 		OVERPROVISIONED_NODE:    { icon: '🖥️', label: 'Overprovisioned Node', color: 'blue',   desc: 'Node with very low utilization' },
 		UNDERUTILIZED_NODE:      { icon: '🔻', label: 'Underutilized Node',   color: 'blue',   desc: 'Node with few pods — consider draining' },
+		ORPHANED_PERSISTENT_VOLUME: { icon: '💾', label: 'Orphaned PV',      color: 'orange', desc: 'PersistentVolume with no bound claim' },
+		ORPHANED_LOAD_BALANCER:    { icon: '🌐', label: 'Orphaned LoadBalancer', color: 'orange', desc: 'LoadBalancer Service with no backing endpoints' },
 	};
 
 	function getTypeConfig(type) {
@@ -163,7 +161,7 @@
 
 			<div class="space-y-1">
 				<label class="text-xs text-dark-400 font-medium" for="ignore-reason">
-					Reason <span class="text-red-400">*</span>
+					Reason <span class="text-dark-500">(optional)</span>
 				</label>
 				<textarea
 					id="ignore-reason"

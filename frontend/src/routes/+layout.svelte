@@ -34,7 +34,7 @@
 			// Show popup if there are connectivity issues
 			const services = result?.services || {};
 			const hasIssues = Object.values(services).some(
-				s => s.status === 'unreachable' || s.status === 'unconfigured'
+				s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
 			);
 			if (hasIssues && !$healthPopupDismissed) {
 				showHealthPopup = true;
@@ -60,8 +60,9 @@
 
 	// Compute sidebar health indicators from services health
 	$: svcData = $servicesHealth?.services || {};
+	$: activeServices = Object.fromEntries(Object.entries(svcData).filter(([, s]) => !s.inactive));
 	$: worstStatus = (() => {
-		const statuses = Object.values(svcData).map(s => s.status);
+		const statuses = Object.values(activeServices).map(s => s.status);
 		if (statuses.includes('unreachable')) return 'unreachable';
 		if (statuses.includes('unconfigured')) return 'unconfigured';
 		if (statuses.includes('degraded')) return 'degraded';
@@ -121,9 +122,9 @@
 		<!-- Bottom section -->
 		<div class="p-3 border-t border-dark-700/50">
 			<!-- Service health indicators -->
-			{#if Object.keys(svcData).length > 0}
+			{#if Object.keys(activeServices).length > 0}
 				<div class="space-y-1 mb-2">
-					{#each Object.entries(svcData) as [name, svc]}
+					{#each Object.entries(activeServices) as [name, svc]}
 						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
 							<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
 							            {svc.status === 'degraded' ? 'animate-pulse' : ''}"></div>

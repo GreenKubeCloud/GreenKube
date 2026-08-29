@@ -125,8 +125,10 @@
 	$: configEntries = config ? flattenConfig(config) : [];
 	$: services = svcHealth?.services || {};
 	$: serviceList = Object.values(services);
-	$: healthyCount = serviceList.filter(s => s.status === 'healthy').length;
-	$: issueCount = serviceList.filter(s => s.status !== 'healthy').length;
+	$: activeServiceList = serviceList.filter(s => !s.inactive);
+	$: inactiveServiceList = serviceList.filter(s => s.inactive);
+	$: healthyCount = activeServiceList.filter(s => s.status === 'healthy').length;
+	$: issueCount = activeServiceList.filter(s => s.status !== 'healthy').length;
 </script>
 
 <div class="p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
@@ -182,7 +184,7 @@
 							<span class="text-sm font-medium text-dark-200 capitalize">
 								{svc.name.replace('_', ' ')}
 							</span>
-							<HealthBadge status={svc.status} compact />
+							<HealthBadge status={svc.inactive ? 'inactive' : svc.status} compact />
 						</div>
 
 						<p class="text-xs text-dark-500 line-clamp-2">{svc.message}</p>

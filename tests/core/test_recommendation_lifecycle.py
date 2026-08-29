@@ -254,6 +254,47 @@ class TestAppliedRecommendationRefresh:
         assert refreshed.carbon_saved_co2e_grams == 0.0
         assert refreshed.cost_saved == 0.0
 
+    def test_orphaned_resource_refresh_keeps_savings_when_still_present(self):
+        """An applied orphaned-resource recommendation keeps its realized savings on refresh.
+
+        The recommendation identity is the orphaned resource itself: a regenerated
+        observation means the resource is still present (deletion pending), not that
+        the issue reappeared — zeroing the savings baseline would lose realized savings.
+        """
+        for rec_type, pod_name in (
+            (RecommendationType.ORPHANED_PERSISTENT_VOLUME, "pvc-gone"),
+            (RecommendationType.ORPHANED_LOAD_BALANCER, "dead-lb"),
+        ):
+            applied = RecommendationRecord(
+                id=3,
+                pod_name=pod_name,
+                namespace="prod",
+                type=rec_type,
+                description="Delete orphaned resource",
+                status=RecommendationStatus.APPLIED,
+                scope="cluster",
+                potential_savings_co2e_grams=None,
+                potential_savings_cost=216.0,
+                carbon_saved_co2e_grams=0.0,
+                cost_saved=216.0,
+                applied_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            observed = RecommendationRecord(
+                pod_name=pod_name,
+                namespace="prod",
+                type=rec_type,
+                description="Resource still present and orphaned",
+                scope="cluster",
+                potential_savings_cost=216.0,
+            )
+
+            refreshed = refresh_applied_recommendation(applied, observed)
+
+            assert refreshed.status == RecommendationStatus.APPLIED
+            assert refreshed.applied_at == applied.applied_at
+            assert refreshed.cost_saved == pytest.approx(216.0)
+            assert refreshed.carbon_saved_co2e_grams == applied.carbon_saved_co2e_grams
+
     def test_savings_summary_with_data(self):
         summary = RecommendationSavingsSummary(
             total_carbon_saved_co2e_grams=500.0,

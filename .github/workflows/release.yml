@@ -115,6 +115,9 @@ jobs:
 
       - name: Package Helm Chart
         run: |
+          # Ship the repo README inside the chart package so Artifact Hub
+          # displays it (single source of truth: README.md, no duplication in Chart.yaml).
+          cp README.md helm-chart/README.md
           mkdir -p ./charts-packaged
           helm package ./helm-chart --destination ./charts-packaged
 
@@ -137,6 +140,11 @@ jobs:
           cp -r charts-packaged/*.tgz /tmp/gh-pages/
           # Copy Artifact Hub repo metadata (must sit next to index.yaml)
           cp artifacthub-repo.yml /tmp/gh-pages/artifacthub-repo.yml
+          # Keep the GitHub Pages site in sync with the latest version:
+          # the site renders the README from the gh-pages branch root.
+          cp README.md CHANGELOG.md /tmp/gh-pages/
+          rsync -a --delete docs/ /tmp/gh-pages/docs/
+          rsync -a --delete assets/ /tmp/gh-pages/assets/
 
           cd /tmp/gh-pages
           if [ -f "index.yaml" ]; then
@@ -148,6 +156,7 @@ jobs:
           git add -f *.tgz
           git add index.yaml
           git add artifacthub-repo.yml
+          git add README.md CHANGELOG.md docs assets
 
           if git diff --cached --quiet; then
             echo "No changes to publish"

@@ -14,7 +14,10 @@ rules:
   - namespaces
   - pods
   - services
+  - endpoints
   - configmaps
+  - persistentvolumes
+  - persistentvolumeclaims
   verbs:
   - get
   - list

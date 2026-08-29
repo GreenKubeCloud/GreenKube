@@ -194,6 +194,12 @@ config:
     idleNamespaceEnergyThreshold: 1000
     carbonAwareThreshold: 1.5
     nodeUtilizationThreshold: 0.2
+    # Assumed monthly cost per GiB of provisioned storage (USD), used to estimate
+    # the annual cost savings of deleting orphaned PersistentVolumes.
+    storageCostPerGibMonth: 0.1
+    # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
+    # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
+    loadBalancerCostPerMonth: 18.0
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
     # Minimum realistic thresholds — recommendations below these are flagged as unrealistic

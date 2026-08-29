@@ -208,7 +208,7 @@ export async function applyRecommendation(id, body = {}) {
 
 /**
  * @param {number} id
- * @param {{ reason: string }} body
+ * @param {{ reason: ?string }} body
  * @returns {Promise<Object>}
  */
 export async function ignoreRecommendation(id, body) {

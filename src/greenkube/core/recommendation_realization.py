@@ -73,6 +73,16 @@ def refresh_applied_recommendation(
         )
         return applied_record.model_copy(update=updates)
 
+    if applied_record.type in (
+        RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+        RecommendationType.ORPHANED_LOAD_BALANCER,
+    ):
+        # Orphaned resource recommendations are uniquely identified by the
+        # resource itself: a regenerated observation means the resource is
+        # still present (its deletion is pending), not that the issue
+        # reappeared. Keep the realized savings baseline intact.
+        return applied_record.model_copy(update=updates)
+
     updates.update(carbon_saved_co2e_grams=0.0, cost_saved=0.0)
     return applied_record.model_copy(update=updates)
 

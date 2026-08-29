@@ -1,7 +1,7 @@
 <script>
 	/**
 	 * Color-coded health badge for a service.
-	 * @type {'healthy' | 'degraded' | 'unreachable' | 'unconfigured'}
+	 * @type {'healthy' | 'degraded' | 'unreachable' | 'unconfigured' | 'inactive'}
 	 */
 	export let status = 'unconfigured';
 	/** @type {string} */
@@ -15,21 +15,24 @@
 		healthy: 'bg-green-500',
 		degraded: 'bg-yellow-500',
 		unreachable: 'bg-red-500',
-		unconfigured: 'bg-dark-500'
+		unconfigured: 'bg-dark-500',
+		inactive: 'bg-dark-600'
 	};
 
 	const labelMap = {
 		healthy: 'Healthy',
 		degraded: 'Degraded',
 		unreachable: 'Unreachable',
-		unconfigured: 'Not Configured'
+		unconfigured: 'Not Configured',
+		inactive: 'Inactive'
 	};
 
 	const badgeColorMap = {
 		healthy: 'badge-green',
 		degraded: 'badge-yellow',
 		unreachable: 'badge-red',
-		unconfigured: 'bg-dark-800/50 text-dark-400 border border-dark-600/30'
+		unconfigured: 'bg-dark-800/50 text-dark-400 border border-dark-600/30',
+		inactive: 'bg-dark-900/50 text-dark-500 border border-dark-700/30'
 	};
 
 	$: dotColor = colorMap[status] || colorMap.unconfigured;

@@ -87,6 +87,8 @@ data:
   IDLE_NAMESPACE_ENERGY_THRESHOLD: {{ .idleNamespaceEnergyThreshold | quote }}
   CARBON_AWARE_THRESHOLD: {{ .carbonAwareThreshold | quote }}
   NODE_UTILIZATION_THRESHOLD: {{ .nodeUtilizationThreshold | quote }}
+  STORAGE_COST_PER_GIB_MONTH: {{ .storageCostPerGibMonth | default 0.1 | quote }}
+  LOAD_BALANCER_COST_PER_MONTH: {{ .loadBalancerCostPerMonth | default 18.0 | quote }}
   RECOMMEND_SYSTEM_NAMESPACES: {{ .recommendSystemNamespaces | quote }}
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}

@@ -3,10 +3,11 @@
 Enhanced recommendation engine for GreenKube.
 
 Analyzes historical CombinedMetric time-series data to generate
-actionable optimization recommendations across 9 categories:
+actionable optimization recommendations across 11 categories:
 zombie pods, CPU/memory rightsizing, autoscaling candidates,
 off-peak scaling, idle namespaces, carbon-aware scheduling,
-and node-level optimizations.
+node-level optimizations, orphaned PersistentVolumes, and
+orphaned LoadBalancers.
 """
 
 import logging
@@ -47,6 +48,8 @@ class Recommender:
         self.idle_namespace_energy_threshold = cfg.IDLE_NAMESPACE_ENERGY_THRESHOLD
         self.carbon_aware_threshold = cfg.CARBON_AWARE_THRESHOLD
         self.node_utilization_threshold = cfg.NODE_UTILIZATION_THRESHOLD
+        self.storage_cost_per_gib_month = cfg.STORAGE_COST_PER_GIB_MONTH
+        self.load_balancer_cost_per_month = cfg.LOAD_BALANCER_COST_PER_MONTH
         self.recommend_system_namespaces = cfg.RECOMMEND_SYSTEM_NAMESPACES
         self.default_instance_min_watts = cfg.DEFAULT_INSTANCE_MIN_WATTS
         self.default_instance_max_watts = cfg.DEFAULT_INSTANCE_MAX_WATTS
@@ -59,6 +62,8 @@ class Recommender:
         metrics: List[CombinedMetric],
         node_infos: Optional[List] = None,
         hpa_targets: Optional[Set[Tuple[str, str, str]]] = None,
+        persistent_volumes: Optional[List] = None,
+        load_balancers: Optional[List] = None,
         analysis_window_seconds: Optional[float] = None,
     ) -> List[Recommendation]:
         """Generates all recommendation types from metrics.
@@ -69,6 +74,11 @@ class Recommender:
             hpa_targets: Optional set of (namespace, kind, name) tuples for workloads
                          already governed by an HPA. Autoscaling recommendations are
                          skipped for these workloads.
+            persistent_volumes: Optional list of orphaned PersistentVolume descriptors
+                                (e.g. PVCollector output) for PV cleanup recommendations.
+            load_balancers: Optional list of orphaned LoadBalancer descriptors
+                            (e.g. LoadBalancerCollector output) for LB cleanup
+                            recommendations.
             analysis_window_seconds: Optional duration represented by the metrics.
                                      When provided, potential savings are projected
                                      to yearly values from this analysis window.
@@ -90,6 +100,8 @@ class Recommender:
         recs.extend(self._analyze_idle_namespaces(metrics, analysis_window_seconds))
         recs.extend(self._analyze_carbon_aware(metrics, target_series, analysis_window_seconds))
         recs.extend(self._analyze_nodes(metrics, node_infos))
+        recs.extend(self._analyze_orphaned_persistent_volumes(persistent_volumes))
+        recs.extend(self._analyze_orphaned_load_balancers(load_balancers))
 
         deduped = self._deduplicate(recs)
         return [self._apply_minimum_thresholds(r) for r in deduped]
@@ -945,4 +957,158 @@ class Recommender:
                     )
                 )
 
+        return recs
+
+    # ------------------------------------------------------------------
+    # ORPHANED_PERSISTENT_VOLUME
+    # ------------------------------------------------------------------
+
+    def _analyze_orphaned_persistent_volumes(
+        self,
+        persistent_volumes: Optional[List] = None,
+    ) -> List[Recommendation]:
+        """Identifies PersistentVolumes whose claims are gone or released.
+
+        Args:
+            persistent_volumes: Optional list of orphaned PV descriptors
+                                (e.g. PVCollector output). Each item is read
+                                with getattr so plain mocks and dataclasses
+                                are accepted.
+
+        Returns:
+            A list of ORPHANED_PERSISTENT_VOLUME recommendations.
+        """
+        recs = []
+        if not persistent_volumes:
+            return recs
+
+        for pv in persistent_volumes:
+            name = getattr(pv, "name", None)
+            if not name:
+                continue
+
+            phase = getattr(pv, "phase", "") or ""
+            capacity_bytes = getattr(pv, "capacity_bytes", 0) or 0
+            claim_namespace = getattr(pv, "claim_namespace", None)
+            claim_name = getattr(pv, "claim_name", None)
+            reclaim_policy = getattr(pv, "reclaim_policy", "") or ""
+
+            capacity_gib = capacity_bytes / (1024**3)
+            claim_label = f"{claim_namespace}/{claim_name}" if claim_namespace and claim_name else "unknown claim"
+
+            if phase.lower() == "released":
+                reason = (
+                    f"The PV is in 'Released' phase: its PVC {claim_label} was deleted but the "
+                    f"volume was not reclaimed (reclaim policy: {reclaim_policy or 'unknown'})."
+                )
+            else:
+                reason = (
+                    f"The PV references PVC {claim_label} which no longer exists in the cluster, "
+                    f"so the volume can never be bound or used."
+                )
+
+            # CO2e savings are intentionally not projected: energy estimation
+            # currently only covers CPU usage, not disk usage.
+            annual_cost = getattr(pv, "annual_cost", None)
+            if not isinstance(annual_cost, (int, float)) or annual_cost <= 0:
+                annual_cost = None
+            description_savings = ""
+            if annual_cost is not None and capacity_bytes > 0:
+                description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
+            elif capacity_bytes > 0:
+                annual_cost = capacity_gib * self.storage_cost_per_gib_month * 12
+                description_savings = (
+                    f" Estimated cost savings: ${annual_cost:.2f}/year "
+                    f"(at ${self.storage_cost_per_gib_month:.2f}/GiB-month)."
+                )
+
+            recs.append(
+                Recommendation(
+                    pod_name=name,
+                    type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+                    scope="cluster",
+                    description=(
+                        f"PersistentVolume '{name}' is orphaned ({capacity_gib:.1f}GiB, "
+                        f"phase {phase or 'unknown'}, reclaim policy {reclaim_policy or 'unknown'}). "
+                        f"Deleting it releases {capacity_gib:.1f}GiB of provisioned storage."
+                        f"{description_savings}"
+                    ),
+                    reason=reason,
+                    priority="medium",
+                    potential_savings_cost=annual_cost,
+                )
+            )
+        return recs
+
+    # ------------------------------------------------------------------
+    # ORPHANED_LOAD_BALANCER
+    # ------------------------------------------------------------------
+
+    def _analyze_orphaned_load_balancers(
+        self,
+        load_balancers: Optional[List] = None,
+    ) -> List[Recommendation]:
+        """Identifies LoadBalancer Services that have no backing endpoints.
+
+        Args:
+            load_balancers: Optional list of orphaned LoadBalancer descriptors
+                            (e.g. LoadBalancerCollector output). Each item is read
+                            with getattr so plain mocks and dataclasses
+                            are accepted.
+
+        Returns:
+            A list of ORPHANED_LOAD_BALANCER recommendations.
+        """
+        recs = []
+        if not load_balancers:
+            return recs
+
+        for lb in load_balancers:
+            name = getattr(lb, "name", None)
+            if not name:
+                continue
+
+            namespace = getattr(lb, "namespace", None) or ""
+            endpoint_count = getattr(lb, "endpoint_count", 0) or 0
+            external_ip = getattr(lb, "external_ip", None) or ""
+            ports = getattr(lb, "ports", "") or ""
+
+            external_label = f" ({external_ip})" if external_ip else ""
+            ports_label = f" Ports: {ports}." if ports else ""
+
+            # CO2e savings are intentionally not projected: energy estimation
+            # currently only covers CPU usage, not cloud LoadBalancer overhead.
+            annual_cost = getattr(lb, "annual_cost", None)
+            if not isinstance(annual_cost, (int, float)) or annual_cost <= 0:
+                annual_cost = None
+            description_savings = ""
+            if annual_cost is not None:
+                description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
+            else:
+                annual_cost = self.load_balancer_cost_per_month * 12
+                description_savings = (
+                    f" Estimated cost savings: ${annual_cost:.2f}/year "
+                    f"(at ${self.load_balancer_cost_per_month:.2f}/month)."
+                )
+
+            recs.append(
+                Recommendation(
+                    pod_name=name,
+                    namespace=namespace or None,
+                    type=RecommendationType.ORPHANED_LOAD_BALANCER,
+                    scope="cluster",
+                    description=(
+                        f"LoadBalancer Service '{name}' in namespace '{namespace or 'unknown'}' has no "
+                        f"backing endpoints ({endpoint_count} ready){external_label}. Deleting it removes "
+                        f"the cloud LoadBalancer and stops its hourly billing.{ports_label}"
+                        f"{description_savings}"
+                    ),
+                    reason=(
+                        f"The Service of type LoadBalancer has {endpoint_count} ready endpoints, so the "
+                        f"provisioned cloud LoadBalancer routes traffic to nothing."
+                    ),
+                    priority="medium",
+                    potential_savings_cost=annual_cost,
+                )
+            )
         return recs
