@@ -82,14 +82,10 @@
 	}
 
 	async function confirmIgnore() {
-		if (!ignoreReason.trim()) {
-			ignoreError = 'A reason is required.';
-			return;
-		}
 		ignoreLoading = true;
 		ignoreError = null;
 		try {
-			await ignoreRecommendation(ignoreModal.rec.id, { reason: ignoreReason.trim() });
+			await ignoreRecommendation(ignoreModal.rec.id, { reason: ignoreReason.trim() || null });
 			closeIgnoreModal();
 			await loadData();
 		} catch (e) {
@@ -165,7 +161,7 @@
 
 			<div class="space-y-1">
 				<label class="text-xs text-dark-400 font-medium" for="ignore-reason">
-					Reason <span class="text-red-400">*</span>
+					Reason <span class="text-dark-500">(optional)</span>
 				</label>
 				<textarea
 					id="ignore-reason"
