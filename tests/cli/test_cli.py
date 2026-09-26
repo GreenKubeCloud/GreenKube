@@ -133,6 +133,7 @@ def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sa
     mock_repo = mocker.patch("greenkube.cli.recommend.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    repo_inst.read_combined_metrics_smart = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
 
     # Patch node repository for node-level recommendations
@@ -141,17 +142,27 @@ def test_recommend_calls_reporter_with_recommendations(mocker, mock_reporter, sa
     node_repo_inst.get_latest_snapshots_before = AsyncMock(return_value=[])
     mock_node_repo.return_value = node_repo_inst
 
-    # Patch Recommender to return a sample recommendation list
-    sample_rec = mocker.patch("greenkube.cli.recommend.Recommender")
-    rec_instance = sample_rec.return_value
-    rec_instance.generate_recommendations.return_value = [
-        mocker.MagicMock(
-            pod_name="pod-y",
-            namespace="monitoring",
-            type=mocker.MagicMock(value="ZOMBIE_POD"),
-            description="idle",
-        )
-    ]
+    # Avoid Kubernetes side-input collection
+    mocker.patch(
+        "greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
+        new=AsyncMock(return_value=None),
+    )
+    for name, empty in (("HPACollector", set()), ("PVCollector", []), ("LoadBalancerCollector", [])):
+        collector_cls = mocker.patch(f"greenkube.core.optimization.context_builder.{name}")
+        collector_cls.return_value.collect = AsyncMock(return_value=empty)
+
+    # Patch the optimization engine to return a sample recommendation list
+    engine_cls = mocker.patch("greenkube.cli.recommend.OptimizationEngine")
+    engine_cls.return_value.generate = AsyncMock(
+        return_value=[
+            mocker.MagicMock(
+                pod_name="pod-y",
+                namespace="monitoring",
+                type=mocker.MagicMock(value="ZOMBIE_POD"),
+                description="idle",
+            )
+        ]
+    )
 
     # Patch recommend module's ConsoleReporter so the submodule uses the mock
     mock_console = mocker.patch("greenkube.cli.recommend.ConsoleReporter")
@@ -171,6 +182,7 @@ def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_c
     mock_repo = mocker.patch("greenkube.cli.recommend.get_combined_metrics_repository")
     repo_inst = MagicMock()
     repo_inst.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    repo_inst.read_combined_metrics_smart = AsyncMock(return_value=sample_combined_metrics)
     mock_repo.return_value = repo_inst
 
     # Patch node repository
@@ -178,6 +190,11 @@ def test_recommend_with_namespace_filter_no_data(mocker, mock_reporter, sample_c
     node_repo_inst = MagicMock()
     node_repo_inst.get_latest_snapshots_before = AsyncMock(return_value=[])
     mock_node_repo.return_value = node_repo_inst
+
+    mocker.patch(
+        "greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
+        new=AsyncMock(return_value=None),
+    )
 
     result = runner.invoke(app, ["recommend", "--namespace", "non-existent-ns"])
     assert result.exit_code == 0

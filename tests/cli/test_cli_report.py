@@ -89,9 +89,10 @@ def test_recommend_generates_and_reports(monkeypatch):
         )
     ]
 
-    # The recommend command now reads from the database by default
+    # The recommend command reads from the database by default via the unified engine
     dummy_repo = MagicMock()
     dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
+    dummy_repo.read_combined_metrics_smart = AsyncMock(return_value=items)
     monkeypatch.setattr(recommend_mod, "get_combined_metrics_repository", lambda: dummy_repo)
 
     # Dummy node repository
@@ -99,7 +100,18 @@ def test_recommend_generates_and_reports(monkeypatch):
     dummy_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
     monkeypatch.setattr(recommend_mod, "get_node_repository", lambda: dummy_node_repo)
 
-    # Dummy recommender that returns some recommendations
+    # Avoid Kubernetes side-input collection
+    from greenkube.core.optimization import context_builder as cb
+
+    monkeypatch.setattr(cb, "get_active_k8s_namespaces", AsyncMock(return_value=None))
+    for name, empty in (("HPACollector", set()), ("PVCollector", []), ("LoadBalancerCollector", [])):
+        cls = MagicMock()
+        instance = MagicMock()
+        instance.collect = AsyncMock(return_value=empty)
+        cls.return_value = instance
+        monkeypatch.setattr(cb, name, cls)
+
+    # Dummy engine that returns some recommendations
     class DummyRec:
         def __init__(self, pod_name, namespace):
             self.pod_name = pod_name
@@ -107,9 +119,9 @@ def test_recommend_generates_and_reports(monkeypatch):
             self.type = None
             self.description = "desc"
 
-    dummy_recommender = MagicMock()
-    dummy_recommender.generate_recommendations = MagicMock(return_value=[DummyRec("p1", "ns1")])
-    monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
+    dummy_engine = MagicMock()
+    dummy_engine.generate = AsyncMock(return_value=[DummyRec("p1", "ns1")])
+    monkeypatch.setattr(recommend_mod, "OptimizationEngine", lambda: dummy_engine)
 
     reported = []
 

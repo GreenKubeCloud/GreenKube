@@ -1,6 +1,6 @@
-# tests/core/test_recommender_v2.py
+# tests/core/test_native_analyzers.py
 """
-Comprehensive tests for the enhanced recommendation engine.
+Comprehensive tests for the native recommendation analyzers.
 Tests cover all 11 recommendation types using TDD methodology.
 """
 
@@ -11,8 +11,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from greenkube.collectors.pv_collector import OrphanedPV
-from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import CombinedMetric, RecommendationType
+
+from .optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-import]
 
 # ---------------------------------------------------------------------------
 # Helpers to build test metrics
@@ -124,8 +125,8 @@ def _make_timeseries(
 
 @pytest.fixture
 def recommender():
-    """Recommender with default config thresholds."""
-    return Recommender()
+    """Native analyzer test helper with default config thresholds."""
+    return NativeRecommender()
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1095,7 @@ class TestSystemNamespaceExclusion:
 
         cfg = Config()
         cfg.RECOMMEND_SYSTEM_NAMESPACES = True
-        recommender_with_sys = Recommender(config=cfg)
+        recommender_with_sys = NativeRecommender(config=cfg)
 
         metrics = [
             _make_metric(
@@ -1275,7 +1276,7 @@ class TestOrphanedPersistentVolume:
 
         cfg = Config()
         cfg.STORAGE_COST_PER_GIB_MONTH = 0.25
-        custom_recommender = Recommender(config=cfg)
+        custom_recommender = NativeRecommender(config=cfg)
 
         volumes = [
             OrphanedPV(
@@ -1433,7 +1434,7 @@ class TestOrphanedLoadBalancer:
 
         cfg = Config()
         cfg.LOAD_BALANCER_COST_PER_MONTH = 25.0
-        custom_recommender = Recommender(config=cfg)
+        custom_recommender = NativeRecommender(config=cfg)
 
         services = [OrphanedLoadBalancer(name="lb-pricey", namespace="default", endpoint_count=0)]
         metrics = [_make_metric(pod_name="unrelated-pod")]

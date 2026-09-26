@@ -82,20 +82,36 @@ def test_no_color_env_var_disables_rich_markup(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_fail_on_recommendations_exits_nonzero_when_recommendations_exist(monkeypatch):
-    """Exit code should be 1 when recommendations are found and --fail-on-recommendations is set."""
-    items = make_metrics()
+def _setup_recommend(monkeypatch, recommendations):
+    """Wire the CLI recommend command to a dummy engine and mock repositories."""
     dummy_repo = MagicMock()
-    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
+    dummy_repo.read_combined_metrics = AsyncMock(return_value=make_metrics())
+    dummy_repo.read_combined_metrics_smart = AsyncMock(return_value=make_metrics())
     monkeypatch.setattr(recommend_mod, "get_combined_metrics_repository", lambda: dummy_repo)
 
     dummy_node_repo = MagicMock()
     dummy_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
     monkeypatch.setattr(recommend_mod, "get_node_repository", lambda: dummy_node_repo)
 
-    dummy_recommender = MagicMock()
-    dummy_recommender.generate_recommendations = MagicMock(return_value=[make_recommendation()])
-    monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
+    from greenkube.core.optimization import context_builder as cb
+
+    monkeypatch.setattr(cb, "get_active_k8s_namespaces", AsyncMock(return_value=None))
+    for name, empty in (("HPACollector", set()), ("PVCollector", []), ("LoadBalancerCollector", [])):
+        cls = MagicMock()
+        instance = MagicMock()
+        instance.collect = AsyncMock(return_value=empty)
+        cls.return_value = instance
+        monkeypatch.setattr(cb, name, cls)
+
+    dummy_engine = MagicMock()
+    dummy_engine.generate = AsyncMock(return_value=recommendations)
+    monkeypatch.setattr(recommend_mod, "OptimizationEngine", lambda: dummy_engine)
+    return dummy_engine
+
+
+def test_fail_on_recommendations_exits_nonzero_when_recommendations_exist(monkeypatch):
+    """Exit code should be 1 when recommendations are found and --fail-on-recommendations is set."""
+    _setup_recommend(monkeypatch, [make_recommendation()])
 
     result = runner.invoke(app, ["recommend", "--fail-on-recommendations"])
     assert result.exit_code == 1
@@ -103,18 +119,7 @@ def test_fail_on_recommendations_exits_nonzero_when_recommendations_exist(monkey
 
 def test_fail_on_recommendations_exits_zero_when_no_recommendations(monkeypatch):
     """Exit code should be 0 when no recommendations exist, even with --fail-on-recommendations."""
-    items = make_metrics()
-    dummy_repo = MagicMock()
-    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
-    monkeypatch.setattr(recommend_mod, "get_combined_metrics_repository", lambda: dummy_repo)
-
-    dummy_node_repo = MagicMock()
-    dummy_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
-    monkeypatch.setattr(recommend_mod, "get_node_repository", lambda: dummy_node_repo)
-
-    dummy_recommender = MagicMock()
-    dummy_recommender.generate_recommendations = MagicMock(return_value=[])
-    monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
+    _setup_recommend(monkeypatch, [])
 
     result = runner.invoke(app, ["recommend", "--fail-on-recommendations"])
     assert result.exit_code == 0
@@ -122,18 +127,7 @@ def test_fail_on_recommendations_exits_zero_when_no_recommendations(monkeypatch)
 
 def test_fail_on_recommendations_not_set_exits_zero_with_recommendations(monkeypatch):
     """Without the flag, exit code is 0 even if recommendations are present."""
-    items = make_metrics()
-    dummy_repo = MagicMock()
-    dummy_repo.read_combined_metrics = AsyncMock(return_value=items)
-    monkeypatch.setattr(recommend_mod, "get_combined_metrics_repository", lambda: dummy_repo)
-
-    dummy_node_repo = MagicMock()
-    dummy_node_repo.get_latest_snapshots_before = AsyncMock(return_value=[])
-    monkeypatch.setattr(recommend_mod, "get_node_repository", lambda: dummy_node_repo)
-
-    dummy_recommender = MagicMock()
-    dummy_recommender.generate_recommendations = MagicMock(return_value=[make_recommendation()])
-    monkeypatch.setattr(recommend_mod, "Recommender", lambda: dummy_recommender)
+    _setup_recommend(monkeypatch, [make_recommendation()])
 
     result = runner.invoke(app, ["recommend"])
     assert result.exit_code == 0

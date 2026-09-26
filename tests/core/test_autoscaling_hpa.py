@@ -1,4 +1,4 @@
-# tests/core/test_recommender_hpa.py
+# tests/core/test_autoscaling_hpa.py
 """
 Tests for HPA-aware autoscaling recommendations.
 TDD: Tests written before implementation.
@@ -9,8 +9,9 @@ from typing import Set, Tuple
 
 import pytest
 
-from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import CombinedMetric, RecommendationType
+
+from .optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-import]
 
 
 def _ts(hour: int = 12) -> datetime:
@@ -51,7 +52,7 @@ def _make_spiky_timeseries(
 
 @pytest.fixture
 def recommender():
-    return Recommender()
+    return NativeRecommender()
 
 
 class TestHPAAwareAutoscaling:

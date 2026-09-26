@@ -46,7 +46,7 @@ def e2e_client(sqlite_repos):
     """Create a TestClient wired to real SQLite repositories."""
     carbon_repo, combined_repo, node_repo, reco_repo = sqlite_repos
 
-    with patch("greenkube.api.routers.recommendations.HPACollector") as mock_hpa:
+    with patch("greenkube.core.optimization.context_builder.HPACollector") as mock_hpa:
         instance = AsyncMock()
         instance.collect = AsyncMock(return_value=set())
         mock_hpa.return_value = instance

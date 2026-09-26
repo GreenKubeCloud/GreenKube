@@ -155,6 +155,48 @@ async def test_migration_adds_node_snapshots_column(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_migration_adds_recommendation_source_columns(tmp_path):
+    """Migration 0010 should add source, provenance and owner columns."""
+    db_file = str(tmp_path / "v1.db")
+    _create_v1_schema(db_file)
+
+    mgr = DatabaseManager()
+    await mgr.setup_sqlite(db_path=db_file)
+    await mgr.close()
+
+    after = _column_names(db_file, "recommendation_history")
+    for col in ("source", "source_ref", "sources", "superseded_by", "capability", "owner_kind", "owner_name"):
+        assert col in after, f"Migration did not add column: {col}"
+
+
+@pytest.mark.asyncio
+async def test_migration_adds_recommendation_evidence_columns(tmp_path):
+    """Migration 0011 should add evidence, risk, ranking and patch columns."""
+    db_file = str(tmp_path / "v1.db")
+    _create_v1_schema(db_file)
+
+    mgr = DatabaseManager()
+    await mgr.setup_sqlite(db_path=db_file)
+    await mgr.close()
+
+    after = _column_names(db_file, "recommendation_history")
+    for col in (
+        "evidence",
+        "risk_level",
+        "risk_factors",
+        "confidence",
+        "effort",
+        "ranking_score",
+        "ranking_factors",
+        "patch",
+        "expires_at",
+        "reversible",
+        "requires_restart",
+    ):
+        assert col in after, f"Migration did not add column: {col}"
+
+
+@pytest.mark.asyncio
 async def test_migration_preserves_existing_data(tmp_path):
     """Existing rows should survive the migration without corruption."""
     db_file = str(tmp_path / "v1.db")
