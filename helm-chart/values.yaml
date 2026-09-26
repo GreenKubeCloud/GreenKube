@@ -207,6 +207,23 @@ config:
     minMemoryBytes: '16777216'  # 16 MiB — quoted to prevent YAML float serialization
     # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
     applyTolerance: 0.25
+    # --- Recommendation sources (connectors) ---
+    # VPA recommendation mode (updateMode: Off). When enabled, VPA recommendations
+    # replace native CPU/memory rightsizing for the same workload to avoid duplicates.
+    vpaEnabled: false
+    # Karpenter node pool recommendations (reserved; connector not implemented yet).
+    karpenterEnabled: false
+    # Source precedence used to arbitrate conflicts (highest priority first).
+    sourcePriority: vpa,karpenter,greenkube
+    # --- Ranking & review ---
+    # Time-to-live of a recommendation before it is considered expired (days).
+    ttlDays: 14
+    # Multi-criteria ranking profile: balanced | carbon_first | cost_first | quick_wins | low_risk
+    rankingProfile: balanced
+    # Optional JSON object overriding ranking weights, e.g. '{"carbon": 0.5, "risk": 0.3}'.
+    rankingWeights: ''
+    # Minimum raw samples expected for a high-confidence recommendation.
+    minSamples: 36
 
 # ---------------------------------------------------------------------------
 # Elasticsearch (experimental — not production-ready)

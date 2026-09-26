@@ -29,4 +29,20 @@ rules:
   verbs:
   - get
   - list
+  # GreenKube reads recommendation-mode VPAs (updateMode: Off) when the VPA
+  # connector is enabled. Read-only and harmless when the CRD is absent.
+- apiGroups: ["autoscaling.k8s.io"]
+  resources:
+  - verticalpodautoscalers
+  verbs:
+  - get
+  - list
+  # Reserved for the Karpenter connector (node pool consolidation).
+- apiGroups: ["karpenter.sh"]
+  resources:
+  - nodepools
+  - nodeclaims
+  verbs:
+  - get
+  - list
 {{- end }}

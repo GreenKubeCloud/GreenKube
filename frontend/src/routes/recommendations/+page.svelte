@@ -6,6 +6,7 @@
 		getIgnoredRecommendations,
 		getAppliedRecommendations,
 		getRecommendationSavings,
+		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation
 	} from '$lib/api.js';
@@ -23,6 +24,20 @@
 	let activeTab = 'active'; // 'active' | 'ignored' | 'savings'
 	let filterType = 'all';
 	let expandedApplied = new Set(); // ids of expanded applied cards
+	let expandedEvidence = new Set(); // ids of active cards showing the evidence panel
+
+	// Multi-criteria ranking
+	let rankingProfile = ''; // '' = server default (projected savings)
+	let rankedIds = []; // recommendation ids ordered by the selected profile
+
+	const RANKING_PROFILES = [
+		{ value: '', label: 'Projected savings' },
+		{ value: 'balanced', label: 'Balanced' },
+		{ value: 'carbon_first', label: 'Carbon first' },
+		{ value: 'cost_first', label: 'Cost first' },
+		{ value: 'quick_wins', label: 'Quick wins' },
+		{ value: 'low_risk', label: 'Low risk' }
+	];
 
 	// Ignore modal state
 	let ignoreModal = null; // { rec } | null
@@ -58,6 +73,31 @@
 	$: filtered = filterType === 'all'
 		? currentList
 		: currentList.filter(r => r.type === filterType);
+
+	$: displayed = rankedIds.length
+		? [...filtered].sort((a, b) => {
+			const ia = rankedIds.indexOf(a.id);
+			const ib = rankedIds.indexOf(b.id);
+			return (ia === -1 ? Number.MAX_SAFE_INTEGER : ia) - (ib === -1 ? Number.MAX_SAFE_INTEGER : ib);
+		})
+		: filtered;
+
+	async function applyRankingProfile(profile) {
+		rankingProfile = profile;
+		rankedIds = [];
+		if (!profile) return;
+		try {
+			const ranked = await getTopRecommendations({
+				namespace: $selectedNamespace || undefined,
+				limit: 50,
+				metric: 'co2',
+				profile
+			});
+			rankedIds = ranked.map((r) => r.id).filter((id) => id != null);
+		} catch (e) {
+			error = e.message;
+		}
+	}
 
 	$: totalSavingsCO2 = activeRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
 	$: totalSavingsCost = activeRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
@@ -112,6 +152,38 @@
 		expandedApplied = expandedApplied.has(id)
 			? new Set([...expandedApplied].filter(x => x !== id))
 			: new Set([...expandedApplied, id]);
+	}
+
+	function toggleEvidence(id) {
+		expandedEvidence = expandedEvidence.has(id)
+			? new Set([...expandedEvidence].filter(x => x !== id))
+			: new Set([...expandedEvidence, id]);
+	}
+
+	// --- Source / risk display ---
+	const sourceConfig = {
+		greenkube: { label: 'GreenKube', color: 'green' },
+		vpa: { label: 'VPA', color: 'blue' },
+		karpenter: { label: 'Karpenter', color: 'purple' }
+	};
+
+	function getSourceConfig(source) {
+		return sourceConfig[source] ?? { label: source ?? 'GreenKube', color: 'green' };
+	}
+
+	function riskClass(risk) {
+		if (risk === 'high') return 'bg-red-600/20 text-red-400';
+		if (risk === 'medium') return 'bg-yellow-600/20 text-yellow-400';
+		return 'bg-green-600/20 text-green-400';
+	}
+
+	function percent(value) {
+		if (value == null) return '—';
+		return `${Math.round(value * 100)}%`;
+	}
+
+	function rollbackLabel(condition) {
+		return `${condition.metric} ${condition.comparator} ${condition.threshold} — ${condition.description}`;
 	}
 
 	// --- Type config ---
@@ -206,6 +278,16 @@
 					Clear filter: {$selectedNamespace} ✕
 				</button>
 			{/if}
+			<select
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
+				bind:value={rankingProfile}
+				on:change={(e) => applyRankingProfile(e.currentTarget.value)}
+				title="Multi-criteria ranking profile"
+			>
+				{#each RANKING_PROFILES as profile}
+					<option value={profile.value}>{profile.label}</option>
+				{/each}
+			</select>
 			<button class="btn-secondary text-xs" on:click={loadData}>↻ Refresh</button>
 		</div>
 	</div>
@@ -449,7 +531,7 @@
 
 				<!-- Recommendation cards -->
 				<div class="space-y-3">
-					{#each filtered as rec (rec.id)}
+					{#each displayed as rec (rec.id)}
 						{@const cfg = getTypeConfig(rec.type)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
@@ -463,6 +545,15 @@
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
+												<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-300">
+													{getSourceConfig(rec.source).label}
+												</span>
+												{#if rec.risk_level}
+													<span class="text-[10px] px-2 py-0.5 rounded {riskClass(rec.risk_level)}"
+														title={rec.risk_factors?.join(', ')}>
+														{rec.risk_level} risk
+													</span>
+												{/if}
 												{#if activeTab === 'ignored'}
 													<span class="text-[10px] px-2 py-0.5 rounded bg-yellow-600/10 text-yellow-500">ignored</span>
 												{/if}
@@ -565,12 +656,112 @@
 												{rec.priority} priority
 											</span>
 										{/if}
+										{#if rec.confidence != null}
+											<span class="text-[10px] text-dark-400">
+												confidence {percent(rec.confidence)}
+											</span>
+										{/if}
+										{#if rec.ranking_score != null}
+											<span class="text-[10px] text-dark-500" title={JSON.stringify(rec.ranking_factors ?? {})}>
+												rank score {rec.ranking_score.toFixed(2)}
+											</span>
+										{/if}
+										{#if rec.evidence}
+											<button
+												class="text-[10px] px-2 py-0.5 rounded border border-dark-600 text-dark-400
+												       hover:border-green-600/50 hover:text-green-400 transition-colors"
+												on:click={() => toggleEvidence(rec.id)}
+											>
+												{expandedEvidence.has(rec.id) ? 'Hide evidence' : 'Evidence'}
+											</button>
+										{/if}
 										{#if activeTab === 'ignored' && rec.ignored_at}
 											<span class="text-[10px] text-dark-600">
 												Ignored on {new Date(rec.ignored_at).toLocaleDateString()}
 											</span>
 										{/if}
 									</div>
+
+									<!-- Evidence panel -->
+									{#if expandedEvidence.has(rec.id) && rec.evidence}
+										{@const ev = rec.evidence}
+										<div class="mt-3 pt-3 border-t border-dark-700 space-y-3 text-xs">
+											<div class="flex flex-wrap gap-4 text-dark-500">
+												{#if ev.observation_window_start}
+													<span>Window: <span class="text-dark-300">{new Date(ev.observation_window_start).toLocaleDateString()} → {new Date(ev.observation_window_end).toLocaleDateString()}</span></span>
+												{/if}
+												<span>Samples: <span class="text-dark-300">{ev.sample_count}</span></span>
+												<span>Coverage: <span class="text-dark-300">{percent(ev.coverage_ratio)}</span></span>
+												{#if ev.expires_at}
+													<span>Expires: <span class="text-dark-300">{new Date(ev.expires_at).toLocaleDateString()}</span></span>
+												{/if}
+											</div>
+
+											{#if ev.cpu_usage || ev.memory_usage}
+												<div class="overflow-x-auto">
+													<table class="text-[11px] text-dark-400">
+														<thead>
+															<tr class="text-dark-600 uppercase text-[10px]">
+																<th class="text-left pr-4">Signal</th>
+																<th class="text-right pr-4">avg</th>
+																<th class="text-right pr-4">p50</th>
+																<th class="text-right pr-4">p95</th>
+																<th class="text-right pr-4">p99</th>
+																<th class="text-right">max</th>
+															</tr>
+														</thead>
+														<tbody>
+															{#if ev.cpu_usage}
+																<tr>
+																	<td class="pr-4">CPU (m)</td>
+																	<td class="text-right pr-4">{ev.cpu_usage.avg.toFixed(0)}</td>
+																	<td class="text-right pr-4">{ev.cpu_usage.p50.toFixed(0)}</td>
+																	<td class="text-right pr-4">{ev.cpu_usage.p95.toFixed(0)}</td>
+																	<td class="text-right pr-4">{ev.cpu_usage.p99.toFixed(0)}</td>
+																	<td class="text-right">{ev.cpu_usage.max.toFixed(0)}</td>
+																</tr>
+															{/if}
+															{#if ev.memory_usage}
+																<tr>
+																	<td class="pr-4">Memory</td>
+																	<td class="text-right pr-4">{formatBytes(ev.memory_usage.avg)}</td>
+																	<td class="text-right pr-4">{formatBytes(ev.memory_usage.p50)}</td>
+																	<td class="text-right pr-4">{formatBytes(ev.memory_usage.p95)}</td>
+																	<td class="text-right pr-4">{formatBytes(ev.memory_usage.p99)}</td>
+																	<td class="text-right">{formatBytes(ev.memory_usage.max)}</td>
+																</tr>
+															{/if}
+														</tbody>
+													</table>
+												</div>
+											{/if}
+
+											{#if ev.changes?.length}
+												<div class="flex flex-wrap gap-4 text-dark-500">
+													{#each ev.changes as change}
+														<span>
+															{change.resource}: <span class="text-dark-300">{change.current}</span>
+															→ <span class="text-green-400">{change.proposed}</span>
+															{#if change.change_ratio != null}({percent(change.change_ratio)} reduction){/if}
+														</span>
+													{/each}
+												</div>
+											{/if}
+
+											<div class="text-dark-500">
+												Savings method: <span class="text-dark-300">{ev.savings_method}</span>
+											</div>
+
+											{#if ev.rollback_conditions?.length}
+												<div class="space-y-1">
+													<p class="text-dark-600 uppercase text-[10px]">Rollback conditions</p>
+													{#each ev.rollback_conditions as condition}
+														<p class="text-dark-400">• {rollbackLabel(condition)}</p>
+													{/each}
+												</div>
+											{/if}
+										</div>
+									{/if}
 								</div>
 							</div>
 						</div>

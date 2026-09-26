@@ -3,7 +3,7 @@
 API routes for the recommendation lifecycle.
 
 Endpoints:
-  GET  /recommendations            - Live recommendations (runs recommender, upserts DB)
+  GET  /recommendations            - Live recommendations (runs the optimization engine, upserts DB)
   GET  /recommendations/active     - Current active recommendations from DB
     GET  /recommendations/top        - Ranked actionable recommendations by projected savings
   GET  /recommendations/ignored    - All permanently ignored recommendations
@@ -15,7 +15,7 @@ Endpoints:
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,12 +28,9 @@ from greenkube.api.dependencies import (
     validate_namespace,
 )
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
-from greenkube.collectors.hpa_collector import HPACollector
-from greenkube.collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
-from greenkube.collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
 from greenkube.core.config import get_config
+from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.recommendation_ranking import rank_recommendations
-from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -49,30 +46,6 @@ from greenkube.utils.date_utils import parse_duration
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-async def _get_active_k8s_namespaces() -> set[str] | None:
-    """Return names of currently active Kubernetes namespaces, or None if unavailable.
-
-    Returns None (rather than an empty set) when the Kubernetes API cannot be reached
-    so that the calling code skips filtering instead of discarding all metrics.
-    The ApiClient is closed after each call to avoid aiohttp session leaks.
-    """
-    try:
-        from kubernetes_asyncio.client import ApiClient, CoreV1Api
-
-        from greenkube.core.k8s_client import ensure_k8s_config
-
-        if not await ensure_k8s_config():
-            return None
-
-        async with ApiClient() as api_client:
-            v1 = CoreV1Api(api_client=api_client)
-            ns_list = await v1.list_namespace()
-            return {ns.metadata.name for ns in ns_list.items if ns.metadata.name}
-    except Exception as e:
-        logger.warning("Could not list Kubernetes namespaces: %s. Skipping namespace filter.", e)
-        return None
 
 
 def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], Optional[datetime]]:
@@ -95,6 +68,30 @@ def _get_optional_time_range(last: Optional[str]) -> tuple[Optional[datetime], O
 def _get_savings_cluster_name() -> str:
     """Return the cluster name used by the savings attribution task."""
     return get_config().CLUSTER_NAME or "default"
+
+
+def _enum_value(value) -> Optional[str]:
+    """Returns the string value of an enum or plain value."""
+    if value is None:
+        return None
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _filter_records(
+    records: List[RecommendationRecord],
+    source: Optional[str],
+    risk_level: Optional[str],
+    capability: Optional[str],
+) -> List[RecommendationRecord]:
+    """Applies optional source/risk/capability filters in Python."""
+    result = records
+    if source:
+        result = [r for r in result if _enum_value(r.source) == source]
+    if risk_level:
+        result = [r for r in result if _enum_value(r.risk_level) == risk_level]
+    if capability:
+        result = [r for r in result if _enum_value(r.capability) == capability]
+    return result
 
 
 def _summary_from_savings_totals(
@@ -130,98 +127,10 @@ async def _generate_and_persist_recommendations(
     node_repo: NodeRepository,
     reco_repo: RecommendationRepository,
 ) -> list[Recommendation]:
-    """Analyze recent metrics and reconcile persisted active recommendations."""
-    lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=lookback_days)
-    analysis_window_seconds = (end - start).total_seconds()
-    metrics = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
-
-    # Remove metrics from Kubernetes namespaces that no longer exist so that
-    # the recommender does not regenerate recommendations for deleted namespaces,
-    # allowing the subsequent reconcile call to mark those rows as stale.
-    active_namespaces = await _get_active_k8s_namespaces()
-    if active_namespaces is not None and metrics:
-        metrics = [m for m in metrics if m.namespace in active_namespaces]
-
-    if not metrics:
-        try:
-            await reco_repo.reconcile_active_recommendations([], namespace=namespace)
-        except Exception as e:
-            logger.error("Failed to reconcile empty recommendation set: %s", e)
-        return []
-
-    node_infos = []
-    try:
-        node_infos = await node_repo.get_latest_snapshots_before(end)
-    except Exception as e:
-        logger.warning("Could not fetch node snapshots for recommendations: %s", e)
-
-    hpa_targets = None
-    try:
-        hpa_collector = HPACollector()
-        hpa_targets = await hpa_collector.collect()
-    except Exception as e:
-        logger.warning("Could not collect HPA targets: %s. Proceeding without HPA filtering.", e)
-
-    orphaned_volumes = None
-    try:
-        pv_collector = PVCollector()
-        orphaned_volumes = await pv_collector.collect()
-    except Exception as e:
-        logger.warning(
-            "Could not collect orphaned PersistentVolumes: %s. Proceeding without PV cleanup recommendations.",
-            e,
-        )
-
-    if orphaned_volumes:
-        try:
-            orphaned_volumes = await enrich_orphaned_pv_costs(orphaned_volumes, window_days=lookback_days)
-        except Exception as e:
-            logger.warning(
-                "Could not enrich orphaned PV costs from OpenCost: %s. Using capacity-based estimates.",
-                e,
-            )
-
-    orphaned_load_balancers = None
-    try:
-        lb_collector = LoadBalancerCollector()
-        orphaned_load_balancers = await lb_collector.collect()
-    except Exception as e:
-        logger.warning(
-            "Could not collect orphaned LoadBalancer Services: %s. Proceeding without LB cleanup recommendations.",
-            e,
-        )
-
-    if orphaned_load_balancers:
-        try:
-            orphaned_load_balancers = await enrich_orphaned_lb_costs(orphaned_load_balancers, window_days=lookback_days)
-        except Exception as e:
-            logger.warning(
-                "Could not enrich orphaned LoadBalancer costs from OpenCost: %s. Using flat estimates.",
-                e,
-            )
-
-    recommender = Recommender()
-    recommendations = recommender.generate_recommendations(
-        metrics,
-        node_infos=node_infos,
-        hpa_targets=hpa_targets,
-        persistent_volumes=orphaned_volumes,
-        load_balancers=orphaned_load_balancers,
-        analysis_window_seconds=analysis_window_seconds,
-    )
-
+    """Run the optimization engine and reconcile persisted active recommendations."""
+    engine = OptimizationEngine()
+    recommendations = await engine.refresh(repo, node_repo, reco_repo, namespace=namespace)
     update_recommendation_metrics(recommendations)
-
-    try:
-        records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
-        if records:
-            await reco_repo.upsert_recommendations(records)
-        await reco_repo.reconcile_active_recommendations(records, namespace=namespace)
-    except Exception as e:
-        logger.error("Failed to upsert recommendation history: %s", e)
-
     return recommendations
 
 
@@ -246,6 +155,9 @@ async def list_recommendations(
 async def list_active_recommendations(
     namespace: Optional[str] = Depends(validate_namespace),
     refresh: bool = Query(False, description="Refresh recommendations before returning active records."),
+    source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, karpenter)."),
+    risk_level: Optional[str] = Query(None, description="Filter by risk level (low, medium, high)."),
+    capability: Optional[str] = Query(None, description="Filter by optimization capability."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
@@ -253,7 +165,7 @@ async def list_active_recommendations(
     """Return currently active recommendations from the database.
 
     By default this endpoint reads directly from the DB. Pass ``refresh=true``
-    to run the recommender first and reconcile stale active records.
+    to run the optimizer first and reconcile stale active records.
     """
     if refresh:
         try:
@@ -261,7 +173,8 @@ async def list_active_recommendations(
         except Exception as e:
             logger.error("Failed to refresh active recommendations: %s", e)
 
-    return await reco_repo.get_active_recommendations(namespace=namespace)
+    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    return _filter_records(records, source, risk_level, capability)
 
 
 @router.get("/recommendations/top", response_model=List[TopRecommendation])
@@ -269,15 +182,23 @@ async def list_top_recommendations(
     namespace: Optional[str] = Depends(validate_namespace),
     limit: int = Query(5, ge=1, le=50, description="Number of recommendations to return."),
     metric: Literal["co2", "cost"] = Query("co2", description="Savings metric used for ranking."),
+    profile: Optional[str] = Query(
+        None,
+        description=(
+            "Multi-criteria ranking profile: balanced, carbon_first, cost_first, quick_wins, low_risk. "
+            "When omitted, ranking uses projected savings only."
+        ),
+    ),
     refresh: bool = Query(False, description="Refresh recommendations before ranking active records."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
-    """Return the highest-impact active recommendations by projected annual savings.
+    """Return the highest-impact active recommendations.
 
     The default ranking uses projected CO2e savings for the coming year. Pass
-    ``metric=cost`` to prioritize direct cloud cost savings instead.
+    ``metric=cost`` to prioritize direct cloud cost savings, or ``profile`` to
+    rank by the multi-criteria score (impact, confidence, risk, effort).
     """
     if refresh:
         try:
@@ -285,8 +206,11 @@ async def list_top_recommendations(
         except Exception as e:
             logger.error("Failed to refresh top recommendations: %s", e)
 
-    records = await reco_repo.get_top_recommendations(limit=limit, savings_metric=metric, namespace=namespace)
-    return rank_recommendations(records, limit=limit, savings_metric=metric)
+    if profile:
+        records = await reco_repo.get_active_recommendations(namespace=namespace)
+    else:
+        records = await reco_repo.get_top_recommendations(limit=limit, savings_metric=metric, namespace=namespace)
+    return rank_recommendations(records, limit=limit, savings_metric=metric, profile=profile)
 
 
 @router.get("/recommendations/ignored", response_model=List[RecommendationRecord])
@@ -367,6 +291,23 @@ async def get_savings_summary(
         logger.warning("Could not load savings ledger summary: %s. Falling back to recommendation records.", exc)
 
     return record_summary
+
+
+@router.get("/recommendations/{rec_id}", response_model=RecommendationRecord)
+async def get_recommendation_detail(
+    rec_id: int,
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Return a single recommendation with its full evidence block and assessment.
+
+    This is the review endpoint: it returns the observation window, utilization
+    distribution, proposed change, confidence, risk factors, rollback conditions
+    and expiry needed to decide without re-running the analysis.
+    """
+    record = await reco_repo.get_recommendation_by_id(rec_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
+    return record
 
 
 @router.patch("/recommendations/{rec_id}/apply", response_model=RecommendationRecord)

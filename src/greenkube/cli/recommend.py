@@ -2,9 +2,8 @@
 """
 Implements the `recommend` command for the GreenKube CLI.
 
-Uses the unified ``generate_recommendations()`` engine (all 11 recommendation
-types) by reading stored metrics from the database, matching the behaviour
-of the API endpoint.
+Uses the unified optimization engine (all recommendation types) by reading
+stored metrics from the database, matching the behaviour of the API endpoint.
 """
 
 import asyncio
@@ -15,9 +14,9 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-from ..core.config import get_config
 from ..core.factory import get_combined_metrics_repository, get_node_repository
-from ..core.recommender import Recommender
+from ..core.optimization.context_builder import ContextBuilder
+from ..core.optimization.engine import OptimizationEngine
 from ..reporters.console_reporter import ConsoleReporter
 
 logger = logging.getLogger(__name__)
@@ -56,14 +55,13 @@ def recommend(
     if ctx.invoked_subcommand is not None:
         return
 
-    logger.info("Initializing GreenKube Recommender...")
+    logger.info("Initializing GreenKube optimization engine...")
 
     async def _recommend_async():
         processor = None
-        analysis_window_seconds = None
-        lookback_days = None
         try:
-            from datetime import datetime, timedelta, timezone
+            engine = OptimizationEngine()
+            builder = ContextBuilder()
 
             if live:
                 from ..core.factory import get_processor
@@ -71,89 +69,22 @@ def recommend(
                 processor = get_processor()
                 logger.info("Running the data processing pipeline (live mode)...")
                 combined_data = await processor.run()
+                node_repo = get_node_repository()
+                context = await builder.build_from_metrics(combined_data, node_repo, namespace=namespace)
             else:
                 logger.info("Reading stored metrics from database...")
                 repository = get_combined_metrics_repository()
-                lookback_days = get_config().RECOMMENDATION_LOOKBACK_DAYS
-                end = datetime.now(timezone.utc)
-                start = end - timedelta(days=lookback_days)
-                analysis_window_seconds = (end - start).total_seconds()
-                combined_data = await repository.read_combined_metrics(start_time=start, end_time=end)
+                node_repo = get_node_repository()
+                context = await builder.build(repository, node_repo, namespace=namespace)
 
-            if not combined_data:
-                logger.warning("No combined data available. Cannot generate recommendations.")
+            if not context.metrics:
+                if namespace:
+                    logger.warning("No data found for namespace '%s'.", namespace)
+                else:
+                    logger.warning("No combined data available. Cannot generate recommendations.")
                 return
 
-            # Filter by namespace if provided
-            if namespace:
-                logger.info("Filtering results for namespace: %s", namespace)
-                combined_data = [item for item in combined_data if item.namespace == namespace]
-                if not combined_data:
-                    logger.warning("No data found for namespace '%s'.", namespace)
-                    return
-
-            # Fetch node info for node-level recommendations
-            node_infos = []
-            try:
-                node_repo = get_node_repository()
-                end_ts = datetime.now(timezone.utc)
-                node_infos = await node_repo.get_latest_snapshots_before(end_ts)
-            except Exception as e:
-                logger.warning("Could not fetch node snapshots for recommendations: %s", e)
-
-            # Detect existing HPAs to skip redundant autoscaling recommendations
-            hpa_targets = None
-            try:
-                from ..collectors.hpa_collector import HPACollector
-
-                hpa_collector = HPACollector()
-                hpa_targets = await hpa_collector.collect()
-            except Exception as e:
-                logger.warning("Could not collect HPA targets: %s. Proceeding without HPA filtering.", e)
-
-            # Detect orphaned PersistentVolumes for cleanup recommendations
-            orphaned_volumes = None
-            try:
-                from ..collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
-
-                pv_collector = PVCollector()
-                orphaned_volumes = await pv_collector.collect()
-                if orphaned_volumes:
-                    orphaned_volumes = await enrich_orphaned_pv_costs(orphaned_volumes, window_days=lookback_days or 7)
-            except Exception as e:
-                logger.warning(
-                    "Could not collect orphaned PersistentVolumes: %s. Proceeding without PV cleanup recommendations.",
-                    e,
-                )
-
-            # Detect orphaned LoadBalancer Services for cleanup recommendations
-            orphaned_load_balancers = None
-            try:
-                from ..collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
-
-                lb_collector = LoadBalancerCollector()
-                orphaned_load_balancers = await lb_collector.collect()
-                if orphaned_load_balancers:
-                    orphaned_load_balancers = await enrich_orphaned_lb_costs(
-                        orphaned_load_balancers, window_days=lookback_days or 7
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Could not collect orphaned LoadBalancer Services: %s. "
-                    "Proceeding without LB cleanup recommendations.",
-                    e,
-                )
-
-            # Generate all recommendation types via the unified engine
-            recommender = Recommender()
-            recommendations = recommender.generate_recommendations(
-                combined_data,
-                node_infos=node_infos,
-                hpa_targets=hpa_targets,
-                persistent_volumes=orphaned_volumes,
-                load_balancers=orphaned_load_balancers,
-                analysis_window_seconds=analysis_window_seconds,
-            )
+            recommendations = await engine.generate(context)
 
             logger.info("Found %d recommendations.", len(recommendations))
 

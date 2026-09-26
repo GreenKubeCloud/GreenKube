@@ -167,6 +167,28 @@ export function getActiveRecommendations({ namespace, refresh } = {}) {
 	return request(`${BASE}/recommendations/active`, { namespace, refresh });
 }
 
+/**
+ * Ranked active recommendations.
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {number} [opts.limit]
+ * @param {'co2'|'cost'} [opts.metric]
+ * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
+ * @returns {Promise<Object[]>}
+ */
+export function getTopRecommendations({ namespace, limit, metric, profile, refresh } = {}) {
+	return request(`${BASE}/recommendations/top`, { namespace, limit, metric, profile, refresh });
+}
+
+/**
+ * Full recommendation detail, including the evidence block.
+ * @param {number} id
+ * @returns {Promise<Object>}
+ */
+export function getRecommendation(id) {
+	return request(`${BASE}/recommendations/${id}`);
+}
+
 /** @returns {Promise<Object[]>} */
 export function getIgnoredRecommendations() {
 	return request(`${BASE}/recommendations/ignored`);

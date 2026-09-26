@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+from greenkube.models.evidence import RecommendationEvidence
 
 
 class EnergyMetric(BaseModel):
@@ -95,6 +97,51 @@ class RecommendationType(str, Enum):
     ORPHANED_LOAD_BALANCER = "ORPHANED_LOAD_BALANCER"
 
 
+class RecommendationSource(str, Enum):
+    """Origin of a recommendation (connector)."""
+
+    GREENKUBE = "greenkube"
+    VPA = "vpa"
+    KARPENTER = "karpenter"
+
+
+class RecommendationCapability(str, Enum):
+    """Optimization domain, used for cross-source arbitration."""
+
+    CPU_RIGHTSIZING = "cpu_rightsizing"
+    MEMORY_RIGHTSIZING = "memory_rightsizing"
+    AUTOSCALING = "autoscaling"
+    OFF_PEAK = "off_peak"
+    CARBON_AWARE = "carbon_aware"
+    ZOMBIE_CLEANUP = "zombie_cleanup"
+    NAMESPACE_CLEANUP = "namespace_cleanup"
+    NODE_OPTIMIZATION = "node_optimization"
+    STORAGE_CLEANUP = "storage_cleanup"
+    LB_CLEANUP = "lb_cleanup"
+    NODE_POOL = "node_pool"
+
+
+#: Maps each recommendation type to the capability it owns.
+RECOMMENDATION_TYPE_CAPABILITY: dict["RecommendationType", RecommendationCapability] = {
+    RecommendationType.ZOMBIE_POD: RecommendationCapability.ZOMBIE_CLEANUP,
+    RecommendationType.RIGHTSIZING_CPU: RecommendationCapability.CPU_RIGHTSIZING,
+    RecommendationType.RIGHTSIZING_MEMORY: RecommendationCapability.MEMORY_RIGHTSIZING,
+    RecommendationType.AUTOSCALING_CANDIDATE: RecommendationCapability.AUTOSCALING,
+    RecommendationType.OFF_PEAK_SCALING: RecommendationCapability.OFF_PEAK,
+    RecommendationType.IDLE_NAMESPACE: RecommendationCapability.NAMESPACE_CLEANUP,
+    RecommendationType.CARBON_AWARE_SCHEDULING: RecommendationCapability.CARBON_AWARE,
+    RecommendationType.OVERPROVISIONED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
+    RecommendationType.UNDERUTILIZED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
+    RecommendationType.ORPHANED_PERSISTENT_VOLUME: RecommendationCapability.STORAGE_CLEANUP,
+    RecommendationType.ORPHANED_LOAD_BALANCER: RecommendationCapability.LB_CLEANUP,
+}
+
+
+def capability_for_type(rec_type: RecommendationType) -> RecommendationCapability:
+    """Returns the capability owned by a recommendation type."""
+    return RECOMMENDATION_TYPE_CAPABILITY.get(rec_type, RecommendationCapability.NODE_OPTIMIZATION)
+
+
 class RecommendationStatus(str, Enum):
     """Lifecycle status of a persisted recommendation."""
 
@@ -102,6 +149,22 @@ class RecommendationStatus(str, Enum):
     APPLIED = "applied"
     IGNORED = "ignored"
     STALE = "stale"
+
+
+class RiskLevel(str, Enum):
+    """Reliability risk of applying a recommendation."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class EffortLevel(str, Enum):
+    """Implementation effort required to apply a recommendation."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class Recommendation(BaseModel):
@@ -133,6 +196,43 @@ class Recommendation(BaseModel):
     )
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
+    # Source and provenance
+    source: RecommendationSource = Field(
+        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    )
+    source_ref: Optional[str] = Field(None, description="Connector-specific reference (e.g. '<namespace>/<vpa-name>').")
+    sources: List[str] = Field(
+        default_factory=list,
+        description="All sources that observed this issue (provenance, highest priority first).",
+    )
+    superseded_by: Optional[str] = Field(
+        None, description="Source that won arbitration for this capability, when it differs from source."
+    )
+    capability: Optional[RecommendationCapability] = Field(
+        None, description="Optimization domain, derived from type when omitted."
+    )
+    owner_kind: Optional[str] = Field(None, description="Workload owner kind (Deployment, StatefulSet, ...).")
+    owner_name: Optional[str] = Field(None, description="Workload owner name.")
+    # Review evidence and assessment
+    evidence: Optional["RecommendationEvidence"] = Field(
+        None, description="Self-contained review evidence (window, percentiles, diff, rollback conditions)."
+    )
+    risk_level: Optional[RiskLevel] = Field(None, description="Reliability risk: low, medium or high.")
+    risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
+    confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
+    effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
+    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
+    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    patch: Optional[dict] = Field(None, description="Machine-readable action plan for the GitOps patcher.")
+    expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
+    reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
+    requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
+
+    @model_validator(mode="after")
+    def _derive_capability(self) -> "Recommendation":
+        if self.capability is None:
+            self.capability = capability_for_type(self.type)
+        return self
 
 
 class RecommendationRecord(BaseModel):
@@ -159,6 +259,30 @@ class RecommendationRecord(BaseModel):
     recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
+    # Source and provenance
+    source: RecommendationSource = Field(
+        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    )
+    source_ref: Optional[str] = Field(None, description="Connector-specific reference.")
+    sources: List[str] = Field(default_factory=list, description="All sources that observed this issue.")
+    superseded_by: Optional[str] = Field(None, description="Source that won arbitration, when applicable.")
+    capability: Optional[RecommendationCapability] = Field(
+        None, description="Optimization domain, derived from type when omitted."
+    )
+    owner_kind: Optional[str] = Field(None, description="Workload owner kind.")
+    owner_name: Optional[str] = Field(None, description="Workload owner name.")
+    # Review evidence and assessment
+    evidence: Optional[RecommendationEvidence] = Field(None, description="Self-contained review evidence.")
+    risk_level: Optional[RiskLevel] = Field(None, description="Reliability risk: low, medium or high.")
+    risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
+    confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
+    effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
+    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
+    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    patch: Optional[dict] = Field(None, description="Machine-readable action plan for the GitOps patcher.")
+    expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
+    reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
+    requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
     # Applied lifecycle fields
     applied_at: Optional[datetime] = Field(None, description="When the recommendation was applied.")
     actual_cpu_request_millicores: Optional[int] = Field(
@@ -179,6 +303,12 @@ class RecommendationRecord(BaseModel):
         description="When the recommendation was generated.",
     )
     updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
+
+    @model_validator(mode="after")
+    def _derive_capability(self) -> "RecommendationRecord":
+        if self.capability is None:
+            self.capability = capability_for_type(self.type)
+        return self
 
     @classmethod
     def from_recommendation(
@@ -210,6 +340,24 @@ class RecommendationRecord(BaseModel):
             recommended_memory_request_bytes=rec.recommended_memory_request_bytes,
             cron_schedule=rec.cron_schedule,
             target_node=rec.target_node,
+            source=rec.source,
+            source_ref=rec.source_ref,
+            sources=list(rec.sources),
+            superseded_by=rec.superseded_by,
+            capability=rec.capability,
+            owner_kind=rec.owner_kind,
+            owner_name=rec.owner_name,
+            evidence=rec.evidence,
+            risk_level=rec.risk_level,
+            risk_factors=list(rec.risk_factors),
+            confidence=rec.confidence,
+            effort=rec.effort,
+            ranking_score=rec.ranking_score,
+            ranking_factors=dict(rec.ranking_factors),
+            patch=rec.patch,
+            expires_at=rec.expires_at,
+            reversible=rec.reversible,
+            requires_restart=rec.requires_restart,
             created_at=created_at or datetime.now(timezone.utc),
         )
 
@@ -262,6 +410,13 @@ class TopRecommendation(BaseModel):
     sort_value: float = Field(..., description="Projected annual savings value used for the rank.")
     projected_savings_co2e_grams: float = Field(0.0, description="Projected annual CO2e savings in grams.")
     projected_savings_cost: float = Field(0.0, description="Projected annual cloud cost savings.")
+    source: str = Field("greenkube", description="Connector that produced the recommendation.")
+    risk_level: Optional[str] = Field(None, description="Reliability risk: low, medium or high.")
+    confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
+    effort: Optional[str] = Field(None, description="Implementation effort: low, medium or high.")
+    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
+    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
 
 
 class MetricsSummaryRow(BaseModel):

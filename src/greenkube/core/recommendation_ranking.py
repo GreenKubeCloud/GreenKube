@@ -2,9 +2,9 @@
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
-from greenkube.models.metrics import Recommendation, RecommendationRecord, RecommendationType, TopRecommendation
+from greenkube.models.metrics import Recommendation, RecommendationRecord, TopRecommendation
 
 SavingsMetric = Literal["co2", "cost"]
 
@@ -46,12 +46,6 @@ def recommendation_resource_label(recommendation: Recommendation | Recommendatio
     return "_cluster"
 
 
-def recommendation_type_value(recommendation: Recommendation | RecommendationRecord) -> str:
-    """Return the recommendation type as a stable string value."""
-    rec_type = getattr(recommendation, "type")
-    return rec_type.value if isinstance(rec_type, RecommendationType) else str(rec_type)
-
-
 def projected_co2e_grams(recommendation: Recommendation | RecommendationRecord) -> float:
     """Return projected annual CO2e savings in grams."""
     return float(getattr(recommendation, "potential_savings_co2e_grams", None) or 0.0)
@@ -72,6 +66,12 @@ def _timestamp_value(value: datetime | None) -> float:
     return value.timestamp()
 
 
+def _level_value(value) -> Optional[str]:
+    if value is None:
+        return None
+    return value.value if hasattr(value, "value") else str(value)
+
+
 def _sort_value(recommendation: Recommendation | RecommendationRecord, metric: SavingsMetric) -> float:
     return projected_co2e_grams(recommendation) if metric == "co2" else projected_cost(recommendation)
 
@@ -84,6 +84,7 @@ def rank_recommendations(
     recommendations: Sequence[Recommendation | RecommendationRecord],
     limit: int | None = 5,
     savings_metric: str = "co2",
+    profile: str | None = None,
 ) -> list[TopRecommendation]:
     """Rank recommendations by projected annual CO2e or cost savings.
 
@@ -91,22 +92,46 @@ def rank_recommendations(
         recommendations: Active recommendations to rank.
         limit: Maximum number of ranked recommendations to return. ``None`` returns all ranked rows.
         savings_metric: Ranking metric, ``co2`` by default or ``cost``.
+        profile: Optional multi-criteria ranking profile (``balanced``, ``carbon_first``,
+            ``cost_first``, ``quick_wins``, ``low_risk``). When provided, the
+            multi-criteria ``ranking_score`` drives the order.
 
     Returns:
         Ranked top recommendations for the selected savings metric.
     """
     metric = normalize_savings_metric(savings_metric)
-    ranked_source = [rec for rec in recommendations if _sort_value(rec, metric) > 0]
-    ranked_source.sort(
-        key=lambda rec: (
-            _sort_value(rec, metric),
-            _secondary_sort_value(rec, metric),
-            _priority_weight(getattr(rec, "priority", None)),
-            _timestamp_value(getattr(rec, "updated_at", None) or getattr(rec, "created_at", None)),
-            int(getattr(rec, "id", None) or 0),
-        ),
-        reverse=True,
-    )
+    source = list(recommendations)
+
+    if profile:
+        from greenkube.core.optimization.scoring import score_recommendations
+
+        source = score_recommendations(source, profile=profile)
+
+    ranked_source = [rec for rec in source if _sort_value(rec, metric) > 0]
+
+    if profile:
+        ranked_source.sort(
+            key=lambda rec: (
+                float(getattr(rec, "ranking_score", None) or 0.0),
+                _sort_value(rec, metric),
+                _secondary_sort_value(rec, metric),
+                _priority_weight(getattr(rec, "priority", None)),
+                _timestamp_value(getattr(rec, "updated_at", None) or getattr(rec, "created_at", None)),
+                int(getattr(rec, "id", None) or 0),
+            ),
+            reverse=True,
+        )
+    else:
+        ranked_source.sort(
+            key=lambda rec: (
+                _sort_value(rec, metric),
+                _secondary_sort_value(rec, metric),
+                _priority_weight(getattr(rec, "priority", None)),
+                _timestamp_value(getattr(rec, "updated_at", None) or getattr(rec, "created_at", None)),
+                int(getattr(rec, "id", None) or 0),
+            ),
+            reverse=True,
+        )
 
     if limit is not None:
         ranked_source = ranked_source[: max(1, limit)]
@@ -126,6 +151,13 @@ def rank_recommendations(
             sort_value=_sort_value(rec, metric),
             projected_savings_co2e_grams=projected_co2e_grams(rec),
             projected_savings_cost=projected_cost(rec),
+            source=_level_value(getattr(rec, "source", None)) or "greenkube",
+            risk_level=_level_value(getattr(rec, "risk_level", None)),
+            confidence=getattr(rec, "confidence", None),
+            effort=_level_value(getattr(rec, "effort", None)),
+            ranking_score=getattr(rec, "ranking_score", None),
+            ranking_factors=dict(getattr(rec, "ranking_factors", {}) or {}),
+            expires_at=getattr(rec, "expires_at", None),
         )
         for index, rec in enumerate(ranked_source, start=1)
     ]

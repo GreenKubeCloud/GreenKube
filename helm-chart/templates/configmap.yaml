@@ -93,4 +93,11 @@ data:
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
+  RECOMMENDATION_VPA_ENABLED: {{ .vpaEnabled | default false | quote }}
+  RECOMMENDATION_KARPENTER_ENABLED: {{ .karpenterEnabled | default false | quote }}
+  RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
+  RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
+  RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
+  RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}
+  RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
   {{- end }}

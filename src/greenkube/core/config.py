@@ -223,6 +223,25 @@ class Config(BaseSettings):
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
 
+    # --- Recommendation sources (connectors) ---
+    # VPA recommendation mode (updateMode: Off) is used for CPU/memory rightsizing
+    # when enabled; native rightsizing for the same workload is then suppressed.
+    RECOMMENDATION_VPA_ENABLED: bool = False
+    # Karpenter NodePool/NodeClaim recommendations (stub until Phase 6).
+    RECOMMENDATION_KARPENTER_ENABLED: bool = False
+    # Source precedence for capability arbitration, highest priority first.
+    RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
+
+    # --- Recommendation ranking & review ---
+    # Time-to-live of a recommendation before it is considered expired.
+    RECOMMENDATION_TTL_DAYS: int = 14
+    # Ranking profile: balanced, carbon_first, cost_first, quick_wins, low_risk.
+    RECOMMENDATION_RANKING_PROFILE: str = "balanced"
+    # Optional JSON object overriding profile weights, e.g. '{"carbon": 0.5}'.
+    RECOMMENDATION_RANKING_WEIGHTS: str = ""
+    # Minimum number of raw samples expected for a high-confidence recommendation.
+    RECOMMENDATION_MIN_SAMPLES: int = 36
+
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
     # (see _compute_and_validate model validator). The raw env-var value is preserved in
