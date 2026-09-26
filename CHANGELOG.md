@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Optimization engine — unified recommendation orchestration:** Recommendation generation is now centralized in a single `OptimizationEngine` (`src/greenkube/core/optimization/`) used by the API, the startup scan and the CLI. The engine builds one `OptimizationContext`, runs every enabled source, deduplicates/arbitrates, enriches and ranks the results, then persists them. The legacy `Recommender` façade and its energy-based methods were removed. See [docs/specs/optimization-engine.md](docs/specs/optimization-engine.md).
+- **Multi-source recommendations with provenance:** New `RecommendationSource` adapters. A VPA connector reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`, `status.recommendation.containerRecommendations`) and a Karpenter connector is reserved. When VPA is enabled, its CPU/memory targets replace the native rightsizing recommendation for the same workload — duplicates are never shown. Recommendations now carry `source`, `source_ref`, `sources` (provenance), `capability` and `owner_kind`/`owner_name`. Enable with `RECOMMENDATION_VPA_ENABLED=true` (Helm `config.recommendations.vpaEnabled`).
+- **Review-grade evidence on every recommendation:** Each recommendation now includes a structured evidence block — observation window, sample count/coverage, current vs proposed requests, utilization distribution (avg/p50/p90/p95/p99/max), restart count, expected savings and method, confidence with factors, reliability risk with factors, rollback conditions, a machine-readable `patch` action plan and an expiry date. Full detail is exposed by `GET /api/v1/recommendations/{id}` and rendered in the dashboard.
+- **Multi-criteria ranking:** Recommendations are scored on carbon/cost impact, confidence, risk, effort, actionability and source authority. Profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) are available via `GET /api/v1/recommendations/top?profile=...`; each row exposes its `ranking_score` and `ranking_factors` breakdown.
+- **Risk, confidence and effort assessment:** New heuristics derive `risk_level` (low/medium/high) with explainable `risk_factors`, a 0–1 `confidence` based on samples/coverage/source authority, and `effort`. Dashboard cards show source, risk and confidence badges plus an expandable evidence panel.
+- **Migrations `0010` (sources/provenance/owner) and `0011` (evidence/risk/ranking/patch/expiry)** for both SQLite and PostgreSQL. A shared row mapper (`storage/recommendation_mapper.py`) and shared column/value builders now back both repository implementations.
+- **Helm:** new `config.recommendations` values (`vpaEnabled`, `karpenterEnabled`, `sourcePriority`, `ttlDays`, `rankingProfile`, `rankingWeights`, `minSamples`) and read-only RBAC for `verticalpodautoscalers` and Karpenter `nodepools`/`nodeclaims`.
+
+### Changed
+- **Single orchestration path:** The duplicated metric/side-input loading previously present in the API router, startup scan and CLI now lives in `OptimizationContext`/`ContextBuilder`. Source failures are isolated and degrade gracefully.
+- **SQLite/PostgreSQL recommendation repositories:** Insert/update statements are generated from a shared column definition, removing placeholder drift between backends.
+
 ## [0.3.0] — 2026-08-30
 
 ### Added

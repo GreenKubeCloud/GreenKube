@@ -1,6 +1,12 @@
 # Recommendation Lifecycle
 
-This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/recommender.py`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
+> **Note:** The recommendation component is being overhauled into a multi-source
+> optimization engine. The target architecture, evidence model, ranking and
+> verification lifecycle are specified in
+> [Optimization engine specification](specs/optimization-engine.md). This page
+> documents the behavior currently implemented.
+
+This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/optimization/`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
 
 ## What GreenKube Analyzes
 
@@ -35,13 +41,25 @@ The current code does not implement `open`, `in_progress`, `resolved`, `dismisse
 ## Generation Flow
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
-2. The recommendation scan reads a recent metrics window and, when available, node snapshots, HPA targets, orphaned PersistentVolumes, and orphaned LoadBalancers.
-3. `Recommender.generate_recommendations()` groups metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name.
-4. The recommender runs all recommendation analyzers and deduplicates by scope, namespace, target, type, and node.
-5. Recommended CPU and memory requests are floored to configured minimums before being returned.
-6. API and startup paths convert recommendations to `RecommendationRecord` objects, upsert active records, and reconcile missing active records as stale.
+2. `OptimizationEngine.refresh()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers. This loading logic is shared by the API, the startup scan and the CLI.
+3. Enabled **sources** run over the context. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The optional VPA source reads recommendation-mode VPAs.
+4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
+5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with the multi-criteria ranking profile.
+6. Recommended CPU and memory requests are floored to configured minimums.
+7. API and startup paths convert recommendations to `RecommendationRecord` objects, upsert active records, and reconcile missing active records as stale.
 
-The CLI `greenkube recommend` uses the same `Recommender` engine, but it is a reporting command: it prints recommendations and can fail a CI/CD gate, but it does not persist lifecycle records or update recommendation statuses.
+The CLI `greenkube recommend` uses the same engine, but it is a reporting command: it prints recommendations and can fail a CI/CD gate, but it does not persist lifecycle records or update recommendation statuses.
+
+## Sources, Evidence And Ranking
+
+**Sources.** Each recommendation carries `source` (`greenkube`, `vpa`, `karpenter`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` provenance list and a `capability` (used for arbitration). Enable the VPA connector with `RECOMMENDATION_VPA_ENABLED=true`; source precedence is controlled by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`).
+
+**Evidence.** Every recommendation embeds a `RecommendationEvidence` block: observation window and coverage, current vs proposed requests, CPU/memory distribution (avg, p50, p90, p95, p99, max), restart count, expected savings and method, confidence with factors, risk level with factors, rollback conditions, a `patch` action plan and `expires_at`. Retrieve the full block from `GET /api/v1/recommendations/{id}`; it is also rendered in the dashboard's evidence panel.
+
+**Risk and confidence.** `risk_level` (low/medium/high) is derived from the observed headroom, restart/OOM history and blast radius; `confidence` (0–1) aggregates sample count, coverage and source authority. Both are explainable via `risk_factors` and the confidence factors inside the evidence block.
+
+**Ranking.** `ranking_score` combines carbon impact, cost impact, confidence, risk, effort, actionability and source authority. Profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) can be selected per request; `ranking_factors` exposes the contribution of each criterion.
+
 
 ## Recommendation Types
 
@@ -85,9 +103,10 @@ All recommendation API paths are under `/api/v1`.
 
 | Method | Path | Behavior |
 |---|---|---|
-| `GET` | `/recommendations?namespace=` | Runs the recommender, persists active records, reconciles stale records, and returns in-memory recommendations. |
-| `GET` | `/recommendations/active?namespace=&refresh=false` | Returns persisted active records. With `refresh=true`, runs generation and reconciliation first. |
-| `GET` | `/recommendations/top?limit=5&metric=co2&namespace=&refresh=false` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. |
+| `GET` | `/recommendations?namespace=` | Runs the optimization engine, persists active records, reconciles stale records, and returns in-memory recommendations. |
+| `GET` | `/recommendations/active?namespace=&refresh=false&source=&risk_level=&capability=` | Returns persisted active records. With `refresh=true`, runs generation and reconciliation first. Optional filters by source, risk level and capability. |
+| `GET` | `/recommendations/top?limit=5&metric=co2&profile=&namespace=&refresh=false` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. With `profile` (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`), the multi-criteria `ranking_score` drives the order. |
+| `GET` | `/recommendations/{id}` | Returns a single record including its full evidence block, risk/confidence assessment, patch plan and expiry. |
 | `GET` | `/recommendations/ignored?namespace=` | Returns ignored records. |
 | `GET` | `/recommendations/applied?namespace=` | Returns applied records ordered by most recent application. |
 | `GET` | `/recommendations/history?start=&end=&type=&namespace=` | Returns records in a creation-time range, any status. |
@@ -138,6 +157,9 @@ The `/recommendations` page currently provides:
 - Active, Ignored, and Realized Savings tabs.
 - Type filtering for active and ignored records.
 - Potential annual CO2e and cost savings summaries for active records.
+- Source badges (GreenKube, VPA, Karpenter), risk badges and confidence indicators.
+- An expandable evidence panel per active recommendation (window, coverage, utilization distribution, proposed change, rollback conditions, expiry).
+- A ranking profile selector (projected savings, balanced, carbon first, cost first, quick wins, low risk).
 - Ignore with a required reason from the Active tab.
 - Restore from the Ignored tab.
 - Applied recommendation details and realized savings in the Realized Savings tab.
@@ -207,6 +229,13 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RECOMMENDATION_APPLY_TOLERANCE` | `config.recommendations.applyTolerance` | `0.25` |
 | `STORAGE_COST_PER_GIB_MONTH` | `config.recommendations.storageCostPerGibMonth` | `0.1` |
 | `LOAD_BALANCER_COST_PER_MONTH` | `config.recommendations.loadBalancerCostPerMonth` | `18.0` |
+| `RECOMMENDATION_VPA_ENABLED` | `config.recommendations.vpaEnabled` | `false` |
+| `RECOMMENDATION_KARPENTER_ENABLED` | `config.recommendations.karpenterEnabled` | `false` |
+| `RECOMMENDATION_SOURCE_PRIORITY` | `config.recommendations.sourcePriority` | `vpa,karpenter,greenkube` |
+| `RECOMMENDATION_TTL_DAYS` | `config.recommendations.ttlDays` | `14` |
+| `RECOMMENDATION_RANKING_PROFILE` | `config.recommendations.rankingProfile` | `balanced` |
+| `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (profile defaults) |
+| `RECOMMENDATION_MIN_SAMPLES` | `config.recommendations.minSamples` | `36` |
 
 `RECOMMENDATION_APPLY_TOLERANCE` is present in configuration and Helm values, but the current apply endpoint marks a recommendation as applied only when the API is called. There is no automatic apply-detection path using this tolerance in the current code.
 
@@ -214,17 +243,23 @@ Recommendation behavior is configured through environment variables in `src/gree
 
 | Area | Main files |
 |---|---|
-| DTOs and lifecycle fields | `src/greenkube/models/metrics.py` |
-| Recommendation generation | `src/greenkube/core/recommender.py` |
+| DTOs and lifecycle fields | `src/greenkube/models/metrics.py`, `src/greenkube/models/evidence.py` |
+| Optimization engine | `src/greenkube/core/optimization/engine.py`, `context_builder.py`, `context.py` |
+| Analyzers | `src/greenkube/core/optimization/analyzers/` |
+| Sources (native, VPA, Karpenter) | `src/greenkube/core/optimization/providers/`, `registry.py` |
+| Dedup / arbitration / provenance | `src/greenkube/core/optimization/dedup.py` |
+| Evidence, risk, ranking | `src/greenkube/core/optimization/evidence.py`, `risks.py`, `scoring.py`, `enrich.py` |
+| VPA discovery | `src/greenkube/collectors/vpa_collector.py`, `src/greenkube/utils/k8s_quantities.py` |
 | Orphaned PV discovery | `src/greenkube/collectors/pv_collector.py` |
 | Orphaned LoadBalancer discovery | `src/greenkube/collectors/lb_collector.py` |
-| Ranking | `src/greenkube/core/recommendation_ranking.py` |
+| Ranking (API DTOs) | `src/greenkube/core/recommendation_ranking.py` |
 | Realized savings estimation | `src/greenkube/core/recommendation_realization.py` |
 | Savings ledger attribution | `src/greenkube/core/savings_attributor.py` |
 | API routes | `src/greenkube/api/routers/recommendations.py` |
 | Prometheus gauges | `src/greenkube/api/metrics_endpoint.py` |
 | Startup scan | `src/greenkube/api/startup.py` |
-| Storage adapters | `src/greenkube/storage/sqlite/recommendation_repository.py`, `src/greenkube/storage/postgres/recommendation_repository.py` |
+| Storage adapters | `src/greenkube/storage/recommendation_mapper.py`, `src/greenkube/storage/sqlite/recommendation_repository.py`, `src/greenkube/storage/postgres/recommendation_repository.py` |
+| Migrations | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/0010_*.sql`, `0011_*.sql` |
 | CLI | `src/greenkube/cli/recommend.py` |
 | Frontend | `frontend/src/routes/recommendations/+page.svelte`, `frontend/src/lib/api.js` |
 | End-to-end tests | `tests/integration/test_recommendation_lifecycle_e2e.py` |
