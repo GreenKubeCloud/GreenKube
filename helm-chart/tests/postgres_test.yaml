@@ -18,6 +18,13 @@ tests:
       - hasDocuments:
           count: 0
 
+  - it: should not render the StatefulSet when the app uses sqlite
+    set:
+      config.db.type: sqlite
+    asserts:
+      - hasDocuments:
+          count: 0
+
   # --------------------------------------------------------------------------
   # Image
   # --------------------------------------------------------------------------

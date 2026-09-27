@@ -21,10 +21,10 @@ spec:
         {{- include "greenkube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: app
     spec:
-      {{- if .Values.serviceAccount.create }}
+      # Always wire the ServiceAccount the bindings refer to, even when the
+      # chart does not create it (serviceAccount.create=false + name).
       serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
       automountServiceAccountToken: true
-      {{- end }}
       {{- if eq .Values.config.db.type "sqlite" }}
       securityContext:
         fsGroup: 10001

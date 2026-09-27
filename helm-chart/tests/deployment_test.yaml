@@ -280,14 +280,26 @@ tests:
           path: spec.template.spec.serviceAccountName
           value: RELEASE-NAME-greenkube
 
-  - it: should not set serviceAccountName when serviceAccount.create is false
+  - it: should set serviceAccountName to the provided name when serviceAccount.create is false
+    set:
+      serviceAccount.create: false
+      serviceAccount.name: my-sa
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-sa
+
+  - it: should fall back to the default service account when create is false and no name is set
     set:
       serviceAccount.create: false
     templates:
       - templates/deployment.yaml
     asserts:
-      - isNull:
+      - equal:
           path: spec.template.spec.serviceAccountName
+          value: default
 
   # --------------------------------------------------------------------------
   # Resource requests/limits
