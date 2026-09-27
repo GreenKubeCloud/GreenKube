@@ -1,5 +1,4 @@
 <script>
-	import { onMount } from 'svelte';
 	import { selectedNamespace } from '$lib/stores.js';
 	import {
 		getActiveRecommendations,
@@ -64,20 +63,30 @@
 
 	$: if ($selectedNamespace !== undefined) loadData();
 
+	let loadSeq = 0;
+
 	async function loadData() {
+		// Guard against overlapping loads: a slower response must not overwrite
+		// the result of a newer request.
+		const seq = ++loadSeq;
 		loading = true;
 		error = null;
 		try {
-			[activeRecs, ignoredRecs, appliedRecs, savings] = await Promise.all([
+			const [active, ignored, applied, sav] = await Promise.all([
 				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
 				getIgnoredRecommendations(),
 				getAppliedRecommendations(),
 				getRecommendationSavings()
 			]);
+			if (seq !== loadSeq) return;
+			activeRecs = active;
+			ignoredRecs = ignored;
+			appliedRecs = applied;
+			savings = sav;
 		} catch (e) {
-			error = e.message;
+			if (seq === loadSeq) error = e.message;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
 	}
 
@@ -296,7 +305,6 @@
 		return typeConfig[type] ?? { icon: '❓', label: type, color: 'blue', desc: '' };
 	}
 
-	onMount(() => loadData());
 </script>
 
 <!-- ─── Ignore Modal ─────────────────────────────────────────────────────── -->

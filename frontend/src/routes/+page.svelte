@@ -1,5 +1,4 @@
 <script>
-	import { onMount } from 'svelte';
 	import { selectedNamespace, selectedTimeRange } from '$lib/stores.js';
 	import {
 		getMetricsSummary,
@@ -62,7 +61,12 @@
 		};
 	}
 
+	let loadSeq = 0;
+
 	async function loadData() {
+		// Guard against overlapping loads (reactive params + manual refresh):
+		// a slower response must never overwrite a newer one.
+		const seq = ++loadSeq;
 		loading = true;
 		recoLoading = true;
 		error = null;
@@ -100,29 +104,37 @@
 				getMetricsByNamespace({ namespace: ns, last: apiLast }),
 				getTopPods({ namespace: ns, last: apiLast, limit: 10 })
 			]);
+			if (seq !== loadSeq) return;
 			summary = s;
 			timeseries = ts;
 			nsBreakdown = nsData;
 			topPods = topData;
 		} catch (e) {
-			error = e.message;
+			if (seq === loadSeq) error = e.message;
 		} finally {
-			loading = false;
+			if (seq === loadSeq) loading = false;
 		}
+
+		if (seq !== loadSeq) return;
 
 		// Fetch recommendations + savings in the background
 		try {
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
-			[recommendations, savings] = await Promise.all([
+			const [recs, sav] = await Promise.all([
 				getActiveRecommendations({ namespace: ns, refresh: true }),
 				getRecommendationSavings({ namespace: ns, last })
 			]);
+			if (seq !== loadSeq) return;
+			recommendations = recs;
+			savings = sav;
 		} catch {
-			recommendations = [];
-			savings = null;
+			if (seq === loadSeq) {
+				recommendations = [];
+				savings = null;
+			}
 		} finally {
-			recoLoading = false;
+			if (seq === loadSeq) recoLoading = false;
 		}
 	}
 
@@ -157,7 +169,6 @@
 		? buildTopPodsOption(topPods, { label: 'Top Pods by CO₂', topN: 8 })
 		: null;
 
-	onMount(() => loadData());
 </script>
 
 <div class="p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
