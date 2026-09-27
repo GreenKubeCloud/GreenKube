@@ -250,8 +250,14 @@ async def list_recommendation_history(
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
     """Retrieve all recommendation records within a time range (any status)."""
-    start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid ISO 8601 datetime for 'start' or 'end'.",
+        ) from exc
 
     return await reco_repo.get_recommendations(
         start=start_dt,

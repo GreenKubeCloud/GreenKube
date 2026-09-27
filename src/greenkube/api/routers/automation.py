@@ -46,9 +46,12 @@ async def apply_recommendation_pr(
     """
     service = _build_service(reco_repo, pr_repo)
     try:
-        return await service.apply_recommendation_pr(rec_id, request or ApplyPrRequest())
+        response = await service.apply_recommendation_pr(rec_id, request or ApplyPrRequest())
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    if response.status == "error":
+        raise HTTPException(status_code=422, detail=response.message or "Pull request could not be opened.")
+    return response
 
 
 @router.get("/recommendations/{rec_id}/pull-requests", response_model=List[PullRequestRecord])

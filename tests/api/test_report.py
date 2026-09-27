@@ -232,6 +232,15 @@ class TestReportExportEndpoint:
         response = client.get("/api/v1/report/export?aggregate=true&granularity=quarterly")
         assert response.status_code == 400
 
+    def test_export_invalid_last_returns_400(self, client):
+        """An invalid time range must fail before the stream starts."""
+        response = client.get("/api/v1/report/export?last=not-a-range")
+        assert response.status_code == 400
+
+    def test_export_custom_range_missing_end_returns_400(self, client):
+        response = client.get("/api/v1/report/export?start=2026-01-01")
+        assert response.status_code == 400
+
     def test_export_csv_content_disposition(self, client):
         """Response should include a Content-Disposition header for download."""
         response = client.get("/api/v1/report/export?format=csv")

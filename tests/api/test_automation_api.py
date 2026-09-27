@@ -121,6 +121,18 @@ class TestApplyPrEndpoint:
         response = client.get("/api/v1/recommendations/9999/pull-requests")
         assert response.status_code == 404
 
+    async def test_non_rightsizing_recommendation_returns_422(self, automation_client):
+        """Business failures must not be reported as HTTP 200."""
+        client, reco_repo, _ = automation_client
+
+        await reco_repo.save_recommendations([_record(type=RecommendationType.ZOMBIE_POD)])
+        rec_id = (await reco_repo.get_active_recommendations())[0].id
+
+        response = client.post(f"/api/v1/recommendations/{rec_id}/apply-pr", json={})
+
+        assert response.status_code == 422
+        assert "detail" in response.json()
+
     async def test_automation_status_endpoint(self, automation_client):
         client, _, _ = automation_client
         response = client.get("/api/v1/automation/status")
