@@ -277,11 +277,27 @@ def _mount_frontend(app: FastAPI) -> None:
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
         """Serve the SPA index.html for all non-API routes."""
-        if any(full_path.startswith(p) for p in _PROXY_PATHS):
+        # API paths must never fall back to the SPA: unknown API routes
+        # return a JSON 404 instead of a 200 HTML page.
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+        # Well-known proxy/ingress paths return 404 instead of the SPA when
+        # the reverse proxy misroutes them.
+        if any(("/" + full_path).startswith(p) for p in _PROXY_PATHS):
             return Response(status_code=404)
-        file_path = FRONTEND_DIR / full_path
-        if file_path.is_file() and not full_path.startswith("api/"):
-            return FileResponse(str(file_path))
+
+        # Resolve the candidate path and refuse anything outside the
+        # frontend directory (path traversal).
+        frontend_root = FRONTEND_DIR.resolve()
+        candidate = (frontend_root / full_path).resolve()
+        try:
+            candidate.relative_to(frontend_root)
+        except ValueError:
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+        if candidate.is_file():
+            return FileResponse(str(candidate))
         return FileResponse(str(index_html))
 
 
