@@ -90,8 +90,6 @@ config:
   # Database configuration
   db:
     # Supported: "postgres" (recommended), "sqlite" (standalone/dev)
-    # NOTE: "elasticsearch" is implemented but not production-ready and requires
-    #       installing the optional extra: pip install greenkube[elasticsearch]
     # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
     type: postgres
     # Path for the sqlite database file (only used if db.type is "sqlite")
@@ -263,18 +261,6 @@ config:
       commitAuthorEmail: bot@greenkube.cloud
 
 # ---------------------------------------------------------------------------
-# Elasticsearch (experimental — not production-ready)
-# ---------------------------------------------------------------------------
-# Only relevant when db.type is "elasticsearch". The Elasticsearch backend is
-# not actively maintained and requires the optional Python extra:
-#   pip install greenkube[elasticsearch]
-# It will be revisited in a future release.
-elasticsearch:
-  hosts: http://elasticsearch-master:9200
-  indexName: carbon_intensity
-  verifyCerts: true
-
-# ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
 # Option A (default): leave existingSecret empty and fill in the values below.
@@ -294,9 +280,8 @@ elasticsearch:
 #   helm install greenkube ./helm-chart -n greenkube \
 #     --set secrets.existingSecret=greenkube-secrets
 #
-# Optional keys: BOAVIZTA_TOKEN, PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD,
-#   PROMETHEUS_BEARER_TOKEN
-#   (ELASTICSEARCH_USER and ELASTICSEARCH_PASSWORD if using the experimental ES backend)
+  # Optional keys: BOAVIZTA_TOKEN, PROMETHEUS_USERNAME, PROMETHEUS_PASSWORD,
+  #   PROMETHEUS_BEARER_TOKEN
 secrets:
   # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
   existingSecret: ''
@@ -331,11 +316,6 @@ secrets:
     username: ''
     password: ''
     bearerToken: ''
-
-  # Elasticsearch authentication (optional)
-  elasticsearch:
-    user: ''
-    password: ''
 
 # Pod resource requests and limits
 # -- Collector/scheduler container resources

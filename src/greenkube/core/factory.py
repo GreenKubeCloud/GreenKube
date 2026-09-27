@@ -56,12 +56,7 @@ def get_repository() -> CarbonIntensityRepository:
     cfg = get_config()
     db_type = cfg.DB_TYPE
 
-    if db_type == "elasticsearch":
-        logger.info("Using Elasticsearch repository.")
-        from ..storage.elastic.repository import ElasticsearchCarbonIntensityRepository
-
-        return ElasticsearchCarbonIntensityRepository()
-    elif db_type == "sqlite":
+    if db_type == "sqlite":
         logger.info("Using SQLite repository.")
         from ..core.db import get_db_manager
 
@@ -84,12 +79,7 @@ def get_combined_metrics_repository() -> CombinedMetricsRepository:
     cfg = get_config()
     db_type = cfg.DB_TYPE
 
-    if db_type == "elasticsearch":
-        logger.info("Using Elasticsearch combined metrics repository.")
-        from ..storage.elastic.repository import ElasticsearchCombinedMetricsRepository
-
-        return ElasticsearchCombinedMetricsRepository()
-    elif db_type == "sqlite":
+    if db_type == "sqlite":
         logger.info("Using SQLite combined metrics repository.")
         from ..core.db import get_db_manager
 
@@ -113,10 +103,6 @@ def get_node_repository() -> NodeRepository:
         from ..core.db import get_db_manager
 
         return SQLiteNodeRepository(get_db_manager())
-    elif cfg.DB_TYPE == "elasticsearch":
-        from ..storage.elastic.node_repository import ElasticsearchNodeRepository
-
-        return ElasticsearchNodeRepository()
     elif cfg.DB_TYPE == "postgres":
         from ..core.db import get_db_manager
 
@@ -220,7 +206,7 @@ def get_summary_repository() -> SummaryRepository:
 
         return PostgresSummaryRepository(get_db_manager())
     else:
-        # Elasticsearch or unknown — fall back to SQLite
+        # Unknown backend — fall back to SQLite
         logger.warning(
             "SummaryRepository not implemented for DB_TYPE '%s'. Using SQLite fallback.",
             db_type,

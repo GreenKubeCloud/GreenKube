@@ -94,8 +94,6 @@ class Config(BaseSettings):
     # --- Secrets ---
     ELECTRICITY_MAPS_TOKEN: Optional[str] = None
     BOAVIZTA_TOKEN: Optional[str] = None
-    ELASTICSEARCH_USER: Optional[str] = None
-    ELASTICSEARCH_PASSWORD: Optional[str] = None
     PROMETHEUS_BEARER_TOKEN: Optional[str] = None
     PROMETHEUS_USERNAME: Optional[str] = None
     PROMETHEUS_PASSWORD: Optional[str] = None
@@ -139,11 +137,6 @@ class Config(BaseSettings):
     DB_POOL_MIN_SIZE: int = 1
     DB_POOL_MAX_SIZE: int = 10
     DB_STATEMENT_TIMEOUT_MS: int = 30000
-
-    # --- Elasticsearch variables ---
-    ELASTICSEARCH_HOSTS: str = "http://localhost:9200"
-    ELASTICSEARCH_VERIFY_CERTS: bool = True
-    ELASTICSEARCH_INDEX_NAME: str = "carbon_intensity"
 
     # --- Prometheus variables ---
     PROMETHEUS_URL: str = ""
@@ -313,8 +306,8 @@ class Config(BaseSettings):
     @field_validator("DB_TYPE", mode="after")
     @classmethod
     def _validate_db_type(cls, v: str) -> str:
-        if v not in ["sqlite", "postgres", "elasticsearch"]:
-            raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
+        if v not in ["sqlite", "postgres"]:
+            raise ValueError("DB_TYPE must be 'sqlite' or 'postgres'")
         return v
 
     @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Verification rates are sample-normalized:** before/after cost and carbon rates now use the observed sample duration (sample count x query step) instead of the wall-clock window, so verification behaves correctly when collection is sparse (e.g. a freshly installed instance).
 
 ### Removed
+- **Elasticsearch storage backend:** The experimental Elasticsearch backend has been removed, including `storage/elastic/`, the `setup_elasticsearch` wiring, the `ELASTICSEARCH_*` configuration and Helm values, and the optional `greenkube[elasticsearch]` extra. `DB_TYPE` now accepts only `sqlite` and `postgres`.
 - **Interactive CLI report and recommendation commands:** `greenkube report` and `greenkube recommend` have been removed, together with the `exporters`, `reporters` and `models.cli` modules and the `--no-color` global flag. Reporting and recommendations are available exclusively through the REST API and the dashboard. The CLI now only exposes `start`, `demo` and `version`.
 
 ### Fixed

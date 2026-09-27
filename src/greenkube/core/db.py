@@ -70,10 +70,6 @@ class DatabaseManager:
                     except Exception as e:
                         logger.error("Failed to initialize PostgreSQL connection pool: %s", e)
                         raise
-                elif self.db_type == "elasticsearch":
-                    # No-op: Connection is handled by ElasticsearchCarbonIntensityRepository
-                    logger.info("DB_TYPE is 'elasticsearch'. Connection will be managed by the specific repository.")
-                    self.connection = None
                 else:
                     raise ValueError("Unsupported database type specified in config.")
             except Exception as e:

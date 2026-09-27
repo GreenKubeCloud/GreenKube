@@ -8,41 +8,7 @@ from greenkube.utils.date_utils import to_iso_z
 
 from .base_embodied_repository import BaseEmbodiedRepository
 
-# Conditional imports for Elasticsearch
-try:
-    from elasticsearch_dsl import Date, Document, Float, Integer, Keyword  # pyrefly: ignore[missing-import]
-except ImportError:
-    pass
-
 logger = logging.getLogger(__name__)
-
-# Define ES Document for Embodied Profile
-if "Document" in globals():
-
-    class InstanceCarbonProfileDoc(Document):
-        """
-        Elasticsearch Document representing an instance carbon profile.
-        """
-
-        provider = Keyword(required=True)  # pyrefly: ignore[unbound-name]
-        instance_type = Keyword(required=True)  # pyrefly: ignore[unbound-name]
-        gwp_manufacture = Float(required=True)  # pyrefly: ignore[unbound-name]
-        lifespan_hours = Integer(required=True)  # pyrefly: ignore[unbound-name]
-        source = Keyword()  # pyrefly: ignore[unbound-name]
-        last_updated = Date()  # pyrefly: ignore[unbound-name]
-
-        class Index:
-            name = "greenkube_instance_carbon_profiles"
-            settings = {"number_of_shards": 1, "number_of_replicas": 0}
-else:
-    # Dummy class to avoid NameError if elasticsearch-dsl is not installed
-    class InstanceCarbonProfileDoc:
-        class Index:
-            name = "greenkube_instance_carbon_profiles"
-
-        @classmethod
-        async def init(cls):
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -160,52 +126,6 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
 
 
 # ---------------------------------------------------------------------------
-# Elasticsearch implementation
-# ---------------------------------------------------------------------------
-
-
-class ElasticsearchEmbodiedRepository(BaseEmbodiedRepository):
-    """Embodied carbon profile repository backed by Elasticsearch."""
-
-    async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
-        try:
-            doc_id = f"{provider}-{instance_type}"
-            doc = await InstanceCarbonProfileDoc.get(id=doc_id, ignore=404)  # pyrefly: ignore[missing-attribute]
-            if doc:
-                return {
-                    "gwp_manufacture": doc.gwp_manufacture,
-                    "lifespan_hours": doc.lifespan_hours,
-                    "source": doc.source,
-                    "last_updated": doc.last_updated,
-                }
-            return None
-        except Exception as e:
-            logger.error("Error fetching embodied profile from ES for %s/%s: %s", provider, instance_type, e)
-            return None
-
-    async def save_profile(
-        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
-    ):
-        now_iso = to_iso_z(datetime.now(timezone.utc))
-        try:
-            doc_id = f"{provider}-{instance_type}"
-            doc = InstanceCarbonProfileDoc(
-                meta={"id": doc_id},  # pyrefly: ignore[unexpected-keyword]
-                provider=provider,  # pyrefly: ignore[unexpected-keyword]
-                instance_type=instance_type,  # pyrefly: ignore[unexpected-keyword]
-                gwp_manufacture=gwp,  # pyrefly: ignore[unexpected-keyword]
-                lifespan_hours=lifespan,  # pyrefly: ignore[unexpected-keyword]
-                source=source,  # pyrefly: ignore[unexpected-keyword]
-                last_updated=now_iso,  # pyrefly: ignore[unexpected-keyword]
-            )
-            await doc.save()  # pyrefly: ignore[missing-attribute]
-            logger.info("Saved ES profile for %s", doc_id)
-        except Exception as e:
-            logger.error("Error saving embodied profile to ES for %s/%s: %s", provider, instance_type, e)
-            raise QueryError(f"ES error in save_profile: {e}") from e
-
-
-# ---------------------------------------------------------------------------
 # Backward-compatible alias — delegates to the db_type at construction time
 # ---------------------------------------------------------------------------
 
@@ -218,10 +138,8 @@ class EmbodiedRepository(BaseEmbodiedRepository):
     """
 
     def __init__(self, db_manager: DatabaseManager):
-        if db_manager.db_type == "elasticsearch":
-            self._impl: BaseEmbodiedRepository = ElasticsearchEmbodiedRepository()
-        elif db_manager.db_type == "postgres":
-            self._impl = PostgresEmbodiedRepository(db_manager)
+        if db_manager.db_type == "postgres":
+            self._impl: BaseEmbodiedRepository = PostgresEmbodiedRepository(db_manager)
         else:
             self._impl = SQLiteEmbodiedRepository(db_manager)
 

@@ -82,14 +82,6 @@ dependencies = [
     "ruamel.yaml>=0.18.0", # Round-trip YAML editing for the GitOps PR bot
 ]
 
-[project.optional-dependencies]
-# Elasticsearch storage backend (not yet production-ready; use postgres or sqlite).
-# Install with: uv pip install greenkube[elasticsearch]
-elasticsearch = [
-    "elasticsearch>=8.10.0",
-    "elasticsearch-dsl>=8.10.0",
-]
-
 [project.urls]
 "Homepage" = "https://greenkube.cloud"
 "Documentation" = "https://greenkube.cloud/docs/"
