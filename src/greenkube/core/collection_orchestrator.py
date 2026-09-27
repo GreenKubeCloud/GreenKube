@@ -119,7 +119,12 @@ class CollectionOrchestrator:
             structlog.contextvars.bind_contextvars(collector="pods")
             try:
                 pod_metrics = await self.pod_collector.collect()
-                req_map = {(pm.namespace, pm.pod_name): pm.cpu_request / 1000.0 for pm in pod_metrics}
+                # Pod metrics are emitted per container: sum requests per pod so
+                # multi-container workloads are not under-counted.
+                req_map: Dict[tuple, float] = defaultdict(float)
+                for pm in pod_metrics:
+                    req_map[(pm.namespace, pm.pod_name)] += pm.cpu_request / 1000.0
+                req_map = dict(req_map)
 
                 agg_map = defaultdict(
                     lambda: {

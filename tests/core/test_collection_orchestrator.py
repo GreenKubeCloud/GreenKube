@@ -275,3 +275,33 @@ class TestCollectionOrchestratorResilience:
 
         assert "" not in result.cost_map
         assert "pod-x" in result.cost_map
+
+
+class TestMultiContainerPodRequests:
+    @pytest.mark.asyncio
+    async def test_pod_request_map_sums_all_container_requests(self, mock_prometheus, mock_opencost):
+        """A pod with several containers must not keep only the last request."""
+        pod_collector = MagicMock()
+        pod_collector.collect = AsyncMock(
+            return_value=[
+                PodMetric(
+                    pod_name="pod-multi",
+                    namespace="ns-1",
+                    container_name="app",
+                    cpu_request=500,
+                    memory_request=256 * 1024 * 1024,
+                ),
+                PodMetric(
+                    pod_name="pod-multi",
+                    namespace="ns-1",
+                    container_name="sidecar",
+                    cpu_request=300,
+                    memory_request=64 * 1024 * 1024,
+                ),
+            ]
+        )
+        orchestrator = CollectionOrchestrator(mock_prometheus, mock_opencost, pod_collector)
+
+        result = await orchestrator.collect_all()
+
+        assert result.pod_request_map_simple[("ns-1", "pod-multi")] == pytest.approx(0.8)
