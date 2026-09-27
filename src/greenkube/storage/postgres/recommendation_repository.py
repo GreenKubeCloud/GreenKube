@@ -150,7 +150,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
             where_offset + 4,
             where_offset + 5,
         )
-        insert_query = "INSERT INTO recommendation_history ({}) VALUES ({})".format(
+        insert_query = ("INSERT INTO recommendation_history ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
             ", ".join(RECORD_COLUMNS),
             ", ".join(f"${index}" for index in range(1, len(RECORD_COLUMNS) + 1)),
         )
@@ -219,7 +219,10 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 values["status"] = status_val
                 values["created_at"] = values["created_at"] or now
                 values["updated_at"] = now
-                await conn.execute(insert_query, *(values[column] for column in RECORD_COLUMNS))
+                insert_result = await conn.execute(insert_query, *(values[column] for column in RECORD_COLUMNS))
+                if insert_result == "INSERT 0 0":
+                    # Lost a race with a concurrent upsert; the row already exists.
+                    continue
                 count += 1
 
             logger.info("Upserted %d recommendation records in PostgreSQL.", count)
