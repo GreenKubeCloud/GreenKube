@@ -42,6 +42,8 @@ def get_normalized_window() -> tuple[datetime, datetime]:
         raise ValueError(f"Unsupported PROMETHEUS_QUERY_RANGE_STEP format: '{step_str}'. Use 's', 'm', or 'h'.")
 
     value, unit = int(match.group(1)), match.group(2)
+    if value <= 0:
+        raise ValueError(f"PROMETHEUS_QUERY_RANGE_STEP must be greater than zero, got '{step_str}'.")
     if unit == "s":
         step_delta = timedelta(seconds=value)
     elif unit == "m":

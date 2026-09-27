@@ -148,3 +148,22 @@ class TestGetSecret:
                     mock_open.return_value.__enter__.return_value.read.return_value = "file_value"
                     result = Config._get_secret("TEST_SECRET")
                     assert result == "file_value"
+
+
+class TestPrometheusStepValidation:
+    """PROMETHEUS_QUERY_RANGE_STEP must be positive and divide 24 hours."""
+
+    @pytest.mark.parametrize("step", ["0s", "0m", "0h"])
+    def test_zero_step_is_rejected_without_crashing(self, step):
+        with patch.dict(os.environ, {"PROMETHEUS_QUERY_RANGE_STEP": step}, clear=True):
+            with pytest.raises(ValueError, match="greater than zero"):
+                Config()
+
+    def test_step_not_divisor_of_day_is_rejected(self):
+        with patch.dict(os.environ, {"PROMETHEUS_QUERY_RANGE_STEP": "7m"}, clear=True):
+            with pytest.raises(ValueError, match="divisor of 24 hours"):
+                Config()
+
+    def test_valid_step_is_accepted(self):
+        with patch.dict(os.environ, {"PROMETHEUS_QUERY_RANGE_STEP": "5m"}, clear=True):
+            assert Config().PROMETHEUS_QUERY_RANGE_STEP == "5m"

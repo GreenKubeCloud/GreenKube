@@ -60,17 +60,21 @@ class BasicEstimator:
 
     def _parse_step_to_seconds(self, step_str: str) -> int:
         """Converts a Prometheus duration string (like '5m', '1h') to seconds."""
+        seconds = 0
         if step_str.endswith("s"):
-            return int(step_str[:-1])
-        if step_str.endswith("m"):
-            return int(step_str[:-1]) * 60
-        if step_str.endswith("h"):
-            return int(step_str[:-1]) * 3600
-        logger.warning(
-            "Unrecognized PROMETHEUS_QUERY_RANGE_STEP '%s'; defaulting to 300s",
-            step_str,
-        )
-        return 300  # 5 minutes by default
+            seconds = int(step_str[:-1])
+        elif step_str.endswith("m"):
+            seconds = int(step_str[:-1]) * 60
+        elif step_str.endswith("h"):
+            seconds = int(step_str[:-1]) * 3600
+
+        if seconds <= 0:
+            logger.warning(
+                "Unrecognized or non-positive PROMETHEUS_QUERY_RANGE_STEP '%s'; defaulting to 300s",
+                step_str,
+            )
+            return 300  # 5 minutes by default
+        return seconds
 
     def _create_cpu_profile(self, cores: float) -> Dict[str, Any]:
         """Creates a power profile based on core count and default per-core values."""

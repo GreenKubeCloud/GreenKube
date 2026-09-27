@@ -318,9 +318,12 @@ class Config(BaseSettings):
             if not match:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
             value, unit = int(match.group(1)), match.group(2)
+            if value <= 0:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be greater than zero.")
             unit_map = {"s": "seconds", "m": "minutes", "h": "hours"}
             delta = timedelta(**{unit_map[unit]: value})
-            if (24 * 3600) % delta.total_seconds() != 0:
+            total_seconds = delta.total_seconds()
+            if total_seconds <= 0 or (24 * 3600) % total_seconds != 0:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         return v
 
