@@ -50,7 +50,7 @@ Used in timeseries and report endpoints:
 ```bash
 # Health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.9"}
+# {"status":"ok","version":"0.3.0"}
 
 # Per-pod metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"

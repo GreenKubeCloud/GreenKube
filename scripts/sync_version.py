@@ -29,6 +29,37 @@ def update_readme(version):
         f.truncate()
 
 
+def update_uv_lock(version):
+    """Updates the greenkube package version in uv.lock."""
+    with open("uv.lock", "r+") as f:
+        content = f.read()
+        new_content = re.sub(
+            r'(\[\[package\]\]\nname = "greenkube"\nversion = ")[^"]+(")',
+            rf"\g<1>{version}\g<2>",
+            content,
+        )
+        f.seek(0)
+        f.write(new_content)
+        f.truncate()
+
+
+def update_docs(version):
+    """Updates version examples in docs/api.md and docs/configuration.md."""
+    with open("docs/api.md", "r+") as f:
+        content = f.read()
+        new_content = re.sub(r'("version":")[^"]+(")', rf"\g<1>{version}\g<2>", content)
+        f.seek(0)
+        f.write(new_content)
+        f.truncate()
+
+    with open("docs/configuration.md", "r+") as f:
+        content = f.read()
+        new_content = re.sub(r"(tag: )\d+\.\d+\.\d+", rf"\g<1>{version}", content)
+        f.seek(0)
+        f.write(new_content)
+        f.truncate()
+
+
 def update_helm_chart_yaml(version):
     """Updates the version in helm-chart/Chart.yaml, including ArtifactHub annotations."""
     yaml = YAML()
@@ -95,12 +126,32 @@ def update_frontend_package_json(version):
         f.write("\n")
 
 
+def update_frontend_package_lock_json(version):
+    """Updates the version in frontend/package-lock.json."""
+    with open("frontend/package-lock.json", "r") as f:
+        data = json.load(f)
+
+    data["version"] = version
+    if "" in data.get("packages", {}):
+        data["packages"][""]["version"] = version
+
+    with open("frontend/package-lock.json", "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
 def main():
     version = get_project_version()
     print(f"Syncing version: {version}")
 
     update_readme(version)
     print("Updated README.md")
+
+    update_uv_lock(version)
+    print("Updated uv.lock")
+
+    update_docs(version)
+    print("Updated docs/api.md and docs/configuration.md")
 
     update_helm_chart_yaml(version)
     print("Updated helm-chart/Chart.yaml")
@@ -116,6 +167,9 @@ def main():
 
     update_frontend_package_json(version)
     print("Updated frontend/package.json")
+
+    update_frontend_package_lock_json(version)
+    print("Updated frontend/package-lock.json")
 
     print("Version sync complete.")
 

@@ -11,7 +11,7 @@ The full `values.yaml` is self-documented. The most important parameters are gro
 ```yaml
 image:
   repository: greenkube/greenkube
-  tag: 0.2.9
+  tag: 0.3.0
   pullPolicy: IfNotPresent
 ```
 
