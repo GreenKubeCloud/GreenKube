@@ -7,10 +7,12 @@ via FastAPI's Depends() mechanism, keeping the API layer decoupled from
 concrete implementations.
 """
 
+import ipaddress
 import logging
 import re
 import secrets
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Query, Request
 
@@ -92,6 +94,46 @@ def validate_namespace(
             ),
         )
     return namespace
+
+
+# Hostnames that resolve to cloud metadata services and must never be configured.
+_BLOCKED_SERVICE_HOSTS = {"metadata", "metadata.google.internal", "metadata.goog"}
+
+
+def validate_service_url(url: str) -> str:
+    """Validate a user-supplied backend service URL.
+
+    In-cluster (private) and public ``http(s)`` endpoints are allowed. The
+    following are rejected because they are classic SSRF targets:
+    non-http(s) schemes, embedded credentials, loopback, link-local,
+    multicast, unspecified and CGNAT addresses, and known cloud metadata
+    hostnames. Hostnames are not resolved here so that in-cluster service
+    names keep working even when DNS is not reachable from the API pod.
+    """
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="URL must use the http or https scheme.")
+    if parts.username or parts.password:
+        raise HTTPException(status_code=400, detail="URL must not contain credentials.")
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host:
+        raise HTTPException(status_code=400, detail="URL must include a host.")
+    if host in _BLOCKED_SERVICE_HOSTS:
+        raise HTTPException(status_code=400, detail="URL host is not allowed.")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return url
+
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        raise HTTPException(
+            status_code=400,
+            detail="URL must not target loopback, link-local or multicast addresses.",
+        )
+    if not (ip.is_private or ip.is_global):
+        raise HTTPException(status_code=400, detail="URL must target a private or public address.")
+    return url
 
 
 async def get_carbon_repository() -> CarbonIntensityRepository:
