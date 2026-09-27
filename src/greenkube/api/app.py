@@ -10,6 +10,7 @@ directory is present in the image.
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,9 +19,9 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from limits import parse as parse_rate_limit
+from limits.storage import MemoryStorage
+from limits.strategies import MovingWindowRateLimiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from greenkube import __version__
@@ -99,6 +100,44 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-client, per-route sliding-window rate limiting for API routes.
+
+    Enforcement is done with the ``limits`` library directly: slowapi's
+    middleware cannot discover endpoints registered through FastAPI's
+    ``_IncludedRouter`` (FastAPI >= 0.121), which made the previous
+    configuration inert. Static SPA assets are not rate limited so a normal
+    page load cannot exhaust the budget.
+    """
+
+    _LIMITED_PREFIXES = ("/api/",)
+    _LIMITED_EXACT = ("/prometheus/metrics",)
+
+    def __init__(self, app, rate_limit: str, storage: MemoryStorage):
+        super().__init__(app)
+        self._limits = [parse_rate_limit(part.strip()) for part in rate_limit.split(";") if part.strip()]
+        self._storage = storage
+        self._limiter = MovingWindowRateLimiter(storage)
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not (path.startswith(self._LIMITED_PREFIXES) or path in self._LIMITED_EXACT):
+            return await call_next(request)
+
+        client = request.client.host if request.client else "unknown"
+        identifiers = (client, path)
+        for limit in self._limits:
+            if not self._limiter.hit(limit, *identifiers):
+                stats = self._limiter.get_window_stats(limit, *identifiers)
+                retry_after = max(1, int(stats.reset_time - time.time()))
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": f"Rate limit exceeded: {limit}"},
+                    headers={"Retry-After": str(retry_after)},
+                )
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
@@ -163,16 +202,9 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
 
     # --- Rate limiting ---
     # Configurable via API_RATE_LIMIT env var (default "60/minute").
+    # Multiple limits can be combined with ';' (e.g. "60/minute;1000/hour").
     rate_limit = getattr(cfg, "API_RATE_LIMIT", "60/minute") or "60/minute"
-    limiter = Limiter(key_func=get_remote_address, default_limits=[rate_limit])
-    app.state.limiter = limiter
-
-    @app.exception_handler(RateLimitExceeded)
-    async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
-        return JSONResponse(
-            status_code=429,
-            content={"detail": f"Rate limit exceeded: {exc.detail}"},
-        )
+    app.add_middleware(RateLimitMiddleware, rate_limit=rate_limit, storage=MemoryStorage())
 
     # CORS — configurable via CORS_ORIGINS env var (comma-separated).
     # Defaults to ["*"] for in-cluster use where the SPA is served from
