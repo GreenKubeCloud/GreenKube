@@ -12,7 +12,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Optional
 
-from greenkube.automation.git.base import GitProvider, GitProviderError, GitRepository
+from greenkube.automation.git.base import GitProvider, GitProviderError, GitRepository, validate_git_ref
 from greenkube.automation.manifests.patcher import ManifestNotFoundError, RightsizingPatcher
 from greenkube.automation.pr_body import recommendation_title, render_pr_body
 from greenkube.automation.source_resolver import (
@@ -113,6 +113,10 @@ class AutomationService:
 
         repo = provider.repository(source.repo_url, source.branch)
         base_branch = request.base_branch or source.branch or self.config.GIT_DEFAULT_BRANCH
+        try:
+            base_branch = validate_git_ref(base_branch, field="base branch")
+        except GitProviderError as exc:
+            return ApplyPrResponse(status="error", provider=provider.name, repo=repo.full_name, message=str(exc))
 
         try:
             file_path, file_sha, content = await self._read_manifest(provider, repo, source, base_branch, record)
@@ -235,13 +239,18 @@ class AutomationService:
 
         try:
             await provider.create_branch(repo, head_branch, base_branch)
+            # If the branch already existed, the SHA read from the base branch is
+            # stale and the update would fail with a 409; re-read it from the
+            # head branch so retries of apply-pr succeed.
+            current = await provider.get_file(repo, file_path, head_branch)
+            effective_sha = current.sha if current else None
             await provider.update_file(
                 repo,
                 file_path,
                 patch_result.patched,
                 f"{title}\n\nApplied by GreenKube recommendation #{record.id}.",
                 head_branch,
-                sha=file_sha,
+                sha=effective_sha,
             )
             pr = await provider.create_pull_request(
                 repo,

@@ -7,7 +7,13 @@ import logging
 from typing import List, Optional
 from urllib.parse import quote
 
-from greenkube.automation.git.base import GitFile, GitProvider, GitProviderError, GitRepository
+from greenkube.automation.git.base import (
+    GitFile,
+    GitProvider,
+    GitProviderError,
+    GitRepository,
+    validate_git_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,20 +58,35 @@ class GitLabProvider(GitProvider):
         return GitFile(path=path, content=content, sha=data.get("last_commit_id"))
 
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]:
-        response = await self._request(
-            "GET",
-            f"/projects/{self._project(repo)}/repository/tree",
-            params={"ref": ref, "recursive": "true", "per_page": "100"},
-        )
-        if response.status_code == 404:
-            return []
-        return [item["path"] for item in response.json() if item.get("type") == "blob"]
+        files: List[str] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                f"/projects/{self._project(repo)}/repository/tree",
+                params={"ref": ref, "recursive": "true", "per_page": "100", "page": str(page)},
+            )
+            if response.status_code == 404:
+                return files
+            data = response.json()
+            files.extend(item["path"] for item in data if item.get("type") == "blob")
+            next_page = response.headers.get("x-next-page")
+            if not data or not next_page:
+                break
+            try:
+                page = int(next_page)
+            except ValueError:
+                break
+        return files
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
+        branch = validate_git_ref(branch, field="branch name")
+        from_ref = validate_git_ref(from_ref, field="base branch")
         response = await self._request(
             "POST",
             f"/projects/{self._project(repo)}/repository/branches",
             params={"branch": branch, "ref": from_ref},
+            ok_statuses=(200, 201, 400),
         )
         if response.status_code == 400 and "already exists" in response.text.lower():
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
@@ -103,6 +124,8 @@ class GitLabProvider(GitProvider):
         title: str,
         body: str,
     ) -> dict:
+        head = validate_git_ref(head, field="branch name")
+        base = validate_git_ref(base, field="base branch")
         response = await self._request(
             "POST",
             f"/projects/{self._project(repo)}/merge_requests",
@@ -113,6 +136,8 @@ class GitLabProvider(GitProvider):
                 "description": body,
             },
         )
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not open a merge request in {repo.full_name}: project or branch not found.")
         data = response.json()
         return {
             "number": data.get("iid"),

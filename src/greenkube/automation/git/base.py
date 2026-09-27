@@ -14,6 +14,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -22,6 +23,35 @@ logger = logging.getLogger(__name__)
 
 class GitProviderError(RuntimeError):
     """Raised when a Git provider call fails with a user-actionable message."""
+
+
+# Characters and sequences that Git itself forbids in ref names. They are also
+# the building blocks of URL/path injection, so both are rejected up front.
+_GIT_REF_FORBIDDEN_CHARS = re.compile(r"[\x00-\x1f\x7f ~^:?*\[\\]")
+_GIT_REF_FORBIDDEN_SEQUENCES = ("..", "@{", "//")
+
+
+def validate_git_ref(ref: str, *, field: str = "git ref") -> str:
+    """Validate a branch or ref name and prevent URL/path injection.
+
+    Raises :class:`GitProviderError` for names that are not valid Git refs
+    (e.g. ``../main``, ``feature..x``, ``branch name``).
+    """
+    value = (ref or "").strip()
+    if not value or len(value) > 255:
+        raise GitProviderError(f"Invalid {field}: must be 1-255 characters.")
+    if _GIT_REF_FORBIDDEN_CHARS.search(value):
+        raise GitProviderError(f"Invalid {field} '{value}': contains forbidden characters.")
+    if any(seq in value for seq in _GIT_REF_FORBIDDEN_SEQUENCES):
+        raise GitProviderError(f"Invalid {field} '{value}': contains a forbidden sequence.")
+    if value.startswith(("/", ".", "-")) or value.endswith(("/", ".", ".lock")):
+        raise GitProviderError(f"Invalid {field} '{value}': invalid start or end.")
+    return value
+
+
+def quote_git_path(path: str) -> str:
+    """Percent-encode a repository path for URL use, preserving ``/`` separators."""
+    return quote(path.lstrip("/"), safe="/")
 
 
 @dataclass

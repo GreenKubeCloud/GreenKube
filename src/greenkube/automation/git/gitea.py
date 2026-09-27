@@ -8,7 +8,14 @@ import logging
 from typing import List, Optional
 from urllib.parse import quote
 
-from greenkube.automation.git.base import GitFile, GitProvider, GitProviderError, GitRepository
+from greenkube.automation.git.base import (
+    GitFile,
+    GitProvider,
+    GitProviderError,
+    GitRepository,
+    quote_git_path,
+    validate_git_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +41,7 @@ class GiteaProvider(GitProvider):
     async def get_file(self, repo: GitRepository, path: str, ref: str) -> Optional[GitFile]:
         response = await self._request(
             "GET",
-            f"/repos/{repo.owner}/{repo.name}/contents/{quote(path.lstrip('/'))}",
+            f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}",
             params={"ref": ref},
         )
         if response.status_code == 404:
@@ -49,14 +56,28 @@ class GiteaProvider(GitProvider):
         return GitFile(path=path, content=content, sha=data.get("sha"))
 
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]:
-        response = await self._request(
+        files: List[str] = []
+        page = 1
+        first = await self._request(
             "GET",
-            f"/repos/{repo.owner}/{repo.name}/git/trees/{ref}",
-            params={"recursive": "true", "per_page": "1000"},
+            f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
+            params={"recursive": "true", "per_page": "1000", "page": str(page)},
         )
-        if response.status_code == 200:
-            tree = response.json().get("tree", []) or []
-            return [item["path"] for item in tree if item.get("type") == "blob"]
+        if first.status_code == 200:
+            while True:
+                data = first.json()
+                tree = data.get("tree", []) or []
+                files.extend(item["path"] for item in tree if item.get("type") == "blob")
+                if not data.get("truncated"):
+                    return files
+                page += 1
+                first = await self._request(
+                    "GET",
+                    f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
+                    params={"recursive": "true", "per_page": "1000", "page": str(page)},
+                )
+                if first.status_code != 200:
+                    return files
 
         # Older Gitea versions lack the trees API: walk the contents API instead.
         return await self._list_files_via_contents(repo, ref, "", depth=0)
@@ -66,7 +87,7 @@ class GiteaProvider(GitProvider):
             return []
         response = await self._request(
             "GET",
-            f"/repos/{repo.owner}/{repo.name}/contents/{quote(path)}"
+            f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}"
             if path
             else f"/repos/{repo.owner}/{repo.name}/contents",
             params={"ref": ref},
@@ -87,7 +108,9 @@ class GiteaProvider(GitProvider):
         return files
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
-        exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/branches/{branch}")
+        branch = validate_git_ref(branch, field="branch name")
+        from_ref = validate_git_ref(from_ref, field="base branch")
+        exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/branches/{quote(branch, safe='/')}")
         if exists.status_code == 200:
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
             return
@@ -113,7 +136,7 @@ class GiteaProvider(GitProvider):
             "branch": branch,
             "author": {"name": self.author_name, "email": self.author_email},
         }
-        endpoint = f"/repos/{repo.owner}/{repo.name}/contents/{quote(path.lstrip('/'))}"
+        endpoint = f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}"
         if sha:
             body["sha"] = sha
             await self._request("PUT", endpoint, json_body=body)
@@ -129,11 +152,17 @@ class GiteaProvider(GitProvider):
         title: str,
         body: str,
     ) -> dict:
+        head = validate_git_ref(head, field="branch name")
+        base = validate_git_ref(base, field="base branch")
         response = await self._request(
             "POST",
             f"/repos/{repo.owner}/{repo.name}/pulls",
             json_body={"title": title, "head": head, "base": base, "body": body},
         )
+        if response.status_code == 404:
+            raise GitProviderError(
+                f"Could not open a pull request in {repo.full_name}: repository or branch not found."
+            )
         data = response.json()
         return {
             "number": data.get("number"),

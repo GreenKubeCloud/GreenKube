@@ -226,3 +226,44 @@ class TestAutomationService:
         status = await _service(repo, pr_repo, FakeProvider({})).automation_status()
         assert status["token_configured"] is False
         assert status["provider"] == "github"
+
+
+class ShaShiftFakeProvider(FakeProvider):
+    """FakeProvider where the head branch already carries a different file SHA."""
+
+    async def get_file(self, repo, path, ref):
+        content = self.files.get(path)
+        if content is None:
+            return None
+        sha = "head-sha" if ref.startswith("greenkube/reco-") else "base-sha"
+        return GitFile(path=path, content=content, sha=sha)
+
+
+class TestApplyPrHardening:
+    @pytest.mark.asyncio
+    async def test_apply_uses_file_sha_from_the_head_branch(self, repos):
+        repo, pr_repo = repos
+        await repo.save_recommendations([_record()])
+        rec_id = (await repo.get_active_recommendations())[0].id
+        provider = ShaShiftFakeProvider({"apps/api.yaml": MANIFEST})
+
+        first = await _service(repo, pr_repo, provider).apply_recommendation_pr(rec_id, ApplyPrRequest())
+        second = await _service(repo, pr_repo, provider).apply_recommendation_pr(rec_id, ApplyPrRequest())
+
+        assert first.status == "pr_open"
+        assert second.status == "pr_open"
+        assert provider.updates[-1]["sha"] == "head-sha"
+
+    @pytest.mark.asyncio
+    async def test_invalid_base_branch_returns_error(self, repos):
+        repo, pr_repo = repos
+        await repo.save_recommendations([_record()])
+        rec_id = (await repo.get_active_recommendations())[0].id
+        provider = FakeProvider({"apps/api.yaml": MANIFEST})
+
+        response = await _service(repo, pr_repo, provider).apply_recommendation_pr(
+            rec_id, ApplyPrRequest(base_branch="../../etc")
+        )
+
+        assert response.status == "error"
+        assert provider.updates == []

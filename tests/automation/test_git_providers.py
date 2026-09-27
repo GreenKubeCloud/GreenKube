@@ -7,7 +7,7 @@ import pytest
 import respx
 from httpx import Response
 
-from greenkube.automation.git.base import GitProviderError, parse_repo_url
+from greenkube.automation.git.base import GitProviderError, parse_repo_url, validate_git_ref
 from greenkube.automation.git.gitea import GiteaProvider
 from greenkube.automation.git.github import GitHubProvider
 from greenkube.automation.git.gitlab import GitLabProvider
@@ -171,3 +171,66 @@ async def test_gitea_flow():
     pr = await provider.create_pull_request(repo, head="h", base="main", title="t", body="b")
     assert pr["number"] == 11
     await provider.close()
+
+
+class TestValidateGitRef:
+    @pytest.mark.parametrize(
+        "ref",
+        ["../main", "feature..x", "branch name", "a@{1}", "-bad", "/leading", "trailing/", "x.lock", ""],
+    )
+    def test_rejects_invalid_refs(self, ref):
+        with pytest.raises(GitProviderError):
+            validate_git_ref(ref)
+
+    @pytest.mark.parametrize("ref", ["main", "feature/greenkube-reco-1", "release-1.2"])
+    def test_accepts_valid_refs(self, ref):
+        assert validate_git_ref(ref) == ref
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_get_file_percent_encodes_path():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return Response(200, json={"content": base64.b64encode(b"x").decode(), "sha": "s"})
+
+    respx.get(url__startswith="https://api.github.com/repos/acme/manifests/contents/").mock(side_effect=handler)
+    provider = GitHubProvider("token")
+    repo = provider.repository("https://github.com/acme/manifests.git")
+
+    file = await provider.get_file(repo, "apps space/api.yaml", "main")
+
+    assert file is not None and file.sha == "s"
+    assert "%20" in seen["url"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_create_pull_request_404_raises():
+    respx.post("https://api.github.com/repos/acme/manifests/pulls").mock(
+        return_value=Response(404, json={"message": "Not Found"})
+    )
+    provider = GitHubProvider("token")
+    repo = provider.repository("https://github.com/acme/manifests.git")
+
+    with pytest.raises(GitProviderError):
+        await provider.create_pull_request(repo, head="feature/x", base="main", title="t", body="b")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gitlab_list_files_follows_pagination():
+    respx.get("https://gitlab.com/api/v4/projects/acme%2Fmanifests/repository/tree").mock(
+        side_effect=[
+            Response(200, json=[{"path": "a.yaml", "type": "blob"}], headers={"x-next-page": "2"}),
+            Response(200, json=[{"path": "b.yaml", "type": "blob"}], headers={"x-next-page": ""}),
+        ]
+    )
+    provider = GitLabProvider("token")
+    repo = provider.repository("https://gitlab.com/acme/manifests.git")
+
+    files = await provider.list_files(repo, "main")
+
+    assert files == ["a.yaml", "b.yaml"]
