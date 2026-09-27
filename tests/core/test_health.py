@@ -940,3 +940,26 @@ class TestInvalidateHealthCache:
 
         assert health_mod._cached_result is None
         assert health_mod._cached_at == 0.0
+
+
+class TestAllProbesFailing:
+    """All failing probes must not be reported as a healthy API."""
+
+    @pytest.mark.asyncio
+    async def test_runner_reports_error_when_every_probe_raises(self):
+        invalidate_health_cache()
+
+        with (
+            patch("greenkube.core.health.check_prometheus", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("greenkube.core.health.check_opencost", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch(
+                "greenkube.core.health.check_electricity_maps", new_callable=AsyncMock, side_effect=RuntimeError("boom")
+            ),
+            patch("greenkube.core.health.check_wattnet", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("greenkube.core.health.check_boavizta", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("greenkube.core.health.check_kubernetes", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+        ):
+            result = await run_health_checks(force=True)
+
+        assert result.status == "error"
+        assert result.services == {}
