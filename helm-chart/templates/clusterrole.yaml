@@ -37,11 +37,22 @@ rules:
   verbs:
   - get
   - list
-  # Reserved for the Karpenter connector (node pool consolidation).
+   # Karpenter connector (node pool consolidation).
 - apiGroups: ["karpenter.sh"]
   resources:
   - nodepools
   - nodeclaims
+  verbs:
+  - get
+  - list
+  # Apply detection reads live workload requests to detect landed changes
+  # (manual edits, PR merges, ArgoCD syncs). Read-only.
+- apiGroups: ["apps"]
+  resources:
+  - deployments
+  - statefulsets
+  - daemonsets
+  - replicasets
   verbs:
   - get
   - list

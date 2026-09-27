@@ -247,9 +247,13 @@ class TestRecommendationsEndpoint:
 
     def test_savings_summary_uses_ledger_for_selected_window(self, client, mock_reco_repo, mock_savings_repo):
         """Savings windows should count ongoing ledger rows, not only recommendations applied in the window."""
-        mock_savings_repo.get_window_totals = AsyncMock(
-            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
-        )
+        totals_by_type = {"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
+        totals_by_method = {"prorated": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
+
+        async def _window_totals(*args, group_by_method=False, **kwargs):
+            return totals_by_method if group_by_method else totals_by_type
+
+        mock_savings_repo.get_window_totals = AsyncMock(side_effect=_window_totals)
         mock_reco_repo.get_savings_summary = AsyncMock(
             return_value=RecommendationSavingsSummary(
                 total_carbon_saved_co2e_grams=0.0,
@@ -265,7 +269,9 @@ class TestRecommendationsEndpoint:
         assert data["total_carbon_saved_co2e_grams"] == 42.0
         assert data["total_cost_saved"] == 1.5
         assert data["applied_count"] == 1
-        mock_savings_repo.get_window_totals.assert_awaited_once()
+        assert data["prorated_carbon_saved_co2e_grams"] == 42.0
+        assert data["measured_carbon_saved_co2e_grams"] == 0.0
+        assert mock_savings_repo.get_window_totals.await_count == 2
 
     def test_savings_summary_without_window_uses_repository_summary(self, client, mock_reco_repo, mock_savings_repo):
         """Unbounded summaries should keep repository fallback semantics and namespace filtering."""

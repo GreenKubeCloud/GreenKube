@@ -4,9 +4,11 @@ PostgreSQL implementation of the RecommendationRepository.
 Persists recommendation history with full lifecycle management.
 """
 
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from enum import Enum
 from typing import List, Optional
 
 from ...core.recommendation_ranking import normalize_savings_metric
@@ -14,6 +16,7 @@ from ...core.recommendation_realization import estimate_realized_savings, refres
 from ...models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
+    RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     RecommendationStatus,
@@ -26,8 +29,18 @@ from ..recommendation_mapper import (
     record_values,
     row_to_record,
 )
+from ..sqlite.recommendation_repository import MUTABLE_COLUMNS
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_value(value):
+    """Encodes a Python value for an asyncpg bind parameter."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return value
 
 
 def _type_value(record: RecommendationRecord) -> str:
@@ -398,13 +411,35 @@ class PostgresRecommendationRepository(RecommendationRepository):
         """
         async with self.db_manager.connection_scope() as conn:
             params: list = []
-            query = "SELECT * FROM recommendation_history WHERE status = 'applied'"
+            query = (
+                "SELECT * FROM recommendation_history "
+                "WHERE status IN ('applied', 'verifying', 'verified', 'rollback_review')"
+            )
 
             if namespace:
                 query += " AND namespace = $1"
                 params.append(namespace)
 
             query += " ORDER BY applied_at DESC"
+            rows = await conn.fetch(query, *params)
+            return [row_to_record(r) for r in rows]
+
+    async def get_recommendations_by_statuses(
+        self,
+        statuses: List[str],
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns recommendations in any of the given lifecycle statuses."""
+        if not statuses:
+            return []
+        params: list = [list(statuses)]
+        query = "SELECT * FROM recommendation_history WHERE status = ANY($1::text[])"
+        if namespace:
+            params.append(namespace)
+            query += f" AND namespace = ${len(params)}"
+        query += " ORDER BY created_at DESC"
+
+        async with self.db_manager.connection_scope() as conn:
             rows = await conn.fetch(query, *params)
             return [row_to_record(r) for r in rows]
 
@@ -423,7 +458,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     COALESCE(SUM(carbon_saved_co2e_grams), 0) AS total_co2e_grams,
                     COALESCE(SUM(cost_saved), 0) AS total_cost_dollars
                 FROM recommendation_history
-                WHERE status = 'applied'
+                WHERE status IN ('applied', 'verifying', 'verified', 'rollback_review')
                 GROUP BY type, COALESCE(namespace, '_cluster')
             """)
             return [dict(r) for r in rows]
@@ -441,7 +476,14 @@ class PostgresRecommendationRepository(RecommendationRepository):
             row = await conn.fetchrow("SELECT * FROM recommendation_history WHERE id = $1", rec_id)
             return row_to_record(row) if row else None
 
-    async def apply_recommendation(self, rec_id: int, request: ApplyRecommendationRequest) -> RecommendationRecord:
+    async def apply_recommendation(
+        self,
+        rec_id: int,
+        request: ApplyRecommendationRequest,
+        *,
+        baseline: Optional[dict] = None,
+        application_method: Optional[str] = None,
+    ) -> RecommendationRecord:
         """Marks a recommendation as applied and records the actual applied values.
 
         If savings are not provided, the potential savings from the original recommendation
@@ -450,6 +492,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
         Args:
             rec_id: The database primary key.
             request: The apply request with actual values.
+            baseline: Frozen pre-apply metrics captured for verification.
+            application_method: How the change landed (manual, detected, pr_merge, ...).
 
         Returns:
             The updated RecommendationRecord.
@@ -462,6 +506,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
             record = row_to_record(row)
             carbon_saved, cost_saved = estimate_realized_savings(record, request)
+            method = application_method or request.application_method or "manual"
 
             updated = await conn.fetchrow(
                 """
@@ -472,6 +517,11 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     actual_memory_request_bytes = $4,
                     carbon_saved_co2e_grams = $5,
                     cost_saved = $6,
+                    application_method = $7,
+                    baseline = $8,
+                    verification_status = 'pending',
+                    verification_window_start = NULL,
+                    verification_window_end = NULL,
                     updated_at = $2
                 WHERE id = $1
                 RETURNING *
@@ -482,9 +532,95 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 request.actual_memory_request_bytes,
                 carbon_saved,
                 cost_saved,
+                method,
+                json.dumps(baseline) if baseline is not None else None,
             )
-            logger.info("Recommendation %d marked as applied.", rec_id)
+            logger.info("Recommendation %d marked as applied (%s).", rec_id, method)
             return row_to_record(updated)
+
+    async def update_recommendation_fields(self, rec_id: int, updates: dict) -> RecommendationRecord:
+        """Updates a subset of mutable recommendation columns."""
+        filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
+        if not filtered:
+            raise ValueError("No mutable recommendation columns supplied.")
+
+        set_clause = ", ".join(f"{column} = ${index}" for index, column in enumerate(filtered, start=1))
+        params = [_encode_value(value) for value in filtered.values()]
+        params.append(rec_id)
+
+        async with self.db_manager.connection_scope() as conn:
+            updated = await conn.fetchrow(
+                f"UPDATE recommendation_history SET {set_clause} WHERE id = ${len(params)} RETURNING *",
+                *params,
+            )
+            if not updated:
+                raise ValueError(f"Recommendation {rec_id} not found.")
+            return row_to_record(updated)
+
+    async def record_event(self, event: RecommendationEvent) -> RecommendationEvent:
+        """Appends a recommendation lifecycle event to the audit trail."""
+        created_at = event.created_at or datetime.now(timezone.utc)
+        async with self.db_manager.connection_scope() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO recommendation_events
+                    (recommendation_id, event_type, actor, payload, created_at)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, created_at
+                """,
+                event.recommendation_id,
+                event.event_type,
+                event.actor,
+                json.dumps(event.payload or {}),
+                created_at,
+            )
+            return event.model_copy(update={"id": row["id"], "created_at": row["created_at"]})
+
+    async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
+        """Returns the audit trail for a recommendation, oldest first."""
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM recommendation_events WHERE recommendation_id = $1 ORDER BY created_at ASC, id ASC",
+                rec_id,
+            )
+            events: List[RecommendationEvent] = []
+            for row in rows:
+                data = dict(row)
+                payload = data.get("payload")
+                try:
+                    payload = json.loads(payload) if payload else {}
+                except (TypeError, ValueError):
+                    payload = {}
+                events.append(
+                    RecommendationEvent(
+                        id=data["id"],
+                        recommendation_id=data["recommendation_id"],
+                        event_type=data["event_type"],
+                        actor=data["actor"],
+                        payload=payload,
+                        created_at=data["created_at"],
+                    )
+                )
+            return events
+
+    async def expire_recommendations(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
+        """Marks active recommendations past their TTL as expired."""
+        reference = now or datetime.now(timezone.utc)
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                """
+                UPDATE recommendation_history
+                SET status = 'expired', updated_at = $1
+                WHERE status = 'active'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < $1
+                RETURNING *
+                """,
+                reference,
+            )
+            if rows:
+                logger.info("Expired %d PostgreSQL recommendation record(s).", len(rows))
+            return [row_to_record(row) for row in rows]
 
     async def ignore_recommendation(self, rec_id: int, request: IgnoreRecommendationRequest) -> RecommendationRecord:
         """Permanently ignores a recommendation.
@@ -568,7 +704,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
         """
         async with self.db_manager.connection_scope() as conn:
             params: list = []
-            conditions = ["status = 'applied'"]
+            conditions = ["status IN ('applied', 'verifying', 'verified', 'rollback_review')"]
             if namespace:
                 params.append(namespace)
                 conditions.append(f"namespace = ${len(params)}")
@@ -579,28 +715,55 @@ class PostgresRecommendationRepository(RecommendationRepository):
             where = "WHERE " + " AND ".join(conditions)
 
             rows = await conn.fetch(
-                f"SELECT namespace, carbon_saved_co2e_grams, cost_saved FROM recommendation_history {where}",
+                "SELECT namespace, status, carbon_saved_co2e_grams, cost_saved, "
+                f"measured_co2e_saved_grams, measured_cost_saved FROM recommendation_history {where}",
                 *params,
             )
 
-            total_carbon = 0.0
-            total_cost = 0.0
-            by_ns: dict = defaultdict(lambda: {"carbon_saved_co2e_grams": 0.0, "cost_saved": 0.0, "count": 0})
+            measured_carbon = 0.0
+            measured_cost = 0.0
+            prorated_carbon = 0.0
+            prorated_cost = 0.0
+            by_ns: dict = defaultdict(
+                lambda: {
+                    "carbon_saved_co2e_grams": 0.0,
+                    "cost_saved": 0.0,
+                    "measured_carbon_saved_co2e_grams": 0.0,
+                    "measured_cost_saved": 0.0,
+                    "count": 0,
+                }
+            )
 
             for row in rows:
                 data = dict(row)
-                c = data.get("carbon_saved_co2e_grams") or 0.0
-                s = data.get("cost_saved") or 0.0
-                total_carbon += c
-                total_cost += s
+                is_verified = data["status"] == "verified" and data.get("measured_co2e_saved_grams") is not None
+                if is_verified:
+                    c = data.get("measured_co2e_saved_grams") or 0.0
+                    s = data.get("measured_cost_saved") or 0.0
+                    measured_carbon += c
+                    measured_cost += s
+                else:
+                    c = data.get("carbon_saved_co2e_grams") or 0.0
+                    s = data.get("cost_saved") or 0.0
+                    prorated_carbon += c
+                    prorated_cost += s
                 ns_key = data["namespace"] or "_cluster"
                 by_ns[ns_key]["carbon_saved_co2e_grams"] += c
                 by_ns[ns_key]["cost_saved"] += s
+                by_ns[ns_key]["measured_carbon_saved_co2e_grams"] += (
+                    data.get("measured_co2e_saved_grams") or 0.0 if is_verified else 0.0
+                )
+                by_ns[ns_key]["measured_cost_saved"] += data.get("measured_cost_saved") or 0.0 if is_verified else 0.0
                 by_ns[ns_key]["count"] += 1
 
             return RecommendationSavingsSummary(
-                total_carbon_saved_co2e_grams=total_carbon,
-                total_cost_saved=total_cost,
+                total_carbon_saved_co2e_grams=measured_carbon + prorated_carbon,
+                total_cost_saved=measured_cost + prorated_cost,
                 applied_count=len(rows),
                 namespace_breakdown=[{"namespace": ns, **vals} for ns, vals in by_ns.items()],
+                measured_carbon_saved_co2e_grams=measured_carbon,
+                measured_cost_saved=measured_cost,
+                prorated_carbon_saved_co2e_grams=prorated_carbon,
+                prorated_cost_saved=prorated_cost,
+                verified_count=sum(1 for row in rows if dict(row)["status"] == "verified"),
             )

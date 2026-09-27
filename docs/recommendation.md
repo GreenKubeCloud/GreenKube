@@ -1,10 +1,10 @@
 # Recommendation Lifecycle
 
-> **Note:** The recommendation component is being overhauled into a multi-source
-> optimization engine. The target architecture, evidence model, ranking and
-> verification lifecycle are specified in
+> **Note:** The recommendation component is a multi-source optimization engine.
+> The architecture, evidence model, ranking, verification lifecycle and GitOps
+> PR bot are specified in the
 > [Optimization engine specification](specs/optimization-engine.md). This page
-> documents the behavior currently implemented.
+> documents how the engine is used end to end.
 
 This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/optimization/`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
 
@@ -27,16 +27,25 @@ During API and startup scans, metrics from Kubernetes namespaces that no longer 
 
 ## Lifecycle States
 
-There are four implemented persisted states. A freshly generated in-memory `Recommendation` has no lifecycle state until it is converted into a `RecommendationRecord`.
+A freshly generated in-memory `Recommendation` has no lifecycle state until it is converted into a `RecommendationRecord`. Every transition writes a row to `recommendation_events` (actor, payload, timestamp) exposed by `GET /api/v1/recommendations/{id}/events`.
 
 | State | Meaning | How it is reached |
 |---|---|---|
 | `active` | The recommendation is currently valid and visible in active lists, top recommendations, Prometheus active gauges, Grafana cards, and the frontend Active tab. | Created by `RecommendationRecord.from_recommendation()` and inserted or refreshed by repository upsert. Ignored recommendations can also be restored to active. |
-| `applied` | A user or automation marked the recommendation as implemented. Applied records are excluded from active recommendations and included in realized savings. | `PATCH /api/v1/recommendations/{id}/apply`. |
-| `ignored` | A user intentionally hid the recommendation with an optional reason. Ignored records are preserved for review and can be restored. | `PATCH /api/v1/recommendations/{id}/ignore`. |
 | `stale` | A previously active recommendation no longer appears in the latest generated set. It is kept in history but no longer shown as active. | `reconcile_active_recommendations()` after a refresh or startup scan. |
+| `expired` | The recommendation passed `expires_at` (`generated_at + RECOMMENDATION_TTL_DAYS`) without being applied. It is hidden from active lists but retained for history. | `RecommendationLifecycle.expire()` during every refresh and every lifecycle job. |
+| `ignored` | A user intentionally hid the recommendation with an optional reason. Ignored records are preserved for review and can be restored. | `PATCH /api/v1/recommendations/{id}/ignore`. |
+| `pr_open` | The PR bot opened a pull request that applies the recommendation. | `POST /api/v1/recommendations/{id}/apply-pr`. |
+| `applied` | The change landed in the cluster. Applying freezes a verification baseline. | `PATCH .../apply` (manual), apply detection (Kubernetes API), or a merged PR. |
+| `verifying` | The observation window after apply is in progress (or was extended once because of insufficient samples). | `RecommendationVerifier` lifecycle job. |
+| `verified` | Cost, carbon and health gates passed; measured savings replace the prorated estimate in the ledger. | `RecommendationVerifier` lifecycle job. |
+| `rollback_review` | A health gate failed (restarts, OOM, usage above the proposed request × headroom): the change needs review and prior savings rows are superseded. | `RecommendationVerifier` lifecycle job. |
+| `reverted` | The change was rolled back. | Reserved for the rollback follow-up. |
+| `failed` | The PR was closed without merge or the savings gate failed (record stays visible with `savings_realized=false`). | PR tracking / verification. |
 
-The current code does not implement `open`, `in_progress`, `resolved`, `dismissed`, or `snoozed` states.
+**Apply succeeded vs recommendation succeeded.** `application_method` records how the change landed (`manual`, `detected`, `pr_merge`); `verified_at` and `verification_status` record whether the outcome matched the projection. Only verified savings count as measured.
+
+**Verification gates.** `VERIFICATION_WINDOW_HOURS` (default 72) and `VERIFICATION_MIN_SAMPLES` control the observation window; the cost/carbon gate requires the measured reduction to reach `VERIFICATION_MIN_SAVINGS_RATIO` (default 0.5) of the projection; the health gate requires the p95 usage to stay below the proposed request × `VERIFICATION_USAGE_HEADROOM` (default 1.1), no restart delta above `VERIFICATION_MAX_RESTART_DELTA`, and no OOM kills. Insufficient samples extend the window once, then produce `inconclusive`.
 
 ## Generation Flow
 
@@ -108,12 +117,36 @@ All recommendation API paths are under `/api/v1`.
 | `GET` | `/recommendations/top?limit=5&metric=co2&profile=&namespace=&refresh=false` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. With `profile` (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`), the multi-criteria `ranking_score` drives the order. |
 | `GET` | `/recommendations/{id}` | Returns a single record including its full evidence block, risk/confidence assessment, patch plan and expiry. |
 | `GET` | `/recommendations/ignored?namespace=` | Returns ignored records. |
-| `GET` | `/recommendations/applied?namespace=` | Returns applied records ordered by most recent application. |
+| `GET` | `/recommendations/applied?namespace=` | Returns applied, verifying, verified and rollback-review records ordered by most recent application. |
 | `GET` | `/recommendations/history?start=&end=&type=&namespace=` | Returns records in a creation-time range, any status. |
-| `GET` | `/recommendations/savings?namespace=&last=` | Returns realized savings. Without `last`, it uses applied recommendation records. With `last`, it prefers the savings ledger for exact window totals and falls back to records if the ledger is unavailable. |
-| `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied, and records realized savings. |
+| `GET` | `/recommendations/{id}/events` | Returns the full lifecycle audit trail (actor, payload, timestamp) for a recommendation. |
+| `GET` | `/recommendations/savings?namespace=&last=` | Returns realized savings split into measured (verified) and prorated (pending verification) totals. Without `last`, it uses applied recommendation records. With `last`, it prefers the savings ledger for exact window totals and falls back to records if the ledger is unavailable. |
+| `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied, freezes the verification baseline, and records realized savings. |
 | `PATCH` | `/recommendations/{id}/ignore` | Marks a recommendation as `ignored` and stores the reason. |
 | `DELETE` | `/recommendations/{id}/ignore` | Restores an ignored recommendation to `active`. |
+| `POST` | `/recommendations/{id}/apply-pr` | Resolves the workload's Git source from its annotations, patches the manifest and opens a pull request. `dry_run=true` returns the diff without touching Git. |
+| `GET` | `/recommendations/{id}/pull-requests` | Lists the pull-request attempts and their status for a recommendation. |
+| `GET` | `/automation/status` | Reports whether the PR bot is configured (provider, token, default branch). |
+
+### GitOps PR bot
+
+The bot is documented in detail in the [automation plan](automation-plan.md). In short:
+
+1. It reads `greenkube.cloud/git-repo`, `greenkube.cloud/git-path` and
+   `greenkube.cloud/git-branch` annotations from the workload (Deployment,
+   StatefulSet or DaemonSet).
+2. It fetches the manifest through the configured Git provider (`github`,
+   `gitlab` or `gitea`), applies the rightsizing patch with a round-trip YAML
+   editor (comments and formatting are preserved) and renders the PR body from
+   the stored evidence block.
+3. It creates a `greenkube/reco-<id>-<target>` branch, commits the change and
+   opens a pull request. The recommendation moves to `pr_open` and an audit
+   event is written.
+4. After the PR is merged (and ArgoCD or the user syncs it), the **apply
+   detector** observes the lowered request on the live workload, freezes the
+   verification baseline and moves the recommendation to `applied` with
+   `application_method=pr_merge`. The **verifier** later confirms the outcome
+   and switches the ledger from prorated to measured savings.
 
 Example lifecycle calls:
 
@@ -160,11 +193,16 @@ The `/recommendations` page currently provides:
 - Source badges (GreenKube, VPA, Karpenter), risk badges and confidence indicators.
 - An expandable evidence panel per active recommendation (window, coverage, utilization distribution, proposed change, rollback conditions, expiry).
 - A ranking profile selector (projected savings, balanced, carbon first, cost first, quick wins, low risk).
+- A **Create PR** action on rightsizing cards: it previews the Git diff (dry run),
+  lets the user adjust the base branch and opens the pull request through the
+  configured Git provider.
 - Ignore with a required reason from the Active tab.
 - Restore from the Ignored tab.
-- Applied recommendation details and realized savings in the Realized Savings tab.
-
-The frontend API client contains an `applyRecommendation()` helper, but the recommendations page does not currently expose an Apply button. The page tells users to mark active recommendations as applied through the API.
+- Applied recommendation details, verification state (`applied`, `verifying`,
+  `verified`, `rollback_review`), measured vs projected savings and an expandable
+  lifecycle event trail.
+- Realized savings summary split into **measured (verified)** and **projected
+  (prorated)** totals.
 
 ## Prometheus And Grafana
 
@@ -204,6 +242,8 @@ Applied recommendations can later be refreshed when the same issue is observed a
 
 The `SavingsAttributor` converts annual realized savings into per-period ledger rows using the collection step duration. The ledger writes one row per applied recommendation per attribution cycle when annual CO2e savings are positive; cost savings are included on those rows. Raw rows can be compressed into hourly aggregates, and API/Grafana windowed savings read both raw and hourly data.
 
+After verification, ledger rows switch to `measurement_method='measured'` and use the verifier's measured savings; pending records keep writing prorated rows. When a recommendation enters `rollback_review`, attribution stops and all its prior rows are flagged `superseded=true` (never deleted). The API and the dashboard expose measured and prorated totals separately, and the `greenkube_savings_measured_vs_projected_ratio` gauge tracks the measured share.
+
 ## Configuration
 
 Recommendation behavior is configured through environment variables in `src/greenkube/core/config.py` and Helm values under `config.recommendations`.
@@ -229,15 +269,34 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RECOMMENDATION_APPLY_TOLERANCE` | `config.recommendations.applyTolerance` | `0.25` |
 | `STORAGE_COST_PER_GIB_MONTH` | `config.recommendations.storageCostPerGibMonth` | `0.1` |
 | `LOAD_BALANCER_COST_PER_MONTH` | `config.recommendations.loadBalancerCostPerMonth` | `18.0` |
-| `RECOMMENDATION_VPA_ENABLED` | `config.recommendations.vpaEnabled` | `false` |
-| `RECOMMENDATION_KARPENTER_ENABLED` | `config.recommendations.karpenterEnabled` | `false` |
+| `RECOMMENDATION_VPA_ENABLED` | `config.recommendations.vpaEnabled` | `true` (CRD auto-detected) |
+| `RECOMMENDATION_KARPENTER_ENABLED` | `config.recommendations.karpenterEnabled` | `true` (CRD auto-detected) |
 | `RECOMMENDATION_SOURCE_PRIORITY` | `config.recommendations.sourcePriority` | `vpa,karpenter,greenkube` |
 | `RECOMMENDATION_TTL_DAYS` | `config.recommendations.ttlDays` | `14` |
 | `RECOMMENDATION_RANKING_PROFILE` | `config.recommendations.rankingProfile` | `balanced` |
 | `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (profile defaults) |
 | `RECOMMENDATION_MIN_SAMPLES` | `config.recommendations.minSamples` | `36` |
+| `VERIFICATION_WINDOW_HOURS` | `config.recommendations.verification.windowHours` | `72` |
+| `VERIFICATION_MIN_SAMPLES` | `config.recommendations.verification.minSamples` | `36` |
+| `VERIFICATION_MIN_SAVINGS_RATIO` | `config.recommendations.verification.minSavingsRatio` | `0.5` |
+| `VERIFICATION_USAGE_HEADROOM` | `config.recommendations.verification.usageHeadroom` | `1.1` |
+| `VERIFICATION_MAX_RESTART_DELTA` | `config.recommendations.verification.maxRestartDelta` | `0` |
+| `VERIFICATION_MIN_READINESS` | `config.recommendations.verification.minReadiness` | `0.99` |
+| `VERIFICATION_MAX_THROTTLE_RATIO` | `config.recommendations.verification.maxThrottleRatio` | `0.05` |
+| `RECOMMENDATION_LIFECYCLE_INTERVAL` | `config.recommendations.verification.lifecycleInterval` | `5m` |
+| `GIT_PROVIDER` | `config.recommendations.git.provider` | `github` |
+| `GIT_API_BASE_URL` | `config.recommendations.git.apiBaseUrl` | `""` |
+| `GIT_DEFAULT_BRANCH` | `config.recommendations.git.defaultBranch` | `main` |
+| `GIT_TOKEN` (secret) | `secrets.gitToken` / `secrets.existingSecret` | unset (PR bot disabled) |
 
-`RECOMMENDATION_APPLY_TOLERANCE` is present in configuration and Helm values, but the current apply endpoint marks a recommendation as applied only when the API is called. There is no automatic apply-detection path using this tolerance in the current code.
+`RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: the
+lifecycle job compares live workload requests against the stored current values
+and marks a recommendation applied when the request dropped by more than the
+tolerance, or matches the recommended value within it.
+
+The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes
+in the collector/scheduler container) runs apply detection, outcome
+verification and TTL expiry.
 
 ## Source Map
 
@@ -249,15 +308,20 @@ Recommendation behavior is configured through environment variables in `src/gree
 | Sources (native, VPA, Karpenter) | `src/greenkube/core/optimization/providers/`, `registry.py` |
 | Dedup / arbitration / provenance | `src/greenkube/core/optimization/dedup.py` |
 | Evidence, risk, ranking | `src/greenkube/core/optimization/evidence.py`, `risks.py`, `scoring.py`, `enrich.py` |
+| Lifecycle, apply detection, verification | `src/greenkube/core/optimization/lifecycle.py`, `applied_detector.py`, `verifier.py` |
 | VPA discovery | `src/greenkube/collectors/vpa_collector.py`, `src/greenkube/utils/k8s_quantities.py` |
+| Karpenter discovery | `src/greenkube/collectors/karpenter_collector.py` |
 | Orphaned PV discovery | `src/greenkube/collectors/pv_collector.py` |
 | Orphaned LoadBalancer discovery | `src/greenkube/collectors/lb_collector.py` |
 | Ranking (API DTOs) | `src/greenkube/core/recommendation_ranking.py` |
 | Realized savings estimation | `src/greenkube/core/recommendation_realization.py` |
 | Savings ledger attribution | `src/greenkube/core/savings_attributor.py` |
-| API routes | `src/greenkube/api/routers/recommendations.py` |
+| PR bot | `src/greenkube/automation/` |
+| Recommendation API routes | `src/greenkube/api/routers/recommendations.py` |
+| Automation API routes | `src/greenkube/api/routers/automation.py` |
 | Prometheus gauges | `src/greenkube/api/metrics_endpoint.py` |
-| Startup scan | `src/greenkube/api/startup.py` |
+| Startup scan & lifecycle job | `src/greenkube/api/startup.py`, `src/greenkube/cli/start.py` |
+| Migrations 0012–0014 | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/` |
 | Storage adapters | `src/greenkube/storage/recommendation_mapper.py`, `src/greenkube/storage/sqlite/recommendation_repository.py`, `src/greenkube/storage/postgres/recommendation_repository.py` |
 | Migrations | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/0010_*.sql`, `0011_*.sql` |
 | CLI | `src/greenkube/cli/recommend.py` |

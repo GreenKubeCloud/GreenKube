@@ -149,6 +149,50 @@ class RecommendationStatus(str, Enum):
     APPLIED = "applied"
     IGNORED = "ignored"
     STALE = "stale"
+    EXPIRED = "expired"
+    PR_OPEN = "pr_open"
+    VERIFYING = "verifying"
+    VERIFIED = "verified"
+    ROLLBACK_REVIEW = "rollback_review"
+    REVERTED = "reverted"
+    FAILED = "failed"
+
+
+class ApplicationMethod(str, Enum):
+    """How an applied recommendation landed in the cluster."""
+
+    MANUAL = "manual"
+    DETECTED = "detected"
+    PR_MERGE = "pr_merge"
+    WEBHOOK = "webhook"
+    POLLING = "polling"
+
+
+class VerificationStatus(str, Enum):
+    """Outcome of the post-apply verification window."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    PASSED = "passed"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
+
+
+class RecommendationEventType(str, Enum):
+    """Audit-trail event types written on every lifecycle transition."""
+
+    CREATED = "created"
+    IGNORED = "ignored"
+    UNIGNORED = "unignored"
+    EXPIRED = "expired"
+    PR_OPENED = "pr_opened"
+    PR_MERGED = "pr_merged"
+    APPLIED = "applied"
+    VERIFICATION_STARTED = "verification_started"
+    VERIFIED = "verified"
+    ROLLBACK_REVIEW = "rollback_review"
+    REVERTED = "reverted"
+    FAILED = "failed"
 
 
 class RiskLevel(str, Enum):
@@ -298,6 +342,20 @@ class RecommendationRecord(BaseModel):
     # Ignore lifecycle fields
     ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
     ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+    # Apply / verification lifecycle fields (Phase 3)
+    application_method: Optional[str] = Field(
+        None, description="How the change landed: manual, detected, pr_merge, webhook, polling."
+    )
+    verified_at: Optional[datetime] = Field(None, description="When the outcome was confirmed.")
+    verification_status: Optional[str] = Field(
+        None, description="Verification outcome: pending, in_progress, passed, failed, inconclusive."
+    )
+    verification_window_start: Optional[datetime] = Field(None, description="Start of the verification window.")
+    verification_window_end: Optional[datetime] = Field(None, description="End of the verification window.")
+    baseline: Optional[dict] = Field(None, description="Frozen pre-apply metrics used as the verification baseline.")
+    measured_co2e_saved_grams: Optional[float] = Field(None, description="Measured annual CO2e savings after apply.")
+    measured_cost_saved: Optional[float] = Field(None, description="Measured annual cost savings after apply.")
+    savings_realized: Optional[bool] = Field(None, description="Whether the cost gate passed during verification.")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="When the recommendation was generated.",
@@ -377,6 +435,76 @@ class ApplyRecommendationRequest(BaseModel):
     cost_saved: Optional[float] = Field(
         None, description="Actual cost savings realised (computed server-side if omitted)."
     )
+    application_method: Optional[str] = Field(
+        None, description="How the change landed: manual, detected, pr_merge, webhook, polling."
+    )
+
+
+class RecommendationEvent(BaseModel):
+    """Audit-trail row written on every recommendation lifecycle transition."""
+
+    id: Optional[int] = Field(None, description="Auto-generated database ID.")
+    recommendation_id: int = Field(..., description="Owning recommendation ID.")
+    event_type: str = Field(..., description="Transition type (created, applied, verified, ...).")
+    actor: str = Field("system", description="Who triggered the transition.")
+    payload: dict = Field(default_factory=dict, description="Structured event context.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When the event was recorded.",
+    )
+
+
+class PullRequestStatus(str, Enum):
+    """Lifecycle of a pull request opened by the automation bot."""
+
+    PENDING = "pending"
+    OPEN = "open"
+    MERGED = "merged"
+    CLOSED = "closed"
+    ERROR = "error"
+
+
+class PullRequestRecord(BaseModel):
+    """A pull request attempt opened for a recommendation."""
+
+    id: Optional[int] = Field(None, description="Auto-generated database ID.")
+    recommendation_id: int = Field(..., description="Owning recommendation ID.")
+    provider: str = Field(..., description="Git provider: github, gitlab or gitea.")
+    repo: str = Field(..., description="Repository in owner/name form.")
+    base_branch: str = Field("main", description="Target branch of the pull request.")
+    head_branch: Optional[str] = Field(None, description="Branch created by the bot.")
+    pr_number: Optional[int] = Field(None, description="Provider-side pull request number.")
+    pr_url: Optional[str] = Field(None, description="Provider-side pull request URL.")
+    status: PullRequestStatus = Field(PullRequestStatus.PENDING, description="Pull request status.")
+    error: Optional[str] = Field(None, description="Error message when status is error.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When the attempt was recorded.",
+    )
+    updated_at: Optional[datetime] = Field(None, description="When the attempt was last updated.")
+
+
+class ApplyPrRequest(BaseModel):
+    """Request body for opening a pull request that applies a recommendation."""
+
+    base_branch: Optional[str] = Field(None, description="Override the discovery base branch.")
+    dry_run: bool = Field(False, description="When true, return the patch preview without touching Git.")
+
+
+class ApplyPrResponse(BaseModel):
+    """Result of an apply-pr request (dry run preview or opened pull request)."""
+
+    status: str = Field(..., description="dry_run, pr_open or error.")
+    provider: Optional[str] = Field(None, description="Git provider used.")
+    repo: Optional[str] = Field(None, description="Repository in owner/name form.")
+    base_branch: Optional[str] = Field(None, description="Target branch of the pull request.")
+    head_branch: Optional[str] = Field(None, description="Branch created by the bot.")
+    path: Optional[str] = Field(None, description="Manifest path that would be (or was) patched.")
+    patch: Optional[dict] = Field(None, description="Machine-readable action plan.")
+    diff: Optional[str] = Field(None, description="Unified diff preview.")
+    pr_url: Optional[str] = Field(None, description="Opened pull request URL.")
+    message: Optional[str] = Field(None, description="Human-readable outcome or error message.")
+    pull_request: Optional[PullRequestRecord] = Field(None, description="Persisted pull request attempt.")
 
 
 class IgnoreRecommendationRequest(BaseModel):
@@ -386,12 +514,22 @@ class IgnoreRecommendationRequest(BaseModel):
 
 
 class RecommendationSavingsSummary(BaseModel):
-    """Aggregate savings from all applied recommendations."""
+    """Aggregate savings from all applied recommendations.
+
+    ``total_*`` remains the combined figure for backward compatibility; the
+    ``measured_*`` / ``prorated_*`` split lets the UI separate savings confirmed
+    by post-apply verification from savings that are still prorated estimates.
+    """
 
     total_carbon_saved_co2e_grams: float = Field(0.0, description="Total CO2e saved in grams.")
     total_cost_saved: float = Field(0.0, description="Total cost saved.")
     applied_count: int = Field(0, description="Number of recommendations marked as applied.")
     namespace_breakdown: List[dict] = Field(default_factory=list, description="Savings breakdown per namespace.")
+    measured_carbon_saved_co2e_grams: float = Field(0.0, description="CO2e saved confirmed by verification.")
+    measured_cost_saved: float = Field(0.0, description="Cost saved confirmed by verification.")
+    prorated_carbon_saved_co2e_grams: float = Field(0.0, description="CO2e saved from prorated estimates.")
+    prorated_cost_saved: float = Field(0.0, description="Cost saved from prorated estimates.")
+    verified_count: int = Field(0, description="Number of recommendations with verified outcomes.")
 
 
 class TopRecommendation(BaseModel):

@@ -33,6 +33,11 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 r.cost_saved_dollars,
                 r.period_seconds,
                 r.timestamp.isoformat(),
+                r.measurement_method,
+                r.baseline_value,
+                r.actual_value,
+                r.confidence,
+                int(bool(r.superseded)),
             )
             for r in records
         ]
@@ -43,8 +48,10 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 INSERT INTO recommendation_savings_ledger
                     (recommendation_id, cluster_name, namespace,
                      recommendation_type, co2e_saved_grams,
-                     cost_saved_dollars, period_seconds, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     cost_saved_dollars, period_seconds, timestamp,
+                     measurement_method, baseline_value, actual_value,
+                     confidence, superseded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -52,44 +59,38 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         logger.debug("Saved %d savings ledger records to SQLite.", len(records))
         return len(records)
 
-    async def get_cumulative_totals(self, cluster_name: str) -> Dict[str, Dict[str, float]]:
-        """Combine raw + hourly totals into a single cumulative dict by type."""
+    async def get_cumulative_totals(
+        self,
+        cluster_name: str,
+        group_by_method: bool = False,
+    ) -> Dict[str, Dict[str, float]]:
+        """Combine raw + hourly totals into a single cumulative dict.
+
+        Groups by recommendation type by default, or by measurement method when
+        ``group_by_method`` is set. Superseded rows are always excluded.
+        """
+        column = "measurement_method" if group_by_method else "recommendation_type"
         result: Dict[str, Dict[str, float]] = {}
 
         async with self._db.connection_scope() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT recommendation_type,
-                       SUM(co2e_saved_grams)   AS co2e,
-                       SUM(cost_saved_dollars) AS cost
-                FROM recommendation_savings_ledger
-                WHERE cluster_name = ?
-                GROUP BY recommendation_type
-                """,
-                (cluster_name,),
-            )
-            for row in await cursor.fetchall():
-                t = row[0]
-                result.setdefault(t, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[t]["co2e_saved_grams"] += row[1] or 0.0
-                result[t]["cost_saved_dollars"] += row[2] or 0.0
-
-            cursor = await conn.execute(
-                """
-                SELECT recommendation_type,
-                       SUM(co2e_saved_grams)   AS co2e,
-                       SUM(cost_saved_dollars) AS cost
-                FROM recommendation_savings_ledger_hourly
-                WHERE cluster_name = ?
-                GROUP BY recommendation_type
-                """,
-                (cluster_name,),
-            )
-            for row in await cursor.fetchall():
-                t = row[0]
-                result.setdefault(t, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[t]["co2e_saved_grams"] += row[1] or 0.0
-                result[t]["cost_saved_dollars"] += row[2] or 0.0
+            for table in ("recommendation_savings_ledger", "recommendation_savings_ledger_hourly"):
+                cursor = await conn.execute(
+                    f"""
+                    SELECT {column},
+                           SUM(co2e_saved_grams)   AS co2e,
+                           SUM(cost_saved_dollars) AS cost
+                    FROM {table}
+                    WHERE cluster_name = ?
+                      AND COALESCE(superseded, 0) = 0
+                    GROUP BY {column}
+                    """,
+                    (cluster_name,),
+                )
+                for row in await cursor.fetchall():
+                    key = row[0] or ("prorated" if group_by_method else "unknown")
+                    result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+                    result[key]["co2e_saved_grams"] += row[1] or 0.0
+                    result[key]["cost_saved_dollars"] += row[2] or 0.0
 
         return result
 
@@ -99,10 +100,12 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         start_time: datetime,
         end_time: datetime,
         namespace: str | None = None,
+        group_by_method: bool = False,
     ) -> Dict[str, Dict[str, float]]:
         """Combine raw + hourly totals for an exact time window."""
         start = to_iso_z(start_time)
         end = to_iso_z(end_time)
+        column = "measurement_method" if group_by_method else "recommendation_type"
         result: Dict[str, Dict[str, float]] = {}
         namespace_filter = ""
         raw_params: list = [cluster_name, start, end]
@@ -117,43 +120,60 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 f"""
-                SELECT recommendation_type,
+                SELECT {column},
                        COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
                        COALESCE(SUM(cost_saved_dollars), 0) AS cost
                 FROM recommendation_savings_ledger
                 WHERE cluster_name = ?
+                  AND COALESCE(superseded, 0) = 0
                   AND timestamp >= ?
                                     AND timestamp <= ?{namespace_filter}
-                GROUP BY recommendation_type
+                GROUP BY {column}
                 """,
                 tuple(raw_params),
             )
             for row in await cursor.fetchall():
-                rec_type = row[0]
-                result.setdefault(rec_type, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[rec_type]["co2e_saved_grams"] += row[1] or 0.0
-                result[rec_type]["cost_saved_dollars"] += row[2] or 0.0
+                key = row[0] or ("prorated" if group_by_method else "unknown")
+                result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+                result[key]["co2e_saved_grams"] += row[1] or 0.0
+                result[key]["cost_saved_dollars"] += row[2] or 0.0
 
             cursor = await conn.execute(
                 f"""
-                SELECT recommendation_type,
+                SELECT {column},
                        COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
                        COALESCE(SUM(cost_saved_dollars), 0) AS cost
                 FROM recommendation_savings_ledger_hourly
                 WHERE cluster_name = ?
+                  AND COALESCE(superseded, 0) = 0
                   AND hour_bucket >= ?
                                     AND hour_bucket <= ?{namespace_filter}
-                GROUP BY recommendation_type
+                GROUP BY {column}
                 """,
                 tuple(hourly_params),
             )
             for row in await cursor.fetchall():
-                rec_type = row[0]
-                result.setdefault(rec_type, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[rec_type]["co2e_saved_grams"] += row[1] or 0.0
-                result[rec_type]["cost_saved_dollars"] += row[2] or 0.0
+                key = row[0] or ("prorated" if group_by_method else "unknown")
+                result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+                result[key]["co2e_saved_grams"] += row[1] or 0.0
+                result[key]["cost_saved_dollars"] += row[2] or 0.0
 
         return result
+
+    async def supersede_for_recommendation(self, recommendation_id: int) -> int:
+        """Flags every attribution row for a recommendation as superseded."""
+        total = 0
+        async with self._db.connection_scope() as conn:
+            for table in ("recommendation_savings_ledger", "recommendation_savings_ledger_hourly"):
+                cursor = await conn.execute(
+                    f"UPDATE {table} SET superseded = 1 WHERE recommendation_id = ? AND COALESCE(superseded, 0) = 0",
+                    (recommendation_id,),
+                )
+                total += cursor.rowcount
+            await conn.commit()
+        if total:
+            logger.info("Superseded %d savings ledger row(s) for recommendation %d.", total, recommendation_id)
+        return total
 
     async def compress_to_hourly(self, cutoff_hours: int = 24) -> int:
         """Aggregate raw records older than cutoff_hours into hourly buckets."""
@@ -165,7 +185,9 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 INSERT OR REPLACE INTO recommendation_savings_ledger_hourly
                     (recommendation_id, cluster_name, namespace,
                      recommendation_type, co2e_saved_grams,
-                     cost_saved_dollars, sample_count, hour_bucket)
+                     cost_saved_dollars, sample_count, hour_bucket,
+                     measurement_method, baseline_value, actual_value,
+                     confidence, superseded)
                 SELECT
                     recommendation_id,
                     cluster_name,
@@ -174,11 +196,17 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                     SUM(co2e_saved_grams),
                     SUM(cost_saved_dollars),
                     COUNT(*),
-                    strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour_bucket
+                    strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour_bucket,
+                    COALESCE(measurement_method, 'prorated'),
+                    MAX(baseline_value),
+                    MAX(actual_value),
+                    MAX(confidence),
+                    MAX(COALESCE(superseded, 0))
                 FROM recommendation_savings_ledger
                 WHERE timestamp < ?
                 GROUP BY recommendation_id, cluster_name, namespace,
                          recommendation_type,
+                         COALESCE(measurement_method, 'prorated'),
                          strftime('%Y-%m-%dT%H:00:00Z', timestamp)
                 """,
                 (cutoff,),

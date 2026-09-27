@@ -35,6 +35,7 @@ from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
     Recommendation,
+    RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     TopRecommendation,
@@ -98,6 +99,7 @@ def _summary_from_savings_totals(
     totals_by_type: dict[str, dict[str, float]],
     applied_count: int,
     namespace: Optional[str],
+    totals_by_method: Optional[dict[str, dict[str, float]]] = None,
 ) -> RecommendationSavingsSummary:
     """Build an API savings summary from ledger totals grouped by recommendation type."""
     total_carbon = sum(values.get("co2e_saved_grams", 0.0) for values in totals_by_type.values())
@@ -113,11 +115,25 @@ def _summary_from_savings_totals(
             }
         )
 
+    measured = (totals_by_method or {}).get("measured", {})
+    prorated = (totals_by_method or {}).get("prorated", {})
+    measured_carbon = measured.get("co2e_saved_grams", 0.0)
+    measured_cost = measured.get("cost_saved_dollars", 0.0)
+    if totals_by_method:
+        prorated_carbon = prorated.get("co2e_saved_grams", 0.0)
+        prorated_cost = prorated.get("cost_saved_dollars", 0.0)
+    else:
+        prorated_carbon, prorated_cost = total_carbon, total_cost
+
     return RecommendationSavingsSummary(
         total_carbon_saved_co2e_grams=total_carbon,
         total_cost_saved=total_cost,
         applied_count=applied_count,
         namespace_breakdown=namespace_breakdown,
+        measured_carbon_saved_co2e_grams=measured_carbon,
+        measured_cost_saved=measured_cost,
+        prorated_carbon_saved_co2e_grams=prorated_carbon,
+        prorated_cost_saved=prorated_cost,
     )
 
 
@@ -286,7 +302,14 @@ async def get_savings_summary(
         )
 
         if totals:
-            return _summary_from_savings_totals(totals, record_summary.applied_count, namespace)
+            by_method = await savings_repo.get_window_totals(
+                cluster_name=cluster_name,
+                start_time=start,
+                end_time=end,
+                namespace=namespace,
+                group_by_method=True,
+            )
+            return _summary_from_savings_totals(totals, record_summary.applied_count, namespace, by_method)
     except Exception as exc:
         logger.warning("Could not load savings ledger summary: %s. Falling back to recommendation records.", exc)
 
@@ -323,11 +346,39 @@ async def apply_recommendation(
 
     A recommendation is considered applied even when the actual value deviates from
     the recommendation (e.g., reducing CPU to 50m instead of the suggested 40m).
+    Applying freezes the verification baseline and starts the observation window.
     """
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
+    lifecycle = RecommendationLifecycle(reco_repo)
     try:
-        return await reco_repo.apply_recommendation(rec_id, request)
+        return await lifecycle.apply(
+            rec_id,
+            actual_cpu=request.actual_cpu_request_millicores,
+            actual_memory=request.actual_memory_request_bytes,
+            carbon_saved_co2e_grams=request.carbon_saved_co2e_grams,
+            cost_saved=request.cost_saved,
+            application_method=request.application_method or "manual",
+            actor="user",
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/recommendations/{rec_id}/events", response_model=List[RecommendationEvent])
+async def list_recommendation_events(
+    rec_id: int,
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Return the full lifecycle audit trail for a recommendation.
+
+    Every transition (created, applied, pr_opened, verified, rollback_review,
+    reverted, expired, ...) is recorded with actor, payload and timestamp.
+    """
+    record = await reco_repo.get_recommendation_by_id(rec_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
+    return await reco_repo.get_events(rec_id)
 
 
 @router.patch("/recommendations/{rec_id}/ignore", response_model=RecommendationRecord)
@@ -344,8 +395,14 @@ async def ignore_recommendation(
     Typical use case: a pod cannot support HPA due to a RWO PVC, or a namespace
     intentionally runs at low utilization (e.g., a staging environment).
     """
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
     try:
-        return await reco_repo.ignore_recommendation(rec_id, request)
+        record = await reco_repo.ignore_recommendation(rec_id, request)
+        await RecommendationLifecycle(reco_repo).record_event(
+            rec_id, "ignored", actor="user", payload={"reason": request.reason}
+        )
+        return record
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -360,7 +417,11 @@ async def unignore_recommendation(
     Useful when circumstances change (e.g., the PVC is migrated to RWX) or when a
     recommendation was accidentally ignored.
     """
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
     try:
-        return await reco_repo.unignore_recommendation(rec_id)
+        record = await reco_repo.unignore_recommendation(rec_id)
+        await RecommendationLifecycle(reco_repo).record_event(rec_id, "unignored", actor="user")
+        return record
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

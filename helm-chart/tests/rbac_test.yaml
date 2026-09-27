@@ -106,6 +106,26 @@ tests:
           path: rules[1].verbs
           content: list
 
+  - it: ClusterRole should grant read access to VPA, Karpenter and workloads
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules[2].resources
+          content: verticalpodautoscalers
+      - contains:
+          path: rules[3].resources
+          content: nodepools
+      - contains:
+          path: rules[4].resources
+          content: deployments
+      - contains:
+          path: rules[4].resources
+          content: statefulsets
+      - contains:
+          path: rules[4].verbs
+          content: list
+
   # --------------------------------------------------------------------------
   # ClusterRoleBinding
   # --------------------------------------------------------------------------

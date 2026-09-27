@@ -155,3 +155,44 @@ class TestSavingsAttributorIntegration:
 
         assert totals["OVERPROVISIONED_NODE"]["co2e_saved_grams"] == pytest.approx(42.0)
         mock_repo.get_cumulative_totals.assert_awaited_once_with(cluster_name="minikube")
+
+
+class TestSavingsAttributorMeasured:
+    """Phase 5: verified recommendations contribute measured values."""
+
+    def _verified_rec(self) -> RecommendationRecord:
+        rec = _make_applied_rec(co2e_annual=150.5, cost_annual=12.3)
+        return rec.model_copy(
+            update={
+                "status": RecommendationStatus.VERIFIED,
+                "measured_co2e_saved_grams": 90.0,
+                "measured_cost_saved": 7.5,
+                "confidence": 0.87,
+            }
+        )
+
+    def test_verified_records_use_measured_values(self):
+        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
+        records = attributor._compute_period_records([self._verified_rec()], period_seconds=3600)
+
+        assert len(records) == 1
+        expected_co2 = 90.0 * 3600 / _SECONDS_PER_YEAR
+        assert records[0].measurement_method == "measured"
+        assert records[0].co2e_saved_grams == pytest.approx(expected_co2, rel=1e-4)
+        assert records[0].actual_value == pytest.approx(90.0)
+        assert records[0].confidence == pytest.approx(0.87)
+
+    def test_applied_records_stay_prorated(self):
+        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
+        records = attributor._compute_period_records([_make_applied_rec()], period_seconds=3600)
+        assert records[0].measurement_method == "prorated"
+
+    def test_rollback_review_records_are_skipped(self):
+        rec = _make_applied_rec().model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
+        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
+        assert attributor._compute_period_records([rec], period_seconds=300) == []
+
+    def test_reverted_records_are_skipped(self):
+        rec = _make_applied_rec().model_copy(update={"status": RecommendationStatus.REVERTED})
+        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
+        assert attributor._compute_period_records([rec], period_seconds=300) == []

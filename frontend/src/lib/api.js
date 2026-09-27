@@ -262,6 +262,47 @@ export async function unignoreRecommendation(id) {
 }
 
 /**
+ * Preview or open a pull request that applies a rightsizing recommendation.
+ * @param {number} id
+ * @param {{ dry_run?: boolean, base_branch?: string }} [body]
+ * @returns {Promise<Object>}
+ */
+export async function applyRecommendationPr(id, body = {}) {
+	const url = new URL(`${BASE}/recommendations/${id}/apply-pr`, window.location.origin);
+	const res = await fetch(url.toString(), {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		const b = await res.json().catch(() => ({}));
+		throw new Error(b.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object[]>}
+ */
+export function getRecommendationPullRequests(id) {
+	return request(`${BASE}/recommendations/${id}/pull-requests`);
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object[]>}
+ */
+export function getRecommendationEvents(id) {
+	return request(`${BASE}/recommendations/${id}/events`);
+}
+
+/** @returns {Promise<Object>} */
+export function getAutomationStatus() {
+	return request(`${BASE}/automation/status`);
+}
+
+/**
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]

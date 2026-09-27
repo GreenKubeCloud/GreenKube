@@ -54,9 +54,10 @@ class SavingsAttributor:
     ) -> List[SavingsLedgerRecord]:
         """Compute the savings records for a single collection period.
 
-        Only recommendations with a positive ``carbon_saved_co2e_grams``
-        value are included — those without an estimate contribute zero and
-        are skipped to keep the ledger clean.
+        Verified recommendations contribute their measured savings
+        (``measurement_method='measured'``); everything else contributes the
+        prorated projection. Recommendations in rollback review or reverted are
+        excluded so attribution stops at the rollback event.
 
         Args:
             applied_records: Applied RecommendationRecord objects from the DB.
@@ -69,10 +70,21 @@ class SavingsAttributor:
         records: List[SavingsLedgerRecord] = []
 
         for rec in applied_records:
-            annual_co2e = rec.carbon_saved_co2e_grams
-            annual_cost = rec.cost_saved
+            status = rec.status.value if hasattr(rec.status, "value") else str(rec.status)
+            if status in ("rollback_review", "reverted"):
+                continue
 
-            # Skip if there is no positive annual CO₂ estimate.
+            is_measured = status == "verified" and rec.measured_co2e_saved_grams is not None
+            if is_measured:
+                annual_co2e = rec.measured_co2e_saved_grams
+                annual_cost = rec.measured_cost_saved or 0.0
+                method = "measured"
+            else:
+                annual_co2e = rec.carbon_saved_co2e_grams
+                annual_cost = rec.cost_saved
+                method = "prorated"
+
+            # Skip if there is no positive annual CO₂ figure.
             if not annual_co2e or annual_co2e <= 0:
                 continue
 
@@ -93,6 +105,10 @@ class SavingsAttributor:
                     cost_saved_dollars=(annual_cost or 0.0) * factor,
                     period_seconds=period_seconds,
                     timestamp=now,
+                    measurement_method=method,
+                    baseline_value=rec.potential_savings_co2e_grams,
+                    actual_value=annual_co2e,
+                    confidence=rec.confidence,
                 )
             )
 

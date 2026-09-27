@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Phases 0–2 implemented; Phases 3–6 specified |
-| **Scope of current iteration** | Phases 0–2 (unified engine, multi-source architecture, evidence model, ranking & risk) |
-| **Deferred to later iterations** | Phase 3 apply detection & verification, Phase 4 PR bot, Phase 5 impact measurement, Phase 6 real VPA/Karpenter connectors |
+| **Status** | Phases 0–6 implemented |
+| **Scope of current iteration** | Full engine: unified pipeline, multi-source architecture, evidence model, ranking & risk, apply detection, verification, GitOps PR bot, measured savings and real VPA/Karpenter connectors |
+| **Deferred to later iterations** | Git-provider webhooks/polling for merge detection (Kubernetes API detection is the implemented path), multi-container per-container patching, Helm/Kustomize value-file patching |
 | **Related documents** | [Recommendation lifecycle](../recommendation.md), [Automation plan](../automation-plan.md), [Architecture](../architecture.md), [API](../api.md), [Configuration](../configuration.md) |
 
 ---

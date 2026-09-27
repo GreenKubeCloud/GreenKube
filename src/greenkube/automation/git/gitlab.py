@@ -1,0 +1,133 @@
+# src/greenkube/automation/git/gitlab.py
+"""GitLab REST API adapter (GitLab.com and self-managed)."""
+
+from __future__ import annotations
+
+import logging
+from typing import List, Optional
+from urllib.parse import quote
+
+from greenkube.automation.git.base import GitFile, GitProvider, GitProviderError, GitRepository
+
+logger = logging.getLogger(__name__)
+
+
+class GitLabProvider(GitProvider):
+    """Opens merge requests through the GitLab REST API."""
+
+    name = "gitlab"
+
+    def __init__(self, token: str, *, api_base_url: Optional[str] = None, **kwargs):
+        base = api_base_url or "https://gitlab.com"
+        if not base.endswith("/api/v4"):
+            base = f"{base.rstrip('/')}/api/v4"
+        super().__init__(token, api_base_url=base, **kwargs)
+
+    def _headers(self) -> dict:
+        return {"Accept": "application/json", "PRIVATE-TOKEN": self.token}
+
+    def _project(self, repo: GitRepository) -> str:
+        return quote(repo.full_name, safe="")
+
+    async def get_default_branch(self, repo: GitRepository) -> str:
+        response = await self._request("GET", f"/projects/{self._project(repo)}")
+        return response.json().get("default_branch") or repo.default_branch
+
+    async def get_file(self, repo: GitRepository, path: str, ref: str) -> Optional[GitFile]:
+        encoded_path = quote(path.lstrip("/"), safe="")
+        response = await self._request(
+            "GET",
+            f"/projects/{self._project(repo)}/repository/files/{encoded_path}",
+            params={"ref": ref},
+        )
+        if response.status_code == 404:
+            return None
+        data = response.json()
+        import base64
+
+        try:
+            content = base64.b64decode(data.get("content", "")).decode("utf-8")
+        except Exception:
+            content = data.get("content", "")
+        return GitFile(path=path, content=content, sha=data.get("last_commit_id"))
+
+    async def list_files(self, repo: GitRepository, ref: str) -> List[str]:
+        response = await self._request(
+            "GET",
+            f"/projects/{self._project(repo)}/repository/tree",
+            params={"ref": ref, "recursive": "true", "per_page": "100"},
+        )
+        if response.status_code == 404:
+            return []
+        return [item["path"] for item in response.json() if item.get("type") == "blob"]
+
+    async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
+        response = await self._request(
+            "POST",
+            f"/projects/{self._project(repo)}/repository/branches",
+            params={"branch": branch, "ref": from_ref},
+        )
+        if response.status_code == 400 and "already exists" in response.text.lower():
+            logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
+            return
+        if response.status_code not in (200, 201):
+            raise GitProviderError(f"Could not create branch '{branch}': {response.text[:200]}")
+
+    async def update_file(
+        self,
+        repo: GitRepository,
+        path: str,
+        content: str,
+        message: str,
+        branch: str,
+        sha: Optional[str] = None,
+    ) -> None:
+        encoded_path = quote(path.lstrip("/"), safe="")
+        await self._request(
+            "PUT",
+            f"/projects/{self._project(repo)}/repository/files/{encoded_path}",
+            json_body={
+                "branch": branch,
+                "content": content,
+                "commit_message": message,
+                "encoding": "text",
+            },
+        )
+
+    async def create_pull_request(
+        self,
+        repo: GitRepository,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> dict:
+        response = await self._request(
+            "POST",
+            f"/projects/{self._project(repo)}/merge_requests",
+            json_body={
+                "source_branch": head,
+                "target_branch": base,
+                "title": title,
+                "description": body,
+            },
+        )
+        data = response.json()
+        return {
+            "number": data.get("iid"),
+            "html_url": data.get("web_url"),
+            "state": data.get("state"),
+        }
+
+    async def get_pull_request(self, repo: GitRepository, number: int) -> dict:
+        response = await self._request("GET", f"/projects/{self._project(repo)}/merge_requests/{number}")
+        if response.status_code == 404:
+            raise GitProviderError(f"Merge request {number} not found in {repo.full_name}.")
+        data = response.json()
+        return {
+            "number": data.get("iid"),
+            "html_url": data.get("web_url"),
+            "state": data.get("state"),
+            "merged": bool(data.get("merged_at") or data.get("state") == "merged"),
+        }

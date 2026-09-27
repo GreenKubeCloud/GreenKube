@@ -22,7 +22,12 @@ async def db_connection():
                 co2e_saved_grams REAL,
                 cost_saved_dollars REAL,
                 period_seconds INTEGER,
-                timestamp TEXT
+                timestamp TEXT,
+                measurement_method TEXT DEFAULT 'prorated',
+                baseline_value REAL,
+                actual_value REAL,
+                confidence REAL,
+                superseded INTEGER DEFAULT 0
             )
             """
         )
@@ -36,7 +41,12 @@ async def db_connection():
                 co2e_saved_grams REAL,
                 cost_saved_dollars REAL,
                 sample_count INTEGER,
-                hour_bucket TEXT
+                hour_bucket TEXT,
+                measurement_method TEXT DEFAULT 'prorated',
+                baseline_value REAL,
+                actual_value REAL,
+                confidence REAL,
+                superseded INTEGER DEFAULT 0
             )
             """
         )
@@ -175,3 +185,64 @@ async def test_get_window_totals_filters_cluster_scoped_rows(sqlite_savings_repo
     )
 
     assert totals == {"OVERPROVISIONED_NODE": {"co2e_saved_grams": 17.0, "cost_saved_dollars": 1.7}}
+
+
+@pytest.mark.asyncio
+async def test_supersede_excludes_rows_from_totals(sqlite_savings_repo, db_connection):
+    start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    sample_time = start + timedelta(minutes=15)
+
+    await db_connection.executemany(
+        """
+        INSERT INTO recommendation_savings_ledger
+            (recommendation_id, cluster_name, namespace, recommendation_type,
+             co2e_saved_grams, cost_saved_dollars, period_seconds, timestamp, measurement_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "minikube", "prod", "RIGHTSIZING_CPU", 10.0, 1.0, 300, to_iso_z(sample_time), "prorated"),
+            (2, "minikube", "prod", "RIGHTSIZING_CPU", 20.0, 2.0, 300, to_iso_z(sample_time), "measured"),
+        ],
+    )
+    await db_connection.commit()
+
+    flagged = await sqlite_savings_repo.supersede_for_recommendation(1)
+    assert flagged == 1
+
+    totals = await sqlite_savings_repo.get_window_totals(cluster_name="minikube", start_time=start, end_time=end)
+    assert totals == {"RIGHTSIZING_CPU": {"co2e_saved_grams": 20.0, "cost_saved_dollars": 2.0}}
+
+    by_method = await sqlite_savings_repo.get_window_totals(
+        cluster_name="minikube", start_time=start, end_time=end, group_by_method=True
+    )
+    assert by_method == {"measured": {"co2e_saved_grams": 20.0, "cost_saved_dollars": 2.0}}
+
+
+@pytest.mark.asyncio
+async def test_get_window_totals_group_by_method(sqlite_savings_repo, db_connection):
+    start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    sample_time = start + timedelta(minutes=15)
+
+    await db_connection.executemany(
+        """
+        INSERT INTO recommendation_savings_ledger
+            (recommendation_id, cluster_name, namespace, recommendation_type,
+             co2e_saved_grams, cost_saved_dollars, period_seconds, timestamp, measurement_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("r1", "minikube", "prod", "RIGHTSIZING_CPU", 10.0, 1.0, 300, to_iso_z(sample_time), "prorated"),
+            ("r2", "minikube", "prod", "RIGHTSIZING_CPU", 4.0, 0.4, 300, to_iso_z(sample_time), "measured"),
+        ],
+    )
+    await db_connection.commit()
+
+    by_method = await sqlite_savings_repo.get_window_totals(
+        cluster_name="minikube", start_time=start, end_time=end, group_by_method=True
+    )
+    assert by_method == {
+        "prorated": {"co2e_saved_grams": 10.0, "cost_saved_dollars": 1.0},
+        "measured": {"co2e_saved_grams": 4.0, "cost_saved_dollars": 0.4},
+    }

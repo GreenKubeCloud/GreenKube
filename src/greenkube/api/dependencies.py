@@ -111,6 +111,13 @@ async def get_recommendation_repository() -> RecommendationRepository:
     return factory_get_reco_repo()
 
 
+async def get_pull_request_repository():
+    """Provides the PullRequestRepository instance via the factory."""
+    from greenkube.core.factory import get_pull_request_repository as factory_get_pr_repo
+
+    return factory_get_pr_repo()
+
+
 async def get_savings_ledger_repository() -> SavingsLedgerRepository:
     """Provides the SavingsLedgerRepository instance via the factory."""
     from greenkube.core.factory import get_savings_ledger_repository as factory_get_savings_repo

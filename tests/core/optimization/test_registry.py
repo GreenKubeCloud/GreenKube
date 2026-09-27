@@ -19,14 +19,23 @@ class TestParseSourcePriority:
 
 
 class TestBuildSources:
-    def test_native_only_by_default(self):
+    def test_all_sources_enabled_by_default(self):
+        # Phase 6: VPA and Karpenter are enabled by default and detect their
+        # CRDs at runtime, so an absent CRD disables the source gracefully.
         sources = build_sources(Config())
+        assert [s.name for s in sources] == ["vpa", "karpenter", "greenkube"]
+
+    def test_native_only_when_sources_disabled(self):
+        cfg = Config()
+        cfg.RECOMMENDATION_VPA_ENABLED = False
+        cfg.RECOMMENDATION_KARPENTER_ENABLED = False
+        sources = build_sources(cfg)
         assert [s.name for s in sources] == ["greenkube"]
         assert sources[0].priority == 1
 
     def test_vpa_enabled(self):
         cfg = Config()
-        cfg.RECOMMENDATION_VPA_ENABLED = True
+        cfg.RECOMMENDATION_KARPENTER_ENABLED = False
         sources = build_sources(cfg)
         names = [s.name for s in sources]
         assert names == ["vpa", "greenkube"]
@@ -35,7 +44,7 @@ class TestBuildSources:
 
     def test_karpenter_enabled(self):
         cfg = Config()
-        cfg.RECOMMENDATION_KARPENTER_ENABLED = True
+        cfg.RECOMMENDATION_VPA_ENABLED = False
         sources = build_sources(cfg)
         assert [s.name for s in sources] == ["karpenter", "greenkube"]
 

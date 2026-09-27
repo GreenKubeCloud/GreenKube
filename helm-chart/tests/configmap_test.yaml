@@ -185,6 +185,54 @@ tests:
           value: "25"
 
   # --------------------------------------------------------------------------
+  # Verification & automation (Phases 3–4)
+  # --------------------------------------------------------------------------
+  - it: should enable VPA and Karpenter connectors by default
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_VPA_ENABLED
+          value: "true"
+      - equal:
+          path: data.RECOMMENDATION_KARPENTER_ENABLED
+          value: "true"
+
+  - it: should set verification window defaults
+    asserts:
+      - equal:
+          path: data.VERIFICATION_WINDOW_HOURS
+          value: "72"
+      - equal:
+          path: data.VERIFICATION_MIN_SAVINGS_RATIO
+          value: "0.5"
+      - equal:
+          path: data.RECOMMENDATION_LIFECYCLE_INTERVAL
+          value: "5m"
+
+  - it: should reflect custom verification settings
+    set:
+      config.recommendations.verification.windowHours: 24
+      config.recommendations.verification.minSavingsRatio: 0.75
+    asserts:
+      - equal:
+          path: data.VERIFICATION_WINDOW_HOURS
+          value: "24"
+      - equal:
+          path: data.VERIFICATION_MIN_SAVINGS_RATIO
+          value: "0.75"
+
+  - it: should set git automation defaults
+    asserts:
+      - equal:
+          path: data.GIT_PROVIDER
+          value: "github"
+      - equal:
+          path: data.GIT_DEFAULT_BRANCH
+          value: "main"
+      - equal:
+          path: data.GIT_COMMIT_AUTHOR_NAME
+          value: "GreenKube Bot"
+
+  # --------------------------------------------------------------------------
   # Default zone (conditional key)
   # --------------------------------------------------------------------------
   - it: should NOT include DEFAULT_ZONE when empty

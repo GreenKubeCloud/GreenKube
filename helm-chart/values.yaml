@@ -210,9 +210,11 @@ config:
     # --- Recommendation sources (connectors) ---
     # VPA recommendation mode (updateMode: Off). When enabled, VPA recommendations
     # replace native CPU/memory rightsizing for the same workload to avoid duplicates.
-    vpaEnabled: false
-    # Karpenter node pool recommendations (reserved; connector not implemented yet).
-    karpenterEnabled: false
+    # Enabled by default; the source detects the CRD and skips cleanly when absent.
+    vpaEnabled: true
+    # Karpenter node pool consolidation recommendations. Enabled by default; the
+    # source detects the CRDs and skips cleanly when absent.
+    karpenterEnabled: true
     # Source precedence used to arbitrate conflicts (highest priority first).
     sourcePriority: vpa,karpenter,greenkube
     # --- Ranking & review ---
@@ -224,6 +226,34 @@ config:
     rankingWeights: ''
     # Minimum raw samples expected for a high-confidence recommendation.
     minSamples: 36
+    # --- Verification (apply detection, health gates, rollback review) ---
+    verification:
+      # Observation window after a change lands before the outcome is verified.
+      windowHours: 72
+      # Minimum raw samples required before a verdict is rendered.
+      minSamples: 36
+      # Measured savings must reach this ratio of the projection to pass the cost gate.
+      minSavingsRatio: 0.5
+      # p95 usage must stay below proposed request x this factor to pass the health gate.
+      usageHeadroom: 1.1
+      # Maximum allowed restart-count increase during the observation window.
+      maxRestartDelta: 0
+      # Minimum readiness ratio during the observation window.
+      minReadiness: 0.99
+      # Maximum allowed CPU throttling ratio during the observation window.
+      maxThrottleRatio: 0.05
+      # Interval between lifecycle jobs (apply detection, verification, expiry).
+      lifecycleInterval: 5m
+    # --- Git automation (PR bot) ---
+    git:
+      # Provider: github | gitlab | gitea
+      provider: github
+      # API base URL override for self-hosted instances (e.g. https://gitea.example.com).
+      apiBaseUrl: ''
+      # Fallback base branch when the workload annotation omits one.
+      defaultBranch: main
+      commitAuthorName: GreenKube Bot
+      commitAuthorEmail: bot@greenkube.cloud
 
 # ---------------------------------------------------------------------------
 # Elasticsearch (experimental — not production-ready)
@@ -279,6 +309,10 @@ secrets:
 
   # API Key for GreenKube API authentication (optional — no auth if empty)
   apiKey: ''
+
+  # Git personal access token used by the recommendation PR bot to create
+  # branches and open pull requests. Leave empty to disable PR automation.
+  gitToken: ''
 
   # PostgreSQL connection string (only used when db.type is "postgres" and
   # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)

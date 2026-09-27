@@ -8,7 +8,9 @@
 		getRecommendationSavings,
 		getTopRecommendations,
 		ignoreRecommendation,
-		unignoreRecommendation
+		unignoreRecommendation,
+		applyRecommendationPr,
+		getRecommendationEvents
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
 	import DataState from '$lib/components/DataState.svelte';
@@ -44,6 +46,17 @@
 	let ignoreReason = '';
 	let ignoreLoading = false;
 	let ignoreError = null;
+
+	// Create-PR modal state (Phase 4)
+	let prModal = null; // { rec } | null
+	let prBaseBranch = '';
+	let prDiff = null;
+	let prResult = null;
+	let prLoading = false;
+	let prError = null;
+
+	// Verification event trail per applied recommendation
+	let eventsByRec = {}; // { [id]: Event[] }
 
 	// Per-card action loading state
 	let actionLoading = {}; // { [id]: bool }
@@ -133,6 +146,83 @@
 		} finally {
 			ignoreLoading = false;
 		}
+	}
+
+	// --- Create PR ---
+	const RIGHTSIZING_TYPES = ['RIGHTSIZING_CPU', 'RIGHTSIZING_MEMORY'];
+
+	function canCreatePr(rec) {
+		return RIGHTSIZING_TYPES.includes(rec.type) && (rec.owner_kind || rec.pod_name);
+	}
+
+	async function openPrModal(rec) {
+		prModal = { rec };
+		prBaseBranch = '';
+		prDiff = null;
+		prResult = null;
+		prError = null;
+		prLoading = true;
+		try {
+			const preview = await applyRecommendationPr(rec.id, { dry_run: true });
+			if (preview.status === 'error') {
+				prError = preview.message ?? 'Could not prepare the pull request.';
+			} else {
+				prDiff = preview.diff;
+				prBaseBranch = preview.base_branch ?? '';
+			}
+		} catch (e) {
+			prError = e.message;
+		} finally {
+			prLoading = false;
+		}
+	}
+
+	function closePrModal() {
+		prModal = null;
+		prDiff = null;
+		prResult = null;
+		prError = null;
+	}
+
+	async function confirmPr() {
+		prLoading = true;
+		prError = null;
+		try {
+			const result = await applyRecommendationPr(prModal.rec.id, {
+				dry_run: false,
+				base_branch: prBaseBranch || undefined
+			});
+			prResult = result;
+			if (result.status === 'error') prError = result.message;
+			if (result.status === 'pr_open') await loadData();
+		} catch (e) {
+			prError = e.message;
+		} finally {
+			prLoading = false;
+		}
+	}
+
+	// --- Verification events ---
+	async function toggleEvents(rec) {
+		if (eventsByRec[rec.id]) {
+			const copy = { ...eventsByRec };
+			delete copy[rec.id];
+			eventsByRec = copy;
+			return;
+		}
+		try {
+			const events = await getRecommendationEvents(rec.id);
+			eventsByRec = { ...eventsByRec, [rec.id]: events };
+		} catch (e) {
+			error = e.message;
+		}
+	}
+
+	function verificationClass(status) {
+		if (status === 'passed') return 'bg-green-600/20 text-green-400';
+		if (status === 'failed') return 'bg-red-600/20 text-red-400';
+		if (status === 'inconclusive') return 'bg-yellow-600/20 text-yellow-400';
+		return 'bg-blue-600/10 text-blue-400';
 	}
 
 	// --- Un-ignore ---
@@ -264,6 +354,81 @@
 	</div>
 {/if}
 
+<!-- ─── Create PR Modal ──────────────────────────────────────────────────── -->
+{#if prModal}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+		on:click|self={closePrModal}
+	>
+		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto">
+			<div class="flex items-start justify-between gap-4">
+				<div>
+					<h2 class="text-base font-semibold text-dark-100">Apply via pull request</h2>
+					<p class="text-xs text-dark-500 mt-1 break-words">
+						{getTypeConfig(prModal.rec.type).icon}
+						{prModal.rec.owner_kind ? `${prModal.rec.owner_kind}/${prModal.rec.owner_name}` : prModal.rec.pod_name}
+						— {getTypeConfig(prModal.rec.type).label}
+					</p>
+				</div>
+				<button
+					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none flex-shrink-0"
+					on:click={closePrModal}
+				>✕</button>
+			</div>
+
+			{#if prLoading && !prDiff && !prResult}
+				<p class="text-xs text-dark-400 flex items-center gap-2"><span class="animate-spin">⟳</span> Preparing preview…</p>
+			{/if}
+
+			{#if prError}
+				<div class="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded-lg px-3 py-2">
+					{prError}
+				</div>
+			{/if}
+
+			{#if prResult?.status === 'pr_open'}
+				<div class="text-xs text-green-400 bg-green-600/10 border border-green-600/30 rounded-lg px-3 py-2">
+					Pull request opened:
+					<a class="underline" href={prResult.pr_url} target="_blank" rel="noreferrer">{prResult.pr_url}</a>
+				</div>
+			{/if}
+
+			{#if prDiff}
+				<div class="space-y-1">
+					<p class="text-xs text-dark-400 font-medium">Proposed diff</p>
+					<pre class="text-[11px] leading-relaxed text-dark-300 bg-dark-950 border border-dark-700 rounded-lg p-3 overflow-x-auto whitespace-pre">{prDiff}</pre>
+				</div>
+
+				<div class="space-y-1">
+					<label class="text-xs text-dark-400 font-medium" for="pr-base-branch">Base branch</label>
+					<input
+						id="pr-base-branch"
+						bind:value={prBaseBranch}
+						placeholder="main"
+						class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-dark-100
+						       placeholder-dark-600 focus:outline-none focus:border-green-600"
+					/>
+				</div>
+			{/if}
+
+			<div class="flex gap-3 justify-end pt-1">
+				<button class="btn-secondary text-xs" on:click={closePrModal}>Close</button>
+				{#if !prResult && prDiff}
+					<button
+						class="btn-primary text-xs flex items-center gap-2 disabled:opacity-50"
+						disabled={prLoading}
+						on:click={confirmPr}
+					>
+						{#if prLoading}<span class="animate-spin">⟳</span>{/if}
+						Create pull request
+					</button>
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
+
 <!-- ─── Page ─────────────────────────────────────────────────────────────── -->
 <div class="p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
 	<!-- Header -->
@@ -339,14 +504,25 @@
 						<div class="card-compact text-center">
 							<p class="stat-label">Applied Recommendations</p>
 							<p class="stat-value text-2xl text-blue-400">{savings.applied_count}</p>
+							{#if savings.verified_count != null}
+								<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{savings.verified_count} verified</p>
+							{/if}
 						</div>
 						<div class="card-compact text-center">
 							<p class="stat-label">CO₂ Avoided</p>
 							<p class="stat-value text-2xl text-green-400">{formatCO2(savings.total_carbon_saved_co2e_grams)}</p>
+							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
+								measured {formatCO2(savings.measured_carbon_saved_co2e_grams ?? 0)} ·
+								projected {formatCO2(savings.prorated_carbon_saved_co2e_grams ?? 0)}
+							</p>
 						</div>
 						<div class="card-compact text-center">
 							<p class="stat-label">Cost Saved</p>
 							<p class="stat-value text-2xl text-blue-400">{formatCost(savings.total_cost_saved)}</p>
+							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
+								measured {formatCost(savings.measured_cost_saved ?? 0)} ·
+								projected {formatCost(savings.prorated_cost_saved ?? 0)}
+							</p>
 						</div>
 					</div>
 
@@ -370,7 +546,20 @@
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</span>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
-												<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/10 text-blue-400">applied</span>
+												{#if rec.status === 'verified'}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-green-600/20 text-green-400">✓ verified</span>
+												{:else if rec.status === 'rollback_review'}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-red-600/20 text-red-400">rollback review</span>
+												{:else if rec.status === 'verifying'}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/20 text-blue-400">verifying…</span>
+												{:else}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/10 text-blue-400">applied</span>
+												{/if}
+												{#if rec.verification_status}
+													<span class="text-[10px] px-2 py-0.5 rounded {verificationClass(rec.verification_status)}">
+														{rec.verification_status}
+													</span>
+												{/if}
 											</div>
 											{#if rec.namespace}
 												<p class="text-xs text-dark-500 mt-0.5">Namespace: <span class="text-dark-400">{rec.namespace}</span></p>
@@ -402,17 +591,59 @@
 												{/if}
 												{#if rec.carbon_saved_co2e_grams}
 													<div>
-														<p class="text-[10px] uppercase text-dark-600">CO₂ Avoided</p>
-														<p class="text-xs text-green-400 font-semibold">{formatCO2(rec.carbon_saved_co2e_grams)}</p>
+														<p class="text-[10px] uppercase text-dark-600">
+															{rec.status === 'verified' && rec.measured_co2e_saved_grams != null ? 'CO₂ Measured' : 'CO₂ Projected'}
+														</p>
+														<p class="text-xs text-green-400 font-semibold">
+															{formatCO2(rec.status === 'verified' && rec.measured_co2e_saved_grams != null ? rec.measured_co2e_saved_grams : rec.carbon_saved_co2e_grams)}
+														</p>
 													</div>
 												{/if}
 												{#if rec.cost_saved}
 													<div>
-														<p class="text-[10px] uppercase text-dark-600">Cost Saved</p>
-														<p class="text-xs text-blue-400 font-semibold">{formatCost(rec.cost_saved)}</p>
+														<p class="text-[10px] uppercase text-dark-600">
+															{rec.status === 'verified' && rec.measured_cost_saved != null ? 'Cost Measured' : 'Cost Projected'}
+														</p>
+														<p class="text-xs text-blue-400 font-semibold">
+															{formatCost(rec.status === 'verified' && rec.measured_cost_saved != null ? rec.measured_cost_saved : rec.cost_saved)}
+														</p>
 													</div>
 												{/if}
 											</div>
+
+											<div class="flex flex-wrap items-center gap-3">
+												{#if rec.application_method}
+													<div class="flex items-center gap-2">
+														<span class="text-[10px] uppercase text-dark-600">Applied via</span>
+														<span class="text-xs text-dark-300">{rec.application_method}</span>
+													</div>
+												{/if}
+												{#if rec.verified_at}
+													<div class="flex items-center gap-2">
+														<span class="text-[10px] uppercase text-dark-600">Verified on</span>
+														<span class="text-xs text-dark-300">{new Date(rec.verified_at).toLocaleDateString()}</span>
+													</div>
+												{/if}
+												<button
+													class="text-[10px] px-2 py-0.5 rounded border border-dark-600 text-dark-400
+													       hover:border-blue-600/50 hover:text-blue-400 transition-colors"
+													on:click|stopPropagation={() => toggleEvents(rec)}
+												>
+													{eventsByRec[rec.id] ? 'Hide lifecycle' : 'Lifecycle'}
+												</button>
+											</div>
+
+											{#if eventsByRec[rec.id]}
+												<div class="space-y-1 border-t border-dark-700 pt-2">
+													{#each eventsByRec[rec.id] as event}
+														<p class="text-[11px] text-dark-400">
+															<span class="text-dark-600">{new Date(event.created_at).toLocaleString()}</span>
+															• <span class="text-dark-200">{event.event_type}</span>
+															<span class="text-dark-600">by {event.actor}</span>
+														</p>
+													{/each}
+												</div>
+											{/if}
 
 											{#if rec.current_cpu_request_millicores != null || rec.current_memory_request_bytes != null}
 												<div class="flex flex-wrap gap-4">
@@ -574,6 +805,14 @@
 												</div>
 											{/if}
 											{#if activeTab === 'active'}
+												{#if canCreatePr(rec)}
+													<button
+														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
+														       hover:border-green-600/50 hover:text-green-400 transition-colors"
+														title="Open a pull request that applies this recommendation"
+														on:click={() => openPrModal(rec)}
+													>Create PR</button>
+												{/if}
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 													       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"

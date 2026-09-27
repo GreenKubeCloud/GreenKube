@@ -226,9 +226,12 @@ class Config(BaseSettings):
     # --- Recommendation sources (connectors) ---
     # VPA recommendation mode (updateMode: Off) is used for CPU/memory rightsizing
     # when enabled; native rightsizing for the same workload is then suppressed.
-    RECOMMENDATION_VPA_ENABLED: bool = False
-    # Karpenter NodePool/NodeClaim recommendations (stub until Phase 6).
-    RECOMMENDATION_KARPENTER_ENABLED: bool = False
+    # Phase 6 enables the source by default; it degrades gracefully when the VPA
+    # CRD is not installed.
+    RECOMMENDATION_VPA_ENABLED: bool = True
+    # Karpenter NodePool consolidation recommendations. Enabled by default and
+    # skipped gracefully when the Karpenter CRDs are absent.
+    RECOMMENDATION_KARPENTER_ENABLED: bool = True
     # Source precedence for capability arbitration, highest priority first.
     RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
 
@@ -241,6 +244,37 @@ class Config(BaseSettings):
     RECOMMENDATION_RANKING_WEIGHTS: str = ""
     # Minimum number of raw samples expected for a high-confidence recommendation.
     RECOMMENDATION_MIN_SAMPLES: int = 36
+
+    # --- Recommendation verification (Phase 3) ---
+    # Observation window after apply before the outcome is verified.
+    VERIFICATION_WINDOW_HOURS: float = 72
+    # Minimum raw samples required before a verdict is rendered.
+    VERIFICATION_MIN_SAMPLES: int = 36
+    # Measured savings must reach this ratio of the projection to pass the cost gate.
+    VERIFICATION_MIN_SAVINGS_RATIO: float = 0.5
+    # p95 usage must stay below proposed request x this factor to pass the health gate.
+    VERIFICATION_USAGE_HEADROOM: float = 1.1
+    # Maximum allowed restart-count increase during the observation window.
+    VERIFICATION_MAX_RESTART_DELTA: int = 0
+    # Minimum readiness ratio during the observation window.
+    VERIFICATION_MIN_READINESS: float = 0.99
+    # Maximum allowed CPU throttling ratio during the observation window.
+    VERIFICATION_MAX_THROTTLE_RATIO: float = 0.05
+    # Interval between lifecycle jobs (apply detection, verification, expiry).
+    RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
+
+    # --- Git automation (PR bot, Phase 4) ---
+    # Personal access token used to push branches and open pull requests.
+    GIT_TOKEN: Optional[str] = None
+    # Git provider selection: github, gitlab or gitea.
+    GIT_PROVIDER: str = "github"
+    # API base URL override for self-hosted instances / local testing.
+    GIT_API_BASE_URL: Optional[str] = None
+    # Fallback base branch when the workload annotation omits one.
+    GIT_DEFAULT_BRANCH: str = "main"
+    # Bot commit identity.
+    GIT_COMMIT_AUTHOR_NAME: str = "GreenKube Bot"
+    GIT_COMMIT_AUTHOR_EMAIL: str = "bot@greenkube.cloud"
 
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER

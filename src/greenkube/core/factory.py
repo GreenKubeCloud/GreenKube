@@ -172,6 +172,21 @@ def get_recommendation_repository() -> RecommendationRepository:
 
 
 @lru_cache(maxsize=1)
+def get_pull_request_repository():
+    """Factory for the PullRequestRepository singleton (PR bot)."""
+    from ..core.db import get_db_manager
+
+    cfg = get_config()
+    if cfg.DB_TYPE == "postgres":
+        from ..storage.postgres.pull_request_repository import PostgresPullRequestRepository
+
+        return PostgresPullRequestRepository(get_db_manager())
+    from ..storage.sqlite.pull_request_repository import SQLitePullRequestRepository
+
+    return SQLitePullRequestRepository(get_db_manager())
+
+
+@lru_cache(maxsize=1)
 def get_savings_ledger_repository():
     """Factory for the SavingsLedgerRepository singleton."""
     from ..core.db import get_db_manager as _get_db
@@ -325,6 +340,7 @@ def clear_caches():
     get_node_repository.cache_clear()
     get_embodied_repository.cache_clear()
     get_recommendation_repository.cache_clear()
+    get_pull_request_repository.cache_clear()
     get_savings_ledger_repository.cache_clear()
     get_summary_repository.cache_clear()
     get_timeseries_cache_repository.cache_clear()

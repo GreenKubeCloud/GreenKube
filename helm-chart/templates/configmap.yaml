@@ -93,11 +93,28 @@ data:
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
-  RECOMMENDATION_VPA_ENABLED: {{ .vpaEnabled | default false | quote }}
-  RECOMMENDATION_KARPENTER_ENABLED: {{ .karpenterEnabled | default false | quote }}
+  RECOMMENDATION_VPA_ENABLED: {{ .vpaEnabled | default true | quote }}
+  RECOMMENDATION_KARPENTER_ENABLED: {{ .karpenterEnabled | default true | quote }}
   RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}
   RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  {{- with .verification }}
+  VERIFICATION_WINDOW_HOURS: {{ .windowHours | default 72 | quote }}
+  VERIFICATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  VERIFICATION_MIN_SAVINGS_RATIO: {{ .minSavingsRatio | default 0.5 | quote }}
+  VERIFICATION_USAGE_HEADROOM: {{ .usageHeadroom | default 1.1 | quote }}
+  VERIFICATION_MAX_RESTART_DELTA: {{ .maxRestartDelta | default 0 | int | quote }}
+  VERIFICATION_MIN_READINESS: {{ .minReadiness | default 0.99 | quote }}
+  VERIFICATION_MAX_THROTTLE_RATIO: {{ .maxThrottleRatio | default 0.05 | quote }}
+  RECOMMENDATION_LIFECYCLE_INTERVAL: {{ .lifecycleInterval | default "5m" | quote }}
+  {{- end }}
+  {{- with .git }}
+  GIT_PROVIDER: {{ .provider | default "github" | quote }}
+  GIT_API_BASE_URL: {{ .apiBaseUrl | default "" | quote }}
+  GIT_DEFAULT_BRANCH: {{ .defaultBranch | default "main" | quote }}
+  GIT_COMMIT_AUTHOR_NAME: {{ .commitAuthorName | default "GreenKube Bot" | quote }}
+  GIT_COMMIT_AUTHOR_EMAIL: {{ .commitAuthorEmail | default "bot@greenkube.cloud" | quote }}
+  {{- end }}
   {{- end }}

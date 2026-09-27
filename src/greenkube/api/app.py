@@ -31,6 +31,7 @@ from greenkube.api.dependencies import (
     verify_api_key,
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
+from greenkube.api.routers import automation as automation_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
@@ -201,6 +202,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(namespaces.router, prefix="/api/v1", tags=["Namespaces"])
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
+    app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])
     app.include_router(report.router, prefix="/api/v1", tags=["Report"])

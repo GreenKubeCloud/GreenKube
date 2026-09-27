@@ -81,8 +81,17 @@ class OptimizationEngine:
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
     ) -> None:
-        """Upserts generated recommendations and marks absent actives as stale."""
+        """Upserts generated recommendations, expires overdue actives and reconciles stale ones."""
         try:
+            # Expire actives whose TTL elapsed before reconciling so they are not
+            # accidentally reported as stale.
+            try:
+                from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
+                await RecommendationLifecycle(reco_repo).expire()
+            except Exception as e:
+                logger.warning("Failed to expire overdue recommendations: %s", e)
+
             records = [RecommendationRecord.from_recommendation(r) for r in recommendations]
             if records:
                 await reco_repo.upsert_recommendations(records)

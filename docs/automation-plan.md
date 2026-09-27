@@ -1,16 +1,33 @@
 # Development Plan: "Apply Recommendation" → Automated PR
 
+> **Implementation status:** implemented (Phase 4 of the
+> [optimization engine specification](specs/optimization-engine.md)). This
+> document is kept as the design reference and now describes the shipped
+> behavior, including the deviations listed at the end of this section.
+>
+> Deviations from the original draft:
+> - `owner_kind`/`owner_name` shipped with migration `0010` (engine phase 1);
+>   the pull-request table is migration `0013`.
+> - A third provider, **Gitea**, is supported alongside GitHub and GitLab
+>   (used by the self-contained local GitOps demo).
+> - `POST /recommendations/{id}/apply-pr` executes **synchronously** and returns
+>   the created pull request (or the dry-run diff). There is no background task
+>   or `202` response: the operation is bounded and the UI can render the result
+>   deterministically. Tracking rows still record `pending`/`error`/`open`.
+> - Merge detection uses the Kubernetes API (apply detector) rather than Git
+>   webhooks/polling, per the phase 3 decision.
+
 ## 1. Goal & Scope
 
-Turn GreenKube recommendations from passive suggestions into actionable fixes. A user clicks **"Apply"** on a recommendation, and GreenKube opens a pull request against the workload's Git repository that implements the change.
+Turn GreenKube recommendations from passive suggestions into actionable fixes. A user clicks **"Create PR"** on a recommendation, and GreenKube opens a pull request against the workload's Git repository that implements the change.
 
 **Decided scope:**
 
 - Source discovery via **workload annotations** (primary).
-- Git platforms: **GitHub** and **GitLab**, both SaaS and self-hosted.
+- Git platforms: **GitHub**, **GitLab** and **Gitea**, both SaaS and self-hosted.
 - Recommendation types: **CPU/memory rightsizing only** (v1).
 - Bot runs **in-process** inside the existing FastAPI app.
-- `ruamel.yaml` as a **production dependency** (preserves comments/formatting).
+- `ruamel.yaml` is a **production dependency** (preserves comments/formatting).
 - A dedicated **`POST /api/v1/recommendations/{id}/apply-pr`** endpoint (distinct from the existing "record applied" endpoint).
 
 The existing `PATCH /recommendations/{id}/apply` only *records* that a change was made (it does not touch Git). This feature is additive and does not replace it.
@@ -22,16 +39,17 @@ The existing `PATCH /recommendations/{id}/apply` only *records* that a change wa
 Three pluggable layers, all in-process, following the existing clean/hexagonal conventions:
 
 ```
-Frontend "Apply" button
+Frontend "Create PR" button
         │ POST /api/v1/recommendations/{id}/apply-pr
         ▼
 AutomationService (orchestrator)                src/greenkube/automation/service.py
-  │ 1. Load RecommendationRecord (needs owner_kind + namespace + name)
-  │ 2. SourceResolver → Source{repo_url, path?, branch?}   (reads workload annotations via K8s)
-  │ 3. GitProvider.read_file(repo, path, ref)             (GitHub / GitLab adapters)
-  │ 4. ManifestPatcher.build_patch(rec, content)          (rightsizing edits)
-  │ 5. GitProvider.create_pr(branch, commit, title, body)
-  │ 6. PullRequestRepository.record_pr(rec.id, pr info)
+  │ 1. Load RecommendationRecord (owner_kind + namespace + name + evidence)
+  │ 2. SourceResolver → ManifestSource{repo_url, path?, branch?}   (workload annotations)
+  │ 3. GitProvider.read_file / list_files                          (GitHub / GitLab / Gitea)
+  │ 4. RightsizingPatcher.patch_content(record, content)           (ruamel.yaml round-trip)
+  │ 5. GitProvider.create_branch + update_file + create_pull_request
+  │ 6. PullRequestRepository.save/update                           (recommendation_pull_requests)
+  │ 7. RecommendationLifecycle.transition(pr_open) + audit event
   ▼
 PR URL returned + persisted; user reviews & merges
 ```
@@ -40,169 +58,160 @@ Key principle: **no knowledge of ArgoCD/Flux anywhere**. The bot only needs (a) 
 
 ---
 
-## 3. Persistence Changes
+## 3. Persistence
 
-### 3.1 New column on `recommendation_history`: `owner_kind`
+### 3.1 `owner_kind` on `recommendation_history`
 
-Currently the recommender groups by `(namespace, owner_kind, owner_name)` but the `Recommendation` DTO drops `owner_kind` (it only stores `pod_name = target_name`, `scope`). The bot must know the Kubernetes **kind** (Deployment/StatefulSet/CronJob) to locate and patch the right manifest.
+Shipped with migration `0010_recommendation_sources.sql` (see the optimization
+engine spec). The DTOs carry `owner_kind`, `owner_name`, `source_ref` and the
+machine-readable `patch` plan.
 
-- Add `owner_kind: Optional[str]` to `Recommendation` and `RecommendationRecord` in `src/greenkube/models/metrics.py`.
-- Populate it in `src/greenkube/core/recommender.py` (every `Recommendation(...)` already has `target_kind` in scope; pass it through).
-- Migration `0010_*` for both `postgres/` and `sqlite/` (see `0006`/`0007` as templates):
-
-  ```sql
-  ALTER TABLE recommendation_history ADD COLUMN IF NOT EXISTS owner_kind TEXT;
-  ```
-
-- Update `_row_to_record`, `INSERT`/`UPDATE` statements in both `sqlite/recommendation_repository.py` and `postgres/recommendation_repository.py`.
-
-### 3.2 New table `recommendation_pull_requests`
-
-Tracks PR lifecycle independently of recommendation status (a recommendation can have multiple attempts; the recommendation stays `active` until actually merged/applied).
+### 3.2 Table `recommendation_pull_requests` (migration `0013`)
 
 | column | type |
 |---|---|
 | id | PK auto |
 | recommendation_id | FK → recommendation_history.id |
-| provider | text (`github` / `gitlab`) |
-| repo | text |
+| provider | text (`github` / `gitlab` / `gitea`) |
+| repo | text (`owner/name`) |
 | base_branch | text |
-| head_branch | text |
+| head_branch | text (nullable) |
 | pr_number | integer (nullable) |
-| pr_url | text |
+| pr_url | text (nullable) |
 | status | text (`pending` / `open` / `merged` / `closed` / `error`) |
 | error | text (nullable) |
-| created_at / updated_at | timestamptz |
+| created_at / updated_at | timestamptz / text |
 
-- New `PullRequestRepository` abstract + SQLite/Postgres implementations, registered in `core/factory.py` + `api/dependencies.py`.
-- Migration `0010_*` creates the table.
+- `PullRequestRepository` ABC (`storage/base_pull_request_repository.py`) with
+  SQLite and PostgreSQL implementations sharing `storage/pull_request_mapper.py`.
+- Registered in `core/factory.py` + `api/dependencies.py`.
 
 ---
 
 ## 4. Configuration
 
-Add to `src/greenkube/core/config.py` (and `helm-chart/values.yaml` + configmap/secret templates):
+Secrets (read via `/etc/greenkube/secrets/` or env):
 
-**Secrets (read via `/etc/greenkube/secrets/` or env):**
+- `GIT_TOKEN` — PAT (GitHub/Gitea) or personal access token (GitLab).
 
-- `GIT_TOKEN` — PAT (GitHub) or personal access token (GitLab). Required to push/open PRs.
+Config (`config.recommendations.git.*` in Helm):
 
-**Config:**
+- `GIT_PROVIDER` — `github` | `gitlab` | `gitea` (default `github`)
+- `GIT_API_BASE_URL` — override for GitHub Enterprise / self-hosted GitLab / Gitea
+- `GIT_DEFAULT_BRANCH` — fallback base branch (default `main`)
+- `GIT_COMMIT_AUTHOR_NAME` / `GIT_COMMIT_AUTHOR_EMAIL` — bot commit identity
 
-- `GIT_PROVIDER` — `github` | `gitlab` (default `github`)
-- `GIT_API_BASE_URL` — override for GitHub Enterprise Server / self-hosted GitLab (e.g. `https://git.example.com`)
-- `GIT_DEFAULT_BRANCH` — fallback base branch when the workload annotation omits one (default `main`)
-- `GIT_COMMIT_AUTHOR_NAME` / `GIT_COMMIT_AUTHOR_EMAIL` — identity for bot commits (e.g. `GreenKube Bot` / `bot@greenkube.cloud`)
-
-Helm: add `config.git.*` and `secrets.gitToken` (mirroring the existing `secrets.electricityMapsToken` pattern).
+The token is never logged. When `GIT_TOKEN` is empty the endpoint returns a
+clear "not configured" error and `GET /api/v1/automation/status` reports
+`token_configured: false`.
 
 ---
 
-## 5. Backend Components (new files)
+## 5. Backend Components
 
 ### 5.1 `src/greenkube/automation/source_resolver.py`
 
-- `SourceResolver` with a single `AnnotationSourceResolver` (v1), returning `Source(repo_url, path=None, branch=None)`.
-- Reads the workload object (kind from `owner_kind`, name from `pod_name`, namespace) via `get_core_v1_api()` (or AppsV1 for Deployments).
-- Annotation contract (documented in `docs/`):
+- `AnnotationSourceResolver` reads the workload object (Deployment,
+  StatefulSet or DaemonSet) through the Kubernetes apps API.
+- Annotation contract:
   - `greenkube.cloud/git-repo` (required) — repo URL
-  - `greenkube.cloud/git-path` (optional) — file path; if omitted, the bot lists the repo and searches for a manifest with matching `kind` + `metadata.name`
+  - `greenkube.cloud/git-path` (optional) — manifest path; when omitted the bot
+    lists the repository and searches for a matching `kind` + `metadata.name`
   - `greenkube.cloud/git-branch` (optional) — base branch override
-- Graceful failure with a clear error message surfaced to the UI when annotations are missing.
+- `SourceResolutionError` messages are surfaced verbatim to the UI.
 
 ### 5.2 `src/greenkube/automation/git/`
 
-- `base.py` — `GitProvider` ABC: `get_default_branch`, `get_file`, `create_branch`, `update_file`, `create_pull_request`, `get_pr_url`, `test_connection`.
-- `github.py` — GitHub REST API via `httpx.AsyncClient`; supports `GIT_API_BASE_URL` override for Enterprise Server.
-- `gitlab.py` — GitLab REST API; supports `GIT_API_BASE_URL` for self-hosted.
-- Both use `GIT_TOKEN` bearer auth; factory `get_git_provider()` selects based on `GIT_PROVIDER`.
+- `base.py` — `GitProvider` ABC plus `parse_repo_url`, `GitFile`, `GitRepository`.
+- `github.py` — GitHub REST API (SaaS + Enterprise Server).
+- `gitlab.py` — GitLab REST API (SaaS + self-managed), nested groups supported.
+- `gitea.py` — Gitea/Forgejo REST API (self-hosted), used by the local demo.
+- All use `httpx.AsyncClient`; `factory.py` selects the adapter from config.
 
-### 5.3 `src/greenkube/automation/manifests/`
+### 5.3 `src/greenkube/automation/manifests/patcher.py`
 
-- `patcher.py` — `RightsizingPatcher.build_patch(rec, content, kind, name)`:
-  - Parse YAML (multi-doc), find doc with `kind == owner_kind` and `metadata.name == target name`.
-  - Set `spec.template.spec.containers[*].resources.requests.cpu` = `f"{recommended_cpu}m"` and `memory` = humanized bytes (e.g. `512Mi`), creating `resources`/`requests` maps when absent.
-  - CPU and memory handled independently (a rec may set only one).
-  - Uses `ruamel.yaml` to preserve comments/formatting (promoted to production dependencies).
-- `helm_values.py` (Phase 2) — patch `resources.requests.*` in `values.yaml` via an annotation-provided JSON path.
+- `RightsizingPatcher.patch_content(record, content, path)`:
+  - Parses multi-document YAML with `ruamel.yaml` round-trip mode.
+  - Finds the document with `kind == owner_kind` and `metadata.name == owner_name`.
+  - Applies `set_container_resources` operations (CPU/memory requests) from the
+    recommendation `patch`; falls back to the DTO values when no patch is set.
+  - Returns the patched content plus a unified diff.
+- `find_path(record, files)` powers repository discovery when no path annotation
+  is present.
 
 ### 5.4 `src/greenkube/automation/service.py`
 
-- `AutomationService.apply_rightsizing(recommendation_id)` orchestrates steps 1–6 above.
-- Produces a conventional commit message + PR title/body (include before→after request values and projected savings).
-- Wraps everything in try/except; on error, records `status='error'` + message and returns it to the API.
+`AutomationService.apply_recommendation_pr(rec_id, request)` orchestrates
+discovery → patch → branch → commit → PR → persistence → lifecycle transition.
+Failures are persisted on the attempt row (`status=error` + message) and
+returned to the caller. `dry_run=true` stops after the diff.
 
-### 5.5 `src/greenkube/storage/` (new `pull_request_repository.py` files + abstract)
+### 5.5 `src/greenkube/automation/pr_body.py`
 
-- SQLite + Postgres `PullRequestRepository` implementations, mirroring the existing recommendation repository patterns.
+Renders the PR title and body from the evidence block (see the contract in the
+optimization engine spec §6.13): summary, impact, risk, evidence tables,
+proposed diff, verification plan, provenance and reviewer checklist.
 
 ---
 
 ## 6. API
 
-In `src/greenkube/api/routers/recommendations.py`:
-
 - `POST /api/v1/recommendations/{id}/apply-pr`
   - Body: optional `{ base_branch?, dry_run? }`.
-  - Validates the recommendation is a rightsizing type, resolves source, generates the patch.
-  - Runs the PR creation as a background task (`asyncio.create_task`, matching the existing startup-scan pattern) and returns `202` with an initial status.
-  - `dry_run=true` returns the computed diff (path + proposed content) without touching Git — useful for preview in the UI.
-- `GET /api/v1/recommendations/{id}/pull-requests` — list PR attempts/status for a recommendation.
-- `GET /api/v1/automation/status` (optional) — global feature readiness (git token configured? provider?).
-
-Register a new router or extend the recommendations router. Add `PullRequestRepository` dependency in `api/dependencies.py` and factory in `core/factory.py`.
+  - Validates the recommendation is rightsizing, resolves the source and builds
+    the patch. `dry_run=true` returns `{status: "dry_run", diff, path, ...}`.
+  - On success returns `{status: "pr_open", pr_url, ...}` and moves the
+    recommendation to `pr_open`.
+- `GET /api/v1/recommendations/{id}/pull-requests` — PR attempts/status.
+- `GET /api/v1/automation/status` — provider + token readiness.
+- `GET /api/v1/recommendations/{id}/events` — lifecycle audit trail.
 
 ---
 
-## 7. Frontend (`frontend/src/`)
+## 7. Frontend
 
-- `src/lib/api.js`: add `applyRecommendationPr(id, body)` and `getRecommendationPullRequests(id)` helpers (the client already has `applyRecommendation` for the old "mark applied" flow).
-- `src/routes/recommendations/+page.svelte`:
-  - Add an **"Apply"** button (visible only for `RIGHTSIZING_CPU` / `RIGHTSIZING_MEMORY` cards in the Active tab).
-  - Clicking opens a modal: preview (dry-run diff), confirm base branch, then submit.
-  - On success, show the PR URL + status; poll for updates or refresh on next load.
-  - If source discovery fails (missing annotations), show the specific, actionable error.
-- Match existing Tailwind/button patterns (`btn-primary`, `card`, existing Ignore modal).
+`frontend/src/routes/recommendations/+page.svelte`:
+
+- **Create PR** button on active CPU/memory rightsizing cards that have a
+  workload owner.
+- Preview modal: dry-run diff, base branch input, confirm, PR URL on success,
+  actionable error on failure.
+- Applied cards show the verification state (`applied`, `verifying`, `verified`,
+  `rollback_review`), measured vs projected savings and a lifecycle event trail.
+- Realized savings split into measured (verified) and projected (prorated).
 
 ---
 
 ## 8. Helm Chart
 
-- `helm-chart/values.yaml`: `config.git.*` and `secrets.gitToken`.
-- `helm-chart/templates/configmap.yaml` / `secret.yaml`: wire the new env vars/secrets (follow existing patterns).
-- Document the annotation convention in `docs/automation.md`.
+- `config.recommendations.git.*` values wired into the ConfigMap.
+- `secrets.gitToken` (or `secrets.existingSecret`) wired into the Secret.
+- ClusterRole grants read access to `apps` workloads (apply detection), plus
+  VPA and Karpenter CRDs.
 
 ---
 
 ## 9. Testing
 
-Follow existing TDD + `pytest-asyncio` + `respx` patterns:
-
-- Unit: `SourceResolver` (mock K8s), `RightsizingPatcher` (golden YAML fixtures), GitHub/GitLab providers (respx-mocked HTTP), `AutomationService` orchestration (mocks).
-- Integration: new `PullRequestRepository` against SQLite + Postgres (mirroring `test_recommendation_lifecycle_e2e.py`).
-- API: full request/response cycle for `apply-pr` incl. `dry_run`.
-- Frontend: Svelte component test for the Apply button/modal.
-
----
-
-## 10. Implementation Phases
-
-1. **Data model** — add `owner_kind` to models + repositories + migration `0010` (both backends); populate from recommender. Update `RecommendationRecord.from_recommendation`.
-2. **PR persistence** — `PullRequestRepository` abstract + SQLite/Postgres + factory/deps + migration.
-3. **Config & Helm** — new `GIT_*` settings and secrets.
-4. **Git providers** — `GitProvider` ABC + GitHub + GitLab + factory.
-5. **Source resolver + patcher** — annotation resolver + rightsizing YAML patcher (+ `ruamel.yaml` to prod deps).
-6. **Orchestration + API** — `AutomationService` + `apply-pr`/`pull-requests` endpoints.
-7. **Frontend** — Apply button, preview modal, PR status.
-8. **Tests + docs** — unit/integration/e2e + `docs/automation.md`.
+- Unit: `SourceResolver` (fake reader), `RightsizingPatcher` (golden YAML),
+  GitHub/GitLab/Gitea providers (respx-mocked HTTP), `AutomationService`
+  orchestration (fake provider + real SQLite repositories).
+- Storage: `PullRequestRepository` SQLite tests and PR table migration tests.
+- API: `apply-pr` dry run, pull-request listing, automation status and events.
+- Frontend build (`npm run build`) is part of verification.
 
 ---
 
-## 11. Risks / Notes / Future Work
+## 10. Risks / Notes / Future Work
 
-- **YAML round-trip fidelity** — solved by `ruamel.yaml` (promote to prod dep).
-- **Helm/Kustomize/values-based workloads** — v1 targets raw manifests; Helm values patching (via annotation JSON path) is the natural Phase 2.
-- **Multi-container** — patcher applies the new request to all containers by default; can be refined later to target a specific container via annotation.
-- **Merge detection** — v1 stops at "PR created"; marking the recommendation `applied` on merge can come later via GitHub/GitLab webhooks or a manual "Mark merged" action. The existing `apply` endpoint already handles realized-savings once merged.
-- **Non-rightsizing types** — zombie deletion / HPA addition / off-peak cron are follow-ups using the same `ManifestPatcher` interface.
-- **Security** — token stays in the existing secret mechanism, never logged; PRs only created from explicit user action (no autonomous mutation).
+- **YAML round-trip fidelity** — solved by `ruamel.yaml`; covered by golden tests.
+- **Helm/Kustomize/values-based workloads** — v1 targets raw manifests; Helm
+  values patching (via annotation JSON path) remains a follow-up.
+- **Multi-container** — the patcher applies the new request to all containers by
+  default; per-container targeting is a follow-up.
+- **Merge detection** — Kubernetes API detection; provider webhooks/polling are
+  explicitly deferred (the schema supports `application_method=webhook|polling`).
+- **Non-rightsizing types** — zombie deletion / HPA addition / off-peak cron are
+  follow-ups using the same patcher interface.
+- **Security** — the token stays in the secret mechanism and is never logged;
+  PRs are only created from explicit user action (no autonomous mutation).

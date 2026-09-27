@@ -76,10 +76,43 @@ class VpaSource(RecommendationSource):
     def __init__(self, config: "Config", collector: Optional[VPACollectorLike] = None):
         self.config = config
         self._collector = collector if collector is not None else VPACollector()
+        self._available: Optional[bool] = None
 
     async def is_available(self) -> bool:
-        # Availability of the CRD is handled gracefully by the collector.
-        return True
+        """Detects the VPA CRD once; sources are skipped cleanly when absent.
+
+        Test fakes injected through ``collector`` are considered available.
+        """
+        if self._available is not None:
+            return self._available
+
+        if not isinstance(self._collector, VPACollector):
+            self._available = True
+            return True
+
+        try:
+            from greenkube.collectors.vpa_collector import VPA_GROUP, VPA_PLURAL, VPA_VERSION
+            from greenkube.core.k8s_client import get_custom_objects_api
+
+            api = await get_custom_objects_api()
+            if api is None:
+                self._available = False
+                return False
+            await api.list_cluster_custom_object(
+                group=VPA_GROUP,
+                version=VPA_VERSION,
+                plural=VPA_PLURAL,
+                limit=1,
+            )
+            self._available = True
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            if status == 404:
+                logger.debug("VerticalPodAutoscaler CRD is not installed; VPA source disabled.")
+            else:
+                logger.warning("VPA availability check failed: %s", exc)
+            self._available = False
+        return self._available
 
     async def collect(self, context: "OptimizationContext") -> List[Recommendation]:
         try:

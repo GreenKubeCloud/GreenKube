@@ -2,6 +2,7 @@
 """Pydantic DTOs for the recommendation savings ledger."""
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,12 @@ class SavingsLedgerRecord(BaseModel):
     cost_saved_dollars: float = Field(default=0.0, ge=0.0)
     period_seconds: int = Field(default=300, gt=0)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Phase 5: measurement provenance
+    measurement_method: str = Field("prorated", description="'prorated' (estimate) or 'measured' (verified).")
+    baseline_value: Optional[float] = Field(None, description="Baseline rate before the change.")
+    actual_value: Optional[float] = Field(None, description="Measured rate after the change.")
+    confidence: Optional[float] = Field(None, description="Confidence of the measurement, 0.0–1.0.")
+    superseded: bool = Field(False, description="True when a later outcome invalidated this attribution.")
 
 
 class SavingsCumulativeTotals(BaseModel):

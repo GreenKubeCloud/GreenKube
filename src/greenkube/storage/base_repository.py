@@ -8,6 +8,7 @@ from ..models.metrics import (
     CombinedMetric,
     IgnoreRecommendationRequest,
     MetricsSummaryRow,
+    RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     TimeseriesCachePoint,
@@ -649,6 +650,26 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_recommendations_by_statuses(
+        self,
+        statuses: List[str],
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns recommendations in any of the given lifecycle statuses.
+
+        Used by apply detection and verification to load the records that need
+        attention without scanning the full history.
+
+        Args:
+            statuses: Status values to include.
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of matching RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
         """Returns a single recommendation by its database ID.
 
@@ -661,15 +682,76 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
-    async def apply_recommendation(self, rec_id: int, request: ApplyRecommendationRequest) -> RecommendationRecord:
+    async def apply_recommendation(
+        self,
+        rec_id: int,
+        request: ApplyRecommendationRequest,
+        *,
+        baseline: Optional[dict] = None,
+        application_method: Optional[str] = None,
+    ) -> RecommendationRecord:
         """Marks a recommendation as applied and records the actual applied values.
 
         Args:
             rec_id: The database primary key.
             request: The apply request with actual values.
+            baseline: Frozen pre-apply metrics captured for verification.
+            application_method: How the change landed (manual, detected, pr_merge, ...).
 
         Returns:
             The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def update_recommendation_fields(self, rec_id: int, updates: dict) -> RecommendationRecord:
+        """Updates a subset of mutable recommendation columns.
+
+        Used by the lifecycle, apply-detection and verification services to
+        transition records without a dedicated repository method per status.
+
+        Args:
+            rec_id: The database primary key.
+            updates: ``{column: value}`` pairs restricted to known columns.
+
+        Returns:
+            The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def record_event(self, event: RecommendationEvent) -> RecommendationEvent:
+        """Appends a recommendation lifecycle event to the audit trail.
+
+        Args:
+            event: The event to persist.
+
+        Returns:
+            The persisted event with its database ID.
+        """
+        pass
+
+    @abstractmethod
+    async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
+        """Returns the audit trail for a recommendation, oldest first.
+
+        Args:
+            rec_id: The database primary key.
+
+        Returns:
+            A list of RecommendationEvent objects.
+        """
+        pass
+
+    @abstractmethod
+    async def expire_recommendations(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
+        """Marks active recommendations past their TTL as expired.
+
+        Args:
+            now: Reference time; defaults to the current UTC time.
+
+        Returns:
+            The recommendations that were transitioned to ``expired``.
         """
         pass
 
