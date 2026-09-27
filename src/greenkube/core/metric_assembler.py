@@ -67,63 +67,68 @@ class MetricAssembler:
             emaps_zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
             zone_to_metrics.setdefault(emaps_zone, []).append(em)
 
-        async def _prefetch_zone(zone: str, metrics: List[EnergyMetric]) -> None:
-            representative_ts = max(m.timestamp for m in metrics)
-            gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
-            if isinstance(representative_ts, str):
-                rep_dt = parse_iso_date(representative_ts)
-                if not rep_dt:
-                    rep_dt = datetime.now(timezone.utc)
-            else:
-                rep_dt = representative_ts
-
-            if gran == "hour":
-                rep_normalized_dt = rep_dt.replace(minute=0, second=0, microsecond=0)
-            elif gran == "day":
-                rep_normalized_dt = rep_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            else:
-                rep_normalized_dt = rep_dt
-
-            rep_dt_utc = rep_normalized_dt.astimezone(timezone.utc).replace(microsecond=0)
-            rep_normalized_plus = rep_dt_utc.isoformat()
+        async def _fetch_intensity(zone: str, normalized_dt: datetime) -> Optional[float]:
+            key = normalized_dt.isoformat()
             try:
-                intensity = await self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
+                intensity = await self.repository.get_for_zone_at_time(zone, key)
                 if intensity is None:
                     logger.info(
                         "Intensity missing for zone %s at %s. Attempting live fetch.",
                         zone,
-                        rep_normalized_plus,
+                        key,
                     )
-                    history = await self.electricity_provider.collect(zone=zone, target_datetime=rep_normalized_dt)
+                    history = await self.electricity_provider.collect(zone=zone, target_datetime=normalized_dt)
                     if history:
                         await self.repository.save_history(history, zone)
-                    intensity = await self.repository.get_for_zone_at_time(zone, rep_normalized_plus)
+                    intensity = await self.repository.get_for_zone_at_time(zone, key)
                 logger.info(
                     "Prefetched intensity for zone '%s' at '%s' (present=%s)",
                     zone,
-                    rep_normalized_plus,
+                    key,
                     intensity is not None,
                 )
+                return intensity
             except Exception as e:
-                intensity = None
                 logger.warning(
                     "Failed to prefetch intensity for zone '%s' at '%s': %s",
                     zone,
-                    rep_normalized_plus,
+                    key,
                     e,
                 )
+                return None
 
-            if intensity is not None:
-                for m in metrics:
-                    ts = m.timestamp
-                    if isinstance(ts, str):
-                        dt = parse_iso_date(ts)
-                        if not dt:
-                            dt = rep_dt
-                    else:
-                        dt = ts
-                    ts_str = ts if isinstance(ts, str) else dt.isoformat()
-                    await self.calculator.prefetch_intensity(zone, ts_str, intensity)
+        async def _prefetch_zone(zone: str, metrics: List[EnergyMetric]) -> None:
+            gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
+            # Normalize every metric to its own bucket and fetch each bucket
+            # once, so a batch spanning several hours does not reuse a single
+            # (latest) intensity for all of them.
+            metric_buckets: List[tuple[EnergyMetric, str]] = []
+            buckets: Dict[str, datetime] = {}
+            for metric in metrics:
+                ts = metric.timestamp
+                dt = parse_iso_date(ts) if isinstance(ts, str) else ts
+                if dt is None:
+                    continue
+                normalized = dt.astimezone(timezone.utc).replace(microsecond=0)
+                if gran == "hour":
+                    normalized = normalized.replace(minute=0, second=0)
+                elif gran == "day":
+                    normalized = normalized.replace(hour=0, minute=0, second=0)
+                key = normalized.isoformat()
+                buckets.setdefault(key, normalized)
+                metric_buckets.append((metric, key))
+
+            intensities: Dict[str, Optional[float]] = {}
+            for key, normalized in buckets.items():
+                intensities[key] = await _fetch_intensity(zone, normalized)
+
+            for metric, key in metric_buckets:
+                intensity = intensities.get(key)
+                if intensity is None:
+                    continue
+                ts = metric.timestamp
+                ts_str = ts if isinstance(ts, str) else ts.isoformat()
+                await self.calculator.prefetch_intensity(zone, ts_str, intensity)
 
         if zone_to_metrics:
             logger.info(

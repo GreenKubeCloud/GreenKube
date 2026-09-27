@@ -419,3 +419,25 @@ class TestMetricAssemblerDataIntegrity:
         result = await _assemble_one(assembler, metric, context=_context(), node_info=_node_info())
 
         assert result[0].timestamp == ts
+
+
+class TestPrefetchPerBucket:
+    @pytest.mark.asyncio
+    async def test_prefetch_fetches_each_hour_separately(self, assembler, mock_calculator, mock_repository):
+        """A batch spanning two hours must fetch two intensities, not reuse the latest."""
+        h1 = datetime(2026, 1, 15, 10, 5, tzinfo=timezone.utc)
+        h2 = datetime(2026, 1, 15, 11, 50, tzinfo=timezone.utc)
+        metrics = [
+            _energy(pod="pod-a").model_copy(update={"timestamp": h1}),
+            _energy(pod="pod-b").model_copy(update={"timestamp": h2}),
+        ]
+        mock_repository.get_for_zone_at_time = AsyncMock(side_effect=[100.0, 200.0])
+
+        await assembler.prefetch_intensities(metrics, {"node-1": _context(emaps_zone="FR")})
+
+        queried = [call.args[1] for call in mock_repository.get_for_zone_at_time.await_args_list]
+        assert "2026-01-15T10:00:00+00:00" in queried
+        assert "2026-01-15T11:00:00+00:00" in queried
+        assert mock_calculator.prefetch_intensity.await_count == 2
+        prefetched = sorted(call.args[2] for call in mock_calculator.prefetch_intensity.await_args_list)
+        assert prefetched == [100.0, 200.0]
