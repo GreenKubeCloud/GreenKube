@@ -115,6 +115,7 @@ class SQLiteTimeseriesCacheRepository(TimeseriesCacheRepository):
                             bucket_ts=row["bucket_ts"],
                             co2e_grams=row["co2e_grams"],
                             embodied_co2e_grams=row["embodied_co2e_grams"],
+                            total_co2e_all_scopes=row["co2e_grams"] + row["embodied_co2e_grams"],
                             total_cost=row["total_cost"],
                             joules=row["joules"],
                         )
