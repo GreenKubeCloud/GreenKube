@@ -58,6 +58,9 @@ def _new_yaml() -> YAML:
     yaml = YAML()
     yaml.preserve_quotes = True
     yaml.indent(mapping=2, sequence=4, offset=2)
+    # Avoid folding long scalars (annotation values) onto continuation lines:
+    # round-tripping must not introduce unrelated changes to the manifest.
+    yaml.width = 4096
     return yaml
 
 

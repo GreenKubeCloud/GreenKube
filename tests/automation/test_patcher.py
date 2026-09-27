@@ -98,6 +98,31 @@ spec:
         assert "kind: Service" in result.patched
         assert "cpu: 300m" in result.patched
 
+    def test_long_annotation_values_are_not_wrapped(self):
+        content = (
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: payments-api\n"
+            "  namespace: prod\n"
+            "  annotations:\n"
+            "    greenkube.cloud/git-repo: http://gitea-http.gitea.svc.cluster.local:3000/greenkube/local-k8s.git\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: api\n"
+            "          resources:\n"
+            "            requests:\n"
+            "              cpu: 500m\n"
+        )
+        result = RightsizingPatcher().patch_content(_record(), content, path="apps/payments.yaml")
+        assert (
+            "greenkube.cloud/git-repo: http://gitea-http.gitea.svc.cluster.local:3000/greenkube/local-k8s.git"
+            in result.patched
+        )
+        assert "git-repo: \n" not in result.patched
+
     def test_find_path_locates_manifest(self):
         files = {"a.yaml": "kind: Service\nmetadata:\n  name: x\n", "b.yaml": DEPLOYMENT}
         assert RightsizingPatcher().find_path(_record(), files) == "b.yaml"

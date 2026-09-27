@@ -125,3 +125,12 @@ class TestAppliedDetector:
         detector = AppliedDetector(RecommendationLifecycle(repo), reader=reader, config=Config())
 
         assert await detector.detect() == []
+
+    @pytest.mark.asyncio
+    async def test_zero_observed_request_is_not_a_decrease(self, repo):
+        """A workload without requests must not be treated as an applied change."""
+        await repo.save_recommendations([_cpu_record()])
+        reader = FakeReader({("prod", "Deployment", "api"): WorkloadSnapshot("prod", "Deployment", "api", 0, 0)})
+        detector = AppliedDetector(RecommendationLifecycle(repo), reader=reader, config=Config())
+
+        assert await detector.detect() == []

@@ -169,7 +169,9 @@ class AppliedDetector:
         than the tolerance since the recommendation was generated, or when it
         is within tolerance of the recommended value.
         """
-        if observed is None or current is None or current <= 0:
+        # A missing request (0) is not an applied change: it means the workload
+        # declares no requests, not that the recommendation was implemented.
+        if observed is None or observed <= 0 or current is None or current <= 0:
             return False
         if observed <= current * (1 - tolerance):
             return True

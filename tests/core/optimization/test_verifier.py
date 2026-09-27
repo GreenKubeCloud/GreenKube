@@ -26,10 +26,17 @@ async def repo():
 
 
 class FakeCombinedRepo:
-    def __init__(self, metrics):
+    """Returns post-apply metrics on the first call and pre-apply metrics on the second."""
+
+    def __init__(self, metrics, before_metrics=None):
         self.metrics = metrics
+        self.before_metrics = before_metrics
+        self.calls = 0
 
     async def read_combined_metrics_smart(self, start_time, end_time, namespace=None):
+        self.calls += 1
+        if self.before_metrics is not None and self.calls == 2:
+            return list(self.before_metrics)
         return list(self.metrics)
 
 
@@ -95,7 +102,11 @@ class TestVerifierOutcomes:
         await repo.save_recommendations([_applied_record(applied_at)])
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo([_metric(cost=0.01, co2=0.5, cpu=200)]),  # pyrefly: ignore[bad-argument-type]
+            # After: 0.01 per 5-min sample; before: 0.05 per sample -> ~80% drop.
+            FakeCombinedRepo(
+                [_metric(cost=0.01, co2=0.5, cpu=200)],
+                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
+            ),  # pyrefly: ignore[bad-argument-type]
             config=_config(),
         )
 
@@ -105,6 +116,25 @@ class TestVerifierOutcomes:
         assert verified[0].status == RecommendationStatus.VERIFIED
         assert verified[0].savings_realized is True
         assert verified[0].measured_cost_saved is not None and verified[0].measured_cost_saved > 0
+        assert verified[0].measured_co2e_saved_grams is not None and verified[0].measured_co2e_saved_grams > 0
+
+    @pytest.mark.asyncio
+    async def test_negligible_carbon_projection_does_not_block_verification(self, repo):
+        """A sub-gram CO2e projection must not fail the carbon gate (measurement noise)."""
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at, projected_co2=0.0001)])
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(
+                [_metric(cost=0.01, co2=0.5, cpu=200)],
+                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
+            ),  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        verified = await verifier.verify_due()
+
+        assert verified[0].status == RecommendationStatus.VERIFIED
 
     @pytest.mark.asyncio
     async def test_rollback_review_on_restart_delta(self, repo):

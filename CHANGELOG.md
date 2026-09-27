@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Single orchestration path:** The duplicated metric/side-input loading previously present in the API router, startup scan and CLI now lives in `OptimizationContext`/`ContextBuilder`. Source failures are isolated and degrade gracefully.
 - **SQLite/PostgreSQL recommendation repositories:** Insert/update statements are generated from a shared column definition, removing placeholder drift between backends.
+- **Verification rates are sample-normalized:** before/after cost and carbon rates now use the observed sample duration (sample count x query step) instead of the wall-clock window, so verification behaves correctly when collection is sparse (e.g. a freshly installed instance).
+
+### Fixed
+- **Apply detection no longer fires on missing requests:** a live workload with no CPU/memory request (observed `0`) is not treated as an applied change.
+- **Verified cost-only savings are attributed:** a verified recommendation with zero measured CO2e but positive measured cost now writes a `measured` ledger row instead of being skipped.
+- **Negligible carbon projections do not block verification:** carbon projections below 1 gCO2e/year are treated as noise and skip the carbon gate.
+- **Helm: the collector waits for PostgreSQL** with an init container (`wait-for-postgres`) when the bundled database is enabled, instead of crash-looping on the first connection attempt during a fresh install.
 
 ## [0.3.0] — 2026-08-30
 

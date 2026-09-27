@@ -57,7 +57,8 @@ class SavingsAttributor:
         Verified recommendations contribute their measured savings
         (``measurement_method='measured'``); everything else contributes the
         prorated projection. Recommendations in rollback review or reverted are
-        excluded so attribution stops at the rollback event.
+        excluded so attribution stops at the rollback event. A record is written
+        when either the CO2e or the cost value is positive.
 
         Args:
             applied_records: Applied RecommendationRecord objects from the DB.
@@ -84,8 +85,12 @@ class SavingsAttributor:
                 annual_cost = rec.cost_saved
                 method = "prorated"
 
-            # Skip if there is no positive annual CO₂ figure.
-            if not annual_co2e or annual_co2e <= 0:
+            # Skip only when there is nothing positive to attribute. A verified
+            # recommendation with zero measured CO2e can still have a real cost
+            # saving, and vice versa.
+            has_co2 = bool(annual_co2e and annual_co2e > 0)
+            has_cost = bool(annual_cost and annual_cost > 0)
+            if not has_co2 and not has_cost:
                 continue
 
             # Skip records without a database ID (not yet persisted).

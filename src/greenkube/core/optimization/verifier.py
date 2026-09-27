@@ -31,6 +31,10 @@ _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 #: Statuses that are candidates for verification.
 VERIFIABLE_STATUSES = ["applied", "verifying"]
 
+#: Carbon projections below this annual value (grams) are not meaningful enough
+#: to fail a verification: measurement noise dominates such tiny figures.
+_MIN_MEANINGFUL_CO2_GRAMS_ANNUAL = 1.0
+
 
 @dataclass
 class VerificationOutcome:
@@ -47,12 +51,36 @@ class VerificationOutcome:
 
 @dataclass
 class _Measured:
+    cost_per_hour_before: Optional[float] = None
+    co2e_grams_per_hour_before: Optional[float] = None
     cost_per_hour_after: Optional[float] = None
     co2e_grams_per_hour_after: Optional[float] = None
     cpu_p95: Optional[float] = None
     memory_p95: Optional[float] = None
     restart_count: int = 0
     sample_count: int = 0
+
+
+def _step_seconds(config: "Config") -> int:
+    """Returns the Prometheus query step in seconds, defaulting to 5 minutes."""
+    units = {"s": 1, "m": 60, "h": 3600}
+    raw = (getattr(config, "PROMETHEUS_QUERY_RANGE_STEP", "") or "5m").strip().lower()
+    try:
+        return int(raw[:-1]) * units[raw[-1]]
+    except (ValueError, KeyError, IndexError):
+        return 300
+
+
+def _sample_rate(total: float, sample_count: int, step_seconds: int) -> Optional[float]:
+    """Converts a summed metric into a per-hour rate normalized by sample duration.
+
+    Normalizing by the observed sample duration (count x step) rather than the
+    wall-clock window keeps before/after rates comparable even when collection
+    is sparse (e.g. a freshly installed instance).
+    """
+    if sample_count <= 0 or step_seconds <= 0:
+        return None
+    return total / (sample_count * step_seconds) * 3600
 
 
 class RecommendationVerifier:
@@ -160,39 +188,64 @@ class RecommendationVerifier:
             verification_window_end=now,
         )
 
-    async def _measure(self, record: RecommendationRecord, start: datetime, end: datetime) -> _Measured:
-        """Reads post-apply metrics for the recommendation target."""
-        result = _Measured()
+    async def _read_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
+        """Reads the metric series for a target in a time range (best-effort)."""
         if not record.namespace:
-            return result
-
+            return []
         try:
             metrics = await self.combined_repo.read_combined_metrics_smart(
                 start_time=start, end_time=end, namespace=record.namespace
             )
         except Exception as exc:
             logger.warning("Could not read metrics for verification of %s: %s", record.id, exc)
+            return []
+        return _series_for_record(record, metrics)
+
+    async def _measure(self, record: RecommendationRecord, start: datetime, end: datetime) -> _Measured:
+        """Reads pre/post-apply metrics for the recommendation target."""
+        result = _Measured()
+        if not record.namespace:
             return result
 
-        series = _series_for_record(record, metrics)
-        if not series:
+        step = _step_seconds(self.config)
+        after_series = await self._read_series(record, start, end)
+        if not after_series:
             return result
 
-        window_seconds = max((end - start).total_seconds(), 1.0)
-        total_cost = sum(m.total_cost for m in series if m.total_cost is not None)
-        total_co2 = sum(m.co2e_grams for m in series if m.co2e_grams is not None)
-        result.cost_per_hour_after = total_cost / window_seconds * 3600
-        result.co2e_grams_per_hour_after = total_co2 / window_seconds * 3600
+        span = end - start
+        before_series = await self._read_series(record, start - span, start)
 
-        cpu_points = [m.cpu_usage_millicores for m in series if m.cpu_usage_millicores is not None]
-        memory_points = [m.memory_usage_bytes for m in series if m.memory_usage_bytes is not None]
+        result.cost_per_hour_after = _sample_rate(
+            sum(m.total_cost for m in after_series if m.total_cost is not None),
+            sum(max(int(m.sample_count or 1), 1) for m in after_series),
+            step,
+        )
+        result.co2e_grams_per_hour_after = _sample_rate(
+            sum(m.co2e_grams for m in after_series if m.co2e_grams is not None),
+            sum(max(int(m.sample_count or 1), 1) for m in after_series),
+            step,
+        )
+        if before_series:
+            result.cost_per_hour_before = _sample_rate(
+                sum(m.total_cost for m in before_series if m.total_cost is not None),
+                sum(max(int(m.sample_count or 1), 1) for m in before_series),
+                step,
+            )
+            result.co2e_grams_per_hour_before = _sample_rate(
+                sum(m.co2e_grams for m in before_series if m.co2e_grams is not None),
+                sum(max(int(m.sample_count or 1), 1) for m in before_series),
+                step,
+            )
+
+        cpu_points = [m.cpu_usage_millicores for m in after_series if m.cpu_usage_millicores is not None]
+        memory_points = [m.memory_usage_bytes for m in after_series if m.memory_usage_bytes is not None]
         if cpu_points:
             result.cpu_p95 = percentile(cpu_points, 95)
         if memory_points:
             result.memory_p95 = percentile(memory_points, 95)
 
-        result.restart_count = max((m.restart_count or 0 for m in series), default=0)
-        result.sample_count = sum(max(int(m.sample_count or 1), 1) for m in series)
+        result.restart_count = max((m.restart_count or 0 for m in after_series), default=0)
+        result.sample_count = sum(max(int(m.sample_count or 1), 1) for m in after_series)
         return result
 
     def _evaluate(
@@ -249,8 +302,12 @@ class RecommendationVerifier:
                 f"measured cost saving {measured_cost:.2f}/yr is below "
                 f"{min_ratio:.0%} of the projected {projected_cost:.2f}/yr"
             )
-        if projected_co2 > 0:
-            baseline_co2_rate = baseline.get("co2e_grams_per_hour_before")
+        if projected_co2 >= _MIN_MEANINGFUL_CO2_GRAMS_ANNUAL:
+            baseline_co2_rate = (
+                measured.co2e_grams_per_hour_before
+                if measured.co2e_grams_per_hour_before is not None
+                else baseline.get("co2e_grams_per_hour_before")
+            )
             after_co2_rate = measured.co2e_grams_per_hour_after
             if baseline_co2_rate is not None and after_co2_rate is not None and baseline_co2_rate > 0:
                 measured_co2 = max((baseline_co2_rate - after_co2_rate) * (_SECONDS_PER_YEAR / 3600), 0.0)
@@ -287,11 +344,19 @@ class RecommendationVerifier:
         measured_cost = 0.0
         measured_co2 = 0.0
 
-        before_cost = baseline.get("cost_per_hour_before")
+        before_cost = (
+            measured.cost_per_hour_before
+            if measured.cost_per_hour_before is not None
+            else baseline.get("cost_per_hour_before")
+        )
         if before_cost is not None and measured.cost_per_hour_after is not None:
             measured_cost = max((before_cost - measured.cost_per_hour_after) * (_SECONDS_PER_YEAR / 3600), 0.0)
 
-        before_co2 = baseline.get("co2e_grams_per_hour_before")
+        before_co2 = (
+            measured.co2e_grams_per_hour_before
+            if measured.co2e_grams_per_hour_before is not None
+            else baseline.get("co2e_grams_per_hour_before")
+        )
         if before_co2 is not None and measured.co2e_grams_per_hour_after is not None:
             measured_co2 = max((before_co2 - measured.co2e_grams_per_hour_after) * (_SECONDS_PER_YEAR / 3600), 0.0)
 
