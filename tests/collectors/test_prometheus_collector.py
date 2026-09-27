@@ -604,3 +604,14 @@ async def test_close_closes_reusable_client(collector):
     await collector.close()
 
     assert collector._client is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_cpu_fallback_returns_empty_without_recursion(collector):
+    """When the CPU fallback is also empty the collector must return [] instead of recursing."""
+    respx.get(f"{collector.base_url}/api/v1/query_range").mock(return_value=Response(200, json=MOCK_EMPTY_RESPONSE))
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(minutes=5)
+
+    assert await collector.collect_range(start_time, end_time) == []

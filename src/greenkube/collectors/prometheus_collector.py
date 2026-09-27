@@ -412,7 +412,12 @@ class PrometheusCollector(BaseCollector):
     # Parsing methods _parse_cpu_data ... remain unchanged/same logic
 
     async def collect_range(
-        self, start, end, step: Optional[str] = None, query: Optional[str] = None
+        self,
+        start,
+        end,
+        step: Optional[str] = None,
+        query: Optional[str] = None,
+        allow_cpu_fallback: bool = True,
     ) -> List[Dict[str, Any]]:
         step = step or self.query_range_step
         q = query or self.cpu_usage_query
@@ -456,13 +461,17 @@ class PrometheusCollector(BaseCollector):
                     continue
 
                 results = data.get("data", {}).get("result", [])
-                if not results and "container_cpu_usage_seconds_total" in q and "container" in q:
-                    # Fallback for CPU query only: retry without container label
+                if not results and allow_cpu_fallback and "container_cpu_usage_seconds_total" in q and "container" in q:
+                    # Fallback for CPU query only: retry without container label.
+                    # The fallback query itself matches the condition above, so
+                    # disable the fallback on the retry to avoid infinite recursion.
                     fallback_query = (
                         f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
                         " by (namespace, pod, node)"
                     )
-                    return await self.collect_range(start, end, step=step, query=fallback_query)
+                    return await self.collect_range(
+                        start, end, step=step, query=fallback_query, allow_cpu_fallback=False
+                    )
 
                 return results
 
