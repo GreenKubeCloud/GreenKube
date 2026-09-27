@@ -11,7 +11,7 @@ The GreenKube REST API is available at `/api/v1`. Interactive documentation (Swa
 | `GET` | `/api/v1/config` | Current runtime configuration |
 | `GET` | `/api/v1/metrics` | Per-pod metrics (`?namespace=&last=24h`) |
 | `GET` | `/api/v1/metrics/summary` | Aggregated cluster summary (`?namespace=&last=24h`) |
-| `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=day&last=7d`) |
+| `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=hour&last=7d`) |
 | `GET` | `/api/v1/namespaces` | List of active namespaces |
 | `GET` | `/api/v1/nodes` | Cluster node inventory |
 | `GET` | `/api/v1/recommendations` | Generate and persist optimization recommendations (`?namespace=`) |
@@ -47,11 +47,10 @@ Used in timeseries and report endpoints:
 
 | Value | Description |
 |-------|-------------|
-| `hour` | Hourly buckets |
-| `day` | Daily buckets (default) |
+| `hour` | Hourly buckets (default) |
+| `day` | Daily buckets |
 | `week` | Weekly buckets |
 | `month` | Monthly buckets |
-| `year` | Yearly buckets |
 
 ## Examples
 

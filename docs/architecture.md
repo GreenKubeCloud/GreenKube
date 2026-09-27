@@ -202,7 +202,7 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Purpose:** Fetch hardware embodied emissions data
 - **API:** Boavizta API
 - **Caching:** Stores server impact profiles in `EmbodiedRepository`
-- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 350 kg CO₂e) and marks the metric as estimated
+- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 100 kg CO₂e) and marks the metric as estimated
 - **Emits:** Server impact data (GWP manufacture, lifespan)
 
 ### Estimator (Business Logic)
@@ -423,15 +423,14 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 #### **SvelteKit Dashboard**
 - **Location:** `frontend/`
-- **Framework:** SvelteKit (SSR + SPA)
+- **Framework:** SvelteKit, client-side SPA (`ssr = false`, `prerender = false` in `frontend/src/routes/+layout.js`)
 - **Build:** Vite with adapter-static
-- **Styling:** Tailwind CSS
+- **Styling:** Tailwind CSS (dark UI only — no light/dark theme switch)
 - **Charts:** ECharts for interactive visualizations
 - **Deployment:** Static build served by FastAPI at `/`
 
 **Pages:**
 - `/` — Dashboard (KPIs, charts, breakdown)
-- `/metrics` — Interactive metrics table
 - `/nodes` — Node inventory
 - `/recommendations` — Optimization recommendations
 - `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
@@ -440,9 +439,8 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 **Features:**
 - Client-side routing for smooth navigation
 - Responsive design (mobile-first)
-- Real-time data updates (polling)
+- Data fetched on page load/navigation — no polling or live push updates
 - Export functionality (CSV, JSON) — from the Report page
-- Theme support (light/dark)
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
 - **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
 - **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps) can be updated from the Settings page without restarting the pod
@@ -455,7 +453,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
   - `greenkube demo` — Launch demo mode with sample data
   - `greenkube version` — Show version info
 
-The REST API is started by the separate `greenkube-api` entry point.
+The REST API is started by the separate `greenkube-api` entry point (`greenkube.api.app:main`).
 
 #### **Grafana Integration**
 - **Dashboard:** `dashboards/greenkube-grafana.json`
@@ -625,7 +623,7 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `DEFAULT_ZONE` — Fallback carbon zone
 - `DEFAULT_INTENSITY` — Fallback intensity (gCO2e/kWh)
 - `NORMALIZATION_GRANULARITY` — hour|day|none
-- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 350 kg CO₂e)
+- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 100 kg CO₂e)
 
 **Recommendations:**
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 7

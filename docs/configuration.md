@@ -50,7 +50,7 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.boavizta.url` | `https://api.boavizta.org` | Boavizta API endpoint for embodied emissions |
-| `config.boavizta.defaultEmbodiedEmissionsKg` | `350` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
+| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 
@@ -106,19 +106,34 @@ monitoring:
     prometheusNamespace: monitoring
 ```
 
-### PostgreSQL StatefulSet (`postgresql`)
+### PostgreSQL StatefulSet (`postgres`)
 
 GreenKube ships with an optional bundled PostgreSQL StatefulSet. Adjust storage and credentials as needed:
 
 ```yaml
-postgresql:
+postgres:
   enabled: true
-  storage:
-    size: 5Gi
+  image:
+    repository: postgres
+    tag: 18-alpine
+    pullPolicy: IfNotPresent
   auth:
-    database: greenkube
     username: greenkube
-    # password is managed via secrets
+    # Leave empty to generate a random password on first install (preserved
+    # across upgrades), or set it explicitly.
+    password: ''
+    database: greenkube
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClassName: ''
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
 ```
 
 ## On-premises and bare-metal clusters

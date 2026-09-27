@@ -228,10 +228,6 @@ payload = json.dumps({
     }]
 }).encode()
 
-    ### Published dashboard on Grafana.com
-
-    A published version of the GreenKube dashboard is available on Grafana.com's dashboard repository: https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/.
-
 req = urllib.request.Request(
     "http://<GRAFANA_HOST>/api/dashboards/import",
     data=payload,
@@ -246,6 +242,10 @@ with urllib.request.urlopen(req) as r:
 
 Find your Prometheus datasource UID in Grafana → Connections → Data sources → select your
 Prometheus instance → copy the UID from the URL.
+
+### Published dashboard on Grafana.com
+
+A published version of the GreenKube dashboard is available on Grafana.com's dashboard repository: https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/.
 
 ### Template variables
 
@@ -270,9 +270,9 @@ Prometheus instance → copy the UID from the URL.
 
 > **Required Grafana plugin:** The Command Center row uses [Business Charts (volkovlabs-echarts-panel)](https://grafana.com/grafana/plugins/volkovlabs-echarts-panel/) v7.2.2+. Install it before importing the dashboard, otherwise the radar, footprint, impact, and action-priority panels will not render.
 
-### Grafana 12 compatibility
+### Grafana 10+ compatibility
 
-GreenKube's dashboard targets **Grafana 12**. Several non-obvious choices were required:
+GreenKube's dashboard targets **Grafana 10+**. Several non-obvious choices were required:
 
 | Issue | Root cause | Solution |
 |---|---|---|

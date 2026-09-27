@@ -14,7 +14,7 @@ authors = [
 description = "Open-source FinGreenOps platform for Kubernetes - measure CO2e emissions, energy usage, cloud costs, and get optimization recommendations."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 keywords = [
     "kubernetes",
     "carbon",
@@ -45,9 +45,6 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: System :: Monitoring",

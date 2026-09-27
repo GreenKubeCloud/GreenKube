@@ -6,7 +6,7 @@ Thank you for your interest in GreenKube! We welcome contributions of all kinds 
 
 ### Prerequisites
 
-- Python 3.10+ (we recommend 3.13+)
+- Python 3.13+
 - Node.js 20+ (for the frontend)
 - A Kubernetes cluster with Prometheus and OpenCost (for integration testing)
 
@@ -156,12 +156,12 @@ chore(deps): update httpx to 0.27
 
 ## Pull Request Process
 
-1. Fork the repository and create your branch from `main`
+1. Fork the repository and create your branch from `dev`
 2. Make your changes with appropriate tests
 3. Ensure the full test suite passes: `pytest`
 4. Ensure linting passes: `ruff check .`
 5. Update documentation if you changed behaviour
-6. Open a pull request with a clear description of what and why
+6. Open a pull request targeting `dev` with a clear description of what and why
 
 ## Reporting Bugs
 
