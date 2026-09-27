@@ -615,3 +615,43 @@ async def test_collect_range_cpu_fallback_returns_empty_without_recursion(collec
     start_time = end_time - timedelta(minutes=5)
 
     assert await collector.collect_range(start_time, end_time) == []
+
+
+@pytest.mark.asyncio
+async def test_collect_pod_storage_joins_pvc_metrics(collector):
+    """Per-pod PVC requests and usage are joined from the kube-state-metrics series."""
+
+    async def fake_query(client, query):
+        if query == "kube_pod_spec_volumes_persistentvolumeclaims_info":
+            return [
+                {"metric": {"namespace": "prod", "pod": "app-0", "persistentvolumeclaim": "data-app-0"}},
+                {"metric": {"namespace": "prod", "pod": "app-0", "persistentvolumeclaim": "logs-app-0"}},
+                {"metric": {"namespace": "dev", "pod": "worker-0", "persistentvolumeclaim": "data-worker-0"}},
+            ]
+        if query == "kube_persistentvolumeclaim_resource_requests_storage_bytes":
+            return [
+                {"metric": {"persistentvolumeclaim": "data-app-0"}, "value": [0, "10737418240"]},
+                {"metric": {"persistentvolumeclaim": "logs-app-0"}, "value": [0, "1073741824"]},
+                {"metric": {"persistentvolumeclaim": "data-worker-0"}, "value": [0, "5368709120"]},
+            ]
+        if query == "kubelet_volume_stats_used_bytes":
+            return [{"metric": {"persistentvolumeclaim": "data-app-0"}, "value": [0, "2147483648"]}]
+        return []
+
+    collector._get_client = AsyncMock(return_value=MagicMock())
+    collector._query_prometheus = AsyncMock(side_effect=fake_query)
+
+    storage = await collector.collect_pod_storage()
+
+    assert storage[("prod", "app-0")]["request"] == pytest.approx(11811160064.0)
+    assert storage[("prod", "app-0")]["usage"] == pytest.approx(2147483648.0)
+    assert storage[("dev", "worker-0")]["request"] == pytest.approx(5368709120.0)
+    assert storage[("dev", "worker-0")]["usage"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_collect_pod_storage_returns_empty_on_prometheus_error(collector):
+    collector._get_client = AsyncMock(return_value=MagicMock())
+    collector._query_prometheus = AsyncMock(side_effect=RuntimeError("prometheus down"))
+
+    assert await collector.collect_pod_storage() == {}

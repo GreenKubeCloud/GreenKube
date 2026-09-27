@@ -409,6 +409,58 @@ class PrometheusCollector(BaseCollector):
                     self.verify = old_verify
         return False
 
+    async def collect_pod_storage(self) -> Dict[tuple, Dict[str, float]]:
+        """Collect per-pod persistent storage request/usage from kube-state-metrics.
+
+        Joins ``kube_pod_spec_volumes_persistentvolumeclaims_info`` (pod → PVC)
+        with ``kube_persistentvolumeclaim_resource_requests_storage_bytes``
+        (PVC → requested bytes) and, when the kubelet exposes it,
+        ``kubelet_volume_stats_used_bytes`` (PVC → used bytes).
+
+        Returns ``{(namespace, pod): {"request": bytes, "usage": bytes}}``.
+        This is best-effort: clusters without kube-state-metrics return ``{}``.
+        """
+        client = await self._get_client()
+        try:
+            mapping = await self._query_prometheus(client, "kube_pod_spec_volumes_persistentvolumeclaims_info")
+            requests = await self._query_prometheus(
+                client, "kube_persistentvolumeclaim_resource_requests_storage_bytes"
+            )
+            usage = await self._query_prometheus(client, "kubelet_volume_stats_used_bytes")
+        except Exception as e:
+            logger.warning("Failed to collect pod storage metrics from Prometheus: %s", e)
+            return {}
+
+        def _pvc_values(results: List[Dict[str, Any]]) -> Dict[str, float]:
+            values: Dict[str, float] = {}
+            for item in results:
+                metric = item.get("metric", {}) or {}
+                pvc = metric.get("persistentvolumeclaim")
+                value_str = item.get("value", [None, None])[1]
+                if not pvc or value_str is None:
+                    continue
+                try:
+                    values[pvc] = float(value_str)
+                except (TypeError, ValueError):
+                    continue
+            return values
+
+        request_by_pvc = _pvc_values(requests)
+        usage_by_pvc = _pvc_values(usage)
+
+        pod_storage: Dict[tuple, Dict[str, float]] = {}
+        for item in mapping:
+            metric = item.get("metric", {}) or {}
+            ns = metric.get("namespace")
+            pod = metric.get("pod")
+            pvc = metric.get("persistentvolumeclaim")
+            if not (ns and pod and pvc):
+                continue
+            entry = pod_storage.setdefault((ns, pod), {"request": 0.0, "usage": 0.0})
+            entry["request"] += request_by_pvc.get(pvc, 0.0)
+            entry["usage"] += usage_by_pvc.get(pvc, 0.0)
+        return pod_storage
+
     # Parsing methods _parse_cpu_data ... remain unchanged/same logic
 
     async def collect_range(
