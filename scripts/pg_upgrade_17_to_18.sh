@@ -7,6 +7,10 @@
 # Usage:
 #   ./scripts/pg_upgrade_17_to_18.sh [NAMESPACE]
 #
+# Environment overrides:
+#   PVC_NAME              PostgreSQL data PVC (default: data-greenkube-postgres-0)
+#   SECRET_NAME           Secret holding POSTGRES_PASSWORD (default: greenkube)
+#
 # Prerequisites:
 #   - kubectl configured against the target cluster
 #   - The greenkube Helm release must be uninstalled (postgres pod stopped)
@@ -27,7 +31,8 @@ set -euo pipefail
 
 NAMESPACE="${1:-greenkube}"
 JOB_NAME="postgres-upgrade-17-18"
-PVC_NAME="data-greenkube-postgres-0"
+PVC_NAME="${PVC_NAME:-data-greenkube-postgres-0}"
+SECRET_NAME="${SECRET_NAME:-greenkube}"
 
 echo "==> Checking prerequisites..."
 kubectl get pvc "${PVC_NAME}" -n "${NAMESPACE}" > /dev/null
@@ -44,7 +49,7 @@ kubectl delete job "${JOB_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
 kubectl wait --for=delete job/"${JOB_NAME}" -n "${NAMESPACE}" --timeout=60s 2>/dev/null || true
 
 echo "==> Creating pg_upgrade Job..."
-cat <<'JOBEOF' | sed "s/@@PVC_NAME@@/${PVC_NAME}/g" | kubectl apply -n "${NAMESPACE}" -f -
+cat <<'JOBEOF' | sed "s/@@PVC_NAME@@/${PVC_NAME}/g; s/@@SECRET_NAME@@/${SECRET_NAME}/g" | kubectl apply -n "${NAMESPACE}" -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -73,6 +78,14 @@ spec:
         - name: pg-upgrade
           image: postgres:18-alpine
           imagePullPolicy: IfNotPresent
+          env:
+            # The upgrade job must use the same password as the Helm Secret,
+            # otherwise the re-installed application cannot authenticate.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: @@SECRET_NAME@@
+                  key: POSTGRES_PASSWORD
           securityContext:
             runAsUser: 0
           command:
@@ -99,11 +112,13 @@ spec:
               OLD_BIN=/usr/libexec/postgresql17
               NEW_BIN=/usr/libexec/postgresql
 
-              # Create a temp password file for initdb
+              # Create a temp password file for initdb from the injected env var.
               PWFILE=/var/lib/postgresql/data/.pgpassword
-              grep -q 'POSTGRES_PASSWORD' /proc/1/environ 2>/dev/null && \
-                cat /proc/1/environ | tr '\0' '\n' | grep '^POSTGRES_PASSWORD=' | cut -d= -f2 > "${PWFILE}" || \
-                echo "changeme" > "${PWFILE}"
+              printf '%s' "${POSTGRES_PASSWORD:-}" > "${PWFILE}"
+              if [ ! -s "${PWFILE}" ]; then
+                echo "ERROR: POSTGRES_PASSWORD is empty (check Secret ${SECRET_NAME:-}). Aborting."
+                exit 1
+              fi
               chown 70:70 "${PWFILE}"
               chmod 600 "${PWFILE}"
 
@@ -134,6 +149,10 @@ spec:
               rm -f "${PWFILE}"
 
               # Atomic swap: old → backup, new → active
+              if [ -e /var/lib/postgresql/data/pgdata_pg17_bak ]; then
+                echo "ERROR: /var/lib/postgresql/data/pgdata_pg17_bak already exists. Remove it before re-running."
+                exit 1
+              fi
               mv "${OLD_DATA}" /var/lib/postgresql/data/pgdata_pg17_bak
               mv "${NEW_DATA}" "${OLD_DATA}"
 
