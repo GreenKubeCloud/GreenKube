@@ -5,7 +5,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 from .. import __version__
 from ..collectors.node_collector import NodeCollector
@@ -80,6 +80,15 @@ class HistoricalRangeProcessor:
     # Public API
     # ------------------------------------------------------------------
 
+    async def _read_stored_metrics(
+        self, start_dt: datetime, end_dt: datetime, namespace: Optional[str]
+    ) -> List[CombinedMetric]:
+        """Read stored metrics for the range, filtered by namespace when requested."""
+        stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
+        if namespace:
+            stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
+        return stored_metrics
+
     async def run_range(
         self,
         start,
@@ -107,7 +116,7 @@ class HistoricalRangeProcessor:
                 end_dt = end
 
             if start_dt and end_dt:
-                stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
+                stored_metrics = await self._read_stored_metrics(start_dt, end_dt, namespace)
                 if stored_metrics:
                     logger.info(
                         "Found %d stored metrics in repository for range %s - %s",
@@ -115,8 +124,6 @@ class HistoricalRangeProcessor:
                         start,
                         end,
                     )
-                    if namespace:
-                        stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
                     return stored_metrics
         except Exception as e:
             logger.warning("Failed to read stored metrics: %s", e)
