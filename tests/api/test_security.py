@@ -3,6 +3,7 @@
 Tests for API security hardening: headers, CORS, rate limiting, auth.
 """
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -14,6 +15,20 @@ from greenkube.api.dependencies import (
     get_node_repository,
     get_recommendation_repository,
 )
+
+API_KEY = "test-secret-key"
+
+
+@contextmanager
+def _secured_app(monkeypatch):
+    """Yield a TestClient for an app configured with an API key."""
+    monkeypatch.setenv("GREENKUBE_API_KEY", API_KEY)
+    from greenkube.core.config import Config
+
+    test_cfg = Config()
+    with patch("greenkube.core.config.config", test_cfg):
+        with patch("greenkube.core.config.get_config", return_value=test_cfg):
+            yield TestClient(create_app())
 
 
 class TestSecurityHeaders:
@@ -124,6 +139,35 @@ class TestAPIKeyAuth:
                         assert resp.status_code == 200
 
                     app.dependency_overrides.clear()
+
+    def test_valid_bearer_key_is_accepted(self, monkeypatch):
+        """A correct `Authorization: Bearer <key>` header is accepted."""
+        with _secured_app(monkeypatch) as c:
+            resp = c.get("/api/v1/version", headers={"Authorization": f"Bearer {API_KEY}"})
+        assert resp.status_code == 200
+
+    def test_raw_key_without_bearer_is_rejected(self, monkeypatch):
+        """The key must be sent with the Bearer scheme."""
+        with _secured_app(monkeypatch) as c:
+            resp = c.get("/api/v1/version", headers={"Authorization": API_KEY})
+        assert resp.status_code == 401
+
+    def test_wrong_scheme_is_rejected(self, monkeypatch):
+        with _secured_app(monkeypatch) as c:
+            resp = c.get("/api/v1/version", headers={"Authorization": f"Token {API_KEY}"})
+        assert resp.status_code == 401
+
+    def test_health_services_requires_api_key(self, monkeypatch):
+        """The health-services endpoint leaks URLs/errors and must not be public."""
+        with _secured_app(monkeypatch) as c:
+            resp = c.get("/api/v1/health/services")
+        assert resp.status_code == 401
+
+    def test_prometheus_metrics_requires_api_key(self, monkeypatch):
+        """The Prometheus exposition endpoint must be protected when a key is set."""
+        with _secured_app(monkeypatch) as c:
+            assert c.get("/prometheus/metrics").status_code == 401
+            assert c.get("/prometheus/metrics", headers={"Authorization": f"Bearer {API_KEY}"}).status_code == 200
 
 
 class TestInputValidation:

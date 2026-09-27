@@ -9,6 +9,7 @@ concrete implementations.
 
 import logging
 import re
+import secrets
 from typing import Optional
 
 from fastapi import HTTPException, Query, Request
@@ -29,15 +30,19 @@ logger = logging.getLogger(__name__)
 _NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
+# Public API paths that never require the API key (exact matches only).
+_PUBLIC_API_PATHS = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
+
+
 def verify_api_key(request: Request) -> None:
     """Verify the API key if ``GREENKUBE_API_KEY`` is configured.
 
     When the env var is empty the check is skipped (open access).
-    Only API routes (``/api/v1/*``) are subject to the key check; the
-    SPA frontend and static assets are always served without auth so the
-    browser-based dashboard renders correctly even when an API key is set.
-    Public endpoints (``/health``, ``/docs``, ``/openapi.json``) are always
-    exempt regardless.
+    Protected routes are ``/api/v1/*`` and ``/prometheus/metrics``; the
+    SPA static files are always public. Only three exact paths are exempt
+    from authentication: the liveness endpoint, the docs and the OpenAPI
+    schema. Credentials must be sent as ``Authorization: Bearer <key>`` and
+    are compared in constant time.
     """
     from greenkube.core.config import get_config
 
@@ -47,22 +52,28 @@ def verify_api_key(request: Request) -> None:
 
     path = request.url.path
 
-    # SPA frontend, static assets, and operational endpoints never require
-    # the API key — the key is only for programmatic access to /api/v1/*.
-    if not path.startswith("/api/v1/"):
+    # SPA frontend and static assets never require the API key.
+    if not path.startswith("/api/v1/") and path != "/prometheus/metrics":
         return
 
-    # Allow public/operational API endpoints without auth
-    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
-    if any(path.startswith(p) for p in exempt):
+    # Public operational endpoints (exact match: /health/services is not public).
+    if path in _PUBLIC_API_PATHS:
         return
 
-    token = request.headers.get("Authorization", "")
-    if token.startswith("Bearer "):
-        token = token[7:]
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    if token != api_key:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    if not secrets.compare_digest(token, api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def validate_namespace(
