@@ -106,7 +106,7 @@ class SavingsAttributor:
                     cluster_name=self._cluster,
                     namespace=rec.namespace or "",
                     recommendation_type=rec_type,
-                    co2e_saved_grams=annual_co2e * factor,
+                    co2e_saved_grams=(annual_co2e or 0.0) * factor,
                     cost_saved_dollars=(annual_cost or 0.0) * factor,
                     period_seconds=period_seconds,
                     timestamp=now,

@@ -103,10 +103,10 @@ class TestVerifierOutcomes:
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
             # After: 0.01 per 5-min sample; before: 0.05 per sample -> ~80% drop.
-            FakeCombinedRepo(
+            FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
                 [_metric(cost=0.01, co2=0.5, cpu=200)],
                 before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
-            ),  # pyrefly: ignore[bad-argument-type]
+            ),
             config=_config(),
         )
 
@@ -125,10 +125,10 @@ class TestVerifierOutcomes:
         await repo.save_recommendations([_applied_record(applied_at, projected_co2=0.0001)])
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo(
+            FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
                 [_metric(cost=0.01, co2=0.5, cpu=200)],
                 before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
-            ),  # pyrefly: ignore[bad-argument-type]
+            ),
             config=_config(),
         )
 
