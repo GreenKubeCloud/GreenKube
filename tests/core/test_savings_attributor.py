@@ -189,9 +189,7 @@ class TestSavingsAttributorMeasured:
 
     def test_verified_cost_only_record_is_attributed(self):
         """A verified record with zero measured CO2 but positive cost is written."""
-        rec = self._verified_rec().model_copy(
-            update={"measured_co2e_saved_grams": 0.0, "measured_cost_saved": 25.0}
-        )
+        rec = self._verified_rec().model_copy(update={"measured_co2e_saved_grams": 0.0, "measured_cost_saved": 25.0})
         attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
         records = attributor._compute_period_records([rec], period_seconds=3600)
 
