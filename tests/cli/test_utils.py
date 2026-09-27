@@ -142,28 +142,3 @@ async def test_write_combined_metrics_to_database_ignores_gauge_update_failure()
 
     repo.write_combined_metrics.assert_awaited_once_with([metric])
     processor.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_read_combined_metrics_from_database_filters_namespace():
-    repo = MagicMock()
-    repo.read_combined_metrics = AsyncMock(return_value=[_metric("prod"), _metric("dev")])
-    start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
-    end = datetime(2026, 4, 30, 11, 0, tzinfo=timezone.utc)
-
-    with patch("greenkube.cli.utils.get_combined_metrics_repository", return_value=repo):
-        data = await utils.read_combined_metrics_from_database(start, end, namespace="prod")
-
-    assert [item.namespace for item in data] == ["prod"]
-    repo.read_combined_metrics.assert_awaited_once_with(start_time=start, end_time=end)
-
-
-@pytest.mark.asyncio
-async def test_read_combined_metrics_from_database_returns_empty_on_error():
-    with patch("greenkube.cli.utils.get_combined_metrics_repository", side_effect=RuntimeError("db down")):
-        data = await utils.read_combined_metrics_from_database(
-            datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc),
-            datetime(2026, 4, 30, 11, 0, tzinfo=timezone.utc),
-        )
-
-    assert data == []

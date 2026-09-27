@@ -2,18 +2,10 @@
 """
 GreenKube CLI Package
 
-This package exposes the top-level Typer `app` so tests and the console
-entrypoint can import `greenkube.cli.app` as before the refactor.
+This package exposes the top-level Typer `app` so the console
+entrypoint can import `greenkube.cli.app`.
 """
 
-import logging
-
-from ..core.processor import DataProcessor
-
-# Re-export commonly patched symbols for tests
-from ..reporters.console_reporter import ConsoleReporter
 from .main import app
 
-logger = logging.getLogger(__name__)
-
-__all__ = ["app", "ConsoleReporter", "DataProcessor"]
+__all__ = ["app"]

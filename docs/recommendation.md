@@ -57,7 +57,7 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 6. Recommended CPU and memory requests are floored to configured minimums.
 7. API and startup paths convert recommendations to `RecommendationRecord` objects, upsert active records, and reconcile missing active records as stale.
 
-The CLI `greenkube recommend` uses the same engine, but it is a reporting command: it prints recommendations and can fail a CI/CD gate, but it does not persist lifecycle records or update recommendation statuses.
+The API and frontend are the only consumers of the engine; there is no CLI reporting command.
 
 ## Sources, Evidence And Ranking
 
@@ -168,18 +168,12 @@ curl -X PATCH "http://localhost:8000/api/v1/recommendations/42/ignore" \
 curl -X DELETE "http://localhost:8000/api/v1/recommendations/42/ignore"
 ```
 
-## CLI Usage
+## Lifecycle Mutations
 
-```bash
-greenkube recommend
-greenkube recommend --namespace production
-greenkube recommend --live
-greenkube recommend --fail-on-recommendations
-```
-
-By default, the CLI reads stored metrics from the database over `RECOMMENDATION_LOOKBACK_DAYS`. With `--live`, it runs the full processor pipeline before generating recommendations. With `--fail-on-recommendations`, it exits with code 1 when at least one recommendation is found, which is useful for CI/CD policy gates.
-
-The CLI does not expose lifecycle mutations. Use the API to apply, ignore, or restore recommendations.
+Use the API to apply, ignore, or restore recommendations, and the dashboard to browse them:
+`GET /api/v1/recommendations/active`, `PATCH /api/v1/recommendations/{id}/apply`,
+`PATCH /api/v1/recommendations/{id}/ignore` and `DELETE /api/v1/recommendations/{id}/ignore`.
+The CLI no longer exposes report or recommendation commands.
 
 ## Frontend Usage
 

@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SQLite/PostgreSQL recommendation repositories:** Insert/update statements are generated from a shared column definition, removing placeholder drift between backends.
 - **Verification rates are sample-normalized:** before/after cost and carbon rates now use the observed sample duration (sample count x query step) instead of the wall-clock window, so verification behaves correctly when collection is sparse (e.g. a freshly installed instance).
 
+### Removed
+- **Interactive CLI report and recommendation commands:** `greenkube report` and `greenkube recommend` have been removed, together with the `exporters`, `reporters` and `models.cli` modules and the `--no-color` global flag. Reporting and recommendations are available exclusively through the REST API and the dashboard. The CLI now only exposes `start`, `demo` and `version`.
+
 ### Fixed
 - **Apply detection no longer fires on missing requests:** a live workload with no CPU/memory request (observed `0`) is not treated as an applied change.
 - **Verified cost-only savings are attributed:** a verified recommendation with zero measured CO2e but positive measured cost now writes a `measured` ledger row instead of being skipped.

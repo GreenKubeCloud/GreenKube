@@ -441,7 +441,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - Client-side routing for smooth navigation
 - Responsive design (mobile-first)
 - Real-time data updates (polling)
-- Export functionality (CSV, JSON) — both from the Report page and via the CLI
+- Export functionality (CSV, JSON) — from the Report page
 - Theme support (light/dark)
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
 - **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
@@ -449,14 +449,13 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 #### **CLI**
 - **Location:** `src/greenkube/cli/`
-- **Framework:** Typer with Rich for formatting
+- **Framework:** Typer
 - **Commands:**
-  - `greenkube report` — Generate reports with filtering
-  - `greenkube recommend` — Get optimization recommendations
-  - `greenkube start` — Run as background service
-  - `greenkube api` — Start API server
+  - `greenkube start` — Run the collector and scheduler as a background service
   - `greenkube demo` — Launch demo mode with sample data
   - `greenkube version` — Show version info
+
+The REST API is started by the separate `greenkube-api` entry point.
 
 #### **Grafana Integration**
 - **Dashboard:** `dashboards/greenkube-grafana.json`

@@ -31,20 +31,6 @@ def parse_last_duration(last: str) -> timedelta:
         raise typer.BadParameter(str(exc)) from exc
 
 
-def get_report_time_range(last: Optional[str] = None) -> tuple[datetime, datetime]:
-    """
-    Calculates the start and end time for a report.
-    If 'last' is provided, start = end - duration.
-    Otherwise, defaults to last 24 hours.
-    """
-    end = datetime.now(timezone.utc)
-    if last:
-        start = end - parse_last_duration(last)
-    else:
-        start = end - timedelta(days=1)
-    return start, end
-
-
 def get_normalized_window() -> tuple[datetime, datetime]:
     """
     Calculates a consistent, non-overlapping query window based on the configured step.
@@ -112,25 +98,3 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> None
             await processor.close()
 
     logger.info("--- Finished combined metrics collection task ---")
-
-
-async def read_combined_metrics_from_database(
-    start: datetime, end: datetime, namespace: Optional[str] = None
-) -> List[CombinedMetric]:
-    """
-    Reads combined metrics from the database within a given time range and optional namespace.
-    """
-    logger.info("--- Reading combined metrics from %s to %s ---", start, end)
-    try:
-        combined_metrics_repo = get_combined_metrics_repository()
-        data = await combined_metrics_repo.read_combined_metrics(start_time=start, end_time=end)
-        logger.info("Found %d combined metrics records.", len(data))
-
-        # Filter by namespace if provided
-        if namespace:
-            data = [item for item in data if item.namespace == namespace]
-
-        return data
-    except Exception as e:
-        logger.error("Failed to read combined metrics from database: %s", e)
-        return []

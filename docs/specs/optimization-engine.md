@@ -179,7 +179,7 @@ OptimizationEngine.refresh(namespace, persist=True)
 ```
 
 `OptimizationEngine.generate(context)` exposes steps 1–6 without persistence for
-the CLI (`greenkube recommend` remains a read-only reporting command).
+non-persisting callers (tests, previews, embedding applications).
 
 Source failures are isolated: one failing connector logs a warning and yields an
 empty list; the pipeline never crashes because VPA or Karpenter is unavailable.
