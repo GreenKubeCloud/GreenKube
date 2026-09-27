@@ -11,6 +11,13 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: 0.3.0
 
+# Init container used to wait for the bundled PostgreSQL before starting.
+initContainer:
+  image:
+    repository: busybox
+    tag: "1.37"
+    pullPolicy: IfNotPresent
+
 serviceAccount:
   # Specifies whether a service account should be created
   create: true

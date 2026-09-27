@@ -41,6 +41,28 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       {{- end }}
+      # Wait for the bundled PostgreSQL to accept connections. Without this,
+      # the collector exits on the first connect timeout when the database
+      # pod is still initializing (e.g. on a fresh install).
+      {{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}
+          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - sh
+            - -c
+            - until nc -z {{ include "greenkube.fullname" . }}-postgres 5432; do echo waiting for postgres; sleep 2; done
+        {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
