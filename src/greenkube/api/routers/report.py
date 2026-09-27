@@ -363,8 +363,8 @@ def _rows_to_csv(rows: list) -> str:
 
 
 def _sanitize_cell(value) -> str:
-    """Prevent CSV formula injection."""
+    """Prevent CSV formula injection, including leading-whitespace bypasses."""
     s = str(value) if value is not None else ""
-    if s.startswith(("=", "+", "-", "@")):
+    if s.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
         return f"'{s}"
     return s

@@ -6,6 +6,8 @@ import io
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+import pytest
+
 from greenkube.models.metrics import CombinedMetric
 
 
@@ -372,3 +374,22 @@ class TestReportInternalHelpers:
         """When end is before start the summary endpoint must return 400."""
         response = client.get("/api/v1/report/summary?start=2025-06-01&end=2025-01-01")
         assert response.status_code == 400
+
+
+class TestCsvSanitization:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("=1+1", "'=1+1"),
+            ("  =cmd", "'  =cmd"),
+            ("\t@cmd", "'\t@cmd"),
+            ("\r+cmd", "'\r+cmd"),
+            ("-10", "'-10"),
+            ("normal", "normal"),
+            ("", ""),
+        ],
+    )
+    def test_sanitize_cell_blocks_formula_injection(self, value, expected):
+        from greenkube.api.routers.report import _sanitize_cell
+
+        assert _sanitize_cell(value) == expected
