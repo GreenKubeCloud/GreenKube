@@ -13,6 +13,7 @@
 		getRecommendationEvents
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
+	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
 	import DataState from '$lib/components/DataState.svelte';
 
 	// --- State ---
@@ -635,10 +636,15 @@
 
 											{#if eventsByRec[rec.id]}
 												<div class="space-y-1 border-t border-dark-700 pt-2">
-													{#each eventsByRec[rec.id] as event}
+													{#each groupConsecutiveEvents(eventsByRec[rec.id]) as event}
 														<p class="text-[11px] text-dark-400">
-															<span class="text-dark-600">{new Date(event.created_at).toLocaleString()}</span>
+															<span class="text-dark-600">
+																{new Date(event.first.created_at).toLocaleString()}{#if event.count > 1} → {new Date(event.last.created_at).toLocaleString()}{/if}
+															</span>
 															• <span class="text-dark-200">{event.event_type}</span>
+															{#if event.count > 1}
+																<span class="text-dark-600">×{event.count}</span>
+															{/if}
 															<span class="text-dark-600">by {event.actor}</span>
 														</p>
 													{/each}
