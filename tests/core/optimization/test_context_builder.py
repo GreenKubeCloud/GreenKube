@@ -81,16 +81,15 @@ def mock_active_namespaces():
 
 
 class TestBuild:
-    async def test_empty_metrics_returns_empty_context_without_side_inputs(
-        self, combined_repo, node_repo, mock_side_collectors
-    ):
+    async def test_empty_metrics_still_collects_side_inputs(self, combined_repo, node_repo, mock_side_collectors):
         builder = ContextBuilder(get_config())
         context = await builder.build(combined_repo, node_repo)
 
         assert context.metrics == []
         assert context.analysis_window_seconds is not None
-        node_repo.get_latest_snapshots_before.assert_not_awaited()
-        mock_side_collectors[0].return_value.collect.assert_not_awaited()
+        # Orphaned PV/LB detection must not depend on pod metrics.
+        node_repo.get_latest_snapshots_before.assert_awaited()
+        mock_side_collectors[0].return_value.collect.assert_awaited()
 
     async def test_filters_metrics_from_inactive_namespaces(self, combined_repo, node_repo, mock_active_namespaces):
         combined_repo.read_combined_metrics_smart = AsyncMock(
@@ -164,7 +163,8 @@ class TestBuildFromMetrics:
         context = await builder.build_from_metrics([], node_repo)
 
         assert context.metrics == []
-        node_repo.get_latest_snapshots_before.assert_not_awaited()
+        # Side inputs are still collected for orphaned PV/LB analysis.
+        node_repo.get_latest_snapshots_before.assert_awaited()
 
     async def test_collects_side_inputs(self, node_repo):
         node_repo.get_latest_snapshots_before = AsyncMock(return_value=[_node()])

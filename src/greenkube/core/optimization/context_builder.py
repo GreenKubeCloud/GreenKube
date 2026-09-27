@@ -80,6 +80,10 @@ class ContextBuilder:
         if namespace and metrics:
             metrics = [m for m in metrics if m.namespace == namespace]
 
+        # Collect side inputs even when there are no pod metrics: orphaned
+        # PV/LB recommendations do not depend on pod activity.
+        side_inputs = await self._collect_side_inputs(node_repo, end)
+
         if not metrics:
             return OptimizationContext(
                 config=cfg,
@@ -88,9 +92,9 @@ class ContextBuilder:
                 analysis_window_seconds=analysis_window_seconds,
                 window_start=start,
                 window_end=end,
+                **side_inputs,
             )
 
-        side_inputs = await self._collect_side_inputs(node_repo, end)
         return OptimizationContext(
             config=cfg,
             metrics=metrics,
@@ -115,6 +119,10 @@ class ContextBuilder:
         if namespace:
             metrics = [m for m in metrics if m.namespace == namespace]
 
+        # Collect side inputs even when there are no pod metrics: orphaned
+        # PV/LB recommendations do not depend on pod activity.
+        side_inputs = await self._collect_side_inputs(node_repo, end)
+
         if not metrics:
             return OptimizationContext(
                 config=cfg,
@@ -122,9 +130,9 @@ class ContextBuilder:
                 namespace=namespace,
                 analysis_window_seconds=analysis_window_seconds,
                 window_end=end,
+                **side_inputs,
             )
 
-        side_inputs = await self._collect_side_inputs(node_repo, end)
         return OptimizationContext(
             config=cfg,
             metrics=metrics,
