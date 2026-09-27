@@ -373,10 +373,11 @@ async def _async_start(last: Optional[str]):
         getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
         skip_initial=True,
     )
-    # Compress old raw metrics into hourly aggregates every hour
-    scheduler.add_job(compress_metrics, interval_hours=1)
+    # Compress old raw metrics into hourly aggregates every hour.
+    # skip_initial=True because both jobs are awaited once in the startup block below.
+    scheduler.add_job(compress_metrics, interval_hours=1, skip_initial=True)
     # Refresh pre-computed dashboard summary every hour (after compression)
-    scheduler.add_job(refresh_dashboard_summary, interval_hours=1)
+    scheduler.add_job(refresh_dashboard_summary, interval_hours=1, skip_initial=True)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")

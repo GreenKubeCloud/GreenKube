@@ -28,6 +28,7 @@ class Scheduler:
         """Internal loop to run a job periodically with jitter and exponential backoff."""
         consecutive_failures = 0
         first_run = True
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 if first_run and skip_initial:
@@ -35,7 +36,7 @@ class Scheduler:
                     await asyncio.sleep(interval_seconds)
                     continue
                 first_run = False
-                start = asyncio.get_event_loop().time()
+                start = loop.time()
                 try:
                     await job_func()
                     consecutive_failures = 0
@@ -45,17 +46,19 @@ class Scheduler:
 
                 # Calculate how long to sleep.
                 # On success: sleep until next_run = start + interval (± jitter).
-                # On failure: apply exponential backoff capped at _MAX_BACKOFF_MULTIPLIER × interval.
-                elapsed = asyncio.get_event_loop().time() - start
-                base_sleep = max(interval_seconds - elapsed, 0)
+                # On failure: wait at least interval × 2^failures (capped at
+                # _MAX_BACKOFF_MULTIPLIER × interval) so a failing or overrunning
+                # job cannot degenerate into a 1-second hot loop.
+                elapsed = loop.time() - start
+                sleep_time = max(interval_seconds - elapsed, 0)
 
                 if consecutive_failures > 0:
-                    backoff = min(2**consecutive_failures, _MAX_BACKOFF_MULTIPLIER)
-                    base_sleep = min(base_sleep * backoff, interval_seconds * _MAX_BACKOFF_MULTIPLIER)
+                    backoff_multiplier = min(2**consecutive_failures, _MAX_BACKOFF_MULTIPLIER)
+                    sleep_time = max(sleep_time, interval_seconds * backoff_multiplier)
 
                 # Add ±10% jitter to spread load across replicas
-                jitter = base_sleep * 0.1 * (2 * random.random() - 1)
-                sleep_time = max(base_sleep + jitter, 1.0)
+                jitter = sleep_time * 0.1 * (2 * random.random() - 1)
+                sleep_time = max(sleep_time + jitter, 1.0)
 
                 await asyncio.sleep(sleep_time)
         except asyncio.CancelledError:
@@ -87,6 +90,11 @@ class Scheduler:
         if interval_seconds > 0:
             task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
             self.tasks.append(task)
+        else:
+            logger.warning(
+                "Job '%s' was not scheduled: provide a positive interval_hours or interval_minutes.",
+                job_func.__name__,
+            )
 
     def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str, skip_initial: bool = False):
         """
@@ -97,6 +105,8 @@ class Scheduler:
             raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
 
         value, unit = int(match.group(1)), match.group(2)
+        if value <= 0:
+            raise ValueError(f"Interval must be greater than zero: '{interval_str}'.")
         multipliers = {"s": 1, "m": 60, "h": 3600}
         interval_seconds = value * multipliers[unit]
 

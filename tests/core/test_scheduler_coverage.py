@@ -214,3 +214,35 @@ class TestRunPeriodically:
 
         # Job should not have run at all within the short window
         assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_failure_backoff_waits_at_least_the_interval(monkeypatch):
+    """A failing job must back off, never retry in a 1-second hot loop."""
+    scheduler = Scheduler()
+    sleeps: list[float] = []
+
+    async def failing_job():
+        raise RuntimeError("boom")
+
+    async def fake_sleep(duration):
+        sleeps.append(duration)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("greenkube.core.scheduler.asyncio.sleep", fake_sleep)
+    task = asyncio.create_task(scheduler._run_periodically(10, failing_job))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sleeps
+    assert sleeps[0] >= 15  # 2 × interval floor minus at most 10 % jitter
+
+
+def test_add_job_from_string_rejects_zero_interval():
+    scheduler = Scheduler()
+
+    async def noop():
+        pass
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        scheduler.add_job_from_string(noop, "0m")
