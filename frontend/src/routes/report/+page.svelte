@@ -118,16 +118,21 @@
 			? `${customStart} to ${customEnd}`
 			: (timeRanges.find(r => r.value === last)?.label ?? last);
 
+	let summarySeq = 0;
+
 	async function refreshSummary() {
+		const seq = ++summarySeq;
 		loading = true;
 		error = null;
 		summary = null;
 		try {
-			summary = await getReportSummary(reportParams);
+			const result = await getReportSummary(reportParams);
+			if (seq !== summarySeq) return;
+			summary = result;
 		} catch (e) {
-			error = e.message;
+			if (seq === summarySeq) error = e.message;
 		} finally {
-			loading = false;
+			if (seq === summarySeq) loading = false;
 		}
 	}
 

@@ -6,6 +6,8 @@ import io
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+import pytest
+
 from greenkube.models.metrics import CombinedMetric
 
 
@@ -232,6 +234,15 @@ class TestReportExportEndpoint:
         response = client.get("/api/v1/report/export?aggregate=true&granularity=quarterly")
         assert response.status_code == 400
 
+    def test_export_invalid_last_returns_400(self, client):
+        """An invalid time range must fail before the stream starts."""
+        response = client.get("/api/v1/report/export?last=not-a-range")
+        assert response.status_code == 400
+
+    def test_export_custom_range_missing_end_returns_400(self, client):
+        response = client.get("/api/v1/report/export?start=2026-01-01")
+        assert response.status_code == 400
+
     def test_export_csv_content_disposition(self, client):
         """Response should include a Content-Disposition header for download."""
         response = client.get("/api/v1/report/export?format=csv")
@@ -363,3 +374,22 @@ class TestReportInternalHelpers:
         """When end is before start the summary endpoint must return 400."""
         response = client.get("/api/v1/report/summary?start=2025-06-01&end=2025-01-01")
         assert response.status_code == 400
+
+
+class TestCsvSanitization:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("=1+1", "'=1+1"),
+            ("  =cmd", "'  =cmd"),
+            ("\t@cmd", "'\t@cmd"),
+            ("\r+cmd", "'\r+cmd"),
+            ("-10", "'-10"),
+            ("normal", "normal"),
+            ("", ""),
+        ],
+    )
+    def test_sanitize_cell_blocks_formula_injection(self, value, expected):
+        from greenkube.api.routers.report import _sanitize_cell
+
+        assert _sanitize_cell(value) == expected

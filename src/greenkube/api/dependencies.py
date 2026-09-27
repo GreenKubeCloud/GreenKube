@@ -7,9 +7,12 @@ via FastAPI's Depends() mechanism, keeping the API layer decoupled from
 concrete implementations.
 """
 
+import ipaddress
 import logging
 import re
+import secrets
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Query, Request
 
@@ -29,15 +32,19 @@ logger = logging.getLogger(__name__)
 _NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
+# Public API paths that never require the API key (exact matches only).
+_PUBLIC_API_PATHS = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
+
+
 def verify_api_key(request: Request) -> None:
     """Verify the API key if ``GREENKUBE_API_KEY`` is configured.
 
     When the env var is empty the check is skipped (open access).
-    Only API routes (``/api/v1/*``) are subject to the key check; the
-    SPA frontend and static assets are always served without auth so the
-    browser-based dashboard renders correctly even when an API key is set.
-    Public endpoints (``/health``, ``/docs``, ``/openapi.json``) are always
-    exempt regardless.
+    Protected routes are ``/api/v1/*`` and ``/prometheus/metrics``; the
+    SPA static files are always public. Only three exact paths are exempt
+    from authentication: the liveness endpoint, the docs and the OpenAPI
+    schema. Credentials must be sent as ``Authorization: Bearer <key>`` and
+    are compared in constant time.
     """
     from greenkube.core.config import get_config
 
@@ -47,22 +54,28 @@ def verify_api_key(request: Request) -> None:
 
     path = request.url.path
 
-    # SPA frontend, static assets, and operational endpoints never require
-    # the API key — the key is only for programmatic access to /api/v1/*.
-    if not path.startswith("/api/v1/"):
+    # SPA frontend and static assets never require the API key.
+    if not path.startswith("/api/v1/") and path != "/prometheus/metrics":
         return
 
-    # Allow public/operational API endpoints without auth
-    exempt = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
-    if any(path.startswith(p) for p in exempt):
+    # Public operational endpoints (exact match: /health/services is not public).
+    if path in _PUBLIC_API_PATHS:
         return
 
-    token = request.headers.get("Authorization", "")
-    if token.startswith("Bearer "):
-        token = token[7:]
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    if token != api_key:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    if not secrets.compare_digest(token, api_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def validate_namespace(
@@ -81,6 +94,46 @@ def validate_namespace(
             ),
         )
     return namespace
+
+
+# Hostnames that resolve to cloud metadata services and must never be configured.
+_BLOCKED_SERVICE_HOSTS = {"metadata", "metadata.google.internal", "metadata.goog"}
+
+
+def validate_service_url(url: str) -> str:
+    """Validate a user-supplied backend service URL.
+
+    In-cluster (private) and public ``http(s)`` endpoints are allowed. The
+    following are rejected because they are classic SSRF targets:
+    non-http(s) schemes, embedded credentials, loopback, link-local,
+    multicast, unspecified and CGNAT addresses, and known cloud metadata
+    hostnames. Hostnames are not resolved here so that in-cluster service
+    names keep working even when DNS is not reachable from the API pod.
+    """
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="URL must use the http or https scheme.")
+    if parts.username or parts.password:
+        raise HTTPException(status_code=400, detail="URL must not contain credentials.")
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host:
+        raise HTTPException(status_code=400, detail="URL must include a host.")
+    if host in _BLOCKED_SERVICE_HOSTS:
+        raise HTTPException(status_code=400, detail="URL host is not allowed.")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return url
+
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        raise HTTPException(
+            status_code=400,
+            detail="URL must not target loopback, link-local or multicast addresses.",
+        )
+    if not (ip.is_private or ip.is_global):
+        raise HTTPException(status_code=400, detail="URL must target a private or public address.")
+    return url
 
 
 async def get_carbon_repository() -> CarbonIntensityRepository:
@@ -109,6 +162,13 @@ async def get_recommendation_repository() -> RecommendationRepository:
     from greenkube.core.factory import get_recommendation_repository as factory_get_reco_repo
 
     return factory_get_reco_repo()
+
+
+async def get_pull_request_repository():
+    """Provides the PullRequestRepository instance via the factory."""
+    from greenkube.core.factory import get_pull_request_repository as factory_get_pr_repo
+
+    return factory_get_pr_repo()
 
 
 async def get_savings_ledger_repository() -> SavingsLedgerRepository:

@@ -483,10 +483,11 @@ async def run_health_checks(force: bool = False) -> HealthCheckResponse:
 
     # Determine overall status — inactive (non-selected) providers are excluded.
     statuses = [s.status for s in services.values() if not s.inactive]
-    if all(s == ServiceStatus.HEALTHY for s in statuses):
+    if not statuses:
+        # Every probe failed or returned no service: do not claim "ok".
+        overall = "error"
+    elif all(s == ServiceStatus.HEALTHY for s in statuses):
         overall = "ok"
-    elif any(s == ServiceStatus.UNREACHABLE for s in statuses):
-        overall = "degraded"
     else:
         overall = "degraded"
 

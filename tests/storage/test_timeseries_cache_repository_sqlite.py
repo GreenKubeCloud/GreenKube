@@ -85,6 +85,7 @@ class TestUpsertPoints:
         results = await repo.get_points("24h")
         assert len(results) == 1
         assert results[0].co2e_grams == pytest.approx(99.0)
+        assert results[0].total_co2e_all_scopes == pytest.approx(100.0)
 
     @pytest.mark.asyncio
     async def test_different_windows_are_independent(self, repo):

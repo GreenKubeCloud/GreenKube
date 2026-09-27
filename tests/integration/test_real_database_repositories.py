@@ -11,14 +11,19 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
+from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     CombinedMetric,
+    EffortLevel,
     IgnoreRecommendationRequest,
     MetricsSummaryRow,
+    RecommendationCapability,
     RecommendationRecord,
+    RecommendationSource,
     RecommendationStatus,
     RecommendationType,
+    RiskLevel,
     TimeseriesCachePoint,
 )
 from greenkube.models.node import NodeInfo
@@ -473,6 +478,42 @@ async def test_combined_metrics_repository_round_trips_and_aggregates(real_datab
 
 @pytest.mark.asyncio
 @pytest.mark.database
+async def test_combined_metrics_repository_weekly_buckets_floor_to_monday(real_database: RealDatabase):
+    """Weekly buckets must start on Monday in every backend (ISO week)."""
+    repo = real_database.combined_repository()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # Use the next Monday and the days around it so the rows stay inside the
+    # raw retention window regardless of when the test runs.
+    days_ahead = (7 - now.weekday()) % 7 or 7
+    monday = (now + timedelta(days=days_ahead)).replace(hour=12, minute=0, second=0)
+    wednesday = monday + timedelta(days=2)
+    next_monday = monday + timedelta(days=7)
+    metrics = [
+        _metric("pod-a", "prod", monday, 1.0, 0.1, 100.0),
+        _metric("pod-a", "prod", wednesday, 2.0, 0.2, 200.0),
+        _metric("pod-a", "prod", next_monday, 4.0, 0.4, 400.0),
+    ]
+    assert await repo.write_combined_metrics(metrics) == 3
+
+    series = await repo.aggregate_timeseries(
+        monday - timedelta(hours=1), next_monday + timedelta(hours=1), granularity="week", namespace="prod"
+    )
+
+    assert [point["timestamp"] for point in series] == [
+        monday.strftime("%Y-%m-%dT00:00:00Z"),
+        next_monday.strftime("%Y-%m-%dT00:00:00Z"),
+    ]
+    assert series[0]["co2e_grams"] == pytest.approx(3.0)
+    assert series[1]["co2e_grams"] == pytest.approx(4.0)
+
+    grouped = await repo.aggregate_grouped_row_count(
+        monday - timedelta(hours=1), next_monday + timedelta(hours=1), namespace="prod", granularity="weekly"
+    )
+    assert grouped == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
 async def test_combined_metrics_repository_reads_hourly_rollups(real_database: RealDatabase):
     repo = real_database.combined_repository()
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -648,6 +689,78 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
 
     restored = await repo.unignore_recommendation(worker.id)
     assert restored.status == RecommendationStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_recommendation_source_provenance_round_trip(real_database: RealDatabase):
+    """Source, evidence, risk and ranking fields survive a DB round trip."""
+    repo = real_database.recommendation_repository()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    evidence = RecommendationEvidence(
+        observation_window_seconds=604800,
+        sample_count=120,
+        coverage_ratio=0.98,
+        savings_method="request_reduction_ratio",
+        confidence=0.85,
+        risk_level="low",
+        risk_factors=["sufficient_headroom"],
+    )
+
+    record = _recommendation_record(pod_name="source-pod", created_at=now).model_copy(
+        update={
+            "source": RecommendationSource.VPA,
+            "source_ref": "prod/source-pod-vpa",
+            "sources": ["vpa", "greenkube"],
+            "capability": RecommendationCapability.CPU_RIGHTSIZING,
+            "owner_kind": "Deployment",
+            "owner_name": "source-pod",
+            "evidence": evidence,
+            "risk_level": RiskLevel.LOW,
+            "risk_factors": ["sufficient_headroom"],
+            "confidence": 0.85,
+            "effort": EffortLevel.LOW,
+            "ranking_score": 0.77,
+            "ranking_factors": {"carbon": 0.3, "cost": 0.3},
+            "patch": {"kind": "Deployment", "name": "source-pod", "operations": []},
+            "expires_at": now + timedelta(days=14),
+            "reversible": True,
+            "requires_restart": True,
+        }
+    )
+    assert await repo.upsert_recommendations([record]) == 1
+
+    active = await repo.get_active_recommendations(namespace="prod")
+    assert len(active) == 1
+    stored = active[0]
+    assert stored.source == RecommendationSource.VPA
+    assert stored.source_ref == "prod/source-pod-vpa"
+    assert stored.sources == ["vpa", "greenkube"]
+    assert stored.capability == RecommendationCapability.CPU_RIGHTSIZING
+    assert stored.owner_kind == "Deployment"
+    assert stored.owner_name == "source-pod"
+    assert stored.evidence is not None
+    assert stored.evidence.sample_count == 120
+    assert stored.evidence.rollback_conditions is not None
+    assert stored.risk_level == RiskLevel.LOW
+    assert stored.risk_factors == ["sufficient_headroom"]
+    assert stored.confidence == pytest.approx(0.85)
+    assert stored.effort == EffortLevel.LOW
+    assert stored.ranking_score == pytest.approx(0.77)
+    assert stored.ranking_factors["carbon"] == pytest.approx(0.3)
+    assert stored.patch is not None
+    assert stored.patch["kind"] == "Deployment"
+    assert stored.reversible is True
+    assert stored.requires_restart is True
+    assert stored.expires_at is not None
+
+    native = record.model_copy(update={"source": RecommendationSource.GREENKUBE, "sources": ["greenkube"]})
+    assert await repo.upsert_recommendations([native]) == 1
+    active = await repo.get_active_recommendations(namespace="prod")
+    assert len(active) == 1
+    assert active[0].source == RecommendationSource.GREENKUBE
+    assert active[0].sources == ["greenkube"]
 
 
 @pytest.mark.asyncio

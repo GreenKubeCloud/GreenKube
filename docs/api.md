@@ -11,12 +11,20 @@ The GreenKube REST API is available at `/api/v1`. Interactive documentation (Swa
 | `GET` | `/api/v1/config` | Current runtime configuration |
 | `GET` | `/api/v1/metrics` | Per-pod metrics (`?namespace=&last=24h`) |
 | `GET` | `/api/v1/metrics/summary` | Aggregated cluster summary (`?namespace=&last=24h`) |
-| `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=day&last=7d`) |
+| `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=hour&last=7d`) |
 | `GET` | `/api/v1/namespaces` | List of active namespaces |
 | `GET` | `/api/v1/nodes` | Cluster node inventory |
 | `GET` | `/api/v1/recommendations` | Generate and persist optimization recommendations (`?namespace=`) |
-| `GET` | `/api/v1/recommendations/active` | Active recommendation records (`?namespace=&refresh=true`) |
-| `GET` | `/api/v1/recommendations/top` | Highest-impact active recommendations (`?limit=5&metric=co2&namespace=&refresh=false`) |
+| `GET` | `/api/v1/recommendations/active` | Active recommendation records (`?namespace=&refresh=true&source=&risk_level=&capability=`) |
+| `GET` | `/api/v1/recommendations/top` | Highest-impact active recommendations (`?limit=5&metric=co2&namespace=&refresh=false&profile=`) |
+| `GET` | `/api/v1/recommendations/{id}` | Full recommendation detail including evidence, patch and verification state |
+| `GET` | `/api/v1/recommendations/{id}/events` | Lifecycle audit trail (created, applied, verified, expired, ...) |
+| `PATCH` | `/api/v1/recommendations/{id}/apply` | Mark applied (freezes the verification baseline) |
+| `PATCH` | `/api/v1/recommendations/{id}/ignore` | Ignore a recommendation |
+| `DELETE` | `/api/v1/recommendations/{id}/ignore` | Restore an ignored recommendation |
+| `POST` | `/api/v1/recommendations/{id}/apply-pr` | Preview (`dry_run`) or open a Git pull request |
+| `GET` | `/api/v1/recommendations/{id}/pull-requests` | Pull-request attempts for a recommendation |
+| `GET` | `/api/v1/automation/status` | PR bot readiness (provider, token, default branch) |
 | `GET` | `/api/v1/report/summary` | Report preview — row count and totals (`?namespace=&last=24h&aggregate=true&granularity=daily`) |
 | `GET` | `/api/v1/report/export` | Download report as CSV or JSON (`?format=csv&last=7d&aggregate=true&granularity=daily`) |
 
@@ -39,18 +47,17 @@ Used in timeseries and report endpoints:
 
 | Value | Description |
 |-------|-------------|
-| `hour` | Hourly buckets |
-| `day` | Daily buckets (default) |
+| `hour` | Hourly buckets (default) |
+| `day` | Daily buckets |
 | `week` | Weekly buckets |
 | `month` | Monthly buckets |
-| `year` | Yearly buckets |
 
 ## Examples
 
 ```bash
 # Health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.2.9"}
+# {"status":"ok","version":"0.3.0"}
 
 # Per-pod metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"
@@ -72,6 +79,17 @@ curl "http://localhost:8000/api/v1/recommendations/top?limit=5&metric=co2"
 
 # Top actionable recommendations for a namespace ranked by projected cost savings
 curl "http://localhost:8000/api/v1/recommendations/top?namespace=production&metric=cost&limit=5"
+
+# Preview the GitOps patch for a recommendation without touching Git
+curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
+  -H "Content-Type: application/json" -d '{"dry_run": true}'
+
+# Open the pull request
+curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
+  -H "Content-Type: application/json" -d '{}'
+
+# Inspect the lifecycle audit trail
+curl "http://localhost:8000/api/v1/recommendations/42/events"
 
 # Preview a report before downloading
 curl "http://localhost:8000/api/v1/report/summary?last=ytd&aggregate=true&granularity=monthly"

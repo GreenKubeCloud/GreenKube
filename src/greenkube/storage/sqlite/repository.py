@@ -155,9 +155,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
             async with self.db_manager.connection_scope() as conn:
                 for metric in metrics:
                     try:
-                        timestamp_iso = metric.timestamp.isoformat() if metric.timestamp else None
+                        timestamp_iso = to_iso_z(metric.timestamp) if metric.timestamp else None
                         grid_intensity_timestamp_iso = (
-                            metric.grid_intensity_timestamp.isoformat() if metric.grid_intensity_timestamp else None
+                            to_iso_z(metric.grid_intensity_timestamp) if metric.grid_intensity_timestamp else None
                         )
 
                         cursor = await conn.execute(
@@ -289,7 +289,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                     FROM combined_metrics
                     WHERE "timestamp" BETWEEN ? AND ?
                 """,
-                    (start_time.isoformat(), end_time.isoformat()),
+                    (to_iso_z(start_time), to_iso_z(end_time)),
                 ) as cursor:
                     rows = await cursor.fetchall()
                     metrics = []
@@ -384,7 +384,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics
                         WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
                         params.append(namespace)
 
@@ -398,7 +398,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics_hourly
                         WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
                         params.append(namespace)
 
@@ -460,7 +460,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         _SQLITE_GRAN_FMTS = {
             "hourly": "%Y-%m-%dT%H:00:00Z",
             "daily": "%Y-%m-%dT00:00:00Z",
-            "weekly": "%Y-W%W-%w",
             "monthly": "%Y-%m-01T00:00:00Z",
             "yearly": "%Y-01-01T00:00:00Z",
         }
@@ -471,19 +470,22 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
         end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
 
-        ts_fmt = _SQLITE_GRAN_FMTS.get(granularity or "", None)
-
-        if group_by == "namespace":
-            group_cols = "namespace"
-        else:
-            group_cols = "namespace, pod_name"
-
-        if ts_fmt:
+        if granularity == "weekly":
+            # Floor to Monday of the ISO week (same bucket as the other backends).
+            raw_ts_expr = "strftime('%Y-%m-%dT00:00:00Z', \"timestamp\", 'weekday 0', '-6 days')"
+            hourly_ts_expr = "strftime('%Y-%m-%dT00:00:00Z', hour_bucket, 'weekday 0', '-6 days')"
+        elif granularity in _SQLITE_GRAN_FMTS:
+            ts_fmt = _SQLITE_GRAN_FMTS[granularity]
             raw_ts_expr = f"strftime('{ts_fmt}', \"timestamp\")"
             hourly_ts_expr = f"strftime('{ts_fmt}', hour_bucket)"
         else:
             raw_ts_expr = "NULL"
             hourly_ts_expr = "NULL"
+
+        if group_by == "namespace":
+            group_cols = "namespace"
+        else:
+            group_cols = "namespace, pod_name"
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -497,7 +499,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         f"SELECT {group_cols}, {raw_ts_expr} AS ts_bucket "
                         f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" <= ?{ns_clause}'
                     )
-                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
                         params.append(namespace)
 
@@ -508,7 +510,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         f"SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket "
                         f"FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket <= ?{ns_clause}"
                     )
-                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
                         params.append(namespace)
 
@@ -558,7 +560,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
 
         # For weekly buckets SQLite has no date_trunc; compute Monday of each week.
         if granularity == "week":
-            ts_bucket_expr = "strftime('%Y-%m-%dT00:00:00Z', ts, 'weekday 1', '-6 days')"
+            ts_bucket_expr = "strftime('%Y-%m-%dT00:00:00Z', ts, 'weekday 0', '-6 days')"
         else:
             ts_bucket_expr = f"strftime('{ts_format}', ts)"
 
@@ -582,7 +584,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics
                         WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
                         params.append(namespace)
 
@@ -597,7 +599,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics_hourly
                         WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
                         params.append(namespace)
 
@@ -653,14 +655,14 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                           AND namespace = ?
                         ORDER BY hour_bucket
                     """
-                    params = (start_time.isoformat(), end_time.isoformat(), namespace)
+                    params = (to_iso_z(start_time), to_iso_z(end_time), namespace)
                 else:
                     query = """
                         SELECT * FROM combined_metrics_hourly
                         WHERE hour_bucket >= ? AND hour_bucket <= ?
                         ORDER BY hour_bucket
                     """
-                    params = (start_time.isoformat(), end_time.isoformat())
+                    params = (to_iso_z(start_time), to_iso_z(end_time))
 
                 async with conn.execute(query, params) as cursor:
                     rows = await cursor.fetchall()
@@ -726,12 +728,17 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         return [row["namespace"] for row in rows]
 
                 # Fallback: scan recent combined_metrics if cache is empty
+                from datetime import timedelta
+                from datetime import timezone as tz
+
+                recent_cutoff = to_iso_z(datetime.now(tz.utc) - timedelta(days=7))
                 async with conn.execute(
                     """
                     SELECT DISTINCT namespace FROM combined_metrics
-                    WHERE "timestamp" > datetime('now', '-7 days')
+                    WHERE "timestamp" > ?
                     ORDER BY namespace
-                    """
+                    """,
+                    (recent_cutoff,),
                 ) as cursor:
                     rows = await cursor.fetchall()
                     return [row["namespace"] for row in rows]
@@ -800,7 +807,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics
                         WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
                         params.append(namespace)
 
@@ -812,7 +819,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics_hourly
                         WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
                         params.append(namespace)
 
@@ -869,7 +876,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics
                         WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([raw_start.isoformat(), end_time.isoformat()])
+                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
                         params.append(namespace)
 
@@ -881,7 +888,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         FROM combined_metrics_hourly
                         WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
                     """)
-                    params.extend([start_time.isoformat(), hourly_end.isoformat()])
+                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
                         params.append(namespace)
 

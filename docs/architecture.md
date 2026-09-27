@@ -39,7 +39,7 @@ flowchart TB
             ESvc["EmbodiedEmissionsService<br/>(Boavizta Cache + Fallback)"]
             SR["SummaryRefresher<br/>(Pre-computed Cache)"]
             HRP["HistoricalRangeProcessor<br/>(Chunked Range)"]
-            Rec["Recommender<br/>(9 Types)"]
+            Rec["OptimizationEngine<br/>(multi-source + evidence)"]
         end
 
         subgraph Storage["Storage (Output Adapters)"]
@@ -202,7 +202,7 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Purpose:** Fetch hardware embodied emissions data
 - **API:** Boavizta API
 - **Caching:** Stores server impact profiles in `EmbodiedRepository`
-- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 350 kg CO₂e) and marks the metric as estimated
+- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 100 kg CO₂e) and marks the metric as estimated
 - **Emits:** Server impact data (GWP manufacture, lifespan)
 
 ### Estimator (Business Logic)
@@ -268,36 +268,51 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 - **Scheduling:** Invoked hourly by the background scheduler; on-demand via `POST /api/v1/metrics/dashboard-summary/refresh`
 - **Benefit:** Eliminates full-table scans on every dashboard load, preventing OOM errors on large datasets
 
-### Recommender (Business Logic)
+### Optimization Engine (Business Logic)
 
-#### **Recommender / RecommenderV2**
-Analyzes `CombinedMetric` data to identify optimization opportunities.
+#### **OptimizationEngine**
 
-**Recommendation Types:**
-1. **Zombie Pods:** Workloads consuming resources but producing minimal value
-   - Criteria: Low CPU/energy, high cost, extended idle time
-   - Savings: Potential cost and emission reduction
+Analyzes `CombinedMetric` data to identify optimization opportunities. It is the
+single orchestration path used by the API, the startup scan and the CLI
+(`src/greenkube/core/optimization/`).
 
-2. **Rightsizing:**
-   - Over-provisioned CPU: Request >> actual usage
-   - Over-provisioned memory: Request >> actual usage
-   - Headroom calculation for safe downsizing
-   - Savings estimate based on cloud provider pricing
+**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB
+inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an
+**evidence** block and a **risk/confidence/effort** assessment → compute the
+multi-criteria **ranking score** → persist and reconcile.
 
-3. **Autoscaling Candidates:**
-   - High coefficient of variation (CV) in usage
-   - Spike detection (max/avg ratio)
-   - HPA/VPA recommendations
+**Sources:**
 
-4. **Carbon-Aware Scheduling:**
-   - Identifies high-carbon-intensity periods
-   - Suggests workload time-shifting for batch jobs
+1. **Native (`greenkube`)** — the built-in analyzers:
+   - **Zombie Pods:** workloads consuming cost with minimal energy.
+   - **Rightsizing:** over-provisioned CPU/memory based on observed usage
+     percentiles and configured headroom.
+   - **Autoscaling Candidates:** high coefficient of variation / spike ratio,
+     skipping workloads already governed by an HPA.
+   - **Off-peak Scaling:** idle windows suggesting scale-to-zero schedules.
+   - **Idle Namespaces:** namespaces with minimal activity.
+   - **Carbon-Aware Scheduling:** workloads running during high-intensity periods.
+   - **Node optimization:** overprovisioned / underutilized nodes.
+   - **Orphaned PV / LoadBalancer cleanup.**
 
-5. **Idle Namespace Cleanup:**
-   - Namespaces with minimal activity
-   - Low-value resource consumption
+2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers
+   (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same
+   workload, avoiding duplicate advice.
 
-**Configuration:** All thresholds configurable via `config.py` and Helm values
+3. **Karpenter (`karpenter`, reserved)** — node pool consolidation.
+
+**Evidence, risk and ranking:** every recommendation carries observation window,
+utilization distribution, current vs proposed resources, expected savings and
+method, confidence, reliability risk, rollback conditions, a machine-readable
+patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`,
+`cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort,
+actionability and source authority.
+
+See [docs/specs/optimization-engine.md](specs/optimization-engine.md) for the full
+specification.
+
+**Configuration:** All thresholds, source flags and ranking settings are
+configurable via `config.py` and Helm values.
 
 ### Repositories (Output Ports)
 Repositories use asynchronous drivers for high-performance database interactions. All implement abstract base classes to ensure database agnosticism.
@@ -408,15 +423,14 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 #### **SvelteKit Dashboard**
 - **Location:** `frontend/`
-- **Framework:** SvelteKit (SSR + SPA)
+- **Framework:** SvelteKit, client-side SPA (`ssr = false`, `prerender = false` in `frontend/src/routes/+layout.js`)
 - **Build:** Vite with adapter-static
-- **Styling:** Tailwind CSS
+- **Styling:** Tailwind CSS (dark UI only — no light/dark theme switch)
 - **Charts:** ECharts for interactive visualizations
 - **Deployment:** Static build served by FastAPI at `/`
 
 **Pages:**
 - `/` — Dashboard (KPIs, charts, breakdown)
-- `/metrics` — Interactive metrics table
 - `/nodes` — Node inventory
 - `/recommendations` — Optimization recommendations
 - `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
@@ -425,23 +439,21 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 **Features:**
 - Client-side routing for smooth navigation
 - Responsive design (mobile-first)
-- Real-time data updates (polling)
-- Export functionality (CSV, JSON) — both from the Report page and via the CLI
-- Theme support (light/dark)
+- Data fetched on page load/navigation — no polling or live push updates
+- Export functionality (CSV, JSON) — from the Report page
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
 - **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
 - **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps) can be updated from the Settings page without restarting the pod
 
 #### **CLI**
 - **Location:** `src/greenkube/cli/`
-- **Framework:** Typer with Rich for formatting
+- **Framework:** Typer
 - **Commands:**
-  - `greenkube report` — Generate reports with filtering
-  - `greenkube recommend` — Get optimization recommendations
-  - `greenkube start` — Run as background service
-  - `greenkube api` — Start API server
+  - `greenkube start` — Run the collector and scheduler as a background service
   - `greenkube demo` — Launch demo mode with sample data
   - `greenkube version` — Show version info
+
+The REST API is started by the separate `greenkube-api` entry point (`greenkube.api.app:main`).
 
 #### **Grafana Integration**
 - **Dashboard:** `dashboards/greenkube-grafana.json`
@@ -558,32 +570,32 @@ Used for reporting over time ranges with historical accuracy.
 
 1. **Data Collection:**
    ```
-   Read CombinedMetrics from repository (last N days)
+   Build OptimizationContext from repository (last N days) + node/HPA/PV/LB inputs
    ```
 
 2. **Analysis:**
    ```
-   RecommenderV2.generate_recommendations()
-   ├─ Aggregate pod metrics by stable workload owner when available
-   ├─ Calculate statistics (weighted mean, observed max, percentile, CV)
-   ├─ Apply thresholds:
-   │   ├─ Zombie detection
-   │   ├─ Rightsizing analysis using average and retained maximum usage
-   │   ├─ Autoscaling candidates
-   │   └─ Carbon-aware opportunities
-   ├─ Upsert active recommendations by full target identity
-   ├─ Mark previously active recommendations as stale when absent from the latest generation
-   └─ Calculate savings (cost + CO2e)
+   OptimizationEngine.generate()
+   ├─ Run enabled sources (native analyzers, VPA)
+   ├─ Normalize provenance and arbitrate conflicts by capability/priority
+   ├─ Deduplicate and clamp values to configured minimums
+   ├─ Attach evidence, risk/confidence/effort and expiry
+   └─ Compute multi-criteria ranking score and factors
    ```
 
 3. **Output:**
    ```
    Return List[Recommendation] with:
-   ├─ Type and severity
-   ├─ Affected resources
-   ├─ Current vs. recommended
-   ├─ Estimated savings
-   └─ Actionable commands
+   ├─ Type, source and provenance
+   ├─ Affected resources (current vs recommended)
+   ├─ Evidence (window, percentiles, rollback conditions, patch plan)
+   ├─ Expected savings (cost + CO2e) and confidence
+   └─ Risk level, effort and ranking score
+   ```
+
+4. **Persistence:**
+   ```
+   Upsert active records by target identity; mark absent actives as stale
    ```
 
 ## Configuration & Deployment
@@ -611,7 +623,7 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `DEFAULT_ZONE` — Fallback carbon zone
 - `DEFAULT_INTENSITY` — Fallback intensity (gCO2e/kWh)
 - `NORMALIZATION_GRANULARITY` — hour|day|none
-- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 350 kg CO₂e)
+- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 100 kg CO₂e)
 
 **Recommendations:**
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 7

@@ -911,10 +911,13 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                             network_receive_bytes, network_transmit_bytes,
                             disk_read_bytes, disk_write_bytes,
                             storage_request_bytes, storage_usage_bytes,
-                            ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                            -- Columns that only exist on the raw table; typed NULLs
+                            -- keep the UNION branch shape identical to the raw SELECT.
+                            NULL::bigint AS ephemeral_storage_request_bytes,
+                            NULL::bigint AS ephemeral_storage_usage_bytes,
                             gpu_usage_millicores, restart_count,
-                            owner_kind, owner_name, period, hour_bucket AS timestamp,
-                            duration_seconds, grid_intensity_timestamp,
+                            owner_kind, owner_name, NULL::text AS period, hour_bucket AS timestamp,
+                            duration_seconds, NULL::timestamptz AS grid_intensity_timestamp,
                             node, node_instance_type, node_zone,
                             emaps_zone, estimation_reasons, is_estimated,
                             embodied_co2e_grams, calculation_version

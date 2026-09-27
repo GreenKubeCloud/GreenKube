@@ -167,6 +167,28 @@ export function getActiveRecommendations({ namespace, refresh } = {}) {
 	return request(`${BASE}/recommendations/active`, { namespace, refresh });
 }
 
+/**
+ * Ranked active recommendations.
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {number} [opts.limit]
+ * @param {'co2'|'cost'} [opts.metric]
+ * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
+ * @returns {Promise<Object[]>}
+ */
+export function getTopRecommendations({ namespace, limit, metric, profile, refresh } = {}) {
+	return request(`${BASE}/recommendations/top`, { namespace, limit, metric, profile, refresh });
+}
+
+/**
+ * Full recommendation detail, including the evidence block.
+ * @param {number} id
+ * @returns {Promise<Object>}
+ */
+export function getRecommendation(id) {
+	return request(`${BASE}/recommendations/${id}`);
+}
+
 /** @returns {Promise<Object[]>} */
 export function getIgnoredRecommendations() {
 	return request(`${BASE}/recommendations/ignored`);
@@ -237,6 +259,47 @@ export async function unignoreRecommendation(id) {
 		throw new Error(b.detail || `API error ${res.status}`);
 	}
 	return res.json();
+}
+
+/**
+ * Preview or open a pull request that applies a rightsizing recommendation.
+ * @param {number} id
+ * @param {{ dry_run?: boolean, base_branch?: string }} [body]
+ * @returns {Promise<Object>}
+ */
+export async function applyRecommendationPr(id, body = {}) {
+	const url = new URL(`${BASE}/recommendations/${id}/apply-pr`, window.location.origin);
+	const res = await fetch(url.toString(), {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		const b = await res.json().catch(() => ({}));
+		throw new Error(b.detail || `API error ${res.status}`);
+	}
+	return res.json();
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object[]>}
+ */
+export function getRecommendationPullRequests(id) {
+	return request(`${BASE}/recommendations/${id}/pull-requests`);
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object[]>}
+ */
+export function getRecommendationEvents(id) {
+	return request(`${BASE}/recommendations/${id}/events`);
+}
+
+/** @returns {Promise<Object>} */
+export function getAutomationStatus() {
+	return request(`${BASE}/automation/status`);
 }
 
 /**

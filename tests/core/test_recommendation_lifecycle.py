@@ -1,7 +1,7 @@
 # tests/core/test_recommendation_lifecycle.py
 """
 Tests for the recommendation lifecycle:
-- Minimum threshold clamping by the Recommender
+- Minimum threshold clamping by the optimization engine
 - RecommendationRecord status transitions
 - Savings summary computation
 - API endpoint behaviour (mocked repository)
@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from greenkube.core.config import Config
+from greenkube.core.optimization.thresholds import apply_minimum_thresholds
 from greenkube.core.recommendation_realization import refresh_applied_recommendation
-from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     CombinedMetric,
@@ -24,6 +25,8 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+
+from .optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-import]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,7 +68,6 @@ class TestMinimumThresholdClamping:
 
     def test_cpu_below_minimum_is_clamped(self):
         """A recommendation with suggested CPU < 10m is clamped to 10m."""
-        recommender = Recommender()
         rec = Recommendation(
             pod_name="pod-a",
             namespace="default",
@@ -73,13 +75,12 @@ class TestMinimumThresholdClamping:
             description="Reduce CPU",
             recommended_cpu_request_millicores=3,  # Below 10m default
         )
-        result = recommender._apply_minimum_thresholds(rec)
+        result = apply_minimum_thresholds(rec, Config())
         assert result.recommended_cpu_request_millicores == 10
         assert "Floored to minimum" in result.description
 
     def test_cpu_at_or_above_minimum_is_unchanged(self):
         """A recommendation with suggested CPU >= 10m is left unchanged."""
-        recommender = Recommender()
         rec = Recommendation(
             pod_name="pod-a",
             namespace="default",
@@ -87,13 +88,12 @@ class TestMinimumThresholdClamping:
             description="Reduce CPU",
             recommended_cpu_request_millicores=50,
         )
-        result = recommender._apply_minimum_thresholds(rec)
+        result = apply_minimum_thresholds(rec, Config())
         assert result.recommended_cpu_request_millicores == 50
         assert "Floored" not in result.description
 
     def test_memory_below_minimum_is_clamped(self):
         """A recommendation with suggested memory < 16MiB is clamped."""
-        recommender = Recommender()
         rec = Recommendation(
             pod_name="pod-a",
             namespace="default",
@@ -101,13 +101,12 @@ class TestMinimumThresholdClamping:
             description="Reduce memory",
             recommended_memory_request_bytes=3 * 1024 * 1024,  # 3MiB < 16MiB
         )
-        result = recommender._apply_minimum_thresholds(rec)
+        result = apply_minimum_thresholds(rec, Config())
         assert result.recommended_memory_request_bytes == 16 * 1024 * 1024
         assert "Floored to minimum" in result.description
 
     def test_both_cpu_and_memory_clamped_together(self):
         """Both CPU and memory can be clamped in a single recommendation."""
-        recommender = Recommender()
         rec = Recommendation(
             pod_name="pod-a",
             namespace="default",
@@ -116,7 +115,7 @@ class TestMinimumThresholdClamping:
             recommended_cpu_request_millicores=2,
             recommended_memory_request_bytes=4 * 1024 * 1024,
         )
-        result = recommender._apply_minimum_thresholds(rec)
+        result = apply_minimum_thresholds(rec, Config())
         assert result.recommended_cpu_request_millicores == 10
         assert result.recommended_memory_request_bytes == 16 * 1024 * 1024
 
@@ -124,7 +123,7 @@ class TestMinimumThresholdClamping:
         """generate_recommendations clamps impractically small recommended values."""
         # Very low cpu_usage forces a tiny recommended value before clamping
         metrics = [_make_metric(cpu_req=1000, cpu_usage=2) for _ in range(10)]
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(metrics)
         rightsizing = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
         for r in rightsizing:

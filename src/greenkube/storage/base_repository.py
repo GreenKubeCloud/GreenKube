@@ -1,6 +1,6 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ..models.metrics import (
@@ -8,11 +8,13 @@ from ..models.metrics import (
     CombinedMetric,
     IgnoreRecommendationRequest,
     MetricsSummaryRow,
+    RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     TimeseriesCachePoint,
 )
 from ..models.node import NodeInfo
+from ..utils.date_utils import to_iso_z
 
 
 class NodeRepository(ABC):
@@ -323,7 +325,6 @@ class CombinedMetricsRepository(ABC):
         _GRAN_FORMATS = {
             "hourly": "%Y-%m-%dT%H:00:00Z",
             "daily": "%Y-%m-%dT00:00:00Z",
-            "weekly": "%Y-W%V",
             "monthly": "%Y-%m-01T00:00:00Z",
             "yearly": "%Y-01-01T00:00:00Z",
         }
@@ -336,7 +337,11 @@ class CombinedMetricsRepository(ABC):
                 key_base = m.namespace
             else:
                 key_base = (m.namespace, m.pod_name)
-            if fmt and m.timestamp:
+            if granularity == "weekly" and m.timestamp:
+                # Floor to Monday of the ISO week, same bucket as the SQL backends.
+                monday = m.timestamp - timedelta(days=m.timestamp.weekday())
+                key = (key_base, monday.strftime("%Y-%m-%dT00:00:00Z"))
+            elif fmt and m.timestamp:
                 key = (key_base, m.timestamp.strftime(fmt))
             else:
                 key = key_base
@@ -377,7 +382,11 @@ class CombinedMetricsRepository(ABC):
         buckets: dict[str, list] = defaultdict(list)
         for m in metrics:
             if m.timestamp:
-                key = m.timestamp.strftime(fmt)
+                ts = m.timestamp
+                if granularity == "week":
+                    # Floor to Monday of the ISO week instead of using the raw date.
+                    ts = ts - timedelta(days=ts.weekday())
+                key = ts.strftime(fmt)
                 buckets[key].append(m)
 
         result = []
@@ -493,12 +502,12 @@ class CombinedMetricsRepository(ABC):
             if not m.emaps_zone or m.timestamp is None:
                 continue
             try:
-                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, m.timestamp.isoformat())
+                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, to_iso_z(m.timestamp))
             except Exception:
                 intensity = None
             if intensity is None:
                 continue
-            await calculator.prefetch_intensity(m.emaps_zone, m.timestamp.isoformat(), intensity)
+            await calculator.prefetch_intensity(m.emaps_zone, to_iso_z(m.timestamp), intensity)
             result = await calculator.calculate_emissions(
                 joules=m.joules, zone=m.emaps_zone, timestamp=m.timestamp, pue=m.pue
             )
@@ -649,6 +658,26 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_recommendations_by_statuses(
+        self,
+        statuses: List[str],
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns recommendations in any of the given lifecycle statuses.
+
+        Used by apply detection and verification to load the records that need
+        attention without scanning the full history.
+
+        Args:
+            statuses: Status values to include.
+            namespace: Optional namespace filter.
+
+        Returns:
+            A list of matching RecommendationRecord objects.
+        """
+        pass
+
+    @abstractmethod
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
         """Returns a single recommendation by its database ID.
 
@@ -661,15 +690,76 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
-    async def apply_recommendation(self, rec_id: int, request: ApplyRecommendationRequest) -> RecommendationRecord:
+    async def apply_recommendation(
+        self,
+        rec_id: int,
+        request: ApplyRecommendationRequest,
+        *,
+        baseline: Optional[dict] = None,
+        application_method: Optional[str] = None,
+    ) -> RecommendationRecord:
         """Marks a recommendation as applied and records the actual applied values.
 
         Args:
             rec_id: The database primary key.
             request: The apply request with actual values.
+            baseline: Frozen pre-apply metrics captured for verification.
+            application_method: How the change landed (manual, detected, pr_merge, ...).
 
         Returns:
             The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def update_recommendation_fields(self, rec_id: int, updates: dict) -> RecommendationRecord:
+        """Updates a subset of mutable recommendation columns.
+
+        Used by the lifecycle, apply-detection and verification services to
+        transition records without a dedicated repository method per status.
+
+        Args:
+            rec_id: The database primary key.
+            updates: ``{column: value}`` pairs restricted to known columns.
+
+        Returns:
+            The updated RecommendationRecord.
+        """
+        pass
+
+    @abstractmethod
+    async def record_event(self, event: RecommendationEvent) -> RecommendationEvent:
+        """Appends a recommendation lifecycle event to the audit trail.
+
+        Args:
+            event: The event to persist.
+
+        Returns:
+            The persisted event with its database ID.
+        """
+        pass
+
+    @abstractmethod
+    async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
+        """Returns the audit trail for a recommendation, oldest first.
+
+        Args:
+            rec_id: The database primary key.
+
+        Returns:
+            A list of RecommendationEvent objects.
+        """
+        pass
+
+    @abstractmethod
+    async def expire_recommendations(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
+        """Marks active recommendations past their TTL as expired.
+
+        Args:
+            now: Reference time; defaults to the current UTC time.
+
+        Returns:
+            The recommendations that were transitioned to ``expired``.
         """
         pass
 

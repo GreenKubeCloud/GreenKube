@@ -12,6 +12,7 @@ import os
 
 from fastapi import APIRouter, HTTPException
 
+from greenkube.api.dependencies import validate_service_url
 from greenkube.core.config import get_config
 from greenkube.core.health import invalidate_health_cache, run_health_checks
 from greenkube.core.k8s_secret_store import patch_k8s_secret
@@ -65,11 +66,13 @@ async def update_service_config(update: ServiceConfigUpdate):
     changed = False
 
     if update.prometheus_url is not None:
+        validate_service_url(update.prometheus_url)
         os.environ["PROMETHEUS_URL"] = update.prometheus_url
         logger.info("Prometheus URL updated to: %s", update.prometheus_url)
         changed = True
 
     if update.opencost_url is not None:
+        validate_service_url(update.opencost_url)
         os.environ["OPENCOST_API_URL"] = update.opencost_url
         logger.info("OpenCost URL updated to: %s", update.opencost_url)
         changed = True
@@ -80,6 +83,7 @@ async def update_service_config(update: ServiceConfigUpdate):
         changed = True
 
     if update.boavizta_url is not None:
+        validate_service_url(update.boavizta_url)
         os.environ["BOAVIZTA_API_URL"] = update.boavizta_url
         logger.info("Boavizta URL updated to: %s", update.boavizta_url)
         changed = True

@@ -4,9 +4,11 @@ SQLite implementation of the RecommendationRepository.
 Persists recommendation history with full lifecycle management.
 """
 
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from enum import Enum
 from typing import List, Optional
 
 import aiosqlite
@@ -16,55 +18,92 @@ from greenkube.core.recommendation_realization import estimate_realized_savings,
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
+    RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     RecommendationStatus,
     RecommendationType,
 )
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.storage.recommendation_mapper import (
+    ACTIVE_UPSERT_COLUMNS,
+    RECORD_COLUMNS,
+    record_values,
+    row_to_record,
+)
 from greenkube.utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
 
+#: Columns that lifecycle services may update through ``update_recommendation_fields``.
+MUTABLE_COLUMNS: frozenset = frozenset(
+    {
+        "pod_name",
+        "namespace",
+        "type",
+        "description",
+        "reason",
+        "priority",
+        "scope",
+        "status",
+        "potential_savings_cost",
+        "potential_savings_co2e_grams",
+        "current_cpu_request_millicores",
+        "recommended_cpu_request_millicores",
+        "current_memory_request_bytes",
+        "recommended_memory_request_bytes",
+        "cron_schedule",
+        "target_node",
+        "source",
+        "source_ref",
+        "sources",
+        "superseded_by",
+        "capability",
+        "owner_kind",
+        "owner_name",
+        "evidence",
+        "risk_level",
+        "risk_factors",
+        "confidence",
+        "effort",
+        "ranking_score",
+        "ranking_factors",
+        "patch",
+        "expires_at",
+        "reversible",
+        "requires_restart",
+        "applied_at",
+        "actual_cpu_request_millicores",
+        "actual_memory_request_bytes",
+        "carbon_saved_co2e_grams",
+        "cost_saved",
+        "ignored_at",
+        "ignored_reason",
+        "application_method",
+        "verified_at",
+        "verification_status",
+        "verification_window_start",
+        "verification_window_end",
+        "baseline",
+        "measured_co2e_saved_grams",
+        "measured_cost_saved",
+        "savings_realized",
+        "updated_at",
+    }
+)
 
-def _row_to_record(row) -> RecommendationRecord:
-    """Converts an aiosqlite Row to a RecommendationRecord."""
 
-    def _dt(val) -> Optional[datetime]:
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            return val
-        return datetime.fromisoformat(val.replace("Z", "+00:00"))
-
-    return RecommendationRecord(
-        id=row["id"],
-        pod_name=row["pod_name"],
-        namespace=row["namespace"],
-        type=RecommendationType(row["type"]),
-        description=row["description"],
-        reason=row["reason"] or "",
-        priority=row["priority"] or "medium",
-        scope=row["scope"] or "pod",
-        status=RecommendationStatus(row["status"] if row["status"] else "active"),
-        potential_savings_cost=row["potential_savings_cost"],
-        potential_savings_co2e_grams=row["potential_savings_co2e_grams"],
-        current_cpu_request_millicores=row["current_cpu_request_millicores"],
-        recommended_cpu_request_millicores=row["recommended_cpu_request_millicores"],
-        current_memory_request_bytes=row["current_memory_request_bytes"],
-        recommended_memory_request_bytes=row["recommended_memory_request_bytes"],
-        cron_schedule=row["cron_schedule"],
-        target_node=row["target_node"],
-        applied_at=_dt(row["applied_at"]),
-        actual_cpu_request_millicores=row["actual_cpu_request_millicores"],
-        actual_memory_request_bytes=row["actual_memory_request_bytes"],
-        carbon_saved_co2e_grams=row["carbon_saved_co2e_grams"],
-        cost_saved=row["cost_saved"],
-        ignored_at=_dt(row["ignored_at"]),
-        ignored_reason=row["ignored_reason"],
-        created_at=_dt(row["created_at"]) or datetime.now(timezone.utc),
-        updated_at=_dt(row["updated_at"]),
-    )
+def _encode_value(value):
+    """Encodes a Python value for a SQLite bind parameter."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return to_iso_z(value)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return value
 
 
 def _type_value(record: RecommendationRecord) -> str:
@@ -146,52 +185,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         if not records:
             return 0
 
+        columns = RECORD_COLUMNS
+        query = "INSERT INTO recommendation_history ({}) VALUES ({})".format(
+            ", ".join(columns),
+            ", ".join("?" for _ in columns),
+        )
         async with self.db_manager.connection_scope() as conn:
-            query = """
-                INSERT INTO recommendation_history (
-                    pod_name, namespace, type, description, reason,
-                    priority, scope, status,
-                    potential_savings_cost, potential_savings_co2e_grams,
-                    current_cpu_request_millicores, recommended_cpu_request_millicores,
-                    current_memory_request_bytes, recommended_memory_request_bytes,
-                    cron_schedule, target_node,
-                    applied_at, actual_cpu_request_millicores, actual_memory_request_bytes,
-                    carbon_saved_co2e_grams, cost_saved,
-                    ignored_at, ignored_reason,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
             for r in records:
-                await conn.execute(
-                    query,
-                    (
-                        r.pod_name,
-                        r.namespace,
-                        r.type.value if isinstance(r.type, RecommendationType) else r.type,
-                        r.description,
-                        r.reason,
-                        r.priority,
-                        r.scope,
-                        r.status.value if isinstance(r.status, RecommendationStatus) else r.status,
-                        r.potential_savings_cost,
-                        r.potential_savings_co2e_grams,
-                        r.current_cpu_request_millicores,
-                        r.recommended_cpu_request_millicores,
-                        r.current_memory_request_bytes,
-                        r.recommended_memory_request_bytes,
-                        r.cron_schedule,
-                        r.target_node,
-                        to_iso_z(r.applied_at) if r.applied_at else None,
-                        r.actual_cpu_request_millicores,
-                        r.actual_memory_request_bytes,
-                        r.carbon_saved_co2e_grams,
-                        r.cost_saved,
-                        to_iso_z(r.ignored_at) if r.ignored_at else None,
-                        r.ignored_reason,
-                        to_iso_z(r.created_at) if r.created_at else None,
-                        to_iso_z(r.updated_at) if r.updated_at else None,
-                    ),
-                )
+                values = record_values(r, encode_datetime=to_iso_z)
+                await conn.execute(query, tuple(values[column] for column in columns))
             await conn.commit()
             logger.info("Saved %d recommendation records to SQLite.", len(records))
             return len(records)
@@ -212,6 +214,14 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             return 0
 
         now = to_iso_z(datetime.now(timezone.utc))
+        set_columns = ACTIVE_UPSERT_COLUMNS + ("updated_at",)
+        update_query = "UPDATE recommendation_history SET {} WHERE id = ?".format(
+            ", ".join(f"{column} = ?" for column in set_columns)
+        )
+        insert_query = "INSERT INTO recommendation_history ({}) VALUES ({})".format(
+            ", ".join(RECORD_COLUMNS),
+            ", ".join("?" for _ in RECORD_COLUMNS),
+        )
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             for r in records:
@@ -223,34 +233,9 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 )
                 existing = await row.fetchone()
                 if existing:
-                    await conn.execute(
-                        """
-                        UPDATE recommendation_history SET
-                            description = ?, reason = ?, priority = ?,
-                            scope = ?,
-                            potential_savings_cost = ?, potential_savings_co2e_grams = ?,
-                            current_cpu_request_millicores = ?, recommended_cpu_request_millicores = ?,
-                            current_memory_request_bytes = ?, recommended_memory_request_bytes = ?,
-                            cron_schedule = ?, target_node = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            r.description,
-                            r.reason,
-                            r.priority,
-                            r.scope,
-                            r.potential_savings_cost,
-                            r.potential_savings_co2e_grams,
-                            r.current_cpu_request_millicores,
-                            r.recommended_cpu_request_millicores,
-                            r.current_memory_request_bytes,
-                            r.recommended_memory_request_bytes,
-                            r.cron_schedule,
-                            r.target_node,
-                            now,
-                            existing["id"],
-                        ),
-                    )
+                    values = record_values(r, encode_datetime=to_iso_z)
+                    params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [now, existing["id"]]
+                    await conn.execute(update_query, params)
                     continue
 
                 applied_where, applied_params = _identity_where_clause(r, status="applied")
@@ -261,7 +246,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 applied_row = await cursor.fetchone()
                 if applied_row:
                     refreshed = refresh_applied_recommendation(
-                        _row_to_record(applied_row), r, observed_at=datetime.now(timezone.utc)
+                        row_to_record(applied_row), r, observed_at=datetime.now(timezone.utc)
                     )
                     await conn.execute(
                         """
@@ -283,38 +268,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                         ),
                     )
                 else:
-                    await conn.execute(
-                        """
-                        INSERT INTO recommendation_history (
-                            pod_name, namespace, type, description, reason,
-                            priority, scope, status,
-                            potential_savings_cost, potential_savings_co2e_grams,
-                            current_cpu_request_millicores, recommended_cpu_request_millicores,
-                            current_memory_request_bytes, recommended_memory_request_bytes,
-                            cron_schedule, target_node, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            r.pod_name,
-                            r.namespace,
-                            r.type.value if isinstance(r.type, RecommendationType) else r.type,
-                            r.description,
-                            r.reason,
-                            r.priority,
-                            r.scope,
-                            status_val,
-                            r.potential_savings_cost,
-                            r.potential_savings_co2e_grams,
-                            r.current_cpu_request_millicores,
-                            r.recommended_cpu_request_millicores,
-                            r.current_memory_request_bytes,
-                            r.recommended_memory_request_bytes,
-                            r.cron_schedule,
-                            r.target_node,
-                            to_iso_z(r.created_at) if r.created_at else now,
-                            now,
-                        ),
-                    )
+                    values = record_values(r, encode_datetime=to_iso_z)
+                    values["status"] = status_val
+                    values["created_at"] = values["created_at"] or now
+                    values["updated_at"] = now
+                    await conn.execute(insert_query, tuple(values[column] for column in RECORD_COLUMNS))
             await conn.commit()
             logger.info("Upserted %d recommendation records in SQLite.", len(records))
             return len(records)
@@ -402,7 +360,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             query += " ORDER BY created_at DESC"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [_row_to_record(r) for r in rows]
+            return [row_to_record(r) for r in rows]
 
     async def get_active_recommendations(
         self,
@@ -429,7 +387,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY priority DESC, created_at DESC"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [_row_to_record(r) for r in rows]
+            return [row_to_record(r) for r in rows]
 
     async def get_top_recommendations(
         self,
@@ -470,7 +428,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             params.append(bounded_limit)
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [_row_to_record(r) for r in rows]
+            return [row_to_record(r) for r in rows]
 
     async def get_ignored_recommendations(
         self,
@@ -496,24 +454,31 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             query += " ORDER BY ignored_at DESC"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [_row_to_record(r) for r in rows]
+            return [row_to_record(r) for r in rows]
 
     async def get_applied_recommendations(
         self,
         namespace: Optional[str] = None,
     ) -> List[RecommendationRecord]:
-        """Returns all applied recommendations, ordered by most recently applied.
+        """Returns applied recommendations and their verification states.
+
+        Includes ``applied``, ``verifying``, ``verified`` and
+        ``rollback_review`` records so the Realized Savings view can display
+        projected and measured outcomes side by side.
 
         Args:
             namespace: Optional namespace filter.
 
         Returns:
-            A list of applied RecommendationRecord objects.
+            A list of RecommendationRecord objects ordered by most recently applied.
         """
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             params: list = []
-            query = "SELECT * FROM recommendation_history WHERE status = 'applied'"
+            query = (
+                "SELECT * FROM recommendation_history "
+                "WHERE status IN ('applied', 'verifying', 'verified', 'rollback_review')"
+            )
 
             if namespace:
                 query += " AND namespace = ?"
@@ -522,7 +487,29 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             query += " ORDER BY applied_at DESC"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
-            return [_row_to_record(r) for r in rows]
+            return [row_to_record(r) for r in rows]
+
+    async def get_recommendations_by_statuses(
+        self,
+        statuses: List[str],
+        namespace: Optional[str] = None,
+    ) -> List[RecommendationRecord]:
+        """Returns recommendations in any of the given lifecycle statuses."""
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        query = f"SELECT * FROM recommendation_history WHERE status IN ({placeholders})"
+        params: list = list(statuses)
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
+        query += " ORDER BY created_at DESC"
+
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [row_to_record(r) for r in rows]
 
     async def get_applied_recommendations_stats(self) -> List[dict]:
         """Return aggregated applied-recommendation stats via SQL GROUP BY.
@@ -540,7 +527,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     COALESCE(SUM(carbon_saved_co2e_grams), 0) AS total_co2e_grams,
                     COALESCE(SUM(cost_saved), 0) AS total_cost_dollars
                 FROM recommendation_history
-                WHERE status = 'applied'
+                WHERE status IN ('applied', 'verifying', 'verified', 'rollback_review')
                 GROUP BY type, COALESCE(namespace, '_cluster')
             """)
             rows = await cursor.fetchall()
@@ -559,9 +546,16 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             conn.row_factory = aiosqlite.Row
             cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
             row = await cursor.fetchone()
-            return _row_to_record(row) if row else None
+            return row_to_record(row) if row else None
 
-    async def apply_recommendation(self, rec_id: int, request: ApplyRecommendationRequest) -> RecommendationRecord:
+    async def apply_recommendation(
+        self,
+        rec_id: int,
+        request: ApplyRecommendationRequest,
+        *,
+        baseline: Optional[dict] = None,
+        application_method: Optional[str] = None,
+    ) -> RecommendationRecord:
         """Marks a recommendation as applied and records the actual applied values.
 
         If savings are not provided, the potential savings from the original recommendation
@@ -570,6 +564,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         Args:
             rec_id: The database primary key.
             request: The apply request with actual values.
+            baseline: Frozen pre-apply metrics captured for verification.
+            application_method: How the change landed (manual, detected, pr_merge, ...).
 
         Returns:
             The updated RecommendationRecord.
@@ -582,8 +578,9 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             if not row:
                 raise ValueError(f"Recommendation {rec_id} not found.")
 
-            record = _row_to_record(row)
+            record = row_to_record(row)
             carbon_saved, cost_saved = estimate_realized_savings(record, request)
+            method = application_method or request.application_method or "manual"
 
             await conn.execute(
                 """
@@ -594,6 +591,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     actual_memory_request_bytes = ?,
                     carbon_saved_co2e_grams = ?,
                     cost_saved = ?,
+                    application_method = ?,
+                    baseline = ?,
+                    verification_status = 'pending',
+                    verification_window_start = NULL,
+                    verification_window_end = NULL,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -603,6 +605,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     request.actual_memory_request_bytes,
                     carbon_saved,
                     cost_saved,
+                    method,
+                    json.dumps(baseline) if baseline is not None else None,
                     now,
                     rec_id,
                 ),
@@ -610,8 +614,110 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             await conn.commit()
             cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
             updated = await cursor.fetchone()
-            logger.info("Recommendation %d marked as applied.", rec_id)
-            return _row_to_record(updated)
+            logger.info("Recommendation %d marked as applied (%s).", rec_id, method)
+            return row_to_record(updated)
+
+    async def update_recommendation_fields(self, rec_id: int, updates: dict) -> RecommendationRecord:
+        """Updates a subset of mutable recommendation columns."""
+        filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
+        if not filtered:
+            raise ValueError("No mutable recommendation columns supplied.")
+
+        set_clause = ", ".join(f"{column} = ?" for column in filtered)
+        params = [_encode_value(value) for value in filtered.values()]
+        params.append(rec_id)
+
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT id FROM recommendation_history WHERE id = ?", (rec_id,))
+            if not await cursor.fetchone():
+                raise ValueError(f"Recommendation {rec_id} not found.")
+            await conn.execute(
+                f"UPDATE recommendation_history SET {set_clause} WHERE id = ?",
+                params,
+            )
+            await conn.commit()
+            cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
+            updated = await cursor.fetchone()
+            return row_to_record(updated)
+
+    async def record_event(self, event: RecommendationEvent) -> RecommendationEvent:
+        """Appends a recommendation lifecycle event to the audit trail."""
+        created_at = to_iso_z(event.created_at or datetime.now(timezone.utc))
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO recommendation_events
+                    (recommendation_id, event_type, actor, payload, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event.recommendation_id,
+                    event.event_type,
+                    event.actor,
+                    json.dumps(event.payload or {}),
+                    created_at,
+                ),
+            )
+            await conn.commit()
+            return event.model_copy(
+                update={"id": cursor.lastrowid, "created_at": event.created_at or datetime.now(timezone.utc)}
+            )
+
+    async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
+        """Returns the audit trail for a recommendation, oldest first."""
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT * FROM recommendation_events WHERE recommendation_id = ? ORDER BY created_at ASC, id ASC",
+                (rec_id,),
+            )
+            rows = await cursor.fetchall()
+            events: List[RecommendationEvent] = []
+            for row in rows:
+                payload = row["payload"]
+                try:
+                    payload = json.loads(payload) if payload else {}
+                except (TypeError, ValueError):
+                    payload = {}
+                events.append(
+                    RecommendationEvent(
+                        id=row["id"],
+                        recommendation_id=row["recommendation_id"],
+                        event_type=row["event_type"],
+                        actor=row["actor"],
+                        payload=payload,
+                        created_at=row["created_at"],
+                    )
+                )
+            return events
+
+    async def expire_recommendations(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
+        """Marks active recommendations past their TTL as expired."""
+        reference = to_iso_z(now or datetime.now(timezone.utc))
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """
+                SELECT * FROM recommendation_history
+                WHERE status = 'active'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < ?
+                """,
+                (reference,),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return []
+            ids = [row["id"] for row in rows]
+            placeholders = ", ".join("?" for _ in ids)
+            await conn.execute(
+                f"UPDATE recommendation_history SET status = 'expired', updated_at = ? WHERE id IN ({placeholders})",
+                [reference, *ids],
+            )
+            await conn.commit()
+            logger.info("Expired %d SQLite recommendation record(s).", len(ids))
+            return [row_to_record(row).model_copy(update={"status": RecommendationStatus.EXPIRED}) for row in rows]
 
     async def ignore_recommendation(self, rec_id: int, request: IgnoreRecommendationRequest) -> RecommendationRecord:
         """Permanently ignores a recommendation.
@@ -645,7 +751,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
             updated = await cursor.fetchone()
             logger.info("Recommendation %d ignored. Reason: %s", rec_id, request.reason)
-            return _row_to_record(updated)
+            return row_to_record(updated)
 
     async def unignore_recommendation(self, rec_id: int) -> RecommendationRecord:
         """Reverts an ignored recommendation back to active status.
@@ -678,7 +784,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
             updated = await cursor.fetchone()
             logger.info("Recommendation %d un-ignored, restored to active.", rec_id)
-            return _row_to_record(updated)
+            return row_to_record(updated)
 
     async def get_savings_summary(
         self,
@@ -703,8 +809,10 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             query = (
-                "SELECT namespace, carbon_saved_co2e_grams, cost_saved "
-                "FROM recommendation_history WHERE status = 'applied'"
+                "SELECT namespace, status, carbon_saved_co2e_grams, cost_saved, "
+                "measured_co2e_saved_grams, measured_cost_saved "
+                "FROM recommendation_history "
+                "WHERE status IN ('applied', 'verifying', 'verified', 'rollback_review')"
             )
             params: list = []
 
@@ -718,23 +826,49 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
 
-            total_carbon = 0.0
-            total_cost = 0.0
-            by_ns: dict = defaultdict(lambda: {"carbon_saved_co2e_grams": 0.0, "cost_saved": 0.0, "count": 0})
+            measured_carbon = 0.0
+            measured_cost = 0.0
+            prorated_carbon = 0.0
+            prorated_cost = 0.0
+            by_ns: dict = defaultdict(
+                lambda: {
+                    "carbon_saved_co2e_grams": 0.0,
+                    "cost_saved": 0.0,
+                    "measured_carbon_saved_co2e_grams": 0.0,
+                    "measured_cost_saved": 0.0,
+                    "count": 0,
+                }
+            )
 
             for row in rows:
-                c = row["carbon_saved_co2e_grams"] or 0.0
-                s = row["cost_saved"] or 0.0
-                total_carbon += c
-                total_cost += s
+                is_verified = row["status"] == "verified" and row["measured_co2e_saved_grams"] is not None
+                if is_verified:
+                    c = row["measured_co2e_saved_grams"] or 0.0
+                    s = row["measured_cost_saved"] or 0.0
+                    measured_carbon += c
+                    measured_cost += s
+                else:
+                    c = row["carbon_saved_co2e_grams"] or 0.0
+                    s = row["cost_saved"] or 0.0
+                    prorated_carbon += c
+                    prorated_cost += s
                 ns_key = row["namespace"] or "_cluster"
                 by_ns[ns_key]["carbon_saved_co2e_grams"] += c
                 by_ns[ns_key]["cost_saved"] += s
+                by_ns[ns_key]["measured_carbon_saved_co2e_grams"] += (
+                    row["measured_co2e_saved_grams"] or 0.0 if is_verified else 0.0
+                )
+                by_ns[ns_key]["measured_cost_saved"] += row["measured_cost_saved"] or 0.0 if is_verified else 0.0
                 by_ns[ns_key]["count"] += 1
 
             return RecommendationSavingsSummary(
-                total_carbon_saved_co2e_grams=total_carbon,
-                total_cost_saved=total_cost,
+                total_carbon_saved_co2e_grams=measured_carbon + prorated_carbon,
+                total_cost_saved=measured_cost + prorated_cost,
                 applied_count=len(rows),
                 namespace_breakdown=[{"namespace": ns, **vals} for ns, vals in by_ns.items()],
+                measured_carbon_saved_co2e_grams=measured_carbon,
+                measured_cost_saved=measured_cost,
+                prorated_carbon_saved_co2e_grams=prorated_carbon,
+                prorated_cost_saved=prorated_cost,
+                verified_count=sum(1 for row in rows if row["status"] == "verified"),
             )

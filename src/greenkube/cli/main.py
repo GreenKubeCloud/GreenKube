@@ -2,17 +2,16 @@
 """
 This module is the main entry point for the GreenKube CLI.
 
-It aggregates all commands from the submodules (report, recommend, etc.)
+It aggregates the remaining commands from the submodules (start and demo).
 """
 
 import logging
-import os
 
 import typer
 
 from ..core.config import get_config
 from ..utils.log import configure_logging
-from . import demo, recommend, report, start
+from . import demo, start
 
 _cfg = get_config()
 configure_logging(level=_cfg.LOG_LEVEL, log_format=_cfg.LOG_FORMAT)
@@ -56,23 +55,13 @@ def main(
         is_eager=True,
         help="Show the version and exit.",
     ),
-    no_color: bool = typer.Option(
-        False,
-        "--no-color",
-        help="Disable colors and Rich formatting. Useful for CI/CD pipelines and log parsers.",
-        is_eager=True,
-    ),
 ):
     """
     GreenKube CLI main entry point.
     """
-    if no_color or os.environ.get("NO_COLOR"):
-        os.environ["NO_COLOR"] = "1"
 
 
 # Register command sub-apps
-app.add_typer(report.app, name="report")
-app.add_typer(recommend.app, name="recommend")
 app.add_typer(start.app, name="start")
 app.add_typer(demo.app, name="demo")
 

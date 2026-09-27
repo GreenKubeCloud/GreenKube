@@ -283,6 +283,64 @@ async def refresh_dashboard_summary() -> None:
     logger.info("--- Finished dashboard summary refresh task ---")
 
 
+async def run_recommendation_lifecycle() -> None:
+    """Run apply detection, outcome verification and TTL expiry (Phase 3).
+
+    This is the scheduled counterpart of the PR bot: once a change lands in the
+    cluster (manually, via PR merge or via ArgoCD sync), the detector flips the
+    recommendation to ``applied`` and the verifier compares the measured cost,
+    carbon and workload-health signals against the frozen baseline.
+    """
+    logger.info("--- Starting recommendation lifecycle task ---")
+    try:
+        from ..core.factory import (
+            get_combined_metrics_repository as _combined_repo,
+        )
+        from ..core.factory import (
+            get_recommendation_repository as _reco_repo,
+        )
+        from ..core.optimization.applied_detector import AppliedDetector
+        from ..core.optimization.lifecycle import RecommendationLifecycle
+        from ..core.optimization.verifier import RecommendationVerifier
+
+        repo = _reco_repo()
+        lifecycle = RecommendationLifecycle(repo)
+
+        expired = await lifecycle.expire()
+        if expired:
+            logger.info("Expired %d recommendation(s) past their TTL.", len(expired))
+
+        detector = AppliedDetector(lifecycle)
+        applied = await detector.detect()
+        if applied:
+            logger.info("Detected %d newly applied recommendation(s).", len(applied))
+
+        verifier = RecommendationVerifier(lifecycle, _combined_repo())
+        verified = await verifier.verify_due()
+        if verified:
+            logger.info("Verified %d recommendation outcome(s).", len(verified))
+
+        # Stop attributing savings for outcomes that need rollback review.
+        rollbacks = [
+            r for r in verified if r.id is not None and getattr(r.status, "value", r.status) == "rollback_review"
+        ]
+        if rollbacks:
+            from ..core.factory import get_savings_ledger_repository as _savings_repo
+
+            savings_repo = _savings_repo()
+            for record in rollbacks:
+                rec_id = record.id
+                if rec_id is None:
+                    continue
+                try:
+                    await savings_repo.supersede_for_recommendation(rec_id)
+                except Exception as exc:
+                    logger.warning("Could not supersede savings for recommendation %s: %s", rec_id, exc)
+    except Exception as e:
+        logger.error("Recommendation lifecycle task failed: %s", e)
+    logger.info("--- Finished recommendation lifecycle task ---")
+
+
 async def _async_start(last: Optional[str]):
     cfg = get_config()
     from ..utils.log import configure_logging
@@ -309,10 +367,17 @@ async def _async_start(last: Optional[str]):
     scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
     scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL, skip_initial=True)
     scheduler.add_job_from_string(attribute_recommendation_savings, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
-    # Compress old raw metrics into hourly aggregates every hour
-    scheduler.add_job(compress_metrics, interval_hours=1)
+    # Apply detection, verification and TTL expiry
+    scheduler.add_job_from_string(
+        run_recommendation_lifecycle,
+        getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
+        skip_initial=True,
+    )
+    # Compress old raw metrics into hourly aggregates every hour.
+    # skip_initial=True because both jobs are awaited once in the startup block below.
+    scheduler.add_job(compress_metrics, interval_hours=1, skip_initial=True)
     # Refresh pre-computed dashboard summary every hour (after compression)
-    scheduler.add_job(refresh_dashboard_summary, interval_hours=1)
+    scheduler.add_job(refresh_dashboard_summary, interval_hours=1, skip_initial=True)
 
     logger.info("📈 Starting scheduler...")
     logger.info("\nGreenKube is running. Press CTRL+C to exit.")
@@ -324,6 +389,7 @@ async def _async_start(last: Optional[str]):
     # pass 'last' only to the initial run
     await async_write_combined_metrics_to_database(last=last)
     await attribute_recommendation_savings()
+    await run_recommendation_lifecycle()
     await compress_metrics()
     await refresh_dashboard_summary()
     logger.info("Initial collection complete.")

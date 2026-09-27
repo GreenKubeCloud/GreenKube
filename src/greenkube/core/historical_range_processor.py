@@ -5,7 +5,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 from .. import __version__
 from ..collectors.node_collector import NodeCollector
@@ -80,6 +80,15 @@ class HistoricalRangeProcessor:
     # Public API
     # ------------------------------------------------------------------
 
+    async def _read_stored_metrics(
+        self, start_dt: datetime, end_dt: datetime, namespace: Optional[str]
+    ) -> List[CombinedMetric]:
+        """Read stored metrics for the range, filtered by namespace when requested."""
+        stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
+        if namespace:
+            stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
+        return stored_metrics
+
     async def run_range(
         self,
         start,
@@ -107,7 +116,7 @@ class HistoricalRangeProcessor:
                 end_dt = end
 
             if start_dt and end_dt:
-                stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
+                stored_metrics = await self._read_stored_metrics(start_dt, end_dt, namespace)
                 if stored_metrics:
                     logger.info(
                         "Found %d stored metrics in repository for range %s - %s",
@@ -115,8 +124,6 @@ class HistoricalRangeProcessor:
                         start,
                         end,
                     )
-                    if namespace:
-                        stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
                     return stored_metrics
         except Exception as e:
             logger.warning("Failed to read stored metrics: %s", e)
@@ -254,6 +261,13 @@ class HistoricalRangeProcessor:
         except Exception:
             cost_map = {}
 
+        # Per-pod persistent storage (PVC) request/usage — best-effort.
+        try:
+            pod_storage_map = await self.prometheus_collector.collect_pod_storage()
+        except Exception as e:
+            logger.warning("Failed to collect pod storage metrics: %s", e)
+            pod_storage_map = {}
+
         # --- Chunked processing ---
         CHUNK_SIZE = timedelta(days=1)
         combined: List[CombinedMetric] = []
@@ -294,6 +308,7 @@ class HistoricalRangeProcessor:
             disk_write_query = f"sum(rate(container_fs_writes_bytes_total[{rate_window}])) by (namespace,pod,node)"
             restart_query = "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
             memory_query = "sum(container_memory_working_set_bytes) by (namespace,pod,node)"
+            ephemeral_usage_query = "sum(container_fs_usage_bytes) by (namespace,pod,node)"
 
             try:
                 (
@@ -303,6 +318,7 @@ class HistoricalRangeProcessor:
                     disk_write_results,
                     restart_results,
                     memory_results,
+                    ephemeral_usage_results,
                 ) = await asyncio.gather(
                     self.prometheus_collector.collect_range(
                         start=chunk_start, end=chunk_end, step=chosen_step, query=net_rx_query
@@ -322,6 +338,9 @@ class HistoricalRangeProcessor:
                     self.prometheus_collector.collect_range(
                         start=chunk_start, end=chunk_end, step=chosen_step, query=memory_query
                     ),
+                    self.prometheus_collector.collect_range(
+                        start=chunk_start, end=chunk_end, step=chosen_step, query=ephemeral_usage_query
+                    ),
                 )
             except Exception:
                 net_rx_results = []
@@ -330,6 +349,7 @@ class HistoricalRangeProcessor:
                 disk_write_results = []
                 restart_results = []
                 memory_results = []
+                ephemeral_usage_results = []
 
             def _build_pod_map_from_range(range_results):
                 pod_map = {}
@@ -353,9 +373,11 @@ class HistoricalRangeProcessor:
             range_disk_write_map = _build_pod_map_from_range(disk_write_results)
             range_restart_map = _build_pod_map_from_range(restart_results)
             range_memory_map = _build_pod_map_from_range(memory_results)
+            range_ephemeral_usage_map = _build_pod_map_from_range(ephemeral_usage_results)
 
             del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
             del memory_results
+            del ephemeral_usage_results
 
             # Parse results into samples
             samples = defaultdict(lambda: defaultdict(float))
@@ -523,7 +545,18 @@ class HistoricalRangeProcessor:
                             network_transmit_bytes=range_net_tx_map.get(pod_key),
                             disk_read_bytes=range_disk_read_map.get(pod_key),
                             disk_write_bytes=range_disk_write_map.get(pod_key),
+                            storage_request_bytes=(
+                                int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
+                            ),
+                            storage_usage_bytes=(
+                                int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
+                            ),
                             ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
+                            ephemeral_storage_usage_bytes=(
+                                int(range_ephemeral_usage_map[pod_key])
+                                if pod_key in range_ephemeral_usage_map
+                                else None
+                            ),
                             restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
                             calculation_version=__version__,
                         )
@@ -532,7 +565,7 @@ class HistoricalRangeProcessor:
             del chunk_energy_metrics
             del range_net_rx_map, range_net_tx_map
             del range_disk_read_map, range_disk_write_map, range_restart_map
-            del range_cpu_usage_map, range_memory_map
+            del range_cpu_usage_map, range_memory_map, range_ephemeral_usage_map
 
             chunk_start = chunk_end
 

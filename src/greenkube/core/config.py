@@ -94,8 +94,6 @@ class Config(BaseSettings):
     # --- Secrets ---
     ELECTRICITY_MAPS_TOKEN: Optional[str] = None
     BOAVIZTA_TOKEN: Optional[str] = None
-    ELASTICSEARCH_USER: Optional[str] = None
-    ELASTICSEARCH_PASSWORD: Optional[str] = None
     PROMETHEUS_BEARER_TOKEN: Optional[str] = None
     PROMETHEUS_USERNAME: Optional[str] = None
     PROMETHEUS_PASSWORD: Optional[str] = None
@@ -139,11 +137,6 @@ class Config(BaseSettings):
     DB_POOL_MIN_SIZE: int = 1
     DB_POOL_MAX_SIZE: int = 10
     DB_STATEMENT_TIMEOUT_MS: int = 30000
-
-    # --- Elasticsearch variables ---
-    ELASTICSEARCH_HOSTS: str = "http://localhost:9200"
-    ELASTICSEARCH_VERIFY_CERTS: bool = True
-    ELASTICSEARCH_INDEX_NAME: str = "carbon_intensity"
 
     # --- Prometheus variables ---
     PROMETHEUS_URL: str = ""
@@ -223,6 +216,59 @@ class Config(BaseSettings):
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
 
+    # --- Recommendation sources (connectors) ---
+    # VPA recommendation mode (updateMode: Off) is used for CPU/memory rightsizing
+    # when enabled; native rightsizing for the same workload is then suppressed.
+    # Phase 6 enables the source by default; it degrades gracefully when the VPA
+    # CRD is not installed.
+    RECOMMENDATION_VPA_ENABLED: bool = True
+    # Karpenter NodePool consolidation recommendations. Enabled by default and
+    # skipped gracefully when the Karpenter CRDs are absent.
+    RECOMMENDATION_KARPENTER_ENABLED: bool = True
+    # Source precedence for capability arbitration, highest priority first.
+    RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
+
+    # --- Recommendation ranking & review ---
+    # Time-to-live of a recommendation before it is considered expired.
+    RECOMMENDATION_TTL_DAYS: int = 14
+    # Ranking profile: balanced, carbon_first, cost_first, quick_wins, low_risk.
+    RECOMMENDATION_RANKING_PROFILE: str = "balanced"
+    # Optional JSON object overriding profile weights, e.g. '{"carbon": 0.5}'.
+    RECOMMENDATION_RANKING_WEIGHTS: str = ""
+    # Minimum number of raw samples expected for a high-confidence recommendation.
+    RECOMMENDATION_MIN_SAMPLES: int = 36
+
+    # --- Recommendation verification (Phase 3) ---
+    # Observation window after apply before the outcome is verified.
+    VERIFICATION_WINDOW_HOURS: float = 72
+    # Minimum raw samples required before a verdict is rendered.
+    VERIFICATION_MIN_SAMPLES: int = 36
+    # Measured savings must reach this ratio of the projection to pass the cost gate.
+    VERIFICATION_MIN_SAVINGS_RATIO: float = 0.5
+    # p95 usage must stay below proposed request x this factor to pass the health gate.
+    VERIFICATION_USAGE_HEADROOM: float = 1.1
+    # Maximum allowed restart-count increase during the observation window.
+    VERIFICATION_MAX_RESTART_DELTA: int = 0
+    # Minimum readiness ratio during the observation window.
+    VERIFICATION_MIN_READINESS: float = 0.99
+    # Maximum allowed CPU throttling ratio during the observation window.
+    VERIFICATION_MAX_THROTTLE_RATIO: float = 0.05
+    # Interval between lifecycle jobs (apply detection, verification, expiry).
+    RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
+
+    # --- Git automation (PR bot, Phase 4) ---
+    # Personal access token used to push branches and open pull requests.
+    GIT_TOKEN: Optional[str] = None
+    # Git provider selection: github, gitlab or gitea.
+    GIT_PROVIDER: str = "github"
+    # API base URL override for self-hosted instances / local testing.
+    GIT_API_BASE_URL: Optional[str] = None
+    # Fallback base branch when the workload annotation omits one.
+    GIT_DEFAULT_BRANCH: str = "main"
+    # Bot commit identity.
+    GIT_COMMIT_AUTHOR_NAME: str = "GreenKube Bot"
+    GIT_COMMIT_AUTHOR_EMAIL: str = "bot@greenkube.cloud"
+
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
     # (see _compute_and_validate model validator). The raw env-var value is preserved in
@@ -260,8 +306,8 @@ class Config(BaseSettings):
     @field_validator("DB_TYPE", mode="after")
     @classmethod
     def _validate_db_type(cls, v: str) -> str:
-        if v not in ["sqlite", "postgres", "elasticsearch"]:
-            raise ValueError("DB_TYPE must be 'sqlite', 'postgres', or 'elasticsearch'")
+        if v not in ["sqlite", "postgres"]:
+            raise ValueError("DB_TYPE must be 'sqlite' or 'postgres'")
         return v
 
     @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")
@@ -272,9 +318,12 @@ class Config(BaseSettings):
             if not match:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP format is invalid. Use 's', 'm', or 'h'.")
             value, unit = int(match.group(1)), match.group(2)
+            if value <= 0:
+                raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be greater than zero.")
             unit_map = {"s": "seconds", "m": "minutes", "h": "hours"}
             delta = timedelta(**{unit_map[unit]: value})
-            if (24 * 3600) % delta.total_seconds() != 0:
+            total_seconds = delta.total_seconds()
+            if total_seconds <= 0 or (24 * 3600) % total_seconds != 0:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         return v
 

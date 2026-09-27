@@ -11,7 +11,7 @@ The full `values.yaml` is self-documented. The most important parameters are gro
 ```yaml
 image:
   repository: greenkube/greenkube
-  tag: 0.2.9
+  tag: 0.3.0
   pullPolicy: IfNotPresent
 ```
 
@@ -50,7 +50,7 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.boavizta.url` | `https://api.boavizta.org` | Boavizta API endpoint for embodied emissions |
-| `config.boavizta.defaultEmbodiedEmissionsKg` | `350` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
+| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 
@@ -64,6 +64,25 @@ config:
     url: "http://opencost.opencost.svc.cluster.local:9003"
 ```
 
+### Recommendation engine (`config.recommendations`)
+
+Analyzer thresholds and source selection live under `config.recommendations`.
+The values are wired to `RECOMMENDATION_*` environment variables. Key entries:
+
+| Helm value | Environment variable | Default | Description |
+|---|---|---|---|
+| `recommendations.vpaEnabled` | `RECOMMENDATION_VPA_ENABLED` | `true` | Read recommendation-mode VPAs (`updateMode: Off`). The source detects the CRD and skips cleanly when absent; native rightsizing for the same workload is then suppressed. |
+| `recommendations.karpenterEnabled` | `RECOMMENDATION_KARPENTER_ENABLED` | `true` | Karpenter NodePool consolidation recommendations. Auto-detects the CRDs. |
+| `recommendations.sourcePriority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). |
+| `recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
+| `recommendations.verification.windowHours` | `VERIFICATION_WINDOW_HOURS` | `72` | Post-apply observation window before the outcome is verified. |
+| `recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Measured savings required to pass the cost gate. |
+| `recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
+| `recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
+| `recommendations.git.provider` | `GIT_PROVIDER` | `github` | PR bot provider: `github`, `gitlab` or `gitea`. |
+| `recommendations.git.apiBaseUrl` | `GIT_API_BASE_URL` | `""` | API override for self-hosted instances. |
+| `recommendations.git.defaultBranch` | `GIT_DEFAULT_BRANCH` | `main` | Fallback base branch for pull requests. |
+
 ### Secrets (`secrets`)
 
 | Key | Description |
@@ -71,6 +90,7 @@ config:
 | `secrets.electricityMapsToken` | Electricity Maps API token for real-time grid intensity. Without it, the default intensity is used. Get a free token at [electricitymaps.com](https://www.electricitymaps.com/) |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
+| `secrets.gitToken` | Git personal access token used by the recommendation PR bot. Leave empty to disable PR automation. |
 | `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml` |
 
 ### Monitoring (`monitoring`)
@@ -86,19 +106,34 @@ monitoring:
     prometheusNamespace: monitoring
 ```
 
-### PostgreSQL StatefulSet (`postgresql`)
+### PostgreSQL StatefulSet (`postgres`)
 
 GreenKube ships with an optional bundled PostgreSQL StatefulSet. Adjust storage and credentials as needed:
 
 ```yaml
-postgresql:
+postgres:
   enabled: true
-  storage:
-    size: 5Gi
+  image:
+    repository: postgres
+    tag: 18-alpine
+    pullPolicy: IfNotPresent
   auth:
-    database: greenkube
     username: greenkube
-    # password is managed via secrets
+    # Leave empty to generate a random password on first install (preserved
+    # across upgrades), or set it explicitly.
+    password: ''
+    database: greenkube
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClassName: ''
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
 ```
 
 ## On-premises and bare-metal clusters

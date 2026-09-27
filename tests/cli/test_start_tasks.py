@@ -302,7 +302,10 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks():
 
     db_manager.connect.assert_awaited_once()
     assert scheduler.add_job.call_count == 3
-    assert scheduler.add_job_from_string.call_count == 3
+    assert scheduler.add_job_from_string.call_count == 4
+    add_job_kwargs = {call.args[0]: call.kwargs for call in scheduler.add_job.call_args_list}
+    assert add_job_kwargs[compress]["skip_initial"] is True
+    assert add_job_kwargs[refresh]["skip_initial"] is True
     carbon.assert_awaited_once()
     analyze.assert_awaited_once()
     write_metrics.assert_awaited_once_with(last="1h")

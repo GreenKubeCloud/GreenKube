@@ -425,6 +425,12 @@ SAVINGS_COST_ATTRIBUTED = Gauge(
     ["cluster", "recommendation_type"],
     registry=REGISTRY,
 )
+SAVINGS_MEASURED_RATIO = Gauge(
+    "greenkube_savings_measured_vs_projected_ratio",
+    "Share of attributed CO2e savings that has been verified by measurement (0–1).",
+    ["cluster"],
+    registry=REGISTRY,
+)
 # Legacy gauges kept for backward compatibility — show the total annual
 # projection from applied recommendations (not window-aware).
 CLUSTER_CO2_SAVED = Gauge(
@@ -944,6 +950,7 @@ def update_recommendation_metrics(recommendations: Sequence[Recommendation | Rec
 def update_attributed_savings_metrics(
     cumulative_totals: dict,
     cluster: str,
+    totals_by_method: dict | None = None,
 ) -> None:
     """Update the DB-backed cumulative savings gauges.
 
@@ -953,9 +960,18 @@ def update_attributed_savings_metrics(
     Args:
         cumulative_totals: ``{rec_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
         cluster:           Cluster name label value.
+        totals_by_method:  Optional ``{method: totals}`` split used to expose the
+                           measured-vs-projected ratio gauge.
     """
     _clear_gauge(SAVINGS_CO2_ATTRIBUTED)
     _clear_gauge(SAVINGS_COST_ATTRIBUTED)
+    _clear_gauge(SAVINGS_MEASURED_RATIO)
+
+    if totals_by_method is not None:
+        measured = totals_by_method.get("measured", {}).get("co2e_saved_grams", 0.0) or 0.0
+        prorated = totals_by_method.get("prorated", {}).get("co2e_saved_grams", 0.0) or 0.0
+        total = measured + prorated
+        SAVINGS_MEASURED_RATIO.labels(cluster=cluster).set(measured / total if total > 0 else 0.0)
 
     if not cumulative_totals:
         return
@@ -1169,7 +1185,8 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
             cluster = _get_cluster_name()
             attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
             totals = await attributor.get_cumulative_totals()
-            update_attributed_savings_metrics(totals, cluster=cluster)
+            by_method = await savings_repo.get_cumulative_totals(cluster_name=cluster, group_by_method=True)
+            update_attributed_savings_metrics(totals, cluster=cluster, totals_by_method=by_method)
             clear_dashboard_savings_metrics()
             savings_namespaces = await get_dashboard_namespaces("savings")
             for window_slug, start_time, end_time in _dashboard_window_ranges(now):

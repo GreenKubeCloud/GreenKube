@@ -34,6 +34,14 @@ class TestRecommendationHistoryEndpoint:
         )
         assert response.json() == []
 
+    def test_history_invalid_date_returns_400(self, client):
+        """Invalid ISO 8601 datetimes must produce a 400, not a 500."""
+        response = client.get(
+            "/api/v1/recommendations/history",
+            params={"start": "not-a-date", "end": "2026-02-28T00:00:00Z"},
+        )
+        assert response.status_code == 400
+
     def test_history_with_type_filter(self, client, mock_reco_repo):
         """Should pass the type filter to the repository."""
         records = [
@@ -175,7 +183,7 @@ class TestRecommendationsPersistence:
 
         # Kubernetes only knows about "greenkube" and "default" — NOT "greenkube-db-testing".
         with patch(
-            "greenkube.api.routers.recommendations._get_active_k8s_namespaces",
+            "greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
             new=AsyncMock(return_value={"greenkube", "default"}),
         ):
             response = client.get("/api/v1/recommendations/active", params={"refresh": "true"})

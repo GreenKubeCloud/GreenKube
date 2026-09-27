@@ -264,6 +264,10 @@ async def report_export(
             detail=f"Invalid group_by '{group_by}'. Valid values: {', '.join(_VALID_GROUP_BY)}.",
         )
 
+    # Validate the requested range before starting the stream: once the
+    # response has started, an invalid range cannot become a 400 anymore.
+    ranges = _get_time_ranges(last, start, end, years)
+
     # Stream results in chunks to avoid loading the whole dataset into memory.
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"greenkube-report-{timestamp_str}.{fmt}"
@@ -271,7 +275,6 @@ async def report_export(
     # Create an async generator that yields bytes
     async def _iter_metrics_chunks(chunk_days: int = 7):
         # Convert requested ranges into a sequence of (start, end) windows
-        ranges = _get_time_ranges(last, start, end, years)
         for range_start, range_end in ranges:
             # iterate in chunks of chunk_days
             cursor = range_start
@@ -360,8 +363,8 @@ def _rows_to_csv(rows: list) -> str:
 
 
 def _sanitize_cell(value) -> str:
-    """Prevent CSV formula injection."""
+    """Prevent CSV formula injection, including leading-whitespace bypasses."""
     s = str(value) if value is not None else ""
-    if s.startswith(("=", "+", "-", "@")):
+    if s.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
         return f"'{s}"
     return s

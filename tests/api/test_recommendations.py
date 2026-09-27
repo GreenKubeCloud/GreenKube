@@ -247,9 +247,13 @@ class TestRecommendationsEndpoint:
 
     def test_savings_summary_uses_ledger_for_selected_window(self, client, mock_reco_repo, mock_savings_repo):
         """Savings windows should count ongoing ledger rows, not only recommendations applied in the window."""
-        mock_savings_repo.get_window_totals = AsyncMock(
-            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
-        )
+        totals_by_type = {"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
+        totals_by_method = {"prorated": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
+
+        async def _window_totals(*args, group_by_method=False, **kwargs):
+            return totals_by_method if group_by_method else totals_by_type
+
+        mock_savings_repo.get_window_totals = AsyncMock(side_effect=_window_totals)
         mock_reco_repo.get_savings_summary = AsyncMock(
             return_value=RecommendationSavingsSummary(
                 total_carbon_saved_co2e_grams=0.0,
@@ -265,7 +269,9 @@ class TestRecommendationsEndpoint:
         assert data["total_carbon_saved_co2e_grams"] == 42.0
         assert data["total_cost_saved"] == 1.5
         assert data["applied_count"] == 1
-        mock_savings_repo.get_window_totals.assert_awaited_once()
+        assert data["prorated_carbon_saved_co2e_grams"] == 42.0
+        assert data["measured_carbon_saved_co2e_grams"] == 0.0
+        assert mock_savings_repo.get_window_totals.await_count == 2
 
     def test_savings_summary_without_window_uses_repository_summary(self, client, mock_reco_repo, mock_savings_repo):
         """Unbounded summaries should keep repository fallback semantics and namespace filtering."""
@@ -327,6 +333,13 @@ class TestRecommendationsEndpoint:
                 "sort_value": 6200.0,
                 "projected_savings_co2e_grams": 6200.0,
                 "projected_savings_cost": 148.5,
+                "source": "greenkube",
+                "risk_level": None,
+                "confidence": None,
+                "effort": None,
+                "ranking_score": None,
+                "ranking_factors": {},
+                "expires_at": None,
             }
         ]
         mock_reco_repo.get_top_recommendations.assert_awaited_once_with(
@@ -348,3 +361,132 @@ class TestRecommendationsEndpoint:
             savings_metric="cost",
             namespace="staging",
         )
+
+    def test_top_recommendations_with_profile_ranks_active_records(self, client, mock_reco_repo):
+        """A ranking profile should use the multi-criteria score over all active records."""
+        mock_reco_repo.get_active_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=1,
+                    pod_name="low-risk",
+                    namespace="production",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="safe",
+                    potential_savings_co2e_grams=1000.0,
+                    potential_savings_cost=10.0,
+                    risk_level="low",
+                    confidence=0.9,
+                ),
+                RecommendationRecord(
+                    id=2,
+                    pod_name="high-risk",
+                    namespace="production",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="risky",
+                    potential_savings_co2e_grams=1000.0,
+                    potential_savings_cost=10.0,
+                    risk_level="high",
+                    confidence=0.9,
+                ),
+            ]
+        )
+
+        response = client.get("/api/v1/recommendations/top?profile=low_risk")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["resource"] == "low-risk"
+        assert data[0]["ranking_score"] is not None
+        assert data[0]["risk_level"] == "low"
+        mock_reco_repo.get_top_recommendations.assert_not_awaited()
+
+
+class TestRecommendationDetail:
+    """Tests for GET /api/v1/recommendations/{id}."""
+
+    def test_detail_returns_full_record(self, client, mock_reco_repo):
+        record = RecommendationRecord(
+            id=7,
+            pod_name="api",
+            namespace="prod",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Reduce CPU",
+            evidence={"observation_window_seconds": 604800, "sample_count": 100, "savings_method": "x"},
+        )
+        mock_reco_repo.get_recommendation_by_id = AsyncMock(return_value=record)
+
+        response = client.get("/api/v1/recommendations/7")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == 7
+
+    def test_detail_returns_404_when_missing(self, client, mock_reco_repo):
+        mock_reco_repo.get_recommendation_by_id = AsyncMock(return_value=None)
+
+        response = client.get("/api/v1/recommendations/999")
+
+        assert response.status_code == 404
+
+
+class TestActiveRecommendationFilters:
+    """Tests for source/risk/capability filters on the active list."""
+
+    def test_filters_by_source(self, client, mock_reco_repo):
+        from greenkube.models.metrics import RecommendationSource
+
+        mock_reco_repo.get_active_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=1,
+                    pod_name="api",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="vpa",
+                    source=RecommendationSource.VPA,
+                ),
+                RecommendationRecord(
+                    id=2,
+                    pod_name="api",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_MEMORY,
+                    description="native",
+                    source=RecommendationSource.GREENKUBE,
+                ),
+            ]
+        )
+
+        response = client.get("/api/v1/recommendations/active?source=vpa")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["source"] == "vpa"
+
+    def test_filters_by_risk_level(self, client, mock_reco_repo):
+        mock_reco_repo.get_active_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=1,
+                    pod_name="a",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="risky",
+                    risk_level="high",
+                ),
+                RecommendationRecord(
+                    id=2,
+                    pod_name="b",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="safe",
+                    risk_level="low",
+                ),
+            ]
+        )
+
+        response = client.get("/api/v1/recommendations/active?risk_level=high")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == 1

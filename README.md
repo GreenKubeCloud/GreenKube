@@ -10,7 +10,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
 [![Python Coverage](https://img.shields.io/badge/coverage%20python-87%25-green)](tests/)
 [![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-[![Tests](https://img.shields.io/badge/tests-1252%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1431%20passed-brightgreen)](tests/)
 [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 >**Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the full dashboard with realistic sample data, no install required.
@@ -57,8 +57,9 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 | [Power estimation methodology](docs/power_estimation_methodology.md) | How energy and CO₂e are calculated |
 | [Configuration](docs/configuration.md) | All Helm values and environment variables |
 | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
-| [CLI Reference](docs/cli.md) | `greenkube report`, `recommend`, and other CLI commands |
+| [CLI Reference](docs/cli.md) | `greenkube start`, `demo`, and other CLI commands |
 | [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, persisted, actioned, and measured |
+| [Optimization engine specification](docs/specs/optimization-engine.md) | Technical specification: multi-source engine, evidence model, ranking, verification |
 | [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
 | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
 | [Changelog](CHANGELOG.md) | Version history |

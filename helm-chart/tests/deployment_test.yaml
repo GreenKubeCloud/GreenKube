@@ -215,6 +215,27 @@ tests:
           path: spec.template.spec.securityContext.seccompProfile.type
           value: RuntimeDefault
 
+  - it: should wait for PostgreSQL with an init container in postgres mode
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: until nc -z RELEASE-NAME-greenkube-postgres 5432
+
+  - it: should not add the wait-for-postgres init container when postgres is disabled
+    set:
+      postgres.enabled: false
+      config.db.type: sqlite
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - isNull:
+          path: spec.template.spec.initContainers
+
   - it: should set container securityContext on collector container
     templates:
       - templates/deployment.yaml
@@ -259,14 +280,26 @@ tests:
           path: spec.template.spec.serviceAccountName
           value: RELEASE-NAME-greenkube
 
-  - it: should not set serviceAccountName when serviceAccount.create is false
+  - it: should set serviceAccountName to the provided name when serviceAccount.create is false
+    set:
+      serviceAccount.create: false
+      serviceAccount.name: my-sa
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-sa
+
+  - it: should fall back to the default service account when create is false and no name is set
     set:
       serviceAccount.create: false
     templates:
       - templates/deployment.yaml
     asserts:
-      - isNull:
+      - equal:
           path: spec.template.spec.serviceAccountName
+          value: default
 
   # --------------------------------------------------------------------------
   # Resource requests/limits

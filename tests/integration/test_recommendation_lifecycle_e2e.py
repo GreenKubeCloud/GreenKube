@@ -3,7 +3,7 @@
 End-to-end integration tests for the full recommendation lifecycle.
 
 These tests exercise the complete business flow:
-  1. CombinedMetrics analyzed by the Recommender → Recommendation objects
+  1. CombinedMetrics analyzed by the native analyzers → Recommendation objects
   2. Recommendations converted to RecommendationRecord objects
   3. Records persisted to SQLite
   4. Records retrieved via the FastAPI layer
@@ -27,7 +27,6 @@ from greenkube.api.dependencies import (
     get_recommendation_repository,
 )
 from greenkube.core.db import db_manager
-from greenkube.core.recommender import Recommender
 from greenkube.models.metrics import (
     CombinedMetric,
     RecommendationRecord,
@@ -37,6 +36,7 @@ from greenkube.models.metrics import (
 from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
+from tests.core.optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-import]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,7 +60,7 @@ def lifecycle_client(sqlite_repos):
     """TestClient wired to real SQLite repositories for lifecycle tests."""
     carbon_repo, combined_repo, node_repo, reco_repo = sqlite_repos
 
-    with patch("greenkube.api.routers.recommendations.HPACollector") as mock_hpa:
+    with patch("greenkube.core.optimization.context_builder.HPACollector") as mock_hpa:
         instance = AsyncMock()
         instance.collect = AsyncMock(return_value=set())
         mock_hpa.return_value = instance
@@ -118,16 +118,16 @@ def _make_oversized_cpu_metrics() -> list[CombinedMetric]:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Recommender generates recommendations from metrics
+# Step 1: native analyzers generate recommendations from metrics
 # ---------------------------------------------------------------------------
 
 
-class TestRecommenderGeneratesFromMetrics:
-    """The Recommender correctly identifies issues in CombinedMetric data."""
+class TestNativeAnalyzersGenerateFromMetrics:
+    """The native analyzers correctly identify issues in CombinedMetric data."""
 
     def test_zombie_detected_from_combined_metrics(self):
         """ZOMBIE_POD recommendation is generated from metrics with cost but no energy."""
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_zombie_metrics())
 
         zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
@@ -139,7 +139,7 @@ class TestRecommenderGeneratesFromMetrics:
 
     def test_cpu_rightsizing_detected_from_combined_metrics(self):
         """RIGHTSIZING_CPU recommendation is generated from consistently low-usage metrics."""
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_oversized_cpu_metrics())
 
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
@@ -159,7 +159,7 @@ class TestRecommendationRecordConversion:
 
     def test_record_carries_all_recommendation_fields(self):
         """All fields from Recommendation are reflected in RecommendationRecord."""
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_zombie_metrics())
         zombie_rec = next(r for r in recs if r.type == RecommendationType.ZOMBIE_POD)
 
@@ -174,7 +174,7 @@ class TestRecommendationRecordConversion:
 
     def test_record_default_status_is_active(self):
         """Freshly created records must have ACTIVE status."""
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_zombie_metrics())
         record = RecommendationRecord.from_recommendation(recs[0])
 
@@ -182,7 +182,7 @@ class TestRecommendationRecordConversion:
 
     def test_record_has_created_at_timestamp(self):
         """created_at is set and UTC-aware."""
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_zombie_metrics())
         record = RecommendationRecord.from_recommendation(recs[0])
 
@@ -203,7 +203,7 @@ class TestRecommendationPersistence:
         """A saved recommendation is retrievable from the repository."""
         _, _, _, reco_repo = sqlite_repos
 
-        recommender = Recommender()
+        recommender = NativeRecommender()
         recs = recommender.generate_recommendations(_make_zombie_metrics())
         records = [RecommendationRecord.from_recommendation(r) for r in recs]
 

@@ -64,6 +64,29 @@ tests:
       - isNotEmpty:
           path: spec.endpoints[0].metricRelabelings
 
+  - it: ServiceMonitor should not set bearer authorization without an API key
+    set:
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - isNull:
+          path: spec.endpoints[0].authorization
+
+  - it: ServiceMonitor should use the API key as bearer token when configured
+    set:
+      monitoring.serviceMonitor.enabled: true
+      secrets.apiKey: test-key
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.type
+          value: Bearer
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.key
+          value: GREENKUBE_API_KEY
+
   - it: ServiceMonitor should carry kube-prometheus labels
     set:
       monitoring.serviceMonitor.enabled: true

@@ -83,6 +83,29 @@ async def get_autoscaling_v2_api() -> typing.Optional[client.AutoscalingV2Api]:
     return None
 
 
+async def get_apps_v1_api() -> typing.Optional[client.AppsV1Api]:
+    """
+    Returns a configured AppsV1Api instance for workload reads
+    (Deployments, StatefulSets, DaemonSets) used by apply detection.
+    Safe to call concurrently.
+    """
+    if await ensure_k8s_config():
+        api_client = await _get_shared_api_client()
+        return client.AppsV1Api(api_client=api_client)
+    return None
+
+
+async def get_custom_objects_api() -> typing.Optional[client.CustomObjectsApi]:
+    """
+    Returns a configured CustomObjectsApi instance for CRD access (VPA, Karpenter).
+    Safe to call concurrently.
+    """
+    if await ensure_k8s_config():
+        api_client = await _get_shared_api_client()
+        return client.CustomObjectsApi(api_client=api_client)
+    return None
+
+
 async def _get_shared_api_client() -> client.ApiClient:
     """Create or return a singleton ApiClient for the process.
 

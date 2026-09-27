@@ -6,6 +6,8 @@ Tests for the /api/v1/health/services endpoints.
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from greenkube.models.health import (
     HealthCheckResponse,
     ServiceHealth,
@@ -277,4 +279,45 @@ class TestUpdateServiceConfig:
                 json={"electricity_maps_token": "tok"},
             )
 
+        assert response.status_code == 200
+
+
+class TestServiceConfigUrlValidation:
+    """SSRF and input-validation tests for POST /api/v1/config/services."""
+
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "ftp://prometheus:9090",
+            "http://user:password@prometheus:9090",
+            "http://169.254.169.254/latest/meta-data",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://127.0.0.1:9090",
+            "http://[::1]:9090",
+            "http://0.0.0.0:9090",
+            "not-a-url",
+        ],
+    )
+    def test_rejects_unsafe_service_urls(self, client, bad_url):
+        response = client.post("/api/v1/config/services", json={"prometheus_url": bad_url})
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize(
+        "good_url",
+        [
+            "http://prometheus-k8s.monitoring.svc.cluster.local:9090",
+            "http://10.0.0.5:9090",
+            "https://api.boavizta.org",
+        ],
+    )
+    def test_accepts_in_cluster_and_public_urls(self, client, good_url):
+        with (
+            patch(
+                "greenkube.api.routers.health.run_health_checks",
+                new_callable=AsyncMock,
+                return_value=_mock_health_response(),
+            ),
+            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
+        ):
+            response = client.post("/api/v1/config/services", json={"boavizta_url": good_url})
         assert response.status_code == 200

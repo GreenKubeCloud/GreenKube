@@ -1,8 +1,10 @@
 # CLI Reference
 
-GreenKube ships with a CLI for running reports and collecting recommendations directly from the terminal. In a Kubernetes deployment, commands are run inside the GreenKube pod via `kubectl exec`.
+GreenKube ships with a CLI with two runtime modes: `start` runs the collector service and `demo` launches a self-contained sample environment. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
 
 ## Getting started
+
+In a Kubernetes deployment the collector container already runs `greenkube start`; commands can be run inside the pod via `kubectl exec`:
 
 ```bash
 # Find the GreenKube pod name
@@ -12,100 +14,11 @@ kubectl get pods -n greenkube
 kubectl exec -it <pod-name> -n greenkube -- bash
 ```
 
-All commands below assume you are running inside the pod.
-
 ## Commands
-
-### `greenkube report`
-
-Generate a FinGreenOps report. Reads data from the database and outputs it to the console or a file.
-
-```
-greenkube report [OPTIONS]
-```
-
-**Time range options:**
-
-| Flag | Description |
-|------|-------------|
-| `--last TEXT` | Time window, e.g. `24h`, `7d`, `3m` (default: `24h`) |
-| `--start TEXT` | Start date/time (ISO 8601 format) |
-| `--end TEXT` | End date/time (ISO 8601 format) |
-
-**Grouping options:**
-
-| Flag | Description |
-|------|-------------|
-| `--hourly` | Group results by hour |
-| `--daily` | Group results by day |
-| `--weekly` | Group results by week |
-| `--monthly` | Group results by month |
-| `--yearly` | Group results by year |
-
-**Filter options:**
-
-| Flag | Description |
-|------|-------------|
-| `--namespace TEXT` | Filter by namespace |
-| `--pod TEXT` | Filter by pod name |
-| `--node TEXT` | Filter by node name |
-
-**Output options:**
-
-| Flag | Description |
-|------|-------------|
-| `--format TEXT` | Output format: `table` (default), `csv`, `json` |
-| `--output TEXT` | Output file path (for csv/json exports) |
-| `--no-aggregate` | Disable metric aggregation — show raw rows |
-
-**CI/CD options:**
-
-| Flag | Description |
-|------|-------------|
-| `--fail-on-co2 FLOAT` | Exit with code 1 if total CO₂e (grams) exceeds this threshold |
-| `--fail-on-cost FLOAT` | Exit with code 1 if total cost (USD) exceeds this threshold |
-
-**Examples:**
-
-```bash
-# Show a daily report for the last 7 days
-greenkube report --last 7d --daily
-
-# Export the last 30 days to CSV, aggregated monthly
-greenkube report --last 30d --monthly --format csv --output /tmp/report.csv
-
-# Filter by namespace and export to JSON
-greenkube report --namespace production --last 7d --format json
-
-# CI/CD gate: fail the pipeline if CO₂e exceeds 10,000 grams in the last 24h
-greenkube report --last 24h --fail-on-co2 10000
-```
-
-### `greenkube recommend`
-
-Display optimization recommendations based on collected metrics.
-
-```
-greenkube recommend [OPTIONS]
-```
-
-| Flag | Description |
-|------|-------------|
-| `--namespace TEXT` | Filter recommendations by namespace |
-| `--live` | Run the full processor pipeline live instead of reading stored metrics from the database |
-| `--fail-on-recommendations` | Exit with code 1 if any recommendations are found |
-
-**Example:**
-
-```bash
-greenkube recommend
-greenkube recommend --namespace production
-greenkube recommend --fail-on-recommendations
-```
 
 ### `greenkube start`
 
-Start the GreenKube collector and API server. This is the default entrypoint used by the Docker image.
+Start the collector service: connects to the database, runs schema migrations, performs an initial collection, then schedules data collection, compression, dashboard summary refresh and the recommendation lifecycle job.
 
 ```
 greenkube start [OPTIONS]
@@ -113,12 +26,13 @@ greenkube start [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--port INTEGER` | API server port (default: `8000`) |
-| `--no-browser` | Do not open a browser on start |
+| `--last TEXT` | Initial backfill window, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month). Only used for the initial run; scheduled runs use the normalized window. |
+
+This is the default runtime for the collector container in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 
 ### `greenkube demo`
 
-Start GreenKube in demo mode with pre-populated sample data — no live cluster required.
+Start GreenKube in demo mode with pre-populated sample data — no live cluster required. Creates a temporary SQLite database, starts the API server and serves the dashboard.
 
 ```
 greenkube demo [OPTIONS]
@@ -126,8 +40,9 @@ greenkube demo [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--port INTEGER` | Port to listen on (default: `9000`) |
-| `--no-browser` | Do not open a browser automatically |
+| `--port INTEGER` | Port for the API server (default: `8000`) |
+| `--days INTEGER` | Number of days of sample data to generate (default: `30`) |
+| `--no-browser` | Do not open the browser automatically |
 
 **Example:**
 
@@ -135,10 +50,17 @@ greenkube demo [OPTIONS]
 docker run --rm -p 9000:9000 greenkube/greenkube demo --no-browser --port 9000
 ```
 
-### Global flags
+### `greenkube version`
+
+Print the GreenKube version.
+
+## Global flags
 
 | Flag | Description |
 |------|-------------|
 | `--version` | Print the GreenKube version and exit |
-| `--no-color` | Disable Rich formatting (useful in CI/CD) |
 | `--help` | Show help for any command |
+
+## API server
+
+The REST API is started by the separate `greenkube-api` entry point (the API container in the Helm chart). Reports and recommendations are available through the API and the dashboard; see [API Reference](api.md) and [Recommendation lifecycle](recommendation.md).
