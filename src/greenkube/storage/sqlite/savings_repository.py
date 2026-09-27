@@ -32,7 +32,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 r.co2e_saved_grams,
                 r.cost_saved_dollars,
                 r.period_seconds,
-                r.timestamp.isoformat(),
+                to_iso_z(r.timestamp),
                 r.measurement_method,
                 r.baseline_value,
                 r.actual_value,
@@ -177,7 +177,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
 
     async def compress_to_hourly(self, cutoff_hours: int = 24) -> int:
         """Aggregate raw records older than cutoff_hours into hourly buckets."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=cutoff_hours)).isoformat()
+        cutoff = to_iso_z(datetime.now(timezone.utc) - timedelta(hours=cutoff_hours))
 
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
@@ -225,7 +225,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         """Delete raw savings records older than retention_days."""
         if retention_days < 0:
             return 0
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        cutoff = to_iso_z(datetime.now(timezone.utc) - timedelta(days=retention_days))
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 "DELETE FROM recommendation_savings_ledger WHERE timestamp < ?",

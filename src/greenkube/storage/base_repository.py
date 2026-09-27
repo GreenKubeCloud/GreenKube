@@ -1,6 +1,6 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ..models.metrics import (
@@ -14,6 +14,7 @@ from ..models.metrics import (
     TimeseriesCachePoint,
 )
 from ..models.node import NodeInfo
+from ..utils.date_utils import to_iso_z
 
 
 class NodeRepository(ABC):
@@ -324,7 +325,6 @@ class CombinedMetricsRepository(ABC):
         _GRAN_FORMATS = {
             "hourly": "%Y-%m-%dT%H:00:00Z",
             "daily": "%Y-%m-%dT00:00:00Z",
-            "weekly": "%Y-W%V",
             "monthly": "%Y-%m-01T00:00:00Z",
             "yearly": "%Y-01-01T00:00:00Z",
         }
@@ -337,7 +337,11 @@ class CombinedMetricsRepository(ABC):
                 key_base = m.namespace
             else:
                 key_base = (m.namespace, m.pod_name)
-            if fmt and m.timestamp:
+            if granularity == "weekly" and m.timestamp:
+                # Floor to Monday of the ISO week, same bucket as the SQL backends.
+                monday = m.timestamp - timedelta(days=m.timestamp.weekday())
+                key = (key_base, monday.strftime("%Y-%m-%dT00:00:00Z"))
+            elif fmt and m.timestamp:
                 key = (key_base, m.timestamp.strftime(fmt))
             else:
                 key = key_base
@@ -378,7 +382,11 @@ class CombinedMetricsRepository(ABC):
         buckets: dict[str, list] = defaultdict(list)
         for m in metrics:
             if m.timestamp:
-                key = m.timestamp.strftime(fmt)
+                ts = m.timestamp
+                if granularity == "week":
+                    # Floor to Monday of the ISO week instead of using the raw date.
+                    ts = ts - timedelta(days=ts.weekday())
+                key = ts.strftime(fmt)
                 buckets[key].append(m)
 
         result = []
@@ -494,12 +502,12 @@ class CombinedMetricsRepository(ABC):
             if not m.emaps_zone or m.timestamp is None:
                 continue
             try:
-                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, m.timestamp.isoformat())
+                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, to_iso_z(m.timestamp))
             except Exception:
                 intensity = None
             if intensity is None:
                 continue
-            await calculator.prefetch_intensity(m.emaps_zone, m.timestamp.isoformat(), intensity)
+            await calculator.prefetch_intensity(m.emaps_zone, to_iso_z(m.timestamp), intensity)
             result = await calculator.calculate_emissions(
                 joules=m.joules, zone=m.emaps_zone, timestamp=m.timestamp, pue=m.pue
             )

@@ -478,6 +478,42 @@ async def test_combined_metrics_repository_round_trips_and_aggregates(real_datab
 
 @pytest.mark.asyncio
 @pytest.mark.database
+async def test_combined_metrics_repository_weekly_buckets_floor_to_monday(real_database: RealDatabase):
+    """Weekly buckets must start on Monday in every backend (ISO week)."""
+    repo = real_database.combined_repository()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # Use the next Monday and the days around it so the rows stay inside the
+    # raw retention window regardless of when the test runs.
+    days_ahead = (7 - now.weekday()) % 7 or 7
+    monday = (now + timedelta(days=days_ahead)).replace(hour=12, minute=0, second=0)
+    wednesday = monday + timedelta(days=2)
+    next_monday = monday + timedelta(days=7)
+    metrics = [
+        _metric("pod-a", "prod", monday, 1.0, 0.1, 100.0),
+        _metric("pod-a", "prod", wednesday, 2.0, 0.2, 200.0),
+        _metric("pod-a", "prod", next_monday, 4.0, 0.4, 400.0),
+    ]
+    assert await repo.write_combined_metrics(metrics) == 3
+
+    series = await repo.aggregate_timeseries(
+        monday - timedelta(hours=1), next_monday + timedelta(hours=1), granularity="week", namespace="prod"
+    )
+
+    assert [point["timestamp"] for point in series] == [
+        monday.strftime("%Y-%m-%dT00:00:00Z"),
+        next_monday.strftime("%Y-%m-%dT00:00:00Z"),
+    ]
+    assert series[0]["co2e_grams"] == pytest.approx(3.0)
+    assert series[1]["co2e_grams"] == pytest.approx(4.0)
+
+    grouped = await repo.aggregate_grouped_row_count(
+        monday - timedelta(hours=1), next_monday + timedelta(hours=1), namespace="prod", granularity="weekly"
+    )
+    assert grouped == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
 async def test_combined_metrics_repository_reads_hourly_rollups(real_database: RealDatabase):
     repo = real_database.combined_repository()
     now = datetime.now(timezone.utc).replace(microsecond=0)

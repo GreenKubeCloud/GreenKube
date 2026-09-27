@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from ..core.config import Config, get_config
+from ..utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class MetricsCompressor:
 
     async def _compress_sqlite(self, cutoff: datetime) -> dict:
         """SQLite compression using INSERT OR REPLACE with aggregation."""
-        cutoff_iso = cutoff.isoformat()
+        cutoff_iso = to_iso_z(cutoff)
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 """
@@ -261,7 +262,7 @@ class MetricsCompressor:
             async with self._db.connection_scope() as conn:
                 cursor = await conn.execute(
                     'DELETE FROM combined_metrics WHERE "timestamp" < ?',
-                    (cutoff.isoformat(),),
+                    (to_iso_z(cutoff),),
                 )
                 count = cursor.rowcount
                 await conn.commit()
@@ -292,7 +293,7 @@ class MetricsCompressor:
             async with self._db.connection_scope() as conn:
                 cursor = await conn.execute(
                     "DELETE FROM combined_metrics_hourly WHERE hour_bucket < ?",
-                    (cutoff.isoformat(),),
+                    (to_iso_z(cutoff),),
                 )
                 count = cursor.rowcount
                 await conn.commit()
@@ -320,13 +321,15 @@ class MetricsCompressor:
                 return count
         else:
             async with self._db.connection_scope() as conn:
+                recent_cutoff = to_iso_z(datetime.now(timezone.utc) - timedelta(days=7))
                 cursor = await conn.execute(
                     """
                     INSERT OR REPLACE INTO namespace_cache (namespace, last_seen)
-                    SELECT DISTINCT namespace, datetime('now')
+                    SELECT DISTINCT namespace, ?
                     FROM combined_metrics
-                    WHERE "timestamp" > datetime('now', '-7 days')
-                    """
+                    WHERE "timestamp" > ?
+                    """,
+                    (to_iso_z(datetime.now(timezone.utc)), recent_cutoff),
                 )
                 count = cursor.rowcount
                 await conn.commit()
