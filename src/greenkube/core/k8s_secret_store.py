@@ -29,6 +29,32 @@ logger = logging.getLogger(__name__)
 # Namespace discovery: K8s injects the current namespace into every pod
 # through a well-known file when the service-account token is mounted.
 _NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+_SECRET_MOUNT = "/etc/greenkube/secrets"
+
+
+class ExternalSecretStore:
+    """Read-only view of externally mounted secrets.
+
+    The mounted volume is owned by the orchestrator (Kubernetes, Docker, or a
+    secret manager). Runtime configuration must never attempt to mutate it.
+    """
+
+    def __init__(self, mount_path: str = _SECRET_MOUNT):
+        self.mount_path = mount_path
+
+    def read(self, key: str) -> str | None:
+        """Read a mounted secret, returning ``None`` when it is not mounted."""
+        path = os.path.join(self.mount_path, key)
+        try:
+            with open(path, encoding="utf-8") as secret_file:
+                return secret_file.read().strip()
+        except FileNotFoundError:
+            return None
+        except (PermissionError, OSError) as exc:
+            raise RuntimeError(f"External secret '{key}' could not be read") from exc
+
+
+external_secret_store = ExternalSecretStore()
 
 
 def _get_namespace() -> str:

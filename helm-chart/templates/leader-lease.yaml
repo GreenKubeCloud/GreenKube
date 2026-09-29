@@ -1,0 +1,11 @@
+{{- if and (eq .Values.profile "production") .Values.production.leaderElection.enabled }}
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: {{ include "greenkube.leaseName" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  leaseDurationSeconds: {{ .Values.production.leaderElection.leaseDurationSeconds }}
+{{- end }}

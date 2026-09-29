@@ -92,7 +92,7 @@ class AnnotationSourceResolver(SourceResolver):
         self.reader = reader if reader is not None else K8sAnnotationReader()
 
     async def resolve(self, record: RecommendationRecord) -> ManifestSource:
-        if not record.namespace or not record.owner_kind or not record.owner_name:
+        if record.scope != "workload" or not record.namespace or not record.owner_kind or not record.owner_name:
             raise SourceResolutionError(
                 "This recommendation has no workload owner; only workload-scoped recommendations "
                 "can be applied through a pull request."

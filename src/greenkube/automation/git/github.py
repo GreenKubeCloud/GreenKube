@@ -13,6 +13,8 @@ from greenkube.automation.git.base import (
     GitProvider,
     GitProviderError,
     GitRepository,
+    PullRequestInfo,
+    normalize_pull_request,
     quote_git_path,
     validate_git_ref,
 )
@@ -68,9 +70,7 @@ class GitHubProvider(GitProvider):
         data = response.json()
         tree = data.get("tree", []) or []
         if data.get("truncated"):
-            logger.warning(
-                "GitHub tree for %s@%s is truncated; manifest discovery may miss files.", repo.full_name, ref
-            )
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")
         return [item["path"] for item in tree if item.get("type") == "blob"]
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
@@ -125,7 +125,7 @@ class GitHubProvider(GitProvider):
         base: str,
         title: str,
         body: str,
-    ) -> dict:
+    ) -> PullRequestInfo:
         head = validate_git_ref(head, field="branch name")
         base = validate_git_ref(base, field="base branch")
         response = await self._request(
@@ -137,10 +137,12 @@ class GitHubProvider(GitProvider):
             raise GitProviderError(
                 f"Could not open a pull request in {repo.full_name}: repository or branch not found."
             )
-        return response.json()
+        return normalize_pull_request(response.json(), repo=repo)
 
-    async def get_pull_request(self, repo: GitRepository, number: int) -> dict:
+    async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitProviderError("Pull-request number must be a positive integer.")
         response = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/pulls/{number}")
         if response.status_code == 404:
             raise GitProviderError(f"Pull request {number} not found in {repo.full_name}.")
-        return response.json()
+        return normalize_pull_request(response.json(), repo=repo)

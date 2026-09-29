@@ -4,6 +4,100 @@
 
 replicaCount: 1
 
+# Deployment profile. "standalone" preserves the single-pod collector/API
+# deployment; "production" renders independent API, controller, and
+# automation-worker Deployments.
+profile: standalone
+
+production:
+  migration:
+    enabled: true
+    backoffLimit: 6
+    image:
+      repository: busybox
+      tag: "1.37"
+      pullPolicy: IfNotPresent
+  leaderElection:
+    enabled: true
+    leaseName: ''
+    leaseDurationSeconds: 30
+    renewDeadlineSeconds: 10
+    retryPeriodSeconds: 2
+  components:
+    api:
+      replicas: 2
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+    controller:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+    automation:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 250m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+
 image:
   repository: greenkube/greenkube
   pullPolicy: IfNotPresent
@@ -17,6 +111,24 @@ initContainer:
     repository: busybox
     tag: "1.37"
     pullPolicy: IfNotPresent
+
+# Probes for the collector process. The collector has no HTTP listener, so
+# these process-heartbeat probes verify that its PID is still alive.
+collector:
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -35,6 +147,10 @@ config:
   logLevel: INFO
   # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
   logFormat: json
+  # Runtime environment and API authentication mode.
+  # Development permits an empty API key for local demonstrations; production does not.
+  environment: development
+  apiAuthMode: api_key
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
@@ -330,6 +446,56 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# Security and resource settings for Helm lifecycle hook Jobs.
+hooks:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    capabilities:
+      drop:
+        - ALL
+
+# Security and resource settings for the Helm test Pod.
+tests:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    capabilities:
+      drop:
+        - ALL
+
 # -- API container resources
 # This container serves the FastAPI REST API and the SPA frontend.
 # Memory usage is dominated by query result sets; the hourly aggregation
@@ -405,3 +571,7 @@ monitoring:
     enabled: false
     # Namespace where Prometheus is deployed.
     prometheusNamespace: monitoring
+    # Additional ingress rules, for example an ingress controller or a
+    # namespace-specific client. Entries use the Kubernetes NetworkPolicy
+    # ingress schema and are appended to the Prometheus rule.
+    additionalIngress: []

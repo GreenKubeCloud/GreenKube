@@ -10,6 +10,8 @@ failure must not prevent the API from serving requests.
 import logging
 
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
+from greenkube.core.config import get_config
+from greenkube.core.db import get_db_manager
 from greenkube.core.factory import (
     get_combined_metrics_repository,
     get_node_repository,
@@ -41,7 +43,16 @@ async def run_startup_recommendation_scan() -> None:
         node_repo = get_node_repository()
         reco_repo = get_recommendation_repository()
 
-        engine = OptimizationEngine()
+        run_repo = None
+        if get_config().DB_TYPE == "sqlite":
+            from greenkube.storage.sqlite.optimization_run_repository import SQLiteOptimizationRunRepository
+
+            run_repo = SQLiteOptimizationRunRepository(get_db_manager())
+        else:
+            from greenkube.storage.postgres.optimization_run_repository import PostgresOptimizationRunRepository
+
+            run_repo = PostgresOptimizationRunRepository(get_db_manager())
+        engine = OptimizationEngine(run_repository=run_repo)
         recommendations = await engine.refresh(combined_repo, node_repo, reco_repo, namespace=None)
 
         update_recommendation_metrics(recommendations)

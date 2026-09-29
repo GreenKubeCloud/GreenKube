@@ -11,6 +11,6 @@ roleRef:
   name: {{ include "greenkube.fullname" . }}-secret-writer
 subjects:
   - kind: ServiceAccount
-    name: {{ include "greenkube.serviceAccountName" . }}
+    name: {{ if eq .Values.profile "production" }}{{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}{{ else }}{{ include "greenkube.serviceAccountName" . }}{{ end }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

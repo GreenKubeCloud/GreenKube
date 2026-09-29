@@ -110,3 +110,14 @@ class SQLitePullRequestRepository(PullRequestRepository):
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
             return [row_to_pull_request(r) for r in rows]
+
+    async def reconcile_open_pull_requests(self) -> int:
+        """Mark abandoned pending attempts as errors for worker recovery."""
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute(
+                "UPDATE recommendation_pull_requests SET status = 'error', "
+                "error = COALESCE(error, 'operation recovery required'), "
+                "updated_at = datetime('now') WHERE status = 'pending'"
+            )
+            await conn.commit()
+            return cursor.rowcount

@@ -1,6 +1,6 @@
 <script>
-	import { onMount } from 'svelte';
-	import { getNamespaces, getReportSummary, getReportYears, buildReportExportUrl } from '$lib/api.js';
+	import { onMount, onDestroy } from 'svelte';
+	import { getNamespaces, getReportSummary, getReportYears, downloadReport } from '$lib/api.js';
 	import {
 		reportTimeRanges as timeRanges,
 		aggregationLevels,
@@ -35,6 +35,7 @@
 	let downloading = false;
 	let downloadError = null;
 	let downloadSuccess = false;
+	let requestController = new AbortController();
 
 	const formats = [
 		{ value: 'csv',  label: 'CSV', icon: '📊', description: 'Spreadsheet-compatible, ideal for Excel / Google Sheets' },
@@ -122,15 +123,17 @@
 
 	async function refreshSummary() {
 		const seq = ++summarySeq;
+		requestController.abort();
+		requestController = new AbortController();
 		loading = true;
 		error = null;
 		summary = null;
 		try {
-			const result = await getReportSummary(reportParams);
+			const result = await getReportSummary({ ...reportParams, signal: requestController.signal });
 			if (seq !== summarySeq) return;
 			summary = result;
 		} catch (e) {
-			if (seq === summarySeq) error = e.message;
+			if (seq === summarySeq && e.name !== 'AbortError') error = e.message;
 		} finally {
 			if (seq === summarySeq) loading = false;
 		}
@@ -142,17 +145,10 @@
 		downloadError = null;
 		downloadSuccess = false;
 		try {
-			const url = buildReportExportUrl({
+			await downloadReport({
 				...reportParams,
 				format
 			});
-			// Trigger browser download without leaving the page
-			const a = document.createElement('a');
-			a.href = url;
-			a.download = '';
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
 			downloadSuccess = true;
 			setTimeout(() => { downloadSuccess = false; }, 4000);
 		} catch (e) {
@@ -169,6 +165,8 @@
 			namespaces = [];
 		}
 	});
+
+	onDestroy(() => requestController.abort());
 </script>
 
 <div class="p-6 lg:p-8 space-y-6 max-w-[1200px] mx-auto">

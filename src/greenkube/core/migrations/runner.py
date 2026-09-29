@@ -10,6 +10,7 @@ Supports both SQLite (via aiosqlite) and PostgreSQL (via asyncpg).
 """
 
 import logging
+import sqlite3
 from importlib import resources
 from pathlib import Path
 
@@ -52,24 +53,40 @@ class MigrationRunner:
         Returns:
             The count of newly applied migrations.
         """
-        await self._ensure_migrations_table(connection)
-        applied = await self._get_applied_versions(connection)
-        scripts = self._discover_scripts()
-
-        count = 0
-        for version, name, sql in scripts:
-            if version in applied:
-                continue
-            logger.info("Applying migration %04d: %s", version, name)
-            await self._execute_sql(connection, sql)
-            await self._record_migration(connection, version, name)
-            count += 1
+        if self.db_type == "sqlite":
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                count = await self._run_in_transaction(connection)
+            except BaseException:
+                await connection.rollback()
+                raise
+            await connection.commit()
+        else:
+            async with connection.transaction():
+                await connection.execute("SELECT pg_advisory_xact_lock($1)", self._lock_key())
+                count = await self._run_in_transaction(connection)
 
         if count:
             logger.info("Applied %d migration(s).", count)
         else:
             logger.debug("No pending migrations.")
         return count
+
+    async def _run_in_transaction(self, connection) -> int:
+        await self._ensure_migrations_table(connection)
+        applied = await self._get_applied_versions(connection)
+        count = 0
+        for version, name, sql in self._discover_scripts():
+            if version in applied:
+                continue
+            logger.info("Applying migration %04d: %s", version, name)
+            await self._execute_sql(connection, sql)
+            await self._record_migration(connection, version, name)
+            count += 1
+        return count
+
+    def _lock_key(self) -> int:
+        return 0x47524E4B554245
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -131,7 +148,6 @@ class MigrationRunner:
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
-        await connection.commit()
 
     async def _ensure_migrations_table_postgres(self, connection) -> None:
         await connection.execute("""
@@ -177,8 +193,6 @@ class MigrationRunner:
         and ``OperationalError`` from duplicate-column ``ALTER TABLE`` is
         silently ignored.
         """
-        import sqlite3
-
         statements = [s.strip() for s in sql.split(";") if s.strip()]
         for stmt in statements:
             try:
@@ -188,7 +202,6 @@ class MigrationRunner:
                     logger.debug("Skipping already-applied statement: %s", exc)
                 else:
                     raise
-        await connection.commit()
 
     async def _execute_sql_postgres(self, connection, sql: str) -> None:
         await connection.execute(sql)
@@ -199,7 +212,6 @@ class MigrationRunner:
                 "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
                 (version, name),
             )
-            await connection.commit()
         else:
             await connection.execute(
                 "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",

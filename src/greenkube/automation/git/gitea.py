@@ -13,6 +13,8 @@ from greenkube.automation.git.base import (
     GitProvider,
     GitProviderError,
     GitRepository,
+    PullRequestInfo,
+    normalize_pull_request,
     quote_git_path,
     validate_git_ref,
 )
@@ -58,6 +60,7 @@ class GiteaProvider(GitProvider):
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]:
         files: List[str] = []
         page = 1
+        seen_pages = set()
         first = await self._request(
             "GET",
             f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
@@ -65,6 +68,9 @@ class GiteaProvider(GitProvider):
         )
         if first.status_code == 200:
             while True:
+                if page in seen_pages or page > 10000:
+                    raise GitProviderError("Gitea tree pagination did not progress; refusing partial results.")
+                seen_pages.add(page)
                 data = first.json()
                 tree = data.get("tree", []) or []
                 files.extend(item["path"] for item in tree if item.get("type") == "blob")
@@ -77,14 +83,14 @@ class GiteaProvider(GitProvider):
                     params={"recursive": "true", "per_page": "1000", "page": str(page)},
                 )
                 if first.status_code != 200:
-                    return files
+                    raise GitProviderError("Gitea tree pagination failed; refusing partial results.")
 
         # Older Gitea versions lack the trees API: walk the contents API instead.
         return await self._list_files_via_contents(repo, ref, "", depth=0)
 
     async def _list_files_via_contents(self, repo: GitRepository, ref: str, path: str, depth: int) -> List[str]:
         if depth > 4:
-            return []
+            raise GitProviderError("Gitea contents traversal exceeded the safety limit; refusing partial results.")
         response = await self._request(
             "GET",
             f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}"
@@ -151,7 +157,7 @@ class GiteaProvider(GitProvider):
         base: str,
         title: str,
         body: str,
-    ) -> dict:
+    ) -> PullRequestInfo:
         head = validate_git_ref(head, field="branch name")
         base = validate_git_ref(base, field="base branch")
         response = await self._request(
@@ -163,21 +169,12 @@ class GiteaProvider(GitProvider):
             raise GitProviderError(
                 f"Could not open a pull request in {repo.full_name}: repository or branch not found."
             )
-        data = response.json()
-        return {
-            "number": data.get("number"),
-            "html_url": data.get("html_url"),
-            "state": data.get("state"),
-        }
+        return normalize_pull_request(response.json(), repo=repo)
 
-    async def get_pull_request(self, repo: GitRepository, number: int) -> dict:
+    async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitProviderError("Pull-request number must be a positive integer.")
         response = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/pulls/{number}")
         if response.status_code == 404:
             raise GitProviderError(f"Pull request {number} not found in {repo.full_name}.")
-        data = response.json()
-        return {
-            "number": data.get("number"),
-            "html_url": data.get("html_url"),
-            "state": data.get("state"),
-            "merged": bool(data.get("merged") or data.get("merged_at")),
-        }
+        return normalize_pull_request(response.json(), repo=repo)

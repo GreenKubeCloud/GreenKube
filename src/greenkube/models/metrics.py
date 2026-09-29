@@ -8,7 +8,7 @@ consistency across all modules (collectors, calculators, reporters).
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -211,12 +211,76 @@ class EffortLevel(str, Enum):
     HIGH = "high"
 
 
+class PatchOperation(BaseModel):
+    """One typed JSON-patch operation in a recommendation patch."""
+
+    model_config = ConfigDict(extra="allow")
+
+    op: str = "replace"
+    path: str = ""
+    value: object = None
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+class RecommendationPatchV2(BaseModel):
+    """Versioned, typed patch payload persisted with a recommendation."""
+
+    version: int = 2
+    operations: List[PatchOperation] = Field(default_factory=list)
+    container_name: Optional[str] = None
+    manifest_path: Optional[str] = None
+    kind: Optional[str] = None
+    namespace: Optional[str] = None
+    name: Optional[str] = None
+
+    def __getitem__(self, key: str) -> object:
+        """Preserve mapping-style access for legacy patch consumers."""
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return a field using the legacy mapping-style contract."""
+        return getattr(self, key, default)
+
+
+class RecommendationBaseline(BaseModel):
+    """Frozen metrics captured immediately before applying a recommendation."""
+
+    model_config = ConfigDict(extra="allow")
+
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metrics: dict = Field(default_factory=dict)
+    sample_count: int = 0
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+class RecommendationEventPayload(BaseModel):
+    """Stable envelope for lifecycle event payloads."""
+
+    model_config = ConfigDict(extra="allow")
+
+    version: int = 2
+    baseline: Optional[RecommendationBaseline] = None
+    patch: Optional[RecommendationPatchV2] = None
+    details: dict = Field(default_factory=dict)
+
+
 class Recommendation(BaseModel):
     """Represents a single actionable optimization recommendation."""
 
     pod_name: Optional[str] = Field(
         None, description="The name of the target pod (None for namespace/node-level recs)."
     )
+    container_name: Optional[str] = Field(None, description="The name of the target container.")
     namespace: Optional[str] = Field(None, description="The namespace of the target (None for node-level recs).")
     type: RecommendationType = Field(..., description="The category of the recommendation.")
     description: str = Field(..., description="A human-readable description of the recommendation.")
@@ -267,7 +331,9 @@ class Recommendation(BaseModel):
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
     ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
     ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
-    patch: Optional[dict] = Field(None, description="Machine-readable action plan for the GitOps patcher.")
+    patch: Optional[RecommendationPatchV2] = Field(
+        None, description="Machine-readable action plan for the GitOps patcher."
+    )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
@@ -284,6 +350,7 @@ class RecommendationRecord(BaseModel):
 
     id: Optional[int] = Field(None, description="Auto-generated database ID.")
     pod_name: Optional[str] = Field(None, description="The name of the target pod.")
+    container_name: Optional[str] = Field(None, description="The name of the target container.")
     namespace: Optional[str] = Field(None, description="The namespace of the target.")
     type: RecommendationType = Field(..., description="The category of the recommendation.")
     description: str = Field(..., description="A human-readable description of the recommendation.")
@@ -303,6 +370,8 @@ class RecommendationRecord(BaseModel):
     recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
+    identity_version: int = Field(2, description="Identity algorithm version.")
+    fingerprint: Optional[str] = Field(None, description="Stable v2 recommendation identity fingerprint.")
     # Source and provenance
     source: RecommendationSource = Field(
         RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
@@ -323,7 +392,9 @@ class RecommendationRecord(BaseModel):
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
     ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
     ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
-    patch: Optional[dict] = Field(None, description="Machine-readable action plan for the GitOps patcher.")
+    patch: Optional[RecommendationPatchV2] = Field(
+        None, description="Machine-readable action plan for the GitOps patcher."
+    )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
@@ -352,7 +423,9 @@ class RecommendationRecord(BaseModel):
     )
     verification_window_start: Optional[datetime] = Field(None, description="Start of the verification window.")
     verification_window_end: Optional[datetime] = Field(None, description="End of the verification window.")
-    baseline: Optional[dict] = Field(None, description="Frozen pre-apply metrics used as the verification baseline.")
+    baseline: Optional[RecommendationBaseline] = Field(
+        None, description="Frozen pre-apply metrics used as the verification baseline."
+    )
     measured_co2e_saved_grams: Optional[float] = Field(None, description="Measured annual CO2e savings after apply.")
     measured_cost_saved: Optional[float] = Field(None, description="Measured annual cost savings after apply.")
     savings_realized: Optional[bool] = Field(None, description="Whether the cost gate passed during verification.")
@@ -366,6 +439,18 @@ class RecommendationRecord(BaseModel):
     def _derive_capability(self) -> "RecommendationRecord":
         if self.capability is None:
             self.capability = capability_for_type(self.type)
+        if not self.fingerprint:
+            self.fingerprint = ":".join(
+                (
+                    f"v{self.identity_version}",
+                    self.scope or "pod",
+                    self.namespace or "",
+                    self.pod_name or "",
+                    self.container_name or "",
+                    self.target_node or "",
+                    self.type.value,
+                )
+            )
         return self
 
     @classmethod
@@ -383,6 +468,7 @@ class RecommendationRecord(BaseModel):
         """
         return cls(
             pod_name=rec.pod_name,
+            container_name=rec.container_name,
             namespace=rec.namespace,
             type=rec.type,
             description=rec.description,
@@ -447,7 +533,10 @@ class RecommendationEvent(BaseModel):
     recommendation_id: int = Field(..., description="Owning recommendation ID.")
     event_type: str = Field(..., description="Transition type (created, applied, verified, ...).")
     actor: str = Field("system", description="Who triggered the transition.")
-    payload: dict = Field(default_factory=dict, description="Structured event context.")
+    payload: RecommendationEventPayload = Field(
+        default_factory=RecommendationEventPayload,
+        description="Structured event context.",
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="When the event was recorded.",
@@ -500,7 +589,7 @@ class ApplyPrResponse(BaseModel):
     base_branch: Optional[str] = Field(None, description="Target branch of the pull request.")
     head_branch: Optional[str] = Field(None, description="Branch created by the bot.")
     path: Optional[str] = Field(None, description="Manifest path that would be (or was) patched.")
-    patch: Optional[dict] = Field(None, description="Machine-readable action plan.")
+    patch: Optional[RecommendationPatchV2 | dict] = Field(None, description="Machine-readable action plan.")
     diff: Optional[str] = Field(None, description="Unified diff preview.")
     pr_url: Optional[str] = Field(None, description="Opened pull request URL.")
     message: Optional[str] = Field(None, description="Human-readable outcome or error message.")

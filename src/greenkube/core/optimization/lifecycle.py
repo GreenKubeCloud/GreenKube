@@ -26,6 +26,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_TRANSITIONS = {
+    RecommendationStatus.ACTIVE.value: {
+        RecommendationStatus.APPLIED.value,
+        RecommendationStatus.IGNORED.value,
+        RecommendationStatus.STALE.value,
+        RecommendationStatus.EXPIRED.value,
+        RecommendationStatus.PR_OPEN.value,
+        RecommendationStatus.VERIFIED.value,
+    },
+    RecommendationStatus.PR_OPEN.value: {RecommendationStatus.APPLIED.value, RecommendationStatus.FAILED.value},
+    RecommendationStatus.APPLIED.value: {
+        RecommendationStatus.VERIFYING.value,
+        RecommendationStatus.VERIFIED.value,
+        RecommendationStatus.ROLLBACK_REVIEW.value,
+        RecommendationStatus.REVERTED.value,
+        RecommendationStatus.FAILED.value,
+    },
+    RecommendationStatus.VERIFYING.value: {
+        RecommendationStatus.APPLIED.value,
+        RecommendationStatus.VERIFIED.value,
+        RecommendationStatus.ROLLBACK_REVIEW.value,
+        RecommendationStatus.FAILED.value,
+    },
+    RecommendationStatus.ROLLBACK_REVIEW.value: {RecommendationStatus.REVERTED.value},
+    RecommendationStatus.IGNORED.value: {RecommendationStatus.ACTIVE.value},
+}
+
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
@@ -76,7 +103,7 @@ class RecommendationLifecycle:
         actor: str = "system",
         payload: Optional[dict] = None,
     ) -> RecommendationEvent:
-        """Persists one audit event, tolerating repository failures."""
+        """Persists one audit event."""
         value = event_type.value if hasattr(event_type, "value") else str(event_type)
         event = RecommendationEvent(
             recommendation_id=rec_id,
@@ -86,9 +113,9 @@ class RecommendationLifecycle:
         )
         try:
             return await self.repo.record_event(event)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Could not record recommendation event %s for %s: %s", value, rec_id, exc)
-            return event
+        except Exception:
+            logger.exception("Could not record recommendation event %s for %s.", value, rec_id)
+            raise
 
     async def transition(
         self,
@@ -106,9 +133,24 @@ class RecommendationLifecycle:
         changes = dict(updates or {})
         changes["status"] = status_value
         changes.setdefault("updated_at", datetime.now(timezone.utc))
-        record = await self.repo.update_recommendation_fields(rec_id, changes)
-        if emit_event:
-            await self.record_event(rec_id, event_type, actor=actor, payload=payload)
+        current = await self.repo.get_recommendation_by_id(rec_id)
+        if current is None:
+            raise ValueError(f"Recommendation {rec_id} not found.")
+        current_value = current.status.value if hasattr(current.status, "value") else str(current.status)
+        if status_value != current_value and status_value not in _ALLOWED_TRANSITIONS.get(current_value, set()):
+            raise ValueError(f"Invalid recommendation transition: {current_value} -> {status_value}.")
+        if emit_event and hasattr(self.repo, "transition_and_record_event"):
+            record = await self.repo.transition_and_record_event(
+                rec_id,
+                changes,
+                event_type.value if hasattr(event_type, "value") else str(event_type),
+                actor,
+                payload or {},
+            )
+        else:
+            record = await self.repo.update_recommendation_fields(rec_id, changes)
+            if emit_event:
+                await self.record_event(rec_id, event_type, actor=actor, payload=payload)
         return record
 
     async def apply(

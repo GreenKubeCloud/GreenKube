@@ -20,7 +20,13 @@ import {
 	getRecommendationSavings,
 	getReportYears,
 	getReportSummary,
-	buildReportExportUrl
+	buildReportExportUrl,
+	downloadReport,
+	getNodesPage,
+	getMetricsPage,
+	waitForAutomationOperation,
+	setApiToken,
+	clearApiToken
 } from '$lib/api.js';
 
 
@@ -53,6 +59,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	clearApiToken();
 	vi.restoreAllMocks();
 });
 
@@ -61,11 +68,35 @@ afterEach(() => {
 // getHealth
 // ---------------------------------------------------------------------------
 describe('getHealth', () => {
+	it('uses same-origin credentials and an in-memory bearer token when configured', async () => {
+		globalThis.fetch = mockFetchOk({ status: 'ok' });
+		setApiToken('short-lived-token');
+		await getHealth();
+		const [, options] = fetch.mock.calls[0];
+		expect(options.credentials).toBe('include');
+		expect(options.headers.Authorization).toBe('Bearer short-lived-token');
+	});
+
 	it('returns health data on success', async () => {
 		globalThis.fetch = mockFetchOk({ status: 'ok', version: '0.2.6' });
 		const result = await getHealth();
 		expect(result).toEqual({ status: 'ok', version: '0.2.6' });
 		expect(fetch).toHaveBeenCalledTimes(1);
+	});
+
+	describe('downloadReport', () => {
+		it('downloads through fetch so protected exports receive auth', async () => {
+			globalThis.URL.createObjectURL = vi.fn(() => 'blob:report');
+			globalThis.URL.revokeObjectURL = vi.fn();
+			globalThis.fetch = vi.fn(() => Promise.resolve({
+				ok: true,
+				headers: { get: () => 'attachment; filename="report.csv"' },
+				blob: () => Promise.resolve(new Blob(['csv']))
+			}));
+			await downloadReport({ namespace: 'prod', last: '24h', format: 'csv' });
+			expect(fetch.mock.calls[0][1].credentials).toBe('include');
+			expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:report');
+		});
 	});
 
 	it('throws on API error', async () => {
@@ -145,6 +176,18 @@ describe('updateServiceConfig', () => {
 			})
 		);
 		await expect(updateServiceConfig({})).rejects.toThrow('Invalid config');
+	});
+
+	it('exposes the configuration acknowledgement without changing the response shape', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve({
+			ok: true,
+			headers: { get: (name) => name === 'X-Configuration-Version' ? '12' : 'true' },
+			json: () => Promise.resolve({ services: {} })
+		}));
+		const result = await updateServiceConfig({ prometheus_url: 'http://prom:9090' });
+		expect(result.services).toEqual({});
+		expect(result.configurationAcknowledgement).toEqual({ version: '12', persisted: true });
+		expect(Object.keys(result)).not.toContain('configurationAcknowledgement');
 	});
 });
 
@@ -415,5 +458,61 @@ describe('request error handling', () => {
 			})
 		);
 		await expect(getHealth()).rejects.toThrow('API error 503');
+	});
+
+	it('preserves actionable error metadata', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve({
+			ok: false,
+			status: 429,
+			json: () => Promise.resolve({
+				detail: 'Rate limited',
+				action: 'Wait and retry',
+				retry_after: 3
+			})
+		}));
+		await expect(getHealth()).rejects.toMatchObject({
+			name: 'ApiError',
+			status: 429,
+			action: 'Wait and retry',
+			retryable: true,
+			retryAfter: 3
+		});
+	});
+
+	it('keeps authentication request-scoped and never stores it in browser storage', async () => {
+		setApiToken('ephemeral-token');
+		globalThis.fetch = mockFetchOk({});
+		await getHealth();
+		expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer ephemeral-token');
+		expect(fetch.mock.calls[0][1].credentials).toBe('include');
+		clearApiToken();
+	});
+});
+
+describe('cursor and operation contracts', () => {
+	it('passes opaque cursors unchanged for paginated resources', async () => {
+		globalThis.fetch = mockFetchOk({ items: [], next_cursor: 'opaque/+/=' });
+		const nodes = await getNodesPage({ limit: 2, cursor: 'opaque/+/=' });
+		expect(nodes.next_cursor).toBe('opaque/+/=');
+		const nodeUrl = fetch.mock.calls[0][0];
+		expect(nodeUrl).toContain('limit=2');
+		expect(nodeUrl).toContain('cursor=opaque%2F%2B%2F%3D');
+
+		await getMetricsPage({ namespace: 'prod', limit: 1, cursor: 'next' });
+		expect(fetch.mock.calls[1][0]).toContain('cursor=next');
+	});
+
+	it('polls operation states until a terminal state', async () => {
+		globalThis.fetch = vi.fn()
+			.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'queued' }) })
+			.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'completed', result: { ok: true } }) });
+		const updates = [];
+		const result = await waitForAutomationOperation(7, {
+			intervalMs: 0,
+			onUpdate: (state) => updates.push(state.status)
+		});
+		expect(result.status).toBe('completed');
+		expect(updates).toEqual(['queued', 'completed']);
+		expect(fetch.mock.calls[0][0]).toContain('/automation/operations/7');
 	});
 });

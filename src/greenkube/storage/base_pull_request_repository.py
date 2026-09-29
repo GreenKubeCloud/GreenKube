@@ -44,3 +44,7 @@ class PullRequestRepository(ABC):
     @abstractmethod
     async def get_open_pull_requests(self, recommendation_id: Optional[int] = None) -> List[PullRequestRecord]:
         """Returns attempts still considered open/pending, optionally for one recommendation."""
+
+    @abstractmethod
+    async def reconcile_open_pull_requests(self) -> int:
+        """Reconcile provider-open attempts left pending by a crashed worker."""

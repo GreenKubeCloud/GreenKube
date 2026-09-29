@@ -33,7 +33,12 @@ _NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
 # Public API paths that never require the API key (exact matches only).
-_PUBLIC_API_PATHS = ("/api/v1/health", "/api/v1/docs", "/api/v1/openapi.json")
+_PUBLIC_API_PATHS = (
+    "/api/v1/health",
+    "/api/v1/health/heartbeat",
+    "/api/v1/docs",
+    "/api/v1/openapi.json",
+)
 
 
 def verify_api_key(request: Request) -> None:
@@ -48,9 +53,8 @@ def verify_api_key(request: Request) -> None:
     """
     from greenkube.core.config import get_config
 
-    api_key = get_config().API_KEY
-    if not api_key:
-        return  # no key configured → open access
+    cfg = get_config()
+    api_key = cfg.API_KEY
 
     path = request.url.path
 
@@ -60,6 +64,16 @@ def verify_api_key(request: Request) -> None:
 
     # Public operational endpoints (exact match: /health/services is not public).
     if path in _PUBLIC_API_PATHS:
+        return
+
+    if getattr(cfg, "API_AUTH_MODE", "api_key") != "api_key":
+        raise HTTPException(
+            status_code=503,
+            detail="The configured session/OIDC authentication contract is not available in this deployment.",
+        )
+    if not api_key:
+        if getattr(cfg, "ENVIRONMENT", "development") == "production":
+            raise HTTPException(status_code=503, detail="API authentication is not configured.")
         return
 
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
@@ -190,3 +204,24 @@ async def get_timeseries_cache_repository() -> TimeseriesCacheRepository:
     from greenkube.core.factory import get_timeseries_cache_repository as factory_get_ts
 
     return factory_get_ts()
+
+
+async def get_optimization_engine():
+    """Provide the shared optimization engine to API handlers."""
+    from greenkube.core.factory import get_optimization_engine as factory_get_engine
+
+    return factory_get_engine()
+
+
+async def get_automation_service():
+    """Provide the shared recommendation automation service to API handlers."""
+    from greenkube.core.factory import get_automation_service as factory_get_service
+
+    return factory_get_service()
+
+
+async def get_summary_refresher():
+    """Provide the shared dashboard summary refresher to API handlers."""
+    from greenkube.core.factory import get_summary_refresher as factory_get_refresher
+
+    return factory_get_refresher()

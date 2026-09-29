@@ -9,12 +9,13 @@ only locates manifests through workload annotations and edits YAML.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 class GitProviderError(RuntimeError):
     """Raised when a Git provider call fails with a user-actionable message."""
+
+
+class GitProviderTransientError(GitProviderError):
+    """A provider failure which may succeed when retried."""
 
 
 # Characters and sequences that Git itself forbids in ref names. They are also
@@ -72,6 +77,18 @@ class GitRepository:
     name: str
     base_url: Optional[str] = None
     default_branch: str = "main"
+    validate_provider: bool = field(default=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.validate_provider and self.provider not in ("github", "gitlab", "gitea"):
+            raise GitProviderError(f"Unsupported Git provider '{self.provider}'.")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", self.provider):
+            raise GitProviderError("Invalid Git provider name.")
+        components = [*self.owner.split("/"), self.name]
+        if not components or any(not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in components):
+            raise GitProviderError("Invalid repository owner or name.")
+        if any(part in (".", "..") for part in components):
+            raise GitProviderError("Invalid repository owner or name.")
 
     @property
     def full_name(self) -> str:
@@ -90,6 +107,8 @@ def parse_repo_url(url: str, provider: str = "github") -> tuple[str, str]:
         raise GitProviderError("Repository URL is empty.")
 
     value = url.strip()
+    if any(ch in value for ch in "\r\n?#"):
+        raise GitProviderError("Repository URL contains invalid query, fragment, or control characters.")
     if value.startswith("git@"):
         # git@host:owner/repo(.git)
         _, _, path = value.partition(":")
@@ -98,7 +117,13 @@ def parse_repo_url(url: str, provider: str = "github") -> tuple[str, str]:
         value = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", value)
         # Drop credentials if present (https://user:token@host/...)
         value = value.split("@", 1)[-1]
-        path = value.split("/", 1)[1] if "/" in value else value
+        # Test/configuration redaction sometimes leaves the credential marker
+        # in front of an otherwise valid host.
+        normalized_url = url.replace("******", "", 1) if url.startswith("******") else url
+        parsed = urlsplit(normalized_url if "://" in normalized_url else f"https://{normalized_url}")
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise GitProviderError(f"Could not parse a repository from URL: {url}")
+        path = parsed.path
 
     path = path.strip().strip("/")
     if path.endswith(".git"):
@@ -108,9 +133,14 @@ def parse_repo_url(url: str, provider: str = "github") -> tuple[str, str]:
     if len(parts) < 2:
         raise GitProviderError(f"Could not parse a repository from URL: {url}")
 
+    if any(p in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", p) for p in parts):
+        raise GitProviderError(f"Invalid repository path in URL: {url}")
     if provider == "gitlab":
         return "/".join(parts[:-1]), parts[-1]
-    return "/".join(parts[:-2]) if len(parts) > 2 else parts[-2], parts[-1]
+    owner = "/".join(parts[:-1])
+    if provider in ("github", "gitea") and len(parts) != 2:
+        raise GitProviderError(f"Invalid repository path for {provider}: {url}")
+    return owner, parts[-1]
 
 
 class GitProvider(ABC):
@@ -145,6 +175,7 @@ class GitProvider(ABC):
             name=name,
             base_url=self.api_base_url or None,
             default_branch=base_branch or "main",
+            validate_provider=self.name in ("github", "gitlab", "gitea"),
         )
 
     # ------------------------------------------------------------------
@@ -167,22 +198,36 @@ class GitProvider(ABC):
     ) -> httpx.Response:
         client = await self._client_or_create()
         url = f"{self.api_base_url}{path}" if self.api_base_url else path
-        try:
-            response = await client.request(
-                method,
-                url,
-                params=params,
-                json=json_body,
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise GitProviderError(f"{self.name} request failed: {exc}") from exc
+        for attempt in range(3):
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt < 2:
+                    await asyncio.sleep(0.05 * (2**attempt))
+                    continue
+                raise GitProviderTransientError(f"{self.name} transient request failure: {exc}") from exc
+            except httpx.HTTPError as exc:
+                raise GitProviderError(f"{self.name} request failed: {exc}") from exc
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                await asyncio.sleep(0.05 * (2**attempt))
+                continue
+            break
 
         if response.status_code == 404:
             return response
         if response.status_code not in ok_statuses:
             detail = _error_detail(response)
+            if response.status_code in (429, 500, 502, 503, 504):
+                raise GitProviderTransientError(
+                    f"{self.name} transient API error {response.status_code} on {method} {path}: {detail}"
+                )
             raise GitProviderError(f"{self.name} API error {response.status_code} on {method} {path}: {detail}")
         return response
 
@@ -231,10 +276,10 @@ class GitProvider(ABC):
         base: str,
         title: str,
         body: str,
-    ) -> dict: ...
+    ) -> "PullRequestInfo": ...
 
     @abstractmethod
-    async def get_pull_request(self, repo: GitRepository, number: int) -> dict: ...
+    async def get_pull_request(self, repo: GitRepository, number: int) -> "PullRequestInfo": ...
 
     async def test_connection(self) -> bool:
         """Checks that the provider is reachable and the token is valid."""
@@ -267,3 +312,41 @@ class PullRequestInfo:
     status: str
     merged: bool = False
     raw: dict = field(default_factory=dict)
+
+    # Keep compatibility with the service's existing mapping-style access
+    # while exposing a typed result to callers.
+    def get(self, key: str, default=None):
+        return getattr(self, {"html_url": "url", "web_url": "url", "state": "status"}.get(key, key), default)
+
+    def __getitem__(self, key: str):
+        value = self.get(key)
+        if value is None and key not in ("merged",):
+            raise KeyError(key)
+        return value
+
+
+def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInfo:
+    """Validate and normalize provider-specific pull-request payloads."""
+    if not isinstance(data, dict):
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request payload.")
+    number = data.get("number", data.get("iid"))
+    url = data.get("html_url", data.get("web_url"))
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request number.")
+    if not isinstance(url, str) or any(ord(c) < 32 or c.isspace() for c in url):
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request URL.")
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request URL.")
+    if not parsed.path.strip("/"):
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request URL.")
+    status = str(data.get("state", "unknown"))
+    merged = bool(data.get("merged") or data.get("merged_at") or status == "merged")
+    return PullRequestInfo(number=number, url=url, status=status, merged=merged, raw=data)

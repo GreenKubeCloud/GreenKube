@@ -1,11 +1,14 @@
 # src/greenkube/core/optimization/providers/native.py
 """Native GreenKube recommendation source backed by analyzers."""
 
+import logging
 from typing import TYPE_CHECKING, List, Optional, Sequence, Type
 
 from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
 from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.models.metrics import Recommendation
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -33,5 +36,9 @@ class NativeSource(RecommendationSource):
     async def collect(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         for analyzer in self.analyzers:
-            recs.extend(analyzer.analyze(context))
+            analyzer_name = analyzer.__class__.__name__
+            try:
+                recs.extend(analyzer.analyze(context))
+            except Exception:
+                logger.exception("Native analyzer '%s' failed; continuing with remaining analyzers.", analyzer_name)
         return recs

@@ -4,10 +4,16 @@ metadata:
   name: {{ include "greenkube.fullname" . }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-30"
+    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   # --- General Config ---
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
+  ENVIRONMENT: {{ .Values.config.environment | quote }}
+  API_AUTH_MODE: {{ .Values.config.apiAuthMode | quote }}
   # Name of the Helm-managed Secret — used by the API to persist runtime
   # configuration overrides (UI-set tokens/URLs) back into the Secret.
   GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}

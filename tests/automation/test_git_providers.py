@@ -7,10 +7,29 @@ import pytest
 import respx
 from httpx import Response
 
-from greenkube.automation.git.base import GitProviderError, parse_repo_url, validate_git_ref
+from greenkube.automation.git.base import (
+    GitProviderError,
+    GitRepository,
+    PullRequestInfo,
+    parse_repo_url,
+    validate_git_ref,
+)
 from greenkube.automation.git.gitea import GiteaProvider
 from greenkube.automation.git.github import GitHubProvider
 from greenkube.automation.git.gitlab import GitLabProvider
+
+
+def test_repository_validation_requires_explicit_custom_provider_opt_in():
+    with pytest.raises(GitProviderError, match="Unsupported Git provider"):
+        GitRepository(provider="fake", owner="acme", name="manifests")
+
+    repository = GitRepository(
+        provider="fake",
+        owner="acme",
+        name="manifests",
+        validate_provider=False,
+    )
+    assert repository.full_name == "acme/manifests"
 
 
 class TestParseRepoUrl:
@@ -75,6 +94,7 @@ async def test_github_full_flow():
     await provider.create_branch(repo, "greenkube/reco-1", "main")
     await provider.update_file(repo, "apps/api.yaml", content, "msg", "greenkube/reco-1", sha="abc123")
     pr = await provider.create_pull_request(repo, head="greenkube/reco-1", base="main", title="t", body="b")
+    assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 7
     await provider.close()
 
@@ -128,6 +148,7 @@ async def test_gitlab_flow_maps_merge_request():
     await provider.create_branch(repo, "greenkube/reco-1", "main")
     await provider.update_file(repo, "apps/api.yaml", "content", "msg", "greenkube/reco-1")
     pr = await provider.create_pull_request(repo, head="h", base="main", title="t", body="b")
+    assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 3
     await provider.close()
 
@@ -169,6 +190,7 @@ async def test_gitea_flow():
     await provider.create_branch(repo, "greenkube/reco-1", "main")
     await provider.update_file(repo, "apps/api.yaml", content, "msg", "greenkube/reco-1", sha="abc")
     pr = await provider.create_pull_request(repo, head="h", base="main", title="t", body="b")
+    assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 11
     await provider.close()
 

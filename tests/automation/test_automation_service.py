@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from greenkube.automation.git.base import GitFile, GitProvider, GitRepository
+from greenkube.automation.git.base import GitFile, GitProvider, GitRepository, PullRequestInfo
 from greenkube.automation.service import AutomationService
 from greenkube.automation.source_resolver import (
     ANNOTATION_PATH,
@@ -21,6 +21,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.storage.sqlite.automation_operation_repository import SQLiteAutomationOperationRepository
 from greenkube.storage.sqlite.pull_request_repository import SQLitePullRequestRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
@@ -77,12 +78,24 @@ class FakeProvider(GitProvider):
     async def update_file(self, repo, path, content, message, branch, sha=None):
         self.updates.append({"path": path, "content": content, "branch": branch, "sha": sha})
 
-    async def create_pull_request(self, repo, *, head, base, title, body):
+    async def create_pull_request(
+        self,
+        repo: GitRepository,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> PullRequestInfo:
         self.pulls.append({"head": head, "base": base, "title": title, "body": body})
-        return {"number": 12, "html_url": f"https://example.test/{repo.full_name}/pulls/12"}
+        return PullRequestInfo(
+            number=12,
+            url=f"https://example.test/{repo.full_name}/pulls/12",
+            status="open",
+        )
 
-    async def get_pull_request(self, repo, number):
-        return {"number": number, "html_url": "x", "state": "open"}
+    async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
+        return PullRequestInfo(number=number, url="https://example.test/pull/12", status="open")
 
 
 @pytest.fixture
@@ -166,6 +179,11 @@ class TestAutomationService:
         assert len(attempts) == 1
         assert attempts[0].status == PullRequestStatus.OPEN
 
+        repeated = await _service(repo, pr_repo, provider).apply_recommendation_pr(rec_id, ApplyPrRequest())
+        assert repeated.status == "pr_open"
+        assert len(provider.pulls) == 1
+        assert len(await pr_repo.get_pull_requests_for_recommendation(rec_id)) == 1
+
         updated = await repo.get_recommendation_by_id(rec_id)
         assert updated.status == RecommendationStatus.PR_OPEN
         events = [e.event_type for e in await repo.get_events(rec_id)]
@@ -226,6 +244,27 @@ class TestAutomationService:
         status = await _service(repo, pr_repo, FakeProvider({})).automation_status()
         assert status["token_configured"] is False
         assert status["provider"] == "github"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_is_idempotent_and_rejects_fingerprint_reuse(self, repos):
+        repo, pr_repo = repos
+        await repo.save_recommendations([_record()])
+        rec_id = (await repo.get_active_recommendations())[0].id
+        service = _service(repo, pr_repo, FakeProvider({"apps/api.yaml": MANIFEST}))
+        operations = SQLiteAutomationOperationRepository(db_manager)
+
+        first = await service.enqueue_recommendation_pr(
+            rec_id, ApplyPrRequest(), operations, idempotency_key="request-1", actor="ci"
+        )
+        second = await service.enqueue_recommendation_pr(
+            rec_id, ApplyPrRequest(), operations, idempotency_key="request-1", actor="ci"
+        )
+        assert first.id == second.id
+
+        with pytest.raises(ValueError, match="different operation"):
+            await service.enqueue_recommendation_pr(
+                rec_id, ApplyPrRequest(base_branch="release"), operations, idempotency_key="request-1"
+            )
 
 
 class ShaShiftFakeProvider(FakeProvider):

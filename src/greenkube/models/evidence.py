@@ -8,7 +8,7 @@ recommendation should not require re-running the analysis.
 """
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +55,42 @@ class RollbackCondition(BaseModel):
     description: str = ""
 
 
+class PatchV2(BaseModel):
+    """Typed, versioned action plan retained in review evidence."""
+
+    version: int = 2
+    operations: List[dict[str, Any]] = Field(default_factory=list)
+    container_name: Optional[str] = None
+    manifest_path: Optional[str] = None
+    kind: Optional[str] = None
+    namespace: Optional[str] = None
+    name: Optional[str] = None
+
+    def __getitem__(self, key: str) -> Any:
+        """Preserve mapping-style access for legacy evidence consumers."""
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return a field using the legacy mapping-style contract."""
+        return getattr(self, key, default)
+
+
+class BaselinePayload(BaseModel):
+    """Structured pre-apply baseline included in lifecycle event payloads."""
+
+    captured_at: Optional[datetime] = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    sample_count: int = 0
+
+
+class EventPayload(BaseModel):
+    """Versioned lifecycle event context."""
+
+    version: int = 2
+    baseline: Optional[BaselinePayload] = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class RecommendationEvidence(BaseModel):
     """Structured justification block persisted with each recommendation."""
 
@@ -72,7 +108,7 @@ class RecommendationEvidence(BaseModel):
     oom_events: Optional[int] = None
     cost_per_hour_before: Optional[float] = None
     co2e_grams_per_hour_before: Optional[float] = None
-    proposed_patch: Optional[dict] = None
+    proposed_patch: Optional[PatchV2] = None
     proposed_diff: Optional[str] = None
     expected_savings_cost_annual: Optional[float] = None
     expected_savings_co2e_grams_annual: Optional[float] = None

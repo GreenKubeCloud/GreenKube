@@ -350,6 +350,86 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
             logging.error("Unexpected error reading combined metrics: %s", e)
             raise QueryError(f"Unexpected error reading combined metrics: {e}") from e
 
+    async def read_combined_metrics_cursor(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        cursor: Optional[dict] = None,
+        limit: int = 1000,
+    ) -> tuple[int, List[CombinedMetric], Optional[dict]]:
+        """Read a bounded, stable page ordered by timestamp and pod identity."""
+        limit = min(max(limit, 1), 1000)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                filters = ['"timestamp" >= ?', '"timestamp" <= ?']
+                params: list = [to_iso_z(start_time), to_iso_z(end_time)]
+                if namespace:
+                    filters.append("namespace = ?")
+                    params.append(namespace)
+                count_filters = list(filters)
+                count_params = list(params)
+                if cursor:
+                    filters.append(
+                        '("timestamp" > ? OR ("timestamp" = ? AND (namespace > ? OR (namespace = ? AND pod_name > ?))))'
+                    )
+                    params.extend(
+                        [
+                            cursor["timestamp"],
+                            cursor["timestamp"],
+                            cursor["namespace"],
+                            cursor["namespace"],
+                            cursor["pod_name"],
+                        ]
+                    )
+                where = " AND ".join(filters)
+                async with conn.execute(
+                    f"SELECT COUNT(*) FROM combined_metrics WHERE {' AND '.join(count_filters)}", count_params
+                ) as count_cursor:
+                    total = (await count_cursor.fetchone())[0]
+                query = f"""
+                    SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
+                           cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                           network_receive_bytes, network_transmit_bytes, disk_read_bytes, disk_write_bytes,
+                           storage_request_bytes, storage_usage_bytes, ephemeral_storage_request_bytes,
+                           ephemeral_storage_usage_bytes, gpu_usage_millicores, restart_count,
+                           owner_kind, owner_name, period, "timestamp", duration_seconds,
+                           grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
+                           is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version
+                    FROM combined_metrics WHERE {where}
+                    ORDER BY "timestamp", namespace, pod_name
+                    LIMIT ?
+                """
+                async with conn.execute(query, [*params, limit + 1]) as rows_cursor:
+                    rows = await rows_cursor.fetchall()
+                has_more = len(rows) > limit
+                metrics = []
+                for row in rows[:limit]:
+                    data = dict(row)
+                    for field in ("timestamp", "grid_intensity_timestamp"):
+                        if data[field]:
+                            data[field] = datetime.fromisoformat(data[field])
+                    if data["estimation_reasons"]:
+                        data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+                    metrics.append(CombinedMetric(**data))
+                if has_more and metrics:
+                    last = metrics[-1]
+                    assert last.timestamp is not None
+                    return (
+                        total,
+                        metrics,
+                        {
+                            "timestamp": to_iso_z(last.timestamp),
+                            "namespace": last.namespace,
+                            "pod_name": last.pod_name,
+                        },
+                    )
+                return total, metrics, None
+        except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
+            logger.error("Could not read cursor-paginated combined metrics: %s", e)
+            raise QueryError(f"Could not read cursor-paginated combined metrics: {e}") from e
+
     async def aggregate_summary(
         self,
         start_time: datetime,

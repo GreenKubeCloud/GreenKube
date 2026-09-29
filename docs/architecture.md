@@ -793,6 +793,22 @@ Follow conventional commits:
 
 ## Future Architecture Evolution
 
+### Closed-loop reliability and recovery
+
+The recommendation-to-GitOps composition is intentionally fail-soft at
+external boundaries:
+
+| Boundary | Recovery contract | Verification |
+|---|---|---|
+| Startup recommendation refresh | Runs in a tracked background task; provider or database errors are logged and do not prevent liveness traffic. | `tests/integration/test_gitops_closed_loop.py::test_startup_refresh_failure_does_not_block_shutdown_or_health_state` |
+| Savings ledger write | A transient ledger failure is logged and returns zero; the collection loop continues and can retry on its next period. | `tests/integration/test_gitops_closed_loop.py::test_savings_ledger_failure_is_recoverable` |
+| Rollback transition | Recommendations in `rollback_review` or `reverted` stop producing new ledger attribution while their history remains queryable. | `tests/integration/test_gitops_closed_loop.py::test_rollback_review_stops_future_savings_attribution` |
+
+The API liveness endpoint does not probe optional providers. Readiness is
+marked only after the database connection succeeds and is cleared before
+shutdown. This keeps restarts and provider outages observable without
+turning a transient dependency failure into a process-wide failure.
+
 ### Planned Enhancements
 
 **Multi-Cluster Support:**

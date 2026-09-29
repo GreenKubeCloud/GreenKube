@@ -22,9 +22,10 @@ import pytest
 
 from greenkube.core.calculator import CarbonCalculationResult
 from greenkube.core.metric_assembler import MetricAssembler
-from greenkube.core.prometheus_resource_mapper import PodResourceMaps
+from greenkube.core.prometheus_resource_mapper import PodResourceMaps, PrometheusResourceMapper
 from greenkube.models.metrics import CostMetric, EnergyMetric
 from greenkube.models.node import NodeInfo, NodeZoneContext
+from greenkube.models.prometheus_metrics import PodCPUUsage, PrometheusMetric
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -169,6 +170,54 @@ class TestMetricAssemblerHappyPath:
         result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
 
         assert len(result) == 1
+
+
+class TestPrometheusResourceProvenance:
+    def test_multi_container_values_keep_observed_and_estimated_cpu_separate(self):
+        observed = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.01),
+                PodCPUUsage(namespace="ns", pod="pod-a", container="c2", node="node-1", cpu_usage_cores=0.02),
+            ]
+        )
+        estimated = observed.model_copy(
+            update={
+                "pod_cpu_usage": [
+                    observed.pod_cpu_usage[0].model_copy(
+                        update={
+                            "cpu_usage_cores": 0.1,
+                            "estimated_cpu_usage_cores": 0.1,
+                            "cpu_usage_provenance": "estimated",
+                        }
+                    ),
+                    observed.pod_cpu_usage[1].model_copy(
+                        update={
+                            "cpu_usage_cores": 0.1,
+                            "estimated_cpu_usage_cores": 0.1,
+                            "cpu_usage_provenance": "estimated",
+                        }
+                    ),
+                ]
+            }
+        )
+
+        maps = PrometheusResourceMapper.build(observed, estimated)
+
+        assert maps.cpu_usage_map[("ns", "pod-a")] == 30
+        assert maps.observed_cpu_usage_map[("ns", "pod-a")] == 30
+        assert maps.estimated_cpu_usage_map[("ns", "pod-a")] == 200
+        assert [item.cpu_usage_cores for item in observed.pod_cpu_usage] == [0.01, 0.02]
+
+    def test_mapping_is_idempotent(self):
+        metrics = PrometheusMetric(
+            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.1)]
+        )
+
+        first = PrometheusResourceMapper.build(metrics)
+        second = PrometheusResourceMapper.build(metrics)
+
+        assert first == second
+        assert metrics.pod_cpu_usage[0].cpu_usage_provenance == "observed"
 
     @pytest.mark.asyncio
     async def test_combined_metric_pod_and_namespace(self, assembler):

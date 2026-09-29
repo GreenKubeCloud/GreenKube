@@ -24,6 +24,7 @@
 	let saving = false;
 	let saveMessage = '';
 	let saveError = '';
+	let configAcknowledgement = null;
 
 	onMount(async () => {
 		try {
@@ -61,6 +62,7 @@
 		saving = true;
 		saveMessage = '';
 		saveError = '';
+		configAcknowledgement = null;
 		try {
 			const update = {};
 			if (editPrometheusUrl) update.prometheus_url = editPrometheusUrl;
@@ -77,6 +79,7 @@
 			}
 
 			svcHealth = await updateServiceConfig(update);
+			configAcknowledgement = svcHealth.configurationAcknowledgement;
 			servicesHealth.set(svcHealth);
 
 			// Clear inputs after successful save
@@ -252,7 +255,7 @@
 					</label>
 					<input
 						id="edit-emaps"
-						type="text"
+						type="password"
 						bind:value={editEmapsToken}
 						placeholder="Your API token"
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
@@ -313,6 +316,15 @@
 				{/if}
 				{#if saveError}
 					<span class="text-xs text-red-400">{saveError}</span>
+				{/if}
+				{#if configAcknowledgement}
+					<span class="text-xs text-green-400" role="status">
+						Configuration acknowledged
+						{#if configAcknowledgement.version} (version {configAcknowledgement.version}){/if}.
+						{configAcknowledgement.persisted
+							? ' The override was persisted.'
+							: ' Active for this session; save Helm values to persist it across restarts.'}
+					</span>
 				{/if}
 			</div>
 		</Card>

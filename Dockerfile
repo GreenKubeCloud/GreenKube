@@ -2,12 +2,12 @@
 # Builds the SvelteKit SPA into static files.
 # The output is pure HTML/CSS/JS — architecture-independent, so build it
 # on the native build platform instead of running npm through emulation.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:22.14.0-alpine3.21 AS frontend-builder
 
 WORKDIR /frontend
 
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --ignore-scripts 2>/dev/null || npm install --ignore-scripts
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts
 
 COPY frontend/ .
 RUN npm run build && rm -rf node_modules
@@ -27,10 +27,11 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast dependency resolution and installation
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
 
 # Copy all project files required for the build
 COPY pyproject.toml .
+COPY uv.lock .
 COPY README.md .
 COPY LICENSE .
 COPY src /app/src
@@ -40,8 +41,11 @@ COPY src /app/src
 # We install into /install to easily copy it to the final stage.
 # Note: packaging is installed explicitly because limits 5.x uses it at runtime
 # but uv considers it satisfied by its own vendored copy.
-RUN uv pip install --no-cache --system . --prefix=/install \
-    && uv pip install --no-cache --system --reinstall --no-deps packaging --prefix=/install
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
+        --output-file=/tmp/requirements.txt \
+    && uv pip install --no-cache --system --prefix=/install \
+        --require-hashes -r /tmp/requirements.txt \
+    && uv pip install --no-cache --system --no-deps . --prefix=/install
 
 # --- STAGE 3: Final Image ---
 # This stage creates the final, lean image.

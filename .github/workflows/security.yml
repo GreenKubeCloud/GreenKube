@@ -44,7 +44,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           image-ref: 'greenkube/greenkube:scan'
           format: 'table'
@@ -54,7 +54,7 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Generate Trivy SARIF report
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         if: always()
         with:
           image-ref: 'greenkube/greenkube:scan'
@@ -78,9 +78,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
       - name: Run Trivy on PostgreSQL image
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           image-ref: 'postgres:18-alpine'
           format: 'sarif'
@@ -105,7 +104,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Scan Dockerfile
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           scan-type: 'config'
           scan-ref: './Dockerfile'
@@ -114,7 +113,7 @@ jobs:
           exit-code: '1'
 
       - name: Scan Helm chart
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           scan-type: 'config'
           scan-ref: './helm-chart'
@@ -131,7 +130,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Scan filesystem for vulnerable dependencies
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           scan-type: 'fs'
           scan-ref: '.'

@@ -173,6 +173,13 @@ async def test_async_write_combined_metrics_to_database_delegates_last_value():
     writer.assert_awaited_once_with(last="1h")
 
 
+def test_data_processor_is_resolved_from_factory():
+    with patch("greenkube.cli.start.get_data_processor") as get_processor:
+        get_processor.return_value = MagicMock()
+        assert start_module.get_data_processor() is get_processor.return_value
+        get_processor.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_attribute_recommendation_savings_success():
     reco_repo = MagicMock()

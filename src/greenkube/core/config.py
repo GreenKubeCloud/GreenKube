@@ -11,6 +11,10 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 # Import datacenter PUE profiles
 from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
+from greenkube.models.configuration import (
+    ConfigurationPersistenceAcknowledgement,
+    ConfigurationSnapshot,
+)
 
 
 def _read_secret(key: str, default: str | None = None) -> str | None:
@@ -97,6 +101,9 @@ class Config(BaseSettings):
     PROMETHEUS_BEARER_TOKEN: Optional[str] = None
     PROMETHEUS_USERNAME: Optional[str] = None
     PROMETHEUS_PASSWORD: Optional[str] = None
+    OPENCOST_BEARER_TOKEN: Optional[str] = None
+    OPENCOST_USERNAME: Optional[str] = None
+    OPENCOST_PASSWORD: Optional[str] = None
     WATTNET_EMAIL: Optional[str] = None
     WATTNET_PASSWORD: Optional[str] = None
 
@@ -183,8 +190,16 @@ class Config(BaseSettings):
     # --- API variables ---
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
-    CORS_ORIGINS: str = "*"
+    CORS_ORIGINS: str = ""
+    TRUSTED_HOSTS: str = "*"
+    TRUSTED_PROXY_IPS: str = ""
+    ENVIRONMENT: str = "development"
     API_KEY: str = Field(default="", validation_alias="GREENKUBE_API_KEY")
+    API_AUTH_MODE: str = "api_key"
+    OIDC_ISSUER: Optional[str] = None
+    OIDC_AUDIENCE: Optional[str] = None
+    SESSION_COOKIE_NAME: str = "greenkube_session"
+    SESSION_COOKIE_SECURE: bool = True
     API_RATE_LIMIT: str = "60/minute"
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
@@ -333,6 +348,18 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def _compute_and_validate(self) -> "Config":
+        self.ENVIRONMENT = self.ENVIRONMENT.lower()
+        self.API_AUTH_MODE = self.API_AUTH_MODE.lower()
+        if self.ENVIRONMENT not in ("development", "test", "production"):
+            raise ValueError("ENVIRONMENT must be 'development', 'test', or 'production'.")
+        if self.API_AUTH_MODE not in ("api_key", "oidc", "session"):
+            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', or 'session'.")
+        if self.ENVIRONMENT == "production" and self.API_AUTH_MODE == "api_key" and not self.API_KEY:
+            raise ValueError("GREENKUBE_API_KEY must be configured in production.")
+        if self.API_AUTH_MODE == "oidc" and (not self.OIDC_ISSUER or not self.OIDC_AUDIENCE):
+            raise ValueError("OIDC_ISSUER and OIDC_AUDIENCE are required when API_AUTH_MODE is 'oidc'.")
+        if self.API_AUTH_MODE == "session" and not self.SESSION_COOKIE_NAME:
+            raise ValueError("SESSION_COOKIE_NAME must not be empty when API_AUTH_MODE is 'session'.")
         # Auto-detect cluster name when not explicitly configured
         if not self.CLUSTER_NAME:
             self.CLUSTER_NAME = self._auto_detect_cluster_name()
@@ -521,9 +548,162 @@ class Config(BaseSettings):
             object.__setattr__(self, attr_name, getattr(fresh, attr_name))
 
 
+class ConfigService:
+    """Coordinate layered configuration and versioned runtime overrides.
+
+    Bootstrap values and externally mounted secrets are read through ``Config``.
+    Only the explicitly listed runtime keys can be changed or persisted by this
+    service; this prevents an API update from accidentally replacing security
+    fields or discovery defaults.
+    """
+
+    RUNTIME_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "PROMETHEUS_URL",
+            "OPENCOST_API_URL",
+            "ELECTRICITY_MAPS_TOKEN",
+            "BOAVIZTA_API_URL",
+            "WATTNET_EMAIL",
+            "WATTNET_PASSWORD",
+        }
+    )
+    SECRET_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "ELECTRICITY_MAPS_TOKEN",
+            "BOAVIZTA_TOKEN",
+            "PROMETHEUS_BEARER_TOKEN",
+            "PROMETHEUS_USERNAME",
+            "PROMETHEUS_PASSWORD",
+            "WATTNET_EMAIL",
+            "WATTNET_PASSWORD",
+            "GIT_TOKEN",
+            "API_KEY",
+        }
+    )
+    DISCOVERY_KEYS: ClassVar[frozenset[str]] = frozenset({"CLUSTER_NAME"})
+
+    def __init__(self, settings: Config | None = None, repository=None):
+        self.settings = settings or get_config()
+        self.repository = repository
+        self.version = 0
+        self._runtime_overrides: dict[str, str] = {}
+        self._previous_environment: dict[str, str | None] = {}
+
+    def snapshot(self) -> ConfigurationSnapshot:
+        """Return a frozen, redaction-safe view of effective configuration."""
+        values = self.settings.model_dump()
+        secrets = {key: "***" for key in self.SECRET_KEYS if values.get(key)}
+        discovery = {key: values[key] for key in self.DISCOVERY_KEYS if key in values}
+        runtime = {key: values[key] for key in self.RUNTIME_KEYS - self.SECRET_KEYS if key in values}
+        bootstrap = {
+            key: value
+            for key, value in values.items()
+            if key not in self.RUNTIME_KEYS and key not in self.SECRET_KEYS and key not in self.DISCOVERY_KEYS
+        }
+        return ConfigurationSnapshot(
+            version=self.version,
+            bootstrap=bootstrap,
+            secrets=secrets,
+            runtime_policy=runtime,
+            discovery=discovery,
+        )
+
+    def reload(self) -> ConfigurationSnapshot:
+        """Reload environment-backed settings while preserving singleton identity."""
+        self.settings.reload()
+        self.version += 1
+        return self.snapshot()
+
+    def clear(self) -> ConfigurationSnapshot:
+        """Clear in-process runtime overrides and reload the base layers."""
+        for key, previous in self._previous_environment.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+        self._runtime_overrides.clear()
+        self._previous_environment.clear()
+        return self.reload()
+
+    async def load(self) -> ConfigurationSnapshot:
+        """Load persisted runtime overrides before reloading the base layers."""
+        if self.repository is not None:
+            version, values = await self.repository.load()
+            for key, value in values.items():
+                if key in self.RUNTIME_KEYS:
+                    self._previous_environment.setdefault(key, os.environ.get(key))
+                    self._runtime_overrides[key] = value
+                    os.environ[key] = value
+            self.version = version
+        return self.reload()
+
+    async def apply(self, updates: dict[str, str], persist: bool = True) -> ConfigurationPersistenceAcknowledgement:
+        """Apply allowed runtime updates and acknowledge durable persistence."""
+        invalid = set(updates) - self.RUNTIME_KEYS
+        if invalid:
+            raise ValueError(f"Unsupported runtime configuration keys: {sorted(invalid)}")
+        for key, value in updates.items():
+            self._previous_environment.setdefault(key, os.environ.get(key))
+            self._runtime_overrides[key] = value
+            os.environ[key] = value
+        self.reload()
+
+        if not persist or self.repository is None:
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                keys=tuple(sorted(updates)),
+                message="Runtime configuration applied in memory only.",
+            )
+        try:
+            await self.repository.save(self._runtime_overrides, self.version)
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.warning("Runtime configuration was not persisted: %s", exc)
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                keys=tuple(sorted(updates)),
+                backend=self.repository.__class__.__name__,
+                message="Runtime configuration applied in memory; persistence failed.",
+            )
+        return ConfigurationPersistenceAcknowledgement(
+            version=self.version,
+            persisted=True,
+            keys=tuple(sorted(updates)),
+            backend=self.repository.__class__.__name__,
+            message="Runtime configuration persisted.",
+        )
+
+    async def clear_persisted(self) -> ConfigurationPersistenceAcknowledgement:
+        """Clear runtime overrides in memory and in the configured repository."""
+        self.clear()
+        if self.repository is None:
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version, persisted=False, message="Runtime configuration cleared in memory."
+            )
+        try:
+            await self.repository.clear(self.version)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Runtime configuration clear was not persisted: %s", exc)
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                backend=self.repository.__class__.__name__,
+                message="Runtime configuration cleared in memory; persistence failed.",
+            )
+        return ConfigurationPersistenceAcknowledgement(
+            version=self.version,
+            persisted=True,
+            backend=self.repository.__class__.__name__,
+            message="Runtime configuration cleared and persisted.",
+        )
+
+
 # Module-level singleton – kept for backward compatibility.
 # Prefer :func:`get_config` for explicit dependency injection.
 config = Config()
+config_service = ConfigService(config)
 
 
 def get_config() -> Config:
@@ -534,3 +714,8 @@ def get_config() -> Config:
     dependency injection throughout the application.
     """
     return config
+
+
+def get_config_service() -> ConfigService:
+    """Return the process-wide layered configuration service."""
+    return config_service

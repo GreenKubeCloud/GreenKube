@@ -12,8 +12,15 @@ import logging
 import re
 from typing import TYPE_CHECKING, Optional
 
-from greenkube.automation.git.base import GitProvider, GitProviderError, GitRepository, validate_git_ref
+from greenkube.automation.git.base import (
+    GitProvider,
+    GitProviderError,
+    GitProviderTransientError,
+    GitRepository,
+    validate_git_ref,
+)
 from greenkube.automation.manifests.patcher import ManifestNotFoundError, RightsizingPatcher
+from greenkube.automation.operations import AutomationOperation, operation_fingerprint
 from greenkube.automation.pr_body import recommendation_title, render_pr_body
 from greenkube.automation.source_resolver import (
     AnnotationSourceResolver,
@@ -34,6 +41,7 @@ from greenkube.models.metrics import (
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
+    from greenkube.storage.base_automation_operation_repository import AutomationOperationRepository
     from greenkube.storage.base_pull_request_repository import PullRequestRepository
     from greenkube.storage.base_repository import RecommendationRepository
 
@@ -70,6 +78,46 @@ class AutomationService:
         self._provider = provider
         self.patcher = patcher if patcher is not None else RightsizingPatcher()
 
+    async def enqueue_recommendation_pr(
+        self,
+        rec_id: int,
+        request: ApplyPrRequest,
+        operations: "AutomationOperationRepository",
+        *,
+        actor: str = "user",
+        idempotency_key: Optional[str] = None,
+    ) -> AutomationOperation:
+        """Persist a single, idempotent operation for asynchronous execution."""
+        record = await self.reco_repo.get_recommendation_by_id(rec_id)
+        if record is None or record.id is None:
+            raise ValueError(f"Recommendation {rec_id} not found.")
+        if record.type not in RIGHTSIZING_TYPES:
+            raise ValueError("Pull-request automation only supports CPU/memory rightsizing.")
+        if record.status in {
+            RecommendationStatus.APPLIED,
+            RecommendationStatus.IGNORED,
+            RecommendationStatus.STALE,
+            RecommendationStatus.EXPIRED,
+        }:
+            raise ValueError(f"Recommendation {rec_id} is no longer eligible for automation.")
+        request_data = request.model_dump(mode="json")
+        key = idempotency_key or operation_fingerprint(record, request_data)
+        existing = await operations.get_by_idempotency_key(key)
+        if existing is not None:
+            if existing.fingerprint != operation_fingerprint(record, request_data):
+                raise ValueError("Idempotency key is already associated with a different operation.")
+            return existing
+        return await operations.enqueue(
+            AutomationOperation(
+                id=None,
+                recommendation_id=rec_id,
+                idempotency_key=key,
+                fingerprint=operation_fingerprint(record, request_data),
+                request=request_data,
+                actor=actor,
+            )
+        )
+
     def _git_provider(self) -> GitProvider:
         if self._provider is not None:
             return self._provider
@@ -100,6 +148,15 @@ class AutomationService:
                     f"Recommendation {rec_id} is {record.type.value}."
                 ),
             )
+        if record.status in {
+            RecommendationStatus.APPLIED,
+            RecommendationStatus.IGNORED,
+            RecommendationStatus.STALE,
+            RecommendationStatus.EXPIRED,
+        }:
+            return ApplyPrResponse(
+                status="error", message=f"Recommendation {rec_id} is no longer eligible for automation."
+            )
 
         try:
             source = await self.resolver.resolve(record)
@@ -112,7 +169,12 @@ class AutomationService:
             return ApplyPrResponse(status="error", message=str(exc))
 
         repo = provider.repository(source.repo_url, source.branch)
-        base_branch = request.base_branch or source.branch or self.config.GIT_DEFAULT_BRANCH
+        if request.base_branch:
+            base_branch = request.base_branch
+        elif source.branch:
+            base_branch = source.branch
+        else:
+            base_branch = await provider.get_default_branch(repo)
         try:
             base_branch = validate_git_ref(base_branch, field="base branch")
         except GitProviderError as exc:
@@ -232,7 +294,34 @@ class AutomationService:
             head_branch=head_branch,
             status=PullRequestStatus.PENDING,
         )
-        attempt = await self.pr_repo.save_pull_request(attempt)
+        # A worker retry must continue an interrupted attempt instead of
+        # creating a second database record for the same deterministic branch.
+        existing_attempt = next(
+            (
+                item
+                for item in await self.pr_repo.get_open_pull_requests(record.id)
+                if item.provider == provider.name
+                and item.repo == repo.full_name
+                and item.base_branch == base_branch
+                and item.head_branch == head_branch
+            ),
+            None,
+        )
+        if existing_attempt and existing_attempt.status == PullRequestStatus.OPEN:
+            return ApplyPrResponse(
+                status="pr_open",
+                provider=provider.name,
+                repo=repo.full_name,
+                base_branch=base_branch,
+                head_branch=head_branch,
+                path=file_path,
+                patch=record.patch,
+                diff=patch_result.diff,
+                pr_url=existing_attempt.pr_url,
+                message=f"Pull request #{existing_attempt.pr_number} already opened.",
+                pull_request=existing_attempt,
+            )
+        attempt = existing_attempt or await self.pr_repo.save_pull_request(attempt)
         attempt_id = attempt.id
         if attempt_id is None:  # pragma: no cover - storage always assigns an ID
             raise RuntimeError("Pull-request attempt was persisted without an ID.")
@@ -261,8 +350,18 @@ class AutomationService:
             )
         except Exception as exc:
             message = str(exc)
-            await self.pr_repo.update_pull_request(attempt_id, {"status": PullRequestStatus.ERROR, "error": message})
+            await self.pr_repo.update_pull_request(
+                attempt_id,
+                {
+                    "status": PullRequestStatus.PENDING
+                    if isinstance(exc, GitProviderTransientError)
+                    else PullRequestStatus.ERROR,
+                    "error": message,
+                },
+            )
             logger.warning("Could not open pull request for recommendation %s: %s", record.id, exc)
+            if isinstance(exc, GitProviderTransientError):
+                raise
             return ApplyPrResponse(
                 status="error",
                 provider=provider.name,

@@ -13,6 +13,28 @@ from typing import Optional
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 
 
+def _md(value: object) -> str:
+    """Escape user-controlled text without allowing Markdown structure."""
+    return (
+        str(value)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", " ")
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("#", "\\#")
+        .replace("!", "\\!")
+        .replace("|", "\\|")
+        .replace("~", "\\~")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def _tri_state(value: Optional[bool]) -> str:
     if value is None:
         return "unknown"
@@ -51,10 +73,10 @@ def render_pr_body(
 
     lines.append("## Summary")
     lines.append("")
-    lines.append(record.description)
+    lines.append(_md(record.description))
     if record.reason:
         lines.append("")
-        lines.append(record.reason)
+        lines.append(_md(record.reason))
     lines.append("")
 
     lines.append("## Impact")
@@ -72,7 +94,7 @@ def render_pr_body(
     risk = record.risk_level.value if record.risk_level else "unknown"
     lines.append(f"- Risk level: **{risk}**")
     if record.risk_factors:
-        lines.append(f"- Risk factors: {', '.join(f'`{f}`' for f in record.risk_factors)}")
+        lines.append(f"- Risk factors: {', '.join(f'`{_md(f)}`' for f in record.risk_factors)}")
     lines.append(f"- Reversible: {_tri_state(record.reversible)}")
     lines.append(f"- Requires restart: {_tri_state(record.requires_restart)}")
     lines.append("")
@@ -82,7 +104,7 @@ def render_pr_body(
         lines.append("")
         window_start = evidence.observation_window_start
         window_end = evidence.observation_window_end
-        lines.append(f"- Observation window: {window_start} → {window_end}")
+        lines.append(f"- Observation window: {_md(window_start)} → {_md(window_end)}")
         lines.append(f"- Samples: {evidence.sample_count} (coverage {evidence.coverage_ratio:.0%})")
         lines.append("")
 
@@ -115,7 +137,7 @@ def render_pr_body(
         lines.append("## Proposed diff")
         lines.append("")
         lines.append("```diff")
-        lines.append(diff)
+        lines.append(diff.replace("`", "\\`"))
         lines.append("```")
         lines.append("")
 
@@ -130,7 +152,8 @@ def render_pr_body(
         lines.append("")
         for condition in conditions:
             lines.append(
-                f"- `{condition.metric}` {condition.comparator} {condition.threshold}: {condition.description}"
+                f"- `{_md(condition.metric)}` {_md(condition.comparator)} {_md(condition.threshold)}: "
+                f"{_md(condition.description)}"
             )
     expires = record.expires_at.isoformat() if record.expires_at else "n/a"
     lines.append(f"- Recommendation expiry: {expires}")
@@ -140,7 +163,7 @@ def render_pr_body(
     lines.append("")
     lines.append(f"- Source: `{record.source.value if hasattr(record.source, 'value') else record.source}`")
     if record.source_ref:
-        lines.append(f"- Source reference: `{record.source_ref}`")
+        lines.append(f"- Source reference: `{_md(record.source_ref)}`")
     lines.append(f"- Recommendation ID: `{record.id}`")
     lines.append("")
 

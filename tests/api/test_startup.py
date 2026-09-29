@@ -89,3 +89,30 @@ class TestRunStartupRecommendationScan:
         engine.refresh = AsyncMock(side_effect=Exception("catastrophic DB error"))
 
         await run_startup_recommendation_scan()  # must not raise
+
+
+def test_heartbeat_route_is_registered_and_public():
+    from fastapi.testclient import TestClient
+
+    from greenkube.api.app import create_app
+
+    client = TestClient(create_app())
+    response = client.get("/api/v1/health/heartbeat")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_factory_dependencies_share_composed_services():
+    from greenkube.api.dependencies import get_automation_service, get_optimization_engine
+    from greenkube.core.factory import (
+        get_automation_service as factory_automation,
+    )
+    from greenkube.core.factory import (
+        get_optimization_engine as factory_engine,
+    )
+
+    assert get_automation_service.__name__ == "get_automation_service"
+    assert get_optimization_engine.__name__ == "get_optimization_engine"
+    assert factory_automation.cache_info().maxsize == 1
+    assert factory_engine.cache_info().maxsize == 1

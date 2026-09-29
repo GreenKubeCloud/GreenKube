@@ -95,3 +95,11 @@ class PostgresPullRequestRepository(PullRequestRepository):
         async with self.db_manager.connection_scope() as conn:
             rows = await conn.fetch(query, *params)
             return [row_to_pull_request(r) for r in rows]
+
+    async def reconcile_open_pull_requests(self) -> int:
+        async with self.db_manager.connection_scope() as conn:
+            result = await conn.execute(
+                "UPDATE recommendation_pull_requests SET status = 'error', "
+                "error = COALESCE(error, 'operation recovery required'), updated_at = NOW() WHERE status = 'pending'"
+            )
+            return int(result.split()[-1])

@@ -20,6 +20,14 @@ class PodCPUUsage(BaseModel):
     container: str
     node: str = Field(..., description="The node on which the pod is running")
     cpu_usage_cores: float = Field(..., description="Average CPU usage in cores")
+    estimated_cpu_usage_cores: float | None = Field(
+        None,
+        description="CPU usage substituted from pod requests for estimation, when applicable",
+    )
+    cpu_usage_provenance: str = Field(
+        "observed",
+        description="Whether the value used for estimation was observed or estimated",
+    )
 
 
 class PodMemoryUsage(BaseModel):

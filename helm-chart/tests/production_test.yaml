@@ -1,0 +1,79 @@
+suite: production profile
+templates:
+  - templates/production-deployments.yaml
+  - templates/migration-job.yaml
+  - templates/leader-lease.yaml
+  - templates/serviceaccount.yaml
+
+tests:
+  - it: keeps the production components separate
+    set:
+      profile: production
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-controller
+      - documentIndex: 2
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-automation
+
+  - it: gives only the API an HTTP service probe and port
+    set:
+      profile: production
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        exists:
+          path: spec.template.spec.containers[0].ports[0]
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.containers[0].ports
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command[0]
+          value: sh
+
+  - it: creates a migration hook in production
+    set:
+      profile: production
+    templates:
+      - templates/migration-job.yaml
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+
+  - it: creates a leader lease in production
+    set:
+      profile: production
+    templates:
+      - templates/leader-lease.yaml
+    asserts:
+      - isKind:
+          of: Lease
+
+  - it: creates minimal component service accounts in production
+    set:
+      profile: production
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api

@@ -186,7 +186,7 @@ class MetricAssembler:
             is_estimated = True
             estimation_reasons.append(f"CPU usage on node '{node_name}' was below threshold; substituted pod requests")
 
-        return is_estimated, estimation_reasons
+        return is_estimated, list(dict.fromkeys(estimation_reasons))
 
     # ------------------------------------------------------------------
     # Assemble CombinedMetric list

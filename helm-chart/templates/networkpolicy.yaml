@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.networkPolicy.enabled }}
+{{- if and .Values.monitoring.networkPolicy.enabled .Values.config.api.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -24,6 +24,9 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.config.api.port }}
+    {{- with .Values.monitoring.networkPolicy.additionalIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
     # Allow the post-install/post-upgrade ready-check hook to reach the API
     - from:
         - podSelector:

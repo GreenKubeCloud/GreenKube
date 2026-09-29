@@ -1,3 +1,4 @@
+{{- if ne .Values.profile "production" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -112,6 +113,26 @@ spec:
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.collector.livenessProbe.enabled }}
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: {{ .Values.collector.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.collector.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.collector.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.collector.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.collector.livenessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.collector.readinessProbe.enabled }}
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: {{ .Values.collector.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.collector.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.collector.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.collector.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.collector.readinessProbe.successThreshold }}
+          {{- end }}
 
           volumeMounts:
             - name: secrets
@@ -221,3 +242,4 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- end }}
+{{- end }}

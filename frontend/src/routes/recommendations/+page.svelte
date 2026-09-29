@@ -1,15 +1,20 @@
 <script>
 	import { selectedNamespace } from '$lib/stores.js';
+	import { onDestroy } from 'svelte';
 	import {
 		getActiveRecommendations,
+		getRecommendation,
+		getRecommendationPrEligibility,
 		getIgnoredRecommendations,
 		getAppliedRecommendations,
 		getRecommendationSavings,
+		getOpenPullRequests,
 		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation,
 		applyRecommendationPr,
-		getRecommendationEvents
+		getRecommendationEvents,
+		waitForAutomationOperation
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
 	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
@@ -19,6 +24,9 @@
 	let activeRecs = [];
 	let ignoredRecs = [];
 	let appliedRecs = [];
+	let openPullRequests = [];
+	let openPullRequestKeys = new Set();
+	let prEligibility = {};
 	let savings = null;
 	let loading = true;
 	let error = null;
@@ -54,6 +62,8 @@
 	let prResult = null;
 	let prLoading = false;
 	let prError = null;
+	let modalTitleId = 'recommendation-modal-title';
+	let prOperation = null;
 
 	// Verification event trail per applied recommendation
 	let eventsByRec = {}; // { [id]: Event[] }
@@ -64,34 +74,67 @@
 	$: if ($selectedNamespace !== undefined) loadData();
 
 	let loadSeq = 0;
+	let requestController = new AbortController();
+	onDestroy(() => requestController.abort());
 
 	async function loadData() {
 		// Guard against overlapping loads: a slower response must not overwrite
 		// the result of a newer request.
 		const seq = ++loadSeq;
+		requestController.abort();
+		requestController = new AbortController();
 		loading = true;
 		error = null;
 		try {
-			const [active, ignored, applied, sav] = await Promise.all([
+			const [active, ignored, applied, sav, openPrs] = await Promise.all([
 				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
 				getIgnoredRecommendations(),
 				getAppliedRecommendations(),
-				getRecommendationSavings()
+				getRecommendationSavings({ namespace: $selectedNamespace || undefined }),
+				getOpenPullRequests()
 			]);
 			if (seq !== loadSeq) return;
 			activeRecs = active;
 			ignoredRecs = ignored;
 			appliedRecs = applied;
 			savings = sav;
+			openPullRequests = openPrs;
+			const openPrDetails = await Promise.all(
+				openPrs.map(async (pr) => {
+					try {
+						return await getRecommendation(pr.recommendation_id);
+					} catch {
+						return null;
+					}
+				})
+			);
+			openPullRequestKeys = new Set(
+				openPrDetails.filter(Boolean).map((rec) => recommendationKey(rec))
+			);
+			const eligibilityEntries = await Promise.all(
+				active
+					.filter((rec) => rec.scope === 'workload' && rec.owner_kind && rec.owner_name)
+					.map(async (rec) => {
+						try {
+							return [rec.id, await getRecommendationPrEligibility(rec.id)];
+						} catch {
+							return [rec.id, { eligible: false, reason: 'Could not check GitOps PR eligibility.' }];
+						}
+					})
+			);
+			prEligibility = Object.fromEntries(eligibilityEntries);
 		} catch (e) {
-			if (seq === loadSeq) error = e.message;
+			if (seq === loadSeq && e.name !== 'AbortError') error = e.message;
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
+
 	}
 
 	// --- Type filter ---
-	$: currentList = activeTab === 'active' ? activeRecs : ignoredRecs;
+	$: openPrRecommendationIds = new Set(openPullRequests.map((pr) => pr.recommendation_id));
+	$: actionableActiveRecs = activeRecs;
+	$: currentList = activeTab === 'active' ? actionableActiveRecs : ignoredRecs;
 	$: types = [...new Set(currentList.map(r => r.type))];
 	$: filtered = filterType === 'all'
 		? currentList
@@ -122,8 +165,8 @@
 		}
 	}
 
-	$: totalSavingsCO2 = activeRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
-	$: totalSavingsCost = activeRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
+	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
+	$: totalSavingsCost = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
 	$: potentialSavingsPeriod = 'per year';
 
 	function switchTab(tab) {
@@ -161,8 +204,27 @@
 	// --- Create PR ---
 	const RIGHTSIZING_TYPES = ['RIGHTSIZING_CPU', 'RIGHTSIZING_MEMORY'];
 
+	function recommendationKey(rec) {
+		return [
+			rec.namespace ?? '',
+			rec.type ?? '',
+			rec.owner_kind ?? '',
+			rec.owner_name ?? ''
+		].join('|');
+	}
+
+	function hasOpenPr(rec) {
+		return openPrRecommendationIds.has(rec.id) || openPullRequestKeys.has(recommendationKey(rec));
+	}
+
 	function canCreatePr(rec) {
-		return RIGHTSIZING_TYPES.includes(rec.type) && (rec.owner_kind || rec.pod_name);
+		return (
+			RIGHTSIZING_TYPES.includes(rec.type) &&
+			rec.scope === 'workload' &&
+			Boolean(rec.owner_kind && rec.owner_name) &&
+			!hasOpenPr(rec) &&
+			prEligibility[rec.id]?.eligible === true
+		);
 	}
 
 	async function openPrModal(rec) {
@@ -170,6 +232,7 @@
 		prBaseBranch = '';
 		prDiff = null;
 		prResult = null;
+		prOperation = null;
 		prError = null;
 		prLoading = true;
 		try {
@@ -191,6 +254,7 @@
 		prModal = null;
 		prDiff = null;
 		prResult = null;
+		prOperation = null;
 		prError = null;
 	}
 
@@ -203,8 +267,28 @@
 				base_branch: prBaseBranch || undefined
 			});
 			prResult = result;
-			if (result.status === 'error') prError = result.message;
-			if (result.status === 'pr_open') await loadData();
+			if (result.operation_id) {
+				prOperation = result;
+				prResult = {
+					...await waitForAutomationOperation(result.operation_id, {
+					intervalMs: 750,
+					onUpdate: (state) => { prOperation = { ...result, ...state }; }
+					}),
+					operation_id: result.operation_id
+				};
+			}
+
+			function retryPr() {
+				prResult = null;
+				prOperation = null;
+				confirmPr();
+			}
+			if (['error', 'failed', 'cancelled'].includes(prResult.status)) {
+				prError = prResult.error || prResult.message || 'The operation failed. Retry the pull request.';
+			}
+			if (prResult.status === 'pr_open' || prResult.status === 'completed' || prResult.status === 'succeeded') {
+				await loadData();
+			}
 		} catch (e) {
 			prError = e.message;
 		} finally {
@@ -305,19 +389,29 @@
 		return typeConfig[type] ?? { icon: '❓', label: type, color: 'blue', desc: '' };
 	}
 
+	function handleEscape(event) {
+		if (event.key === 'Escape') {
+			if (ignoreModal) closeIgnoreModal();
+			else if (prModal) closePrModal();
+		}
+	}
+
 </script>
+
+<svelte:window on:keydown={handleEscape} />
 
 <!-- ─── Ignore Modal ─────────────────────────────────────────────────────── -->
 {#if ignoreModal}
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div
+		role="presentation"
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
 		on:click|self={closeIgnoreModal}
 	>
-		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4">
+		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4" role="dialog" aria-modal="true" aria-labelledby={modalTitleId}>
 			<div class="flex items-start justify-between gap-4">
 				<div>
-					<h2 class="text-base font-semibold text-dark-100">Ignore recommendation</h2>
+					<h2 id={modalTitleId} class="text-base font-semibold text-dark-100">Ignore recommendation</h2>
 					<p class="text-xs text-dark-500 mt-1 break-words">
 						{getTypeConfig(ignoreModal.rec.type).icon}
 						{ignoreModal.rec.pod_name ?? ignoreModal.rec.target_node ?? ignoreModal.rec.namespace ?? 'Cluster-wide'}
@@ -325,6 +419,7 @@
 					</p>
 				</div>
 				<button
+					aria-label="Close ignore recommendation dialog"
 					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none flex-shrink-0"
 					on:click={closeIgnoreModal}
 				>✕</button>
@@ -367,10 +462,11 @@
 {#if prModal}
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div
+		role="presentation"
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
 		on:click|self={closePrModal}
 	>
-		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto">
+		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby={modalTitleId}>
 			<div class="flex items-start justify-between gap-4">
 				<div>
 					<h2 class="text-base font-semibold text-dark-100">Apply via pull request</h2>
@@ -381,6 +477,7 @@
 					</p>
 				</div>
 				<button
+					aria-label="Close pull request dialog"
 					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none flex-shrink-0"
 					on:click={closePrModal}
 				>✕</button>
@@ -393,6 +490,17 @@
 			{#if prError}
 				<div class="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded-lg px-3 py-2">
 					{prError}
+					{#if prOperation?.attempts != null}
+						<span class="block mt-1 text-dark-500">Attempt {prOperation.attempts}. You can retry this operation.</span>
+					{/if}
+				</div>
+			{/if}
+
+			{#if prOperation && !prResult?.pr_url && !prError}
+				<div class="text-xs text-blue-300 bg-blue-600/10 border border-blue-600/30 rounded-lg px-3 py-2">
+					<span class="animate-pulse">●</span>
+					Operation {prOperation.status ?? 'queued'}.
+					{#if prOperation.attempts != null} Attempt {prOperation.attempts}.{/if}
 				</div>
 			{/if}
 
@@ -423,6 +531,9 @@
 
 			<div class="flex gap-3 justify-end pt-1">
 				<button class="btn-secondary text-xs" on:click={closePrModal}>Close</button>
+				{#if prError && prResult?.operation_id}
+					<button class="btn-secondary text-xs" on:click={retryPr} disabled={prLoading}>Retry operation</button>
+				{/if}
 				{#if !prResult && prDiff}
 					<button
 						class="btn-primary text-xs flex items-center gap-2 disabled:opacity-50"
@@ -476,7 +587,18 @@
 			Active
 			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full
 			             {activeTab === 'active' ? 'bg-green-600/20 text-green-400' : 'bg-dark-700 text-dark-500'}">
-				{activeRecs.length}
+				{actionableActiveRecs.length}
+			</span>
+		</button>
+		<button
+			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors
+			       {activeTab === 'pull-requests' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
+			on:click={() => switchTab('pull-requests')}
+		>
+			Pull requests
+			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full
+			             {activeTab === 'pull-requests' ? 'bg-blue-600/20 text-blue-400' : 'bg-dark-700 text-dark-500'}">
+				{openPullRequests.length}
 			</span>
 		</button>
 		<button
@@ -717,14 +839,48 @@
 				</div>
 			{/if}
 
+		{:else if activeTab === 'pull-requests'}
+			<div class="space-y-3">
+				<div>
+					<h2 class="text-sm font-semibold text-dark-300">Open pull requests</h2>
+					<p class="text-xs text-dark-500 mt-1">
+						Recommendations with a pending or open pull request are kept here until the PR is closed.
+					</p>
+				</div>
+				{#if openPullRequests.length}
+					<div class="space-y-2">
+						{#each openPullRequests as pr (pr.id)}
+							<div class="card flex flex-col sm:flex-row sm:items-center gap-3">
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2 flex-wrap">
+										<span class="text-sm font-semibold text-dark-100">Recommendation #{pr.recommendation_id}</span>
+										<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/20 text-blue-400">{pr.status}</span>
+									</div>
+									<p class="text-xs text-dark-500 mt-1">
+										{pr.provider} · {pr.repo} · {pr.head_branch}
+									</p>
+								</div>
+								{#if pr.pr_url}
+									<a class="text-xs text-blue-400 hover:text-blue-300 underline break-all" href={pr.pr_url} target="_blank" rel="noreferrer">
+										View PR
+									</a>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{:else}
+					<div class="card text-sm text-dark-500">No pending or open pull requests.</div>
+				{/if}
+			</div>
+
 		<!-- ═══ ACTIVE / IGNORED TABS ════════════════════════════════════════════ -->
 		{:else}
 			<!-- Potential savings summary (active only) -->
-			{#if activeTab === 'active' && activeRecs.length}
+			{#if activeTab === 'active' && actionableActiveRecs.length}
 				<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
 					<div class="card-compact text-center">
 						<p class="stat-label">Active Recommendations</p>
-						<p class="stat-value text-2xl">{activeRecs.length}</p>
+						<p class="stat-value text-2xl">{actionableActiveRecs.length}</p>
 					</div>
 					<div class="card-compact text-center">
 						<p class="stat-label">Potential CO₂ Savings</p>
@@ -744,7 +900,7 @@
 					<p class="text-4xl mb-3">👀</p>
 					<p class="text-dark-400 text-sm">No ignored recommendations.</p>
 				</div>
-			{:else if activeTab === 'active' && activeRecs.length === 0}
+			{:else if activeTab === 'active' && actionableActiveRecs.length === 0}
 				<div class="card text-center py-12">
 					<p class="text-4xl mb-3">🎉</p>
 					<p class="text-dark-400 text-sm">No active recommendations — your cluster looks great!</p>
@@ -826,6 +982,19 @@
 														title="Open a pull request that applies this recommendation"
 														on:click={() => openPrModal(rec)}
 													>Create PR</button>
+												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && hasOpenPr(rec)}
+													<button
+														class="text-xs px-3 py-1.5 rounded-lg border border-blue-600/30 text-blue-400/70
+														       cursor-not-allowed"
+														title="A pull request is already open for this workload recommendation"
+														disabled
+													>PR created</button>
+												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && prEligibility[rec.id] && !prEligibility[rec.id].eligible}
+													<button
+														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-500 cursor-not-allowed"
+														title={prEligibility[rec.id].reason}
+														disabled
+													>GitOps unavailable</button>
 												{/if}
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400

@@ -228,3 +228,43 @@ class TestProcessorResourceWiring:
         assert len(result) >= 1
         combined = result[0]
         assert combined.restart_count == 3
+
+    @pytest.mark.asyncio
+    async def test_low_cpu_fallback_is_non_mutating_and_idempotent_for_multi_container_pod(self):
+        prom_metrics = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="p1", container="c1", node="n1", cpu_usage_cores=0.01),
+                PodCPUUsage(namespace="ns", pod="p1", container="c2", node="n1", cpu_usage_cores=0.01),
+            ],
+            node_instance_types=[],
+        )
+        pod_metrics = [
+            PodMetric(pod_name="p1", namespace="ns", container_name="c1", cpu_request=100, memory_request=1),
+            PodMetric(pod_name="p1", namespace="ns", container_name="c2", cpu_request=100, memory_request=1),
+        ]
+        processor, estimator = _build_processor(prom_metrics, pod_metrics, NODE_INFO)
+        calls = []
+
+        def estimate(metrics):
+            calls.append(metrics)
+            return [
+                EnergyMetric(
+                    pod_name="p1",
+                    namespace="ns",
+                    joules=50000.0,
+                    node="n1",
+                    timestamp=datetime(2025, 2, 20, 12, 0, tzinfo=timezone.utc),
+                )
+            ]
+
+        estimator.estimate = MagicMock(side_effect=estimate)
+
+        await processor.run()
+        await processor.run()
+
+        assert [item.cpu_usage_cores for item in prom_metrics.pod_cpu_usage] == [0.01, 0.01]
+        assert [[item.cpu_usage_cores for item in call.pod_cpu_usage] for call in calls] == [
+            [0.1, 0.1],
+            [0.1, 0.1],
+        ]
+        assert all(item.cpu_usage_provenance == "estimated" for item in calls[0].pod_cpu_usage)

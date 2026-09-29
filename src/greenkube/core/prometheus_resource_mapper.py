@@ -16,6 +16,8 @@ class PodResourceMaps:
     """Per-pod resource usage aggregated from Prometheus data."""
 
     cpu_usage_map: Dict[tuple, int] = field(default_factory=dict)
+    observed_cpu_usage_map: Dict[tuple, int] = field(default_factory=dict)
+    estimated_cpu_usage_map: Dict[tuple, int] = field(default_factory=dict)
     memory_usage_map: Dict[tuple, int] = field(default_factory=dict)
     network_rx_map: Dict[tuple, float] = field(default_factory=dict)
     network_tx_map: Dict[tuple, float] = field(default_factory=dict)
@@ -28,7 +30,10 @@ class PrometheusResourceMapper:
     """Extracts per-pod resource maps from a PrometheusMetric snapshot."""
 
     @staticmethod
-    def build(prom_metrics: Optional[PrometheusMetric]) -> PodResourceMaps:
+    def build(
+        prom_metrics: Optional[PrometheusMetric],
+        estimated_metrics: Optional[PrometheusMetric] = None,
+    ) -> PodResourceMaps:
         """Aggregate all per-pod resource data from Prometheus metrics.
 
         Returns a PodResourceMaps dataclass with all resource maps.
@@ -42,7 +47,17 @@ class PrometheusResourceMapper:
         for item in prom_metrics.pod_cpu_usage:
             cpu_agg[(item.namespace, item.pod)] += item.cpu_usage_cores
         for key, cores in cpu_agg.items():
-            maps.cpu_usage_map[key] = int(round(cores * 1000))
+            usage = int(round(cores * 1000))
+            maps.cpu_usage_map[key] = usage
+            maps.observed_cpu_usage_map[key] = usage
+
+        if estimated_metrics:
+            estimated_cpu_agg: Dict[tuple, float] = defaultdict(float)
+            for item in estimated_metrics.pod_cpu_usage:
+                if item.estimated_cpu_usage_cores is not None:
+                    estimated_cpu_agg[(item.namespace, item.pod)] += item.estimated_cpu_usage_cores
+            for key, cores in estimated_cpu_agg.items():
+                maps.estimated_cpu_usage_map[key] = int(round(cores * 1000))
 
         # Memory usage
         if getattr(prom_metrics, "pod_memory_usage", None):

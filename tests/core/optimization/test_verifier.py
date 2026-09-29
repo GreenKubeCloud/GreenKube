@@ -80,9 +80,16 @@ def _applied_record(
     )
 
 
-def _metric(cost: float, co2: float, cpu: float, restart: int = 0) -> CombinedMetric:
+def _metric(
+    cost: float,
+    co2: float,
+    cpu: float,
+    restart: int = 0,
+    pod_name: str = "api-abc123def",
+    timestamp: datetime | None = None,
+) -> CombinedMetric:
     return CombinedMetric(
-        pod_name="api-abc123def",
+        pod_name=pod_name,
         namespace="prod",
         owner_kind="Deployment",
         owner_name="api",
@@ -91,7 +98,7 @@ def _metric(cost: float, co2: float, cpu: float, restart: int = 0) -> CombinedMe
         cpu_usage_millicores=cpu,
         restart_count=restart,
         sample_count=1,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(timezone.utc),
     )
 
 
@@ -208,3 +215,28 @@ class TestVerifierOutcomes:
         )
 
         assert await verifier.verify_due() == []
+
+    @pytest.mark.asyncio
+    async def test_aggregates_replicas_at_each_timestamp(self, repo):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        first = applied_at + timedelta(minutes=10)
+        second = first + timedelta(minutes=5)
+        after = [
+            _metric(0.01, 0.5, 100, pod_name="api-a", timestamp=first),
+            _metric(0.01, 0.5, 100, pod_name="api-b", timestamp=first),
+            _metric(0.01, 0.5, 100, pod_name="api-a", timestamp=second),
+            _metric(0.01, 0.5, 100, pod_name="api-b", timestamp=second),
+        ]
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(after, before_metrics=[_metric(0.05, 2.5, 100, timestamp=first)]),  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        updated = await verifier.verify_due()
+
+        assert updated[0].status == RecommendationStatus.VERIFIED
+        # Two replicas are summed once per timestamp, not once per sample.
+        assert updated[0].measured_cost_saved is not None
+        assert updated[0].measured_cost_saved > 0

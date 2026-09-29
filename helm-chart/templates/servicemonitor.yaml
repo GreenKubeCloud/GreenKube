@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- if and .Values.monitoring.serviceMonitor.enabled .Values.config.api.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -23,7 +23,7 @@ spec:
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      {{- if .Values.secrets.apiKey }}
+      {{- if or .Values.secrets.apiKey .Values.secrets.existingSecret }}
       # The API key protects /prometheus/metrics. The referenced Secret must
       # exist in the ServiceMonitor namespace (monitoring.serviceMonitor.namespace)
       # for Prometheus to read it.

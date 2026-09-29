@@ -8,12 +8,11 @@ URLs at runtime from the frontend.
 """
 
 import logging
-import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from greenkube.api.dependencies import validate_service_url
-from greenkube.core.config import get_config
+from greenkube.core.config import get_config_service
 from greenkube.core.health import invalidate_health_cache, run_health_checks
 from greenkube.core.k8s_secret_store import patch_k8s_secret
 from greenkube.models.health import (
@@ -51,7 +50,7 @@ async def get_service_health(service_name: str, force: bool = False):
 
 
 @router.post("/config/services", response_model=HealthCheckResponse)
-async def update_service_config(update: ServiceConfigUpdate):
+async def update_service_config(update: ServiceConfigUpdate, response: Response):
     """Update service URLs or tokens at runtime from the frontend.
 
     Changes are applied to the running process via environment variables
@@ -62,62 +61,49 @@ async def update_service_config(update: ServiceConfigUpdate):
     After applying changes the health cache is invalidated and a fresh
     health check is executed and returned.
     """
-    cfg = get_config()
-    changed = False
+    service = get_config_service()
+    updates: dict[str, str] = {}
 
     if update.prometheus_url is not None:
         validate_service_url(update.prometheus_url)
-        os.environ["PROMETHEUS_URL"] = update.prometheus_url
+        updates["PROMETHEUS_URL"] = update.prometheus_url
         logger.info("Prometheus URL updated to: %s", update.prometheus_url)
-        changed = True
 
     if update.opencost_url is not None:
         validate_service_url(update.opencost_url)
-        os.environ["OPENCOST_API_URL"] = update.opencost_url
+        updates["OPENCOST_API_URL"] = update.opencost_url
         logger.info("OpenCost URL updated to: %s", update.opencost_url)
-        changed = True
 
     if update.electricity_maps_token is not None:
-        os.environ["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
+        updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
         logger.info("Electricity Maps token updated.")
-        changed = True
 
     if update.boavizta_url is not None:
         validate_service_url(update.boavizta_url)
-        os.environ["BOAVIZTA_API_URL"] = update.boavizta_url
+        updates["BOAVIZTA_API_URL"] = update.boavizta_url
         logger.info("Boavizta URL updated to: %s", update.boavizta_url)
-        changed = True
 
     if update.wattnet_email is not None:
-        os.environ["WATTNET_EMAIL"] = update.wattnet_email
+        updates["WATTNET_EMAIL"] = update.wattnet_email
         logger.info("Wattnet email updated.")
-        changed = True
 
     if update.wattnet_password is not None:
-        os.environ["WATTNET_PASSWORD"] = update.wattnet_password
+        updates["WATTNET_PASSWORD"] = update.wattnet_password
         logger.info("Wattnet password updated.")
-        changed = True
 
-    if changed:
-        cfg.reload()
+    if updates:
+        acknowledgement = await service.apply(updates, persist=False)
         invalidate_health_cache()
         logger.info("Configuration reloaded after service config update.")
 
-        # Persist overrides to the K8s Secret so they survive pod restarts.
-        # This is best-effort: out-of-cluster or RBAC failures are logged and
-        # the in-memory update is not rolled back.
-        k8s_updates: dict[str, str] = {}
-        if update.prometheus_url is not None:
-            k8s_updates["PROMETHEUS_URL"] = update.prometheus_url
-        if update.opencost_url is not None:
-            k8s_updates["OPENCOST_API_URL"] = update.opencost_url
-        if update.electricity_maps_token is not None:
-            k8s_updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
-        if update.boavizta_url is not None:
-            k8s_updates["BOAVIZTA_API_URL"] = update.boavizta_url
-        if update.wattnet_email is not None:
-            k8s_updates["WATTNET_EMAIL"] = update.wattnet_email
-        if update.wattnet_password is not None:
-            k8s_updates["WATTNET_PASSWORD"] = update.wattnet_password
-        await patch_k8s_secret(k8s_updates)
+        # Mounted external secrets remain read-only. The K8s API patch is a
+        # separate, best-effort persistence channel for runtime overrides.
+        persisted = await patch_k8s_secret(updates)
+        response.headers["X-Configuration-Version"] = str(acknowledgement.version)
+        response.headers["X-Configuration-Persisted"] = str(persisted).lower()
+        if not persisted:
+            logger.warning(
+                "Runtime configuration version %s was applied in memory only.",
+                acknowledgement.version,
+            )
     return await run_health_checks(force=True)

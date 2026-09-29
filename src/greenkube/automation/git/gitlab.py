@@ -12,6 +12,8 @@ from greenkube.automation.git.base import (
     GitProvider,
     GitProviderError,
     GitRepository,
+    PullRequestInfo,
+    normalize_pull_request,
     validate_git_ref,
 )
 
@@ -60,7 +62,11 @@ class GitLabProvider(GitProvider):
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]:
         files: List[str] = []
         page = 1
+        seen_pages = set()
         while True:
+            if page in seen_pages or page > 10000:
+                raise GitProviderError("GitLab pagination did not progress; refusing partial results.")
+            seen_pages.add(page)
             response = await self._request(
                 "GET",
                 f"/projects/{self._project(repo)}/repository/tree",
@@ -75,8 +81,8 @@ class GitLabProvider(GitProvider):
                 break
             try:
                 page = int(next_page)
-            except ValueError:
-                break
+            except (TypeError, ValueError):
+                raise GitProviderError("GitLab returned an invalid pagination cursor; refusing partial results.")
         return files
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
@@ -112,6 +118,7 @@ class GitLabProvider(GitProvider):
                 "content": content,
                 "commit_message": message,
                 "encoding": "text",
+                **({"last_commit_id": sha} if sha else {}),
             },
         )
 
@@ -123,7 +130,7 @@ class GitLabProvider(GitProvider):
         base: str,
         title: str,
         body: str,
-    ) -> dict:
+    ) -> PullRequestInfo:
         head = validate_git_ref(head, field="branch name")
         base = validate_git_ref(base, field="base branch")
         response = await self._request(
@@ -138,21 +145,12 @@ class GitLabProvider(GitProvider):
         )
         if response.status_code == 404:
             raise GitProviderError(f"Could not open a merge request in {repo.full_name}: project or branch not found.")
-        data = response.json()
-        return {
-            "number": data.get("iid"),
-            "html_url": data.get("web_url"),
-            "state": data.get("state"),
-        }
+        return normalize_pull_request(response.json(), repo=repo)
 
-    async def get_pull_request(self, repo: GitRepository, number: int) -> dict:
+    async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitProviderError("Pull-request number must be a positive integer.")
         response = await self._request("GET", f"/projects/{self._project(repo)}/merge_requests/{number}")
         if response.status_code == 404:
             raise GitProviderError(f"Merge request {number} not found in {repo.full_name}.")
-        data = response.json()
-        return {
-            "number": data.get("iid"),
-            "html_url": data.get("web_url"),
-            "state": data.get("state"),
-            "merged": bool(data.get("merged_at") or data.get("state") == "merged"),
-        }
+        return normalize_pull_request(response.json(), repo=repo)

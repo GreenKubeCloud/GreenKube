@@ -76,6 +76,13 @@ class TestAnnotationSourceResolver:
         with pytest.raises(SourceResolutionError):
             await AnnotationSourceResolver(FakeReader({})).resolve(_record(owner_kind=None, owner_name=None))
 
+    @pytest.mark.asyncio
+    async def test_pod_scoped_recommendation_is_rejected_even_with_owner_fields(self):
+        with pytest.raises(SourceResolutionError, match="only workload-scoped"):
+            await AnnotationSourceResolver(FakeReader({})).resolve(
+                _record(scope="pod", owner_kind="Deployment", owner_name="payments-api")
+            )
+
 
 class TestK8sAnnotationReader:
     @pytest.mark.asyncio

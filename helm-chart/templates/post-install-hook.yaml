@@ -19,9 +19,16 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.hooks.podSecurityContext | nindent 8 }}
       containers:
         - name: ready-check
           image: "busybox:1.36"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- toYaml .Values.hooks.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.hooks.resources | nindent 12 }}
           command:
             - /bin/sh
             - -c
@@ -39,4 +46,3 @@ spec:
               echo "⚠️  Timed out waiting for API health endpoint after 120s."
               exit 1
 {{- end }}
-

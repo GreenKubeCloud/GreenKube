@@ -12,6 +12,16 @@ Welcome to
   → http://localhost:{{ .Values.config.api.port }}
 {{- end }}
 
+{{- if eq .Values.profile "production" }}
+* Production profile:
+  API, controller, and automation worker run as separate Deployments.
+  Database migrations run as a pre-install/pre-upgrade Job and the controller
+  uses the {{ include "greenkube.leaseName" . }} Lease for active/standby coordination.
+{{- else }}
+* Standalone profile:
+  Collector and API run together in one replica for simple installations.
+{{- end }}
+
 * Logs:
   kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -n {{ .Release.Namespace }} -f
 

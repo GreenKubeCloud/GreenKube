@@ -7,6 +7,7 @@ verify script discovery, version tracking, idempotency, and error
 handling — all without touching PostgreSQL.
 """
 
+import asyncio
 import sqlite3
 from unittest.mock import patch
 
@@ -117,15 +118,16 @@ class TestScriptDiscovery:
         runner = MigrationRunner("sqlite")
         scripts = runner._discover_scripts()
         assert len(scripts) >= 1
-        # First script should be version 1
-        assert scripts[0][0] == 1
-        assert "baseline" in scripts[0][1]
+        # First script is the initial schema bootstrap.
+        assert scripts[0][0] == 0
+        assert "initial_schema" in scripts[0][1]
 
     def test_discovers_bundled_postgres_scripts(self):
         runner = MigrationRunner("postgres")
         scripts = runner._discover_scripts()
         assert len(scripts) >= 1
-        assert scripts[0][0] == 1
+        assert scripts[0][0] == 0
+        assert "initial_schema" in scripts[0][1]
 
     def test_scripts_are_sorted_by_version(self):
         runner = MigrationRunner("sqlite")
@@ -312,6 +314,43 @@ class TestMigrationRunnerSQLite:
             async with aiosqlite.connect(db_file) as conn:
                 count = await runner.run(conn)
         assert count == 0
+
+    async def test_failure_rolls_back_schema_and_tracking(self, tmp_path):
+        db_file = str(tmp_path / "failed.db")
+        runner = MigrationRunner("sqlite")
+        with patch.object(
+            runner,
+            "_discover_scripts",
+            return_value=[(1, "create", "CREATE TABLE created (id INTEGER);"), (2, "broken", "THIS IS INVALID;")],
+        ):
+            with pytest.raises(sqlite3.OperationalError):
+                async with aiosqlite.connect(db_file) as connection:
+                    await runner.run(connection)
+
+        assert not _table_exists(db_file, "created")
+        assert not _table_exists(db_file, "schema_migrations")
+
+    async def test_concurrent_runners_serialize(self, tmp_path):
+        db_file = str(tmp_path / "concurrent.db")
+        runners = [MigrationRunner("sqlite"), MigrationRunner("sqlite")]
+        patchers = []
+        for runner in runners:
+            patcher = patch.object(runner, "_discover_scripts", return_value=[])
+            patcher.start()
+            patchers.append(patcher)
+
+        async def run(runner):
+            async with aiosqlite.connect(db_file) as connection:
+                return await runner.run(connection)
+
+        try:
+            results = await asyncio.gather(*(run(runner) for runner in runners))
+        finally:
+            for patcher in patchers:
+                patcher.stop()
+
+        assert results == [0, 0]
+        assert _table_exists(db_file, "schema_migrations")
 
 
 class TestMigrationRunnerPostgres:

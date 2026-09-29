@@ -72,3 +72,17 @@ If secrets.existingSecret is set, use that; otherwise use the chart-managed name
 {{- include "greenkube.fullname" . -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Return the ServiceAccount used by a production component.
+*/}}
+{{- define "greenkube.componentServiceAccountName" -}}
+{{- printf "%s-%s" (include "greenkube.fullname" .context) .component | trunc 63 | trimSuffix "-" }}
+{{- end -}}
+
+{{/*
+Return the production Lease name.
+*/}}
+{{- define "greenkube.leaseName" -}}
+{{- default (printf "%s-leader" (include "greenkube.fullname" .)) .Values.production.leaderElection.leaseName | trunc 63 | trimSuffix "-" }}
+{{- end -}}

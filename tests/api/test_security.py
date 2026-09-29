@@ -6,6 +6,8 @@ Tests for API security hardening: headers, CORS, rate limiting, auth.
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from greenkube.api.app import create_app
@@ -14,6 +16,7 @@ from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
+    validate_service_url,
 )
 
 API_KEY = "test-secret-key"
@@ -185,3 +188,11 @@ class TestInputValidation:
     def test_namespace_too_long_rejected(self, client):
         resp = client.get(f"/api/v1/metrics/summary?namespace={'a' * 64}")
         assert resp.status_code == 400
+
+    def test_metadata_service_host_rejected(self):
+        with pytest.raises(HTTPException):
+            validate_service_url("http://metadata.google.internal/latest/meta-data")
+
+    def test_embedded_credentials_rejected(self):
+        with pytest.raises(HTTPException):
+            validate_service_url("http://user:password@prometheus:9090")

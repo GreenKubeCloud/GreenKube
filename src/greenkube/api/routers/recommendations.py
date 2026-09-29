@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
@@ -150,21 +150,25 @@ async def _generate_and_persist_recommendations(
     return recommendations
 
 
-@router.get("/recommendations", response_model=List[Recommendation])
+@router.get("/recommendations", response_model=List[RecommendationRecord])
 async def list_recommendations(
+    background_tasks: BackgroundTasks,
     namespace: Optional[str] = Depends(validate_namespace),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    refresh: bool = Query(False, description="Refresh asynchronously before the next read."),
 ):
-    """Analyze recent metrics, upsert recommendations in DB, and return them.
-
-    Recommended CPU and memory values are guaranteed to be at least the
-    configured minimums (RECOMMENDATION_MIN_CPU_MILLICORES /
-    RECOMMENDATION_MIN_MEMORY_BYTES), so all returned recommendations are
-    actionable as-is.
-    """
-    return await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+    """Read active recommendations without running analyzers in the request."""
+    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    if refresh:
+        background_tasks.add_task(_generate_and_persist_recommendations, namespace, repo, node_repo, reco_repo)
+    elif not records:
+        # Preserve the legacy endpoint's first-read behavior while keeping
+        # populated reads read-only; callers needing explicit refresh can use
+        # the query parameter.
+        records = await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+    return records
 
 
 @router.get("/recommendations/active", response_model=List[RecommendationRecord])

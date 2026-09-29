@@ -244,6 +244,37 @@ def get_timeseries_cache_repository() -> TimeseriesCacheRepository:
 
 
 @lru_cache(maxsize=1)
+def get_optimization_engine():
+    """Return the process-wide optimization engine."""
+    from ..core.optimization.engine import OptimizationEngine
+
+    return OptimizationEngine()
+
+
+@lru_cache(maxsize=1)
+def get_automation_service():
+    """Return the process-wide recommendation automation service."""
+    from ..automation.service import AutomationService
+
+    return AutomationService(
+        reco_repo=get_recommendation_repository(),
+        pr_repo=get_pull_request_repository(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_summary_refresher():
+    """Return the process-wide dashboard summary refresher."""
+    from ..core.summary_refresher import SummaryRefresher
+
+    return SummaryRefresher(
+        metrics_repo=get_combined_metrics_repository(),
+        summary_repo=get_summary_repository(),
+        timeseries_cache_repo=get_timeseries_cache_repository(),
+    )
+
+
+@lru_cache(maxsize=1)
 def get_electricity_provider():
     """
     Factory function to get the electricity (grid carbon intensity) provider
@@ -313,6 +344,11 @@ def get_processor() -> DataProcessor:
         raise typer.Exit(code=1)
 
 
+def get_data_processor() -> DataProcessor:
+    """Compatibility name for the data-collection composition root."""
+    return get_processor()
+
+
 def clear_caches():
     """Clear all factory function caches.
 
@@ -330,5 +366,8 @@ def clear_caches():
     get_savings_ledger_repository.cache_clear()
     get_summary_repository.cache_clear()
     get_timeseries_cache_repository.cache_clear()
+    get_optimization_engine.cache_clear()
+    get_automation_service.cache_clear()
+    get_summary_refresher.cache_clear()
     get_electricity_provider.cache_clear()
     get_processor.cache_clear()

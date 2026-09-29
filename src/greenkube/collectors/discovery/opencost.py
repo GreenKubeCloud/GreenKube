@@ -50,7 +50,24 @@ class OpenCostDiscovery(BaseDiscovery):
 
         try:
             async with get_async_http_client(verify=verify_certs) as client:
-                resp = await client.get(probe_url)
+                headers = (
+                    {"Authorization": f"Bearer {config.OPENCOST_BEARER_TOKEN}"}
+                    if config.OPENCOST_BEARER_TOKEN
+                    else None
+                )
+                auth = (
+                    httpx.BasicAuth(config.OPENCOST_USERNAME, config.OPENCOST_PASSWORD)
+                    if config.OPENCOST_USERNAME and config.OPENCOST_PASSWORD
+                    else None
+                )
+                if headers is not None and auth is not None:
+                    resp = await client.get(probe_url, headers=headers, auth=auth)
+                elif headers is not None:
+                    resp = await client.get(probe_url, headers=headers)
+                elif auth is not None:
+                    resp = await client.get(probe_url, auth=auth)
+                else:
+                    resp = await client.get(probe_url)
                 status = resp.status_code
 
                 logger.info(

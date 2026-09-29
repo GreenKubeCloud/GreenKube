@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 MUTABLE_COLUMNS: frozenset = frozenset(
     {
         "pod_name",
+        "container_name",
         "namespace",
         "type",
         "description",
@@ -54,6 +55,8 @@ MUTABLE_COLUMNS: frozenset = frozenset(
         "recommended_memory_request_bytes",
         "cron_schedule",
         "target_node",
+        "identity_version",
+        "fingerprint",
         "source",
         "source_ref",
         "sources",
@@ -102,7 +105,16 @@ def _encode_value(value):
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, (dict, list)):
-        return json.dumps(value)
+        return json.dumps(
+            value,
+            default=lambda item: (
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump")
+                else item.isoformat()
+                if isinstance(item, datetime)
+                else str(item)
+            ),
+        )
     return value
 
 
@@ -132,9 +144,11 @@ def _bounded_limit(limit: int) -> int:
 def _identity_key(record: RecommendationRecord) -> tuple:
     """Returns the stable identity used to refresh recommendation lifecycle rows."""
     return (
+        record.fingerprint,
         record.scope or "pod",
         record.namespace,
         record.pod_name,
+        record.container_name,
         record.target_node,
         _type_value(record),
     )
@@ -143,17 +157,22 @@ def _identity_key(record: RecommendationRecord) -> tuple:
 def _identity_where_clause(record: RecommendationRecord, status: str = "active") -> tuple[str, list]:
     """Builds a SQLite WHERE clause for NULL-safe recommendation identity matching."""
     return (
+        "fingerprint = ? AND "
         "COALESCE(scope, 'pod') = ? "
         "AND ((namespace = ?) OR (namespace IS NULL AND ? IS NULL)) "
         "AND ((pod_name = ?) OR (pod_name IS NULL AND ? IS NULL)) "
+        "AND ((container_name = ?) OR (container_name IS NULL AND ? IS NULL)) "
         "AND ((target_node = ?) OR (target_node IS NULL AND ? IS NULL)) "
         "AND type = ? AND status = ?",
         [
+            record.fingerprint,
             record.scope or "pod",
             record.namespace,
             record.namespace,
             record.pod_name,
             record.pod_name,
+            record.container_name,
+            record.container_name,
             record.target_node,
             record.target_node,
             _type_value(record),
@@ -290,7 +309,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             conn.row_factory = aiosqlite.Row
             params: list = []
             query = (
-                "SELECT id, pod_name, namespace, type, scope, target_node "
+                "SELECT id, pod_name, container_name, namespace, type, scope, target_node, fingerprint "
                 "FROM recommendation_history WHERE status = 'active'"
             )
             if namespace:
@@ -305,10 +324,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 row_record = RecommendationRecord(
                     id=row["id"],
                     pod_name=row["pod_name"],
+                    container_name=row["container_name"],
                     namespace=row["namespace"],
                     type=RecommendationType(row["type"]),
                     scope=row["scope"] or "pod",
                     target_node=row["target_node"],
+                    fingerprint=row["fingerprint"],
                     description="placeholder",
                 )
                 if _identity_key(row_record) not in current_keys:
@@ -606,7 +627,9 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     carbon_saved,
                     cost_saved,
                     method,
-                    json.dumps(baseline) if baseline is not None else None,
+                    json.dumps(baseline.model_dump(mode="json") if hasattr(baseline, "model_dump") else baseline)
+                    if baseline is not None
+                    else None,
                     now,
                     rec_id,
                 ),
@@ -655,7 +678,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     event.recommendation_id,
                     event.event_type,
                     event.actor,
-                    json.dumps(event.payload or {}),
+                    json.dumps(
+                        event.payload.model_dump(mode="json")
+                        if hasattr(event.payload, "model_dump")
+                        else event.payload or {}
+                    ),
                     created_at,
                 ),
             )
@@ -663,6 +690,30 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             return event.model_copy(
                 update={"id": cursor.lastrowid, "created_at": event.created_at or datetime.now(timezone.utc)}
             )
+
+    async def transition_and_record_event(self, rec_id: int, updates: dict, event_type: str, actor: str, payload: dict):
+        """Atomically update a recommendation and append its lifecycle event."""
+        filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
+        if not filtered:
+            raise ValueError("No mutable recommendation columns supplied.")
+        now = datetime.now(timezone.utc)
+        filtered.setdefault("updated_at", now)
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            params = [_encode_value(value) for value in filtered.values()] + [rec_id]
+            await conn.execute(
+                f"UPDATE recommendation_history SET {', '.join(f'{k} = ?' for k in filtered)} WHERE id = ?",
+                params,
+            )
+            await conn.execute(
+                """INSERT INTO recommendation_events
+                (recommendation_id, event_type, actor, payload, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (rec_id, event_type, actor, json.dumps(payload), to_iso_z(now)),
+            )
+            await conn.commit()
+            row = await (await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))).fetchone()
+            return row_to_record(row)
 
     async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
         """Returns the audit trail for a recommendation, oldest first."""

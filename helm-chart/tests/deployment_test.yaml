@@ -5,6 +5,35 @@ templates:
   - templates/secret.yaml
 
 tests:
+  - it: collector should have process heartbeat probes
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command
+          value:
+            - /bin/sh
+            - -c
+            - kill -0 1
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command
+          value:
+            - /bin/sh
+            - -c
+            - kill -0 1
+
+  - it: API container should not render when API is disabled
+    set:
+      config.api.enabled: false
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+
   # --------------------------------------------------------------------------
   # Basic rendering
   # --------------------------------------------------------------------------

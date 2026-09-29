@@ -1,0 +1,152 @@
+{{- if eq .Values.profile "production" }}
+{{- $root := . }}
+{{- range $component := list "api" "controller" "automation" }}
+{{- if or (ne $component "api") $root.Values.config.api.enabled }}
+{{- $cfg := index $root.Values.production.components $component }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "greenkube.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $component }}
+    spec:
+      serviceAccountName: {{ include "greenkube.componentServiceAccountName" (dict "context" $root "component" $component) }}
+      # The API exposes Kubernetes-backed health and inventory endpoints, so it
+      # needs the same read-only in-cluster identity as the controller.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $component }}
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: [ALL]
+          command:
+            {{- if eq $component "api" }}
+            - greenkube-api
+            {{- else if eq $component "automation" }}
+            - python
+            - -m
+            - greenkube.cli.automation_worker
+            {{- else }}
+            - greenkube
+            {{- end }}
+          args:
+            {{- if eq $component "controller" }}
+            - start
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "greenkube.fullname" $root }}
+            - secretRef:
+                name: {{ include "greenkube.secretName" $root }}
+                optional: true
+          env:
+            {{- if eq $root.Values.config.db.type "postgres" }}
+            - name: DB_SCHEMA
+              value: {{ $root.Values.config.db.schema | quote }}
+            - name: DB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.secretName" $root }}
+                  key: DB_CONNECTION_STRING
+            {{- end }}
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GREENKUBE_COMPONENT
+              value: {{ $component | quote }}
+            {{- if and (eq $component "controller") $root.Values.production.leaderElection.enabled }}
+            - name: LEADER_ELECTION_ENABLED
+              value: "true"
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: {{ include "greenkube.leaseName" $root | quote }}
+            - name: LEADER_ELECTION_LEASE_NAMESPACE
+              value: {{ $root.Release.Namespace | quote }}
+            {{- end }}
+          {{- if eq $component "api" }}
+          ports:
+            - name: http-api
+              containerPort: {{ $root.Values.config.api.port }}
+              protocol: TCP
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          {{- end }}
+          {{- if $cfg.livenessProbe.enabled }}
+          livenessProbe:
+            {{- if eq $component "api" }}
+            httpGet:
+              path: {{ $cfg.livenessProbe.path }}
+              port: {{ $cfg.livenessProbe.port }}
+            {{- else }}
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            {{- end }}
+            initialDelaySeconds: {{ $cfg.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $cfg.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ $cfg.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ $cfg.livenessProbe.failureThreshold }}
+            successThreshold: {{ $cfg.livenessProbe.successThreshold }}
+          {{- end }}
+          {{- if $cfg.readinessProbe.enabled }}
+          readinessProbe:
+            {{- if eq $component "api" }}
+            httpGet:
+              path: {{ $cfg.readinessProbe.path }}
+              port: {{ $cfg.readinessProbe.port }}
+            {{- else }}
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            {{- end }}
+            initialDelaySeconds: {{ $cfg.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $cfg.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ $cfg.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ $cfg.readinessProbe.failureThreshold }}
+            successThreshold: {{ $cfg.readinessProbe.successThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          volumeMounts:
+            - name: secrets
+              mountPath: /etc/greenkube/secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: secrets
+          secret:
+            secretName: {{ include "greenkube.secretName" $root }}
+            optional: true
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}
+{{- end }}
+{{- end }}

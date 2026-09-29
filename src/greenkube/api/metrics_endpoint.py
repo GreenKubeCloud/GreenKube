@@ -19,6 +19,7 @@ from typing import List, Sequence
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
+from greenkube.core.observability import generate_latest_observability
 from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, Recommendation, RecommendationRecord
@@ -1089,7 +1090,7 @@ def get_metrics_output() -> bytes:
     Returns:
         Bytes containing the Prometheus text format metrics.
     """
-    return generate_latest(REGISTRY)
+    return generate_latest(REGISTRY) + generate_latest_observability()
 
 
 async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_repo=None, summary_repo=None) -> None:

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
+from greenkube.models.node import NodeInfo
 
 
 class HealthResponse(BaseModel):
@@ -80,6 +81,14 @@ class PaginatedMetricsResponse(BaseModel):
     offset: int = Field(0, description="Number of records skipped.")
     limit: int = Field(1000, description="Maximum records in this page.")
     items: List[CombinedMetric] = Field(default_factory=list, description="The metrics in this page.")
+    next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
+
+
+class PaginatedNodesResponse(BaseModel):
+    """Opt-in cursor-paginated node response."""
+
+    items: List[NodeInfo] = Field(default_factory=list, description="Nodes in this page.")
+    next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
 
 
 class NamespaceBreakdownItem(BaseModel):

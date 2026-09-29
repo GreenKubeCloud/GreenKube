@@ -112,7 +112,7 @@ class KarpenterSource(RecommendationSource):
 
 
 def _pool_cpu_utilization(pool: NodePoolInfo, context: "OptimizationContext") -> Optional[float]:
-    """Estimates average CPU request utilization across a pool's nodes."""
+    """Estimates time-weighted CPU request utilization across a pool's nodes."""
     if not pool.node_names:
         return None
 
@@ -123,16 +123,22 @@ def _pool_cpu_utilization(pool: NodePoolInfo, context: "OptimizationContext") ->
         if name and capacity:
             capacities[name] = float(capacity)
 
-    requests: Dict[str, float] = {}
+    requests: Dict[object, Dict[str, float]] = {}
     for metric in context.metrics:
         node_name = metric.node
         if node_name and node_name in pool.node_names:
-            requests[node_name] = requests.get(node_name, 0.0) + float(metric.cpu_request or 0)
+            timestamp = metric.timestamp or len(requests)
+            requests.setdefault(timestamp, {})
+            requests[timestamp][node_name] = requests[timestamp].get(node_name, 0.0) + float(metric.cpu_request or 0)
 
     ratios = []
-    for node_name, capacity in capacities.items():
-        if node_name in pool.node_names and capacity > 0:
-            ratios.append(min(requests.get(node_name, 0.0) / capacity, 1.0))
+    for point in requests.values():
+        point_ratios = []
+        for node_name, capacity in capacities.items():
+            if node_name in pool.node_names and capacity > 0:
+                point_ratios.append(min(point.get(node_name, 0.0) / capacity, 1.0))
+        if point_ratios:
+            ratios.append(sum(point_ratios) / len(point_ratios))
     if not ratios:
         return None
     return sum(ratios) / len(ratios)

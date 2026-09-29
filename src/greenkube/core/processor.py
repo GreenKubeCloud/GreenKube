@@ -184,8 +184,13 @@ class DataProcessor:
         # Step: Adjust low-CPU nodes with pod requests
         # ------------------------------------------------------------------
         cpu_adjusted_nodes: Set[str] = set()
+        estimation_prom_metrics = prom_metrics
         if prom_metrics:
             try:
+                adjusted_cpu_items = {
+                    (item.namespace, item.pod, item.container): item.model_copy(deep=True)
+                    for item in prom_metrics.pod_cpu_usage
+                }
                 node_totals: Dict[str, float] = {}
                 for item in prom_metrics.pod_cpu_usage:
                     node_totals.setdefault(item.node, 0.0)
@@ -214,7 +219,23 @@ class DataProcessor:
                                 for itm in node_to_items.get(node, []):
                                     req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
                                     if req:
-                                        itm.cpu_usage_cores = req
+                                        pod_items = [
+                                            candidate
+                                            for candidate in node_to_items.get(node, [])
+                                            if (candidate.namespace, candidate.pod) == (itm.namespace, itm.pod)
+                                        ]
+                                        req_per_container = req / len(pod_items)
+                                        adjusted_cpu_items[(itm.namespace, itm.pod, itm.container)] = itm.model_copy(
+                                            update={
+                                                "cpu_usage_cores": req_per_container,
+                                                "estimated_cpu_usage_cores": req_per_container,
+                                                "cpu_usage_provenance": "estimated",
+                                            }
+                                        )
+                if cpu_adjusted_nodes:
+                    estimation_prom_metrics = prom_metrics.model_copy(
+                        update={"pod_cpu_usage": list(adjusted_cpu_items.values())}
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to adjust node utilization based on pod requests: %s",
@@ -224,7 +245,23 @@ class DataProcessor:
 
             # Estimate energy
             try:
-                energy_metrics = self.estimator.estimate(prom_metrics)
+                assert estimation_prom_metrics is not None
+                energy_metrics = self.estimator.estimate(estimation_prom_metrics)
+                if cpu_adjusted_nodes:
+                    adjustment_reason = (
+                        "CPU usage on node was below threshold; substituted pod requests for energy estimation"
+                    )
+                    energy_metrics = [
+                        metric.model_copy(
+                            update={
+                                "is_estimated": metric.is_estimated or metric.node in cpu_adjusted_nodes,
+                                "estimation_reasons": list(
+                                    dict.fromkeys([*metric.estimation_reasons, adjustment_reason])
+                                ),
+                            }
+                        )
+                        for metric in energy_metrics
+                    ]
                 logger.info(
                     "Successfully estimated %d energy metrics from Prometheus.",
                     len(energy_metrics),
@@ -236,7 +273,7 @@ class DataProcessor:
             energy_metrics = []
 
         # Build per-pod resource maps from Prometheus data
-        resource_maps = PrometheusResourceMapper.build(prom_metrics)
+        resource_maps = PrometheusResourceMapper.build(prom_metrics, estimation_prom_metrics)
 
         # ------------------------------------------------------------------
         # Phase 4: Prefetch carbon intensities and assemble CombinedMetrics

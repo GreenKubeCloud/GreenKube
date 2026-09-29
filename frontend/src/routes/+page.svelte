@@ -1,4 +1,5 @@
 <script>
+	import { onDestroy } from 'svelte';
 	import { selectedNamespace, selectedTimeRange } from '$lib/stores.js';
 	import {
 		getMetricsSummary,
@@ -43,6 +44,7 @@
 	let recoLoading = true;
 	let refreshing = false;
 	let error = null;
+	let requestController = new AbortController();
 
 	$: params = { namespace: $selectedNamespace, last: $selectedTimeRange };
 	$: if (params) loadData();
@@ -67,6 +69,9 @@
 		// Guard against overlapping loads (reactive params + manual refresh):
 		// a slower response must never overwrite a newer one.
 		const seq = ++loadSeq;
+		requestController.abort();
+		requestController = new AbortController();
+		const { signal } = requestController;
 		loading = true;
 		recoLoading = true;
 		error = null;
@@ -79,30 +84,33 @@
 			// For other ranges (1h, 6h): fall back to on-demand endpoints.
 			let summaryPromise, timeseriesPromise;
 			if (PRECOMPUTED_SLUGS.has(last)) {
-				summaryPromise = getDashboardSummary({ namespace: ns }).then(
-					(r) => r.windows?.[last] ?? null
+				summaryPromise = getDashboardSummary({ namespace: ns, signal }).then(
+					(r) => r.windows?.[last] ?? getMetricsSummary({ namespace: ns, last, signal })
 				);
-				timeseriesPromise = getDashboardTimeseries({ windowSlug: last, namespace: ns }).then(
-					(r) => (r.points ?? []).map(normaliseCachePoint)
+				timeseriesPromise = getDashboardTimeseries({ windowSlug: last, namespace: ns, signal }).then(
+					(r) => (r.points?.length ? r.points.map(normaliseCachePoint) : getTimeseries({
+						namespace: ns, last, granularity: 'hour', signal
+					}))
 				);
 			} else {
-				summaryPromise = getMetricsSummary({ namespace: ns, last });
+				summaryPromise = getMetricsSummary({ namespace: ns, last, signal });
 				timeseriesPromise = getTimeseries({
 					namespace: ns,
 					last,
-					granularity: 'hour'  // 1h and 6h are both sub-day → hourly buckets
+					granularity: 'hour',
+					signal
 				});
 			}
 
 			// Use lightweight SQL-aggregated endpoints for donut + top-pods
 			// instead of loading all raw metrics into memory.
-			const apiLast = last === 'ytd' ? '1y' : last;
+			const apiLast = last;
 
 			const [s, ts, nsData, topData] = await Promise.all([
 				summaryPromise,
 				timeseriesPromise,
-				getMetricsByNamespace({ namespace: ns, last: apiLast }),
-				getTopPods({ namespace: ns, last: apiLast, limit: 10 })
+				getMetricsByNamespace({ namespace: ns, last: apiLast, signal }),
+				getTopPods({ namespace: ns, last: apiLast, limit: 10, signal })
 			]);
 			if (seq !== loadSeq) return;
 			summary = s;
@@ -110,7 +118,7 @@
 			nsBreakdown = nsData;
 			topPods = topData;
 		} catch (e) {
-			if (seq === loadSeq) error = e.message;
+			if (seq === loadSeq && e.name !== 'AbortError') error = e.message;
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
@@ -133,6 +141,8 @@
 				recommendations = [];
 				savings = null;
 			}
+
+			onDestroy(() => requestController.abort());
 		} finally {
 			if (seq === loadSeq) recoLoading = false;
 		}

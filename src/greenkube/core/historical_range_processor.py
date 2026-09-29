@@ -19,7 +19,7 @@ from ..core.node_zone_mapper import NodeZoneMapper
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
-from ..utils.date_utils import parse_iso_date
+from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +64,7 @@ class HistoricalRangeProcessor:
 
     @staticmethod
     def _parse_duration_to_seconds(s: str) -> int:
-        s = str(s).strip()
-        try:
-            if s.endswith("s"):
-                return int(s[:-1])
-            if s.endswith("m"):
-                return int(s[:-1]) * 60
-            if s.endswith("h"):
-                return int(s[:-1]) * 3600
-            return int(s)
-        except Exception:
-            return 60
+        return parse_query_step_seconds(s)
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,15 +95,8 @@ class HistoricalRangeProcessor:
         start_dt: datetime | None = None
         end_dt: datetime | None = None
         try:
-            if isinstance(start, str):
-                start_dt = parse_iso_date(start)
-            else:
-                start_dt = start
-
-            if isinstance(end, str):
-                end_dt = parse_iso_date(end)
-            else:
-                end_dt = end
+            start_dt = ensure_utc(start) if not isinstance(start, str) else parse_iso_date(start)
+            end_dt = ensure_utc(end) if not isinstance(end, str) else parse_iso_date(end)
 
             if start_dt and end_dt:
                 stored_metrics = await self._read_stored_metrics(start_dt, end_dt, namespace)
@@ -133,6 +116,8 @@ class HistoricalRangeProcessor:
             raise ValueError(f"Could not parse start time: {start!r}")
         if end_dt is None:
             raise ValueError(f"Could not parse end time: {end!r}")
+        if end_dt <= start_dt:
+            raise ValueError("Historical range end must be after start")
 
         cfg_step_str = self._config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = self._parse_duration_to_seconds(cfg_step_str)
@@ -159,7 +144,7 @@ class HistoricalRangeProcessor:
             if isinstance(ts_str, str):
                 change_dt = parse_iso_date(ts_str)
             else:
-                change_dt = ts_str
+                change_dt = ensure_utc(ts_str)
             if change_dt:
                 node_timeline[node_info.name].append((change_dt, node_info))
         for node_name in node_timeline:

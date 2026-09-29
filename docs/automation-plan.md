@@ -204,6 +204,24 @@ proposed diff, verification plan, provenance and reviewer checklist.
 
 ## 10. Risks / Notes / Future Work
 
+### Durable execution safety
+
+Non-preview `apply-pr` requests are persisted before any provider mutation and
+return `202 Accepted`. The idempotency key is unique and its fingerprint binds
+the recommendation, patch and request; reusing a key with different input is
+rejected. Workers claim operations transactionally and use a deterministic
+branch per recommendation. A retry reuses an unfinished pull-request attempt
+and provider transient failures are requeued with exponential backoff (up to
+five attempts); permanent failures are terminal. Stale worker leases are
+reconciled before claiming work. Operators can inspect operation status,
+attempts, digests and the last error through `/automation/operations/{id}`.
+
+- Provider webhooks, merge reconciliation and rollback PRs remain a W3-C
+  follow-up; the queue currently guarantees safe execution and retry
+  idempotence, not automatic post-merge verification.
+- Keep `Idempotency-Key` stable across client/network retries. Do not retry a
+  request with a changed recommendation or patch under the same key.
+
 - **YAML round-trip fidelity** — solved by `ruamel.yaml`; covered by golden tests.
 - **Helm/Kustomize/values-based workloads** — v1 targets raw manifests; Helm
   values patching (via annotation JSON path) remains a follow-up.

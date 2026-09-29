@@ -17,6 +17,7 @@ from greenkube.core.config import Config, get_config
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.models.metrics import EnergyMetric
 from greenkube.models.prometheus_metrics import PrometheusMetric
+from greenkube.utils.time import parse_query_step_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +61,12 @@ class BasicEstimator:
 
     def _parse_step_to_seconds(self, step_str: str) -> int:
         """Converts a Prometheus duration string (like '5m', '1h') to seconds."""
-        seconds = 0
-        if step_str.endswith("s"):
-            seconds = int(step_str[:-1])
-        elif step_str.endswith("m"):
-            seconds = int(step_str[:-1]) * 60
-        elif step_str.endswith("h"):
-            seconds = int(step_str[:-1]) * 3600
-
-        if seconds <= 0:
+        seconds = parse_query_step_seconds(step_str)
+        if seconds == 300 and step_str.strip().lower() not in {"5m", "300s"}:
             logger.warning(
                 "Unrecognized or non-positive PROMETHEUS_QUERY_RANGE_STEP '%s'; defaulting to 300s",
                 step_str,
             )
-            return 300  # 5 minutes by default
         return seconds
 
     def _create_cpu_profile(self, cores: float) -> Dict[str, Any]:

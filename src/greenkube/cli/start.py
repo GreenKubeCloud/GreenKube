@@ -21,6 +21,7 @@ from ..collectors.node_collector import NodeCollector
 from ..core.config import get_config
 from ..core.factory import (
     get_combined_metrics_repository,
+    get_data_processor,
     get_electricity_provider,
     get_node_repository,
     get_repository,
@@ -361,6 +362,10 @@ async def _async_start(last: Optional[str]):
     await get_db_manager().connect()
     logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
 
+    # Resolve the processor at the composition root before workers are
+    # scheduled. This makes collector/repository wiring fail fast and keeps
+    # scheduled jobs focused on vertical orchestration.
+    processor = get_data_processor()
     scheduler = Scheduler()
     scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1, skip_initial=True)
 
@@ -406,6 +411,7 @@ async def _async_start(last: Optional[str]):
 
     await stop_event.wait()
     await scheduler.stop()
+    await processor.close()
     logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 

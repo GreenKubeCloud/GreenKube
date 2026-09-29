@@ -9,9 +9,11 @@ directory is present in the image.
 """
 
 import asyncio
+import ipaddress
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -23,6 +25,7 @@ from limits import parse as parse_rate_limit
 from limits.storage import MemoryStorage
 from limits.strategies import MovingWindowRateLimiter
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from greenkube import __version__
 from greenkube.api.dependencies import (
@@ -36,7 +39,7 @@ from greenkube.api.routers import automation as automation_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import health as health_router
-from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
+from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
 from greenkube.api.startup import run_startup_recommendation_scan
 from greenkube.core.config import get_config
 from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
@@ -44,6 +47,27 @@ from greenkube.core.factory import get_savings_ledger_repository, get_summary_re
 logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path("/app/frontend")
+
+
+def _parse_networks(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy network: %s", item)
+    return tuple(networks)
+
+
+def _is_trusted_ip(value: str, networks) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -113,11 +137,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     _LIMITED_PREFIXES = ("/api/",)
     _LIMITED_EXACT = ("/prometheus/metrics",)
 
-    def __init__(self, app, rate_limit: str, storage: MemoryStorage):
+    def __init__(self, app, rate_limit: str, storage: MemoryStorage | None = None, limiter=None):
         super().__init__(app)
         self._limits = [parse_rate_limit(part.strip()) for part in rate_limit.split(";") if part.strip()]
-        self._storage = storage
-        self._limiter = MovingWindowRateLimiter(storage)
+        self._storage = storage or MemoryStorage()
+        self._limiter = limiter or MovingWindowRateLimiter(self._storage)
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -125,6 +149,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         client = request.client.host if request.client else "unknown"
+        trusted_proxies = _parse_networks(getattr(get_config(), "TRUSTED_PROXY_IPS", ""))
+        if _is_trusted_ip(client, trusted_proxies):
+            forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+            if forwarded:
+                client = forwarded
         identifiers = (client, path)
         for limit in self._limits:
             if not self._limiter.hit(limit, *identifiers):
@@ -149,11 +178,12 @@ async def lifespan(app: FastAPI):
 
     # Start tracked background startup tasks so we can cancel them on shutdown.
     app.state._startup_tasks = []
-    task = asyncio.create_task(run_startup_recommendation_scan())
-    app.state._startup_tasks.append(task)
+    app.state._startup_tasks.append(asyncio.create_task(run_startup_recommendation_scan()))
+    app.state.ready = True
 
     yield
     logger.info("🛑 Shutting down GreenKube API...")
+    app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
         for t in getattr(app.state, "_startup_tasks", []) or []:
@@ -206,24 +236,18 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     rate_limit = getattr(cfg, "API_RATE_LIMIT", "60/minute") or "60/minute"
     app.add_middleware(RateLimitMiddleware, rate_limit=rate_limit, storage=MemoryStorage())
 
-    # CORS — configurable via CORS_ORIGINS env var (comma-separated).
-    # Defaults to ["*"] for in-cluster use where the SPA is served from
-    # the same origin. Override when the API is exposed via an ingress.
-    #
-    # IMPORTANT: when the API is served behind a reverse-proxy that injects
-    # cookies (e.g. Authentik forward-auth with a session cookie), the
-    # browser may send credentials even on same-origin requests.
-    # allow_credentials=True paired with allow_origins=["*"] violates the
-    # CORS specification and causes intermittent failures.
-    cors_origins_str = cfg.CORS_ORIGINS if hasattr(cfg, "CORS_ORIGINS") else "*"
-    cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()] or ["*"]
+    # CORS is closed by default. Explicit origins are required for cross-origin
+    # browser clients; same-origin SPA requests do not need CORS headers.
+    cors_origins = [o.strip() for o in (getattr(cfg, "CORS_ORIGINS", "") or "").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=False if "*" in cors_origins else True,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
+    trusted_hosts = [h.strip() for h in getattr(cfg, "TRUSTED_HOSTS", "*").split(",") if h.strip()]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts or ["*"])
 
     # Security headers (OWASP recommended)
     app.add_middleware(SecurityHeadersMiddleware)
@@ -238,6 +262,16 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])
     app.include_router(report.router, prefix="/api/v1", tags=["Report"])
+    app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
+
+    @app.get("/api/v1/health/heartbeat", include_in_schema=False)
+    async def heartbeat():
+        """Return a lightweight liveness response without probing dependencies."""
+        return {
+            "status": "ok",
+            "ready": bool(getattr(app.state, "ready", True)),
+            "timestamp": datetime.now(timezone.utc),
+        }
 
     # Prometheus metrics endpoint for Grafana dashboards
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
@@ -341,5 +375,10 @@ def main():
     configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
     uvicorn.run(
-        app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*", timeout_keep_alive=65
+        app,
+        host=cfg.API_HOST,
+        port=cfg.API_PORT,
+        proxy_headers=bool(cfg.TRUSTED_PROXY_IPS),
+        forwarded_allow_ips=cfg.TRUSTED_PROXY_IPS,
+        timeout_keep_alive=65,
     )

@@ -5,11 +5,10 @@ import math
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from greenkube.models.metrics import CombinedMetric
+from greenkube.utils.time import SECONDS_PER_YEAR
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
-
-SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
 
 def percentile(values: List[float], p: float) -> float:

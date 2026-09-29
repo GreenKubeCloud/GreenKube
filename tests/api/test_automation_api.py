@@ -133,6 +133,27 @@ class TestApplyPrEndpoint:
         assert response.status_code == 422
         assert "detail" in response.json()
 
+    async def test_apply_pr_enqueues_and_returns_202(self, automation_client):
+        client, reco_repo, _ = automation_client
+        await reco_repo.save_recommendations([_record()])
+        rec_id = (await reco_repo.get_active_recommendations())[0].id
+
+        response = client.post(
+            f"/api/v1/recommendations/{rec_id}/apply-pr",
+            json={},
+            headers={"Idempotency-Key": "api-request-1", "X-Audit-Actor": "release-bot"},
+        )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["idempotency_key"] == "api-request-1"
+        assert body["actor"] == "release-bot"
+
+        operation = client.get(f"/api/v1/automation/operations/{body['operation_id']}")
+        assert operation.status_code == 200
+        assert operation.json()["fingerprint"] == body["fingerprint"]
+
     async def test_automation_status_endpoint(self, automation_client):
         client, _, _ = automation_client
         response = client.get("/api/v1/automation/status")

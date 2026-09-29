@@ -6,6 +6,7 @@ startup scan and CLI all delegate here; only the CLI skips persistence.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from greenkube.core.optimization.context import OptimizationContext
@@ -30,6 +31,7 @@ class OptimizationEngine:
         self,
         config: Optional["Config"] = None,
         sources: Optional[Sequence[RecommendationSource]] = None,
+        run_repository=None,
     ):
         from greenkube.core.config import get_config
 
@@ -37,10 +39,13 @@ class OptimizationEngine:
         if sources is None:
             sources = build_sources(self.config)
         self.sources: List[RecommendationSource] = list(sources)
+        self.run_repository = run_repository
+        self.failed_sources: List[str] = []
 
     async def generate(self, context: OptimizationContext) -> List[Recommendation]:
         """Runs every available source and returns deduplicated recommendations."""
         recs: List[Recommendation] = []
+        self.failed_sources = []
         for source in self.sources:
             source_name = getattr(source, "name", repr(source))
             try:
@@ -50,6 +55,10 @@ class OptimizationEngine:
                 recs.extend(await source.collect(context))
             except Exception:
                 logger.exception("Recommendation source '%s' failed; continuing without it.", source_name)
+                self.failed_sources.append(source_name)
+                from greenkube.core.observability import record_analyzer_failure
+
+                record_analyzer_failure(source_name)
         finalized = finalize_recommendations(recs, self.config)
         return enrich_recommendations(finalized, context, self.config)
 
@@ -71,8 +80,54 @@ class OptimizationEngine:
     ) -> List[Recommendation]:
         """Generates recommendations and reconciles persisted active records."""
         context = await self.build_context(combined_repo, node_repo, namespace=namespace)
-        recommendations = await self.generate(context)
-        await self.persist(recommendations, reco_repo, namespace=namespace)
+        from greenkube.core.observability import elapsed, record_run, start_timer
+
+        timer = start_timer()
+        run = None
+        run_repository = self.run_repository
+        if run_repository is not None:
+            from greenkube.models.optimization_run import OptimizationRun
+
+            run = await run_repository.create(
+                OptimizationRun(
+                    started_at=datetime.now(timezone.utc),
+                    namespace=namespace,
+                    analyzer_count=len(self.sources),
+                )
+            )
+        try:
+            recommendations = await self.generate(context)
+            # A partial run must not mark previously valid recommendations stale.
+            if not self.failed_sources:
+                await self.persist(recommendations, reco_repo, namespace=namespace)
+            if run is not None and run_repository is not None:
+                await run_repository.complete(
+                    run.id,
+                    status="succeeded" if not self.failed_sources else "failed",
+                    completed_at=datetime.now(timezone.utc),
+                    recommendation_count=len(recommendations),
+                    analyzer_count=len(self.sources),
+                    failed_analyzer_count=len(self.failed_sources),
+                    error=", ".join(self.failed_sources) if self.failed_sources else None,
+                )
+            record_run(
+                "succeeded" if not self.failed_sources else "failed",
+                elapsed(timer),
+                len(recommendations),
+            )
+        except Exception as exc:
+            if run is not None and run_repository is not None:
+                await run_repository.complete(
+                    run.id,
+                    status="failed",
+                    completed_at=datetime.now(timezone.utc),
+                    recommendation_count=0,
+                    analyzer_count=len(self.sources),
+                    failed_analyzer_count=len(self.sources),
+                    error=str(exc),
+                )
+            record_run("failed", elapsed(timer))
+            raise
         return recommendations
 
     async def persist(

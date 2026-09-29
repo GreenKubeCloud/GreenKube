@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- if and .Values.monitoring.serviceMonitor.enabled .Values.config.api.enabled }}
 # Dedicated ServiceAccount for the pre-install CRD check hook.
 # Regular resources (like the main ServiceAccount) are not yet created when
 # pre-install hooks run, so this SA carries its own hook annotations to ensure

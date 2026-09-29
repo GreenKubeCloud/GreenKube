@@ -834,6 +834,69 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
             logger.error("Error in aggregate_top_pods: %s", e)
             raise QueryError(f"aggregate_top_pods failed: {e}") from e
 
+    async def read_combined_metrics_cursor(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        cursor: Optional[dict] = None,
+        limit: int = 1000,
+    ) -> tuple[int, List[CombinedMetric], Optional[dict]]:
+        """Read a bounded, stable page ordered by timestamp and pod identity."""
+        limit = min(max(limit, 1), 1000)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                filters = ["timestamp >= $1", "timestamp <= $2"]
+                params: list = [start_time, end_time]
+                idx = 3
+                if namespace:
+                    filters.append(f"namespace = ${idx}")
+                    params.append(namespace)
+                    idx += 1
+                count_where = " AND ".join(filters)
+                if cursor:
+                    filters.append(
+                        f"(timestamp > ${idx} OR (timestamp = ${idx} AND "
+                        f"(namespace > ${idx + 1} OR (namespace = ${idx + 1} AND pod_name > ${idx + 2})))"
+                    )
+                    params.extend(
+                        [
+                            datetime.fromisoformat(cursor["timestamp"].replace("Z", "+00:00")),
+                            cursor["namespace"],
+                            cursor["pod_name"],
+                        ]
+                    )
+                    idx += 3
+                where = " AND ".join(filters)
+                count_params = params[: idx - (3 if cursor else 0)]
+                total = await conn.fetchval(f"SELECT COUNT(*) FROM combined_metrics WHERE {count_where}", *count_params)
+                rows = await conn.fetch(
+                    f"SELECT * FROM combined_metrics WHERE {where} "
+                    f"ORDER BY timestamp, namespace, pod_name LIMIT ${idx}",
+                    *params,
+                    limit + 1,
+                )
+                metrics = []
+                for row in rows[:limit]:
+                    data = dict(row)
+                    data.pop("id", None)
+                    if isinstance(data.get("estimation_reasons"), str):
+                        data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+                    metrics.append(CombinedMetric(**data))
+                next_cursor = None
+                if len(rows) > limit and metrics:
+                    last = metrics[-1]
+                    assert last.timestamp is not None
+                    next_cursor = {
+                        "timestamp": last.timestamp.isoformat().replace("+00:00", "Z"),
+                        "namespace": last.namespace,
+                        "pod_name": last.pod_name,
+                    }
+                return int(total or 0), metrics, next_cursor
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error("Error in cursor-paginated combined metrics: %s", e)
+            raise QueryError(f"Cursor pagination failed: {e}") from e
+
     async def read_combined_metrics_page(
         self,
         start_time: datetime,
