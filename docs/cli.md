@@ -41,7 +41,7 @@ greenkube demo [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--port INTEGER` | Port for the API server (default: `8000`) |
-| `--days INTEGER` | Number of days of sample data to generate (default: `30`) |
+| `--days INTEGER` | Number of recent days to generate hourly workload metrics for (default: `30`); older metric and carbon-intensity history extends to two years at daily resolution |
 | `--no-browser` | Do not open the browser automatically |
 
 **Example:**

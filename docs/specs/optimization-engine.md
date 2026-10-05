@@ -3,104 +3,50 @@
 | | |
 |---|---|
 | **Status** | Phases 0–6 implemented |
-| **Scope of current iteration** | Full engine: unified pipeline, multi-source architecture, evidence model, ranking & risk, apply detection, verification, GitOps PR bot, measured savings and real VPA/Karpenter connectors |
-| **Deferred to later iterations** | Git-provider webhooks/polling for merge detection (Kubernetes API detection is the implemented path), multi-container per-container patching, Helm/Kustomize value-file patching |
+| **Implemented scope** | Unified engine, multi-source architecture, evidence model, ranking and risk, apply detection, verification, GitOps PR bot, measured savings, and VPA/Karpenter connectors |
+| **Current limits** | Git-provider webhooks/polling for merge detection, per-container patch targeting, and Helm/Kustomize value-file patching are not implemented |
 | **Related documents** | [Recommendation lifecycle](../recommendation.md), [Automation plan](../automation-plan.md), [Architecture](../architecture.md), [API](../api.md), [Configuration](../configuration.md) |
+
+> This document preserves the original phased design and acceptance plan. Its phase sequence is complete, not a current roadmap; use the linked lifecycle, API, and automation documents for the as-built behavior.
 
 ---
 
 ## 1. Purpose
 
-The recommendation component must evolve from a single native analyzer into an
-**optimization engine** that:
-
-1. **Aggregates recommendations from multiple sources** (GreenKube native, VPA in
-   recommendation mode, Karpenter, later KEDA/Goldilocks) with explicit provenance
-   and conflict resolution — a workload governed by VPA must not also receive a
-   redundant (and likely inferior) native rightsizing recommendation.
-2. **Treats every recommendation as a reviewable artifact**: observation window,
-   current requests *and limits*, utilization distribution, proposed diff,
-   confidence, expected savings, reliability risk, expiry date and rollback
-   condition are attached to the recommendation itself — a reviewer must not have
-   to reconstruct the analysis.
-3. **Ranks recommendations** with a multi-criteria score (impact, cost, carbon,
-   confidence, risk, effort, freshness, source authority) exposed with an
-   explainable factor breakdown.
-4. **Separates "apply succeeded" from "recommendation succeeded"**: after the
-   change lands, the engine verifies both the **cost signal** and **workload
-   health** over a defined window; if either leaves the expected bounds the
-   recommendation stays open or enters rollback review.
-5. **Provides a stable contract for the future PR bot** (`patch` payload, evidence
-   and PR body contract) and for a **real savings ledger** (baselines, measured
-   impact, verification outcomes).
-
-The current iteration delivers points 1–3 end-to-end. Points 4–5 are fully
-specified here so that data model, lifecycle and APIs do not need to change again
-when they are implemented.
+The implemented engine aggregates native, VPA, and Karpenter recommendations; records source provenance, evidence, risk, and confidence; ranks and persists recommendations; detects applied changes; verifies outcomes; and attributes projected or measured savings. Eligible CPU and memory rightsizing recommendations can also be submitted to the GitOps PR bot. See [Recommendation lifecycle](../recommendation.md) and [Automation plan](../automation-plan.md) for the current contracts.
 
 ---
 
-## 2. Non-goals (current iteration)
+## 2. Current limits
 
-- No PR is opened against a GitOps repository. `docs/automation-plan.md` remains
-  the implementation reference for that phase.
-- VPA and Karpenter connectors ship as **real collectors behind disabled feature
-  flags**; no cluster-wide enablement until Phase 6.
-- No automatic apply detection or verification jobs run yet; their fields,
-  statuses and interfaces are defined now.
-- No breaking change to existing API responses; all additions are additive.
-- No new storage backend; SQLite and PostgreSQL remain at parity.
+- Merge detection uses the Kubernetes API; Git-provider webhooks and polling are not implemented.
+- The PR bot targets CPU and memory rightsizing in raw workload manifests. It does not patch Helm/Kustomize value files or provide per-container targeting.
+- The PR bot creates pull requests; it does not mutate workloads directly.
+- SQLite and PostgreSQL are the supported storage backends.
 
 ---
 
-## 3. Current state and pain points
+## 3. Implemented components
 
-### 3.1 Assets to preserve
+### 3.1 Engine and lifecycle
 
-| Asset | Location |
-|---|---|
-| 11 analyzers with tuned thresholds | `src/greenkube/core/recommender.py` |
-| Persisted lifecycle (`active`/`applied`/`ignored`/`stale`) | `src/greenkube/models/metrics.py`, `recommendation_history` table |
-| Repository abstraction (SQLite + PostgreSQL) | `src/greenkube/storage/base_repository.py` |
-| Simple ranking by projected savings | `src/greenkube/core/recommendation_ranking.py` |
-| Prorated savings ledger | `src/greenkube/core/savings_attributor.py`, migration `0008` |
-| PR bot design | `docs/automation-plan.md` |
-| Clean/hexagonal conventions | `core/factory.py`, `api/dependencies.py`, ABC repositories, collectors |
+The current implementation is in `src/greenkube/core/optimization/`, with recommendation models in `src/greenkube/models/metrics.py` and SQLite and PostgreSQL repository implementations under `src/greenkube/storage/`. The engine, lifecycle, apply detector, verifier, and savings ledger are implemented and covered by the linked behavior and integration tests.
 
-### 3.2 Blocking limitations
+### 3.2 Historical motivation
 
-| # | Limitation | Evidence |
-|---|---|---|
-| 1 | Orchestration duplicated three times (API, startup scan, CLI), with drift risk | `api/routers/recommendations.py:127`, `api/startup.py:30`, `cli/recommend.py:61` |
-| 2 | Monolithic 1,114-line recommender; analyzers not pluggable | `src/greenkube/core/recommender.py` |
-| 3 | No source/provenance concept; no inter-source deduplication | no `source` field anywhere |
-| 4 | No risk, confidence, effort, evidence or explainable ranking | `Recommendation` DTO |
-| 5 | `RECOMMENDATION_APPLY_TOLERANCE` defined but unused; no apply detection | `config.py:218` |
-| 6 | Savings ledger is 100% prorated projections; no baseline, no before/after measurement | `savings_attributor.py` |
-| 7 | No limits, percentiles, window or expiry stored on recommendations | `recommendation_history` schema |
-| 8 | `owner_kind` not persisted, blocking the future Git patcher | `docs/automation-plan.md` §3.1 |
-| 9 | Statuses do not model PR/verification flows | `RecommendationStatus` enum |
-| 10 | RBAC lacks VPA/Karpenter/apps read permissions; `k8s_client.py` exposes only CoreV1 + AutoscalingV2 | `helm-chart/templates/clusterrole.yaml`, `core/k8s_client.py` |
+The original proposal addressed duplicated orchestration, missing recommendation provenance and evidence, absent verification, and a projected- only savings ledger. Those gaps are addressed by the implemented components summarized above; the subsequent sections retain the design and acceptance details used during implementation.
 
 ---
 
 ## 4. Design principles
 
-1. **One orchestration path.** `OptimizationEngine` is the only component that
-   builds a context, runs sources, deduplicates, scores and persists. API,
-   startup and CLI are thin adapters.
-2. **Source-agnostic core.** The engine knows `RecommendationSource` adapters,
-   never vendor-specific logic. Connectors are infrastructure.
-3. **Evidence-first.** A recommendation without evidence is not reviewable; every
-   generated recommendation carries the evidence block defined in §6.7.
-4. **Apply ≠ success.** `applied` records that a change landed; `verified` records
-   that the outcome matched expectations. Savings are only "real" once verified.
-5. **Additive and backward compatible.** Existing endpoints, DTO fields and
-   Prometheus metric names keep working; new fields and labels are added.
-6. **Deterministic.** Ranking, deduplication and evidence aggregation produce
-   stable, testable output for identical inputs.
-7. **Storage-agnostic.** The core never imports storage code; SQLite and
-   PostgreSQL implementations stay at feature parity behind the same ABC.
+1. **One orchestration path.** `OptimizationEngine` is the only component that builds a context, runs sources, deduplicates, scores and persists. API and startup recommendation paths use it.
+2. **Source-agnostic core.** The engine knows `RecommendationSource` adapters, never vendor-specific logic. Connectors are infrastructure.
+3. **Evidence-first.** A recommendation without evidence is not reviewable; every generated recommendation carries the evidence block defined in §6.7.
+4. **Apply ≠ success.** `applied` records that a change landed; `verified` records that the outcome matched expectations. Savings are only "real" once verified.
+5. **Additive and backward compatible.** Existing endpoints, DTO fields and Prometheus metric names keep working; new fields and labels are added.
+6. **Deterministic.** Ranking, deduplication and evidence aggregation produce stable, testable output for identical inputs.
+7. **Storage-agnostic.** The core never imports storage code; SQLite and PostgreSQL implementations stay at feature parity behind the same ABC.
 
 ---
 
@@ -127,7 +73,7 @@ src/greenkube/core/optimization/
 ├── __init__.py
 ├── engine.py                  # OptimizationEngine (single entry point)
 ├── context.py                 # OptimizationContext dataclass
-├── context_builder.py         # metrics/nodes/HPA/PV/LB loading (deduplicated from API/startup/CLI)
+├── context_builder.py         # metrics/nodes/HPA/PV/LB loading (shared by API and startup scan)
 ├── registry.py                # source selection, feature flags, priority
 ├── dedup.py                   # merge + capability precedence + provenance
 ├── scoring.py                 # multi-criteria ranking, profiles
@@ -151,7 +97,7 @@ src/greenkube/core/optimization/
     ├── base.py                # RecommendationSource ABC
     ├── native.py              # wraps analyzers
     ├── vpa.py                 # VerticalPodAutoscaler (recommendation mode)
-    └── karpenter.py           # NodePool/NodeClaim (stub)
+    └── karpenter.py           # NodePool/NodeClaim collector
 ```
 
 New shared storage mapper:
@@ -160,9 +106,7 @@ New shared storage mapper:
 src/greenkube/storage/recommendation_mapper.py   # single row → RecommendationRecord mapper
 ```
 
-There is no compatibility façade: `core/recommender.py` has been removed and
-all callers use the engine. The behavior suite exercises the native source
-directly through a test helper.
+There is no compatibility façade: `core/recommender.py` has been removed and all callers use the engine. The behavior suite exercises the native source directly through a test helper.
 
 ### 6.2 Pipeline
 
@@ -178,11 +122,9 @@ OptimizationEngine.refresh(namespace, persist=True)
   8. emit_metrics()             → Prometheus gauges
 ```
 
-`OptimizationEngine.generate(context)` exposes steps 1–6 without persistence for
-non-persisting callers (tests, previews, embedding applications).
+`OptimizationEngine.generate(context)` exposes steps 1–6 without persistence for non-persisting callers (tests, previews, embedding applications).
 
-Source failures are isolated: one failing connector logs a warning and yields an
-empty list; the pipeline never crashes because VPA or Karpenter is unavailable.
+Source failures are isolated: one failing connector logs a warning and yields an empty list; the pipeline never crashes because VPA or Karpenter is unavailable.
 
 ### 6.3 `OptimizationContext`
 
@@ -202,9 +144,7 @@ class OptimizationContext:
     live_workloads: dict[tuple[str, str, str], WorkloadSnapshot]  # Phase 3, empty before
 ```
 
-`context_builder.py` centralizes everything currently duplicated in the three
-call sites, including the Kubernetes namespace filter
-(`_get_active_k8s_namespaces`) and OpenCost enrichment of PV/LB costs.
+`context_builder.py` centralizes everything currently duplicated in the three call sites, including the Kubernetes namespace filter (`_get_active_k8s_namespaces`) and OpenCost enrichment of PV/LB costs.
 
 ### 6.4 `RecommendationSource`
 
@@ -224,14 +164,10 @@ class RecommendationSource(ABC):
 | Source | Availability check | Produces | Default |
 |---|---|---|---|
 | `native` | always | all native types | enabled |
-| `vpa` | CRD `verticalpodautoscalers.autoscaling.k8s.io` discoverable | `RIGHTSIZING_CPU`, `RIGHTSIZING_MEMORY` (`source=VPA`) | disabled (`RECOMMENDATION_VPA_ENABLED=false`) |
-| `karpenter` | CRD `nodepools.karpenter.sh` discoverable | `NODE_POOL` (Phase 6) | disabled |
+| `vpa` | CRD `verticalpodautoscalers.autoscaling.k8s.io` discoverable | `RIGHTSIZING_CPU`, `RIGHTSIZING_MEMORY` (`source=VPA`) | enabled; skipped when the CRD is unavailable |
+| `karpenter` | Compatible Karpenter CRDs discoverable | Node-pool consolidation (`OVERPROVISIONED_NODE`) | enabled; skipped when the CRDs are unavailable |
 
-**VPA mapping** (`providers/vpa.py`): list VerticalPodAutoscalers, keep those with
-`spec.updateMode: "Off"` (recommendation-only), read
-`status.recommendation.containerRecommendations[]` (`target.cpu`, `target.memory`,
-`lowerBound`, `upperBound`, `uncappedTarget`), resolve the target from
-`spec.targetRef` (`apiVersion`, `kind`, `name`) and emit recommendations with:
+**VPA mapping** (`providers/vpa.py`): list VerticalPodAutoscalers, keep those with `spec.updateMode: "Off"` (recommendation-only), read `status.recommendation.containerRecommendations[]` (`target.cpu`, `target.memory`, `lowerBound`, `upperBound`, `uncappedTarget`), resolve the target from `spec.targetRef` (`apiVersion`, `kind`, `name`) and emit recommendations with:
 
 - `source = VPA`, `source_ref = "<namespace>/<vpa-name>"`,
 - `owner_kind` / `owner_name` from `targetRef`,
@@ -241,8 +177,7 @@ class RecommendationSource(ABC):
 
 ### 6.5 Analyzers
 
-Each existing `_analyze_*` method becomes an `Analyzer` with unchanged thresholds
-and formulas:
+Each existing `_analyze_*` method becomes an `Analyzer` with unchanged thresholds and formulas:
 
 ```python
 class Analyzer(ABC):
@@ -252,36 +187,23 @@ class Analyzer(ABC):
     def analyze(self, context: OptimizationContext) -> list[Recommendation]: ...
 ```
 
-Shared statistics move to `analyzers/base.py` (`_percentile`, `_usage_stats`,
-`_latest_request_value`, `_balanced_rightsizing_target`,
-`_annualized_window_total`, `_resource_savings_ratio`, minimum-threshold clamping,
-target key derivation). Behavior is locked by the existing test suite.
+Shared statistics move to `analyzers/base.py` (`_percentile`, `_usage_stats`, `_latest_request_value`, `_balanced_rightsizing_target`, `_annualized_window_total`, `_resource_savings_ratio`, minimum-threshold clamping, target key derivation). Behavior is locked by the existing test suite.
 
 ### 6.6 Deduplication and precedence
 
-**Identity for arbitration:** `(namespace, owner_kind, owner_name, capability)`,
-falling back to `(namespace, pod_name, capability)`.
+**Identity for arbitration:** `(namespace, owner_kind, owner_name, capability)`, falling back to `(namespace, pod_name, capability)`.
 
-**Precedence:** ordered by `RECOMMENDATION_SOURCE_PRIORITY` (default
-`vpa,karpenter,greenkube`). The highest-priority source owning a capability wins.
+**Precedence:** ordered by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`). The highest-priority source owning a capability wins.
 
-**VPA rule (decided):** if a VPA recommendation exists for a workload's
-`cpu_rightsizing` or `memory_rightsizing`, the native recommendation for the same
-target and capability is **dropped entirely** — not shown, not stored. This
-guarantees no duplicate or inferior rightsizing advice when VPA is present.
+**VPA rule (decided):** if a VPA recommendation exists for a workload's `cpu_rightsizing` or `memory_rightsizing`, the native recommendation for the same target and capability is **dropped entirely** — not shown, not stored. This guarantees no duplicate or inferior rightsizing advice when VPA is present.
 
-**Provenance:** the surviving recommendation records every source that observed
-the issue in `sources` (e.g. `["vpa", "greenkube"]`) so the UI and future PR body
-can state "also identified by GreenKube native analysis".
+**Provenance:** the surviving recommendation records every source that observed the issue in `sources` (e.g. `["vpa", "greenkube"]`) so the UI and PR body can state "also identified by GreenKube native analysis".
 
-**Second pass:** the existing deduplication on
-`(scope, namespace, pod_name, target_node, type)` is preserved after arbitration.
+**Second pass:** the existing deduplication on `(scope, namespace, pod_name, target_node, type)` is preserved after arbitration.
 
 ### 6.7 Evidence model
 
-Every recommendation carries a structured `RecommendationEvidence` block,
-persisted as JSON (`evidence` column) and exposed by the API. This is the artifact
-a reviewer reads; it must be sufficient without re-running any query.
+Every recommendation carries a structured `RecommendationEvidence` block, persisted as JSON (`evidence` column) and exposed by the API. This is the artifact a reviewer reads; it must be sufficient without re-running any query.
 
 ```python
 class UtilizationStats(BaseModel):
@@ -359,8 +281,7 @@ class RecommendationEvidence(BaseModel):
 
 ### 6.8 Risk, confidence, effort
 
-**Risk level** (`low` | `medium` | `high`) with explicit factors, computed per
-type. Examples:
+**Risk level** (`low` | `medium` | `high`) with explicit factors, computed per type. Examples:
 
 | Situation | Level | Factor |
 |---|---|---|
@@ -373,18 +294,13 @@ type. Examples:
 | Zombie pod deletion | low | `no_observed_usage` |
 | Orphaned PV/LB deletion | low | `no_bound_consumer` |
 
-**Confidence** (0–1) aggregates: sample count vs `RECOMMENDATION_MIN_SAMPLES`,
-window coverage ratio, `is_estimated` flags on underlying metrics, source
-authority (`vpa` receives a bonus for rightsizing), and metric variance.
+**Confidence** (0–1) aggregates: sample count vs `RECOMMENDATION_MIN_SAMPLES`, window coverage ratio, `is_estimated` flags on underlying metrics, source authority (`vpa` receives a bonus for rightsizing), and metric variance.
 
-**Effort** (`low` | `medium` | `high`): derived from actionability — `low` when a
-`patch` is available and mechanical, `medium` for HPA/cron additions, `high` for
-node operations.
+**Effort** (`low` | `medium` | `high`): derived from actionability — `low` when a `patch` is available and mechanical, `medium` for HPA/cron additions, `high` for node operations.
 
 ### 6.9 Ranking and scoring
 
-`scoring.py` replaces the current savings-only sort while keeping deterministic
-tie-breaking.
+`scoring.py` replaces the current savings-only sort while keeping deterministic tie-breaking.
 
 ```text
 score = w_carbon   * norm(carbon_impact)
@@ -398,12 +314,9 @@ score = w_carbon   * norm(carbon_impact)
 ```
 
 - Impact normalization: `log1p` followed by min-max over the candidate set.
-- Profiles: `balanced` (default), `carbon_first`, `cost_first`, `quick_wins`,
-  `low_risk`.
-- Weights are configurable (`RECOMMENDATION_RANKING_PROFILE`,
-  `RECOMMENDATION_RANKING_WEIGHTS` as JSON override).
-- Output: `ranking_score` (persisted) and `ranking_factors: dict[str, float]`
-  (persisted, exposed) for "why this rank" explainability.
+- Profiles: `balanced` (default), `carbon_first`, `cost_first`, `quick_wins`, `low_risk`.
+- Weights are configurable (`RECOMMENDATION_RANKING_PROFILE`, `RECOMMENDATION_RANKING_WEIGHTS` as JSON override).
+- Output: `ranking_score` (persisted) and `ranking_factors: dict[str, float]` (persisted, exposed) for "why this rank" explainability.
 - Filters: `max_risk_level`, `min_confidence`, `source`, `capability`.
 
 ### 6.10 Lifecycle — apply success vs recommendation success
@@ -445,34 +358,22 @@ The current four statuses are extended. Two moments are explicitly distinct:
  └───────────┘
 ```
 
-Status set (final target): `active`, `ignored`, `stale`, `expired`, `pr_open`,
-`applied`, `verifying`, `verified`, `rollback_review`, `reverted`, `failed`.
+Lifecycle statuses: `active`, `ignored`, `stale`, `expired`, `pr_open`, `applied`, `verifying`, `verified`, `rollback_review`, `reverted`, `failed`.
 
-Current iteration implements `active`, `ignored`, `stale` as today plus the new
-`expired` status and the `expires_at` field. All other statuses are defined in
-the enum and migration but only produced by Phase 3.
+These lifecycle statuses are implemented. Verification outcomes are recorded separately as `pending`, `in_progress`, `passed`, `failed`, or `inconclusive`.
 
-**Events:** every transition writes a row to `recommendation_events`
-(`created`, `ignored`, `unignored`, `expired`, `pr_opened`, `pr_merged`,
-`applied`, `verification_started`, `verified`, `rollback_review`, `reverted`,
-`failed`) with actor, payload and timestamp — the audit trail for DevOps managers.
+**Events:** every transition writes a row to `recommendation_events` (`created`, `ignored`, `unignored`, `expired`, `pr_opened`, `pr_merged`, `applied`, `verification_started`, `verified`, `rollback_review`, `reverted`, `failed`) with actor, payload and timestamp — the audit trail for DevOps managers.
 
-**Expiry:** `expires_at = generated_at + RECOMMENDATION_TTL_DAYS` (default 14).
-An expired recommendation is hidden from active lists but retained for history;
-a fresh scan may regenerate it.
+**Expiry:** `expires_at = generated_at + RECOMMENDATION_TTL_DAYS` (default 14). An expired recommendation is hidden from active lists but retained for history; a fresh scan may regenerate it.
 
 ### 6.11 Verification (Phase 3)
 
 Triggered when a recommendation reaches `applied` (detection or manual).
 
-1. **Freeze baseline** — the evidence block captured at apply time is stored as
-   the baseline (`recommendation_baselines` or `evidence.baseline`).
-2. **Observation window** — `VERIFICATION_WINDOW_HOURS` (default 72 h),
-   `VERIFICATION_MIN_SAMPLES` (default 36 five-minute points).
-3. **Cost gate** — measured cost/hour reduction must be ≥
-   `VERIFICATION_MIN_SAVINGS_RATIO` (default 0.5) of the projected reduction.
-4. **Carbon gate** — measured gCO2e/hour reduction must be consistent with the
-   projection (same ratio, adjusted for grid intensity variation).
+1. **Freeze baseline** — the evidence block captured at apply time is stored as the baseline (`recommendation_baselines` or `evidence.baseline`).
+2. **Observation window** — `VERIFICATION_WINDOW_HOURS` (default 72 h), `VERIFICATION_MIN_SAMPLES` (default 36 five-minute points).
+3. **Cost gate** — measured cost/hour reduction must be ≥ `VERIFICATION_MIN_SAVINGS_RATIO` (default 0.5) of the projected reduction.
+4. **Carbon gate** — measured gCO2e/hour reduction must be consistent with the projection (same ratio, adjusted for grid intensity variation).
 5. **Health gate** — all of:
    - restart delta ≤ `VERIFICATION_MAX_RESTART_DELTA` (default 0),
    - no new OOM kills,
@@ -487,27 +388,22 @@ Triggered when a recommendation reaches `applied` (detection or manual).
      `savings_realized=false`; the recommendation remains open for review.
    - insufficient samples → `inconclusive`; the window is extended once, then
      marked `inconclusive` and excluded from "verified savings".
-7. **Rollback conditions** from the evidence block are evaluated continuously
-   during the window; when triggered, the recommendation moves to
-   `rollback_review` and `recommendation_events` records the condition.
+7. **Rollback conditions** from the evidence block are evaluated continuously during the window; when triggered, the recommendation moves to `rollback_review` and `recommendation_events` records the condition.
 
 ### 6.12 Savings ledger evolution (Phase 5)
 
-- `SavingsLedgerRecord` gains `measurement_method` (`prorated` | `measured`),
-  `baseline_value`, `actual_value`, `confidence`.
+- `SavingsLedgerRecord` gains `measurement_method` (`prorated` | `measured`), `baseline_value`, `actual_value`, `confidence`.
 - Attribution rules:
   - between `applied_at` and `verified_at`: prorated (as today);
   - after `verified_at`: measured actuals replace proration for the verified
     window and onward until drift;
   - on `rollback_review` / `reverted`: attribution stops and prior rows are
     flagged (`superseded=true`) rather than deleted.
-- Realized Savings UI distinguishes **Projected**, **Measured (verified)** and
-  **Prorated (pending verification)** totals — never mixes them silently.
+- Realized Savings UI distinguishes **Projected**, **Measured (verified)** and **Prorated (pending verification)** totals — never mixes them silently.
 
 ### 6.13 Automation contract (Phase 4)
 
-The engine produces a machine-readable `patch` payload per recommendation;
-the patcher consumes it. This keeps Git logic out of the core.
+The engine produces a machine-readable `patch` payload per recommendation; the patcher consumes it. This keeps Git logic out of the core.
 
 ```json
 {
@@ -527,29 +423,19 @@ the patcher consumes it. This keeps Git logic out of the core.
 }
 ```
 
-**PR body contract** (rendered from the evidence block — the PR is a rendered
-recommendation, not a separate artifact):
+**PR body contract** (rendered from the evidence block — the PR is a rendered recommendation, not a separate artifact):
 
 1. **Title** — `greenkube(optimization): rightsize Deployment/payments-api cpu 500m → 300m`
 2. **Summary** — what changes, where, why.
-3. **Impact** — annual/monthly cost savings and gCO2e savings, with the
-   `savings_method` and assumptions stated explicitly.
+3. **Impact** — annual/monthly cost savings and gCO2e savings, with the `savings_method` and assumptions stated explicitly.
 4. **Risk & reliability** — `risk_level`, factors, blast radius, reversibility.
-5. **Evidence** — observation window, sample coverage, utilization distribution
-   table (avg/p50/p95/p99/max), current vs proposed requests and limits.
+5. **Evidence** — observation window, sample coverage, utilization distribution table (avg/p50/p95/p99/max), current vs proposed requests and limits.
 6. **Proposed diff** — unified diff.
-7. **Verification plan** — what GreenKube will check after merge, the rollback
-   conditions, and the expiry date.
-8. **Provenance** — source (`vpa`/`karpenter`/`greenkube`), `source_ref`,
-   recommendation ID and dashboard link.
-9. **Reviewer checklist** — confirm non-production window, confirm HPA/PVC
-   interactions, confirm rollback owner.
+7. **Verification plan** — what GreenKube will check after merge, the rollback conditions, and the expiry date.
+8. **Provenance** — source (`vpa`/`karpenter`/`greenkube`), `source_ref`, recommendation ID and dashboard link.
+9. **Reviewer checklist** — confirm non-production window, confirm HPA/PVC interactions, confirm rollback owner.
 
-Merge detection (Phase 3/4) uses the **Kubernetes API only** for the first
-iteration: when a live request decreases and a matching recommendation existed,
-the recommendation transitions to `applied`. Webhook + polling via Git providers
-is explicitly deferred; `application_method` already supports `webhook` and
-`polling` so it can be added without schema change.
+Merge/apply detection currently uses the **Kubernetes API**: when a live request decreases and a matching recommendation exists, the recommendation transitions to `applied`. The application-method enum also includes `webhook` and `polling`, but Git-provider webhook and polling integrations are not implemented.
 
 ---
 
@@ -586,9 +472,7 @@ is explicitly deferred; `application_method` already supports `webhook` and
 | `measured_cost_saved` | `float \| None` | 3 | Measured cost impact |
 | `savings_realized` | `bool \| None` | 3 | Cost gate outcome |
 
-Existing fields (`potential_savings_cost`, `potential_savings_co2e_grams`,
-`current_*_request_*`, `recommended_*_request_*`, `cron_schedule`,
-`target_node`, `priority`) are preserved unchanged.
+Existing fields (`potential_savings_cost`, `potential_savings_co2e_grams`, `current_*_request_*`, `recommended_*_request_*`, `cron_schedule`, `target_node`, `priority`) are preserved unchanged.
 
 ### 7.2 New enums
 
@@ -622,9 +506,7 @@ class EffortLevel(str, Enum):
     HIGH = "high"
 ```
 
-`RecommendationStatus` is extended with `EXPIRED`, `PR_OPEN`, `VERIFYING`,
-`VERIFIED`, `ROLLBACK_REVIEW`, `REVERTED` and `FAILED` (existing `ACTIVE`,
-`APPLIED`, `IGNORED` and `STALE` are unchanged).
+`RecommendationStatus` is extended with `EXPIRED`, `PR_OPEN`, `VERIFYING`, `VERIFIED`, `ROLLBACK_REVIEW`, `REVERTED` and `FAILED` (existing `ACTIVE`, `APPLIED`, `IGNORED` and `STALE` are unchanged).
 
 ### 7.3 Migrations
 
@@ -636,45 +518,22 @@ class EffortLevel(str, Enum):
 | `0013_recommendation_pull_requests.sql` | PR tracking table (per `automation-plan.md` §3.2) | 4 |
 | `0014_savings_ledger_measurement.sql` | `measurement_method`, `baseline_value`, `actual_value`, `confidence`, `superseded` | 5 |
 
-Migrations are applied to **both** `sqlite/` and `postgres/` script directories
-and are covered by `tests/integration/test_sqlite_migrations.py`.
+Migrations are applied to **both** `sqlite/` and `postgres/` script directories and are covered by `tests/integration/test_sqlite_migrations.py`.
 
-JSON storage: `TEXT` on SQLite, `JSONB` on PostgreSQL. The mapper deserializes
-into the Pydantic evidence model and tolerates `NULL` for old rows.
+JSON storage: `TEXT` on SQLite, `JSONB` on PostgreSQL. The mapper deserializes into the Pydantic evidence model and tolerates `NULL` for old rows.
 
 ### 7.4 Repository changes
 
-- New shared mapper `storage/recommendation_mapper.py` replaces the duplicated
-  `_row_to_record` implementations in SQLite and PostgreSQL.
+- New shared mapper `storage/recommendation_mapper.py` replaces the duplicated `_row_to_record` implementations in SQLite and PostgreSQL.
 - `upsert_recommendations` refreshes the new columns for active records.
-- `reconcile_active_recommendations` also marks active records past
-  `expires_at` as `expired`.
-- `get_top_recommendations` becomes a pre-filter (active, positive impact,
-  optionally by risk/source) with final ordering performed by `scoring.py` in
-  Python, preserving the bounded limit (1–50).
+- `reconcile_active_recommendations` also marks active records past `expires_at` as `expired`.
+- `get_top_recommendations` becomes a pre-filter (active, positive impact, optionally by risk/source) with final ordering performed by `scoring.py` in Python, preserving the bounded limit (1–50).
 
 ---
 
-## 8. API changes
+## 8. API
 
-All additions are backward compatible.
-
-| Method | Path | Change |
-|---|---|---|
-| `GET` | `/recommendations` | New query params `source`, `risk_level`, `capability`, `profile`; response includes new fields |
-| `GET` | `/recommendations/active` | Same filters; expired records excluded |
-| `GET` | `/recommendations/top` | New `profile` param; ranking factors in response |
-| `GET` | `/recommendations/{id}` | **New** — full detail including `evidence`, `patch`, risk and verification fields |
-| `GET` | `/recommendations/{id}/events` | **New (Phase 3)** — audit trail |
-| `PATCH` | `/recommendations/{id}/apply` | Unchanged; accepts optional verification-related values (ignored until Phase 3) |
-| `PATCH` | `/recommendations/{id}/ignore` | Unchanged |
-| `DELETE` | `/recommendations/{id}/ignore` | Unchanged |
-| `POST` | `/recommendations/{id}/apply-pr` | **Phase 4** — `dry_run` support |
-| `GET` | `/recommendations/{id}/pull-requests` | **Phase 4** |
-| `POST` | `/automation/webhooks/{provider}` | **Phase 4 (deferred)** — merge detection |
-
-`TopRecommendation` gains `source`, `risk_level`, `confidence`, `effort`,
-`ranking_score`, `ranking_factors`, `expires_at`.
+The optimization and automation routes are implemented. Their current parameters, response behavior, and operation-status route are documented in the [API reference](../api.md); this section does not define a separate API contract.
 
 ---
 
@@ -684,108 +543,50 @@ All additions are backward compatible.
 
 - **Source badge** on each card (`GreenKube`, `VPA`, `Karpenter`).
 - **Risk badge** with tooltip listing `risk_factors`; **confidence** indicator.
-- **Evidence panel** (expandable): window, coverage, utilization distribution
-  table, current vs proposed requests/limits, proposed diff, expiry, rollback
-  conditions.
-- **Ranking explanation**: `ranking_factors` breakdown and profile selector
-  (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`).
+- **Evidence panel** (expandable): window, coverage, utilization distribution table, current vs proposed requests/limits, proposed diff, expiry, rollback conditions.
+- **Ranking explanation**: `ranking_factors` breakdown and profile selector (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`).
 - **Filters**: source, risk level, capability.
-- **Create PR button + preview modal** (Phase 4) rendered from the same evidence
-  block as the PR body.
-- **Verification state** on applied cards: `applied` vs `verified` vs
-  `rollback_review`, with measured vs projected savings clearly separated.
+- **Create PR button + preview modal** rendered from the same evidence block as the PR body.
+- **Verification state** on applied cards: `applied` vs `verified` vs `rollback_review`, with measured vs projected savings clearly separated.
 
 ---
 
 ## 10. Prometheus and Grafana
 
-- Add a `source` label to `greenkube_recommendations_total` and the projected
-  savings gauges; update `dashboards/greenkube-grafana.json` and
-  `docs/prometheus-grafana.md` accordingly.
-- New gauges (Phase 2/3):
-  - `greenkube_recommendations_by_risk_total{risk,source,namespace}`,
-  - `greenkube_recommendations_avg_confidence`,
-  - `greenkube_recommendations_expiring_soon_total`,
-  - `greenkube_recommendations_verified_total` (Phase 3),
-  - `greenkube_recommendations_rollback_review_total` (Phase 3),
-  - `greenkube_savings_measured_vs_projected_ratio` (Phase 5).
+The current recommendation gauges and their labels are listed in [Recommendation lifecycle](../recommendation.md) and [Prometheus & Grafana](../prometheus-grafana.md).
 
 ---
 
 ## 11. Configuration and Helm
 
-New environment variables / Helm values under `config.recommendations`:
-
-| Env var | Helm value | Default | Phase |
-|---|---|---|---|
-| `RECOMMENDATION_VPA_ENABLED` | `sources.vpa.enabled` | `false` | 1 |
-| `RECOMMENDATION_KARPENTER_ENABLED` | `sources.karpenter.enabled` | `false` | 1 |
-| `RECOMMENDATION_SOURCE_PRIORITY` | `sourcePriority` | `vpa,karpenter,greenkube` | 1 |
-| `RECOMMENDATION_TTL_DAYS` | `ttlDays` | `14` | 2 |
-| `RECOMMENDATION_RANKING_PROFILE` | `rankingProfile` | `balanced` | 2 |
-| `RECOMMENDATION_RANKING_WEIGHTS` | `rankingWeights` | `{}` (profile defaults) | 2 |
-| `RECOMMENDATION_MIN_SAMPLES` | `minSamples` | `36` | 2 |
-| `VERIFICATION_WINDOW_HOURS` | `verification.windowHours` | `72` | 3 |
-| `VERIFICATION_MIN_SAVINGS_RATIO` | `verification.minSavingsRatio` | `0.5` | 3 |
-| `VERIFICATION_USAGE_HEADROOM` | `verification.usageHeadroom` | `1.1` | 3 |
-| `VERIFICATION_MAX_RESTART_DELTA` | `verification.maxRestartDelta` | `0` | 3 |
-| `VERIFICATION_MIN_READINESS` | `verification.minReadiness` | `0.99` | 3 |
-
-RBAC additions (read-only, harmless when CRDs are absent):
-
-- `autoscaling.k8s.io` → `verticalpodautoscalers` (`get`, `list`),
-- `karpenter.sh` → `nodepools`, `nodeclaims` (`get`, `list`),
-- `apps` → `deployments`, `statefulsets`, `daemonsets` (`get`, `list`)
-  (required by apply detection in Phase 3; can be added now).
-
-`k8s_client.py` gains `get_apps_v1_api()` and `get_custom_objects_api()`.
+Current environment variables, Helm value names, and defaults are maintained in the [Configuration reference](../configuration.md) and [`helm-chart/values.yaml`](../../helm-chart/values.yaml). VPA and Karpenter sources are enabled by default and skip when their CRDs are unavailable.
 
 ---
 
-## 12. Testing strategy
+## 12. Testing
 
-Follow existing TDD + `pytest-asyncio` + `respx` patterns.
-
-| Area | Tests |
-|---|---|
-| Engine/context | `tests/core/optimization/test_engine.py`, `test_context_builder.py` |
-| Analyzer extraction | `tests/core/test_native_analyzers.py` and `tests/core/test_autoscaling_hpa.py` run against the native source through the synchronous test helper |
-| Sources | `test_source_registry.py`, `test_vpa_provider.py` (mocked CustomObjectsApi), `test_karpenter_stub.py` |
-| Dedup/precedence | `test_dedup_precedence.py`: VPA + native → VPA only; distinct capabilities coexist; provenance recorded |
-| Evidence | `test_evidence_builder.py`: completeness per type, percentile math, coverage ratio, rollback conditions |
-| Risk/confidence | `test_risks.py`: each heuristic, OOM/restart escalation, source authority bonus |
-| Scoring | `test_scoring.py`: profile ordering, determinism, factor breakdown sums to score |
-| Persistence | `tests/storage/test_recommendation_repository.py` (SQLite + PostgreSQL parity), JSON round-trip, expiry reconciliation |
-| Migrations | `tests/integration/test_sqlite_migrations.py` extended for `0010`/`0011` |
-| API | `tests/api/test_recommendations.py`: new filters, `/{id}` detail, profile ranking, additive compatibility |
-| E2E | `tests/integration/test_recommendation_lifecycle_e2e.py` extended with evidence persistence and expiry |
-
-Verification per phase: `pytest`, `ruff check`, `ruff format --check`, `pyrefly`
-(pre-commit chain).
+The file paths and test names in the original phased plan are historical. For current test instructions, see [Testing](../testing.md), the [GA qualification runbook](../ga-qualification.md), and the repository CI workflow.
 
 ---
 
-## 13. Delivery plan
+## 13. Completed delivery plan (historical)
 
 ### Phase 0 — Unified engine foundation (no functional change)
 
 - Create `core/optimization/` package, `OptimizationContext`, context builder.
 - Extract the 11 analyzers verbatim; no compatibility façade is retained.
-- Single orchestration used by API, startup and CLI.
+- Single orchestration used by API and startup scans.
 - Shared `recommendation_mapper.py`; both repositories refactored onto it.
-- Exit criteria: full existing test suite green; API/CLI/startup behavior
-  byte-for-byte equivalent (same recommendations, same savings).
+- Exit criteria: full existing test suite green; API/CLI/startup behavior byte-for-byte equivalent (same recommendations, same savings).
 
 ### Phase 1 — Multi-source architecture and evidence model
 
 - `RecommendationSource` ABC, registry, config, feature flags.
-- `NativeSource`; `VpaSource` and `KarpenterSource` behind disabled flags.
+- `NativeSource`; `VpaSource` and `KarpenterSource` enabled with CRD-aware availability checks.
 - Deduplication/arbitration with VPA suppression rule and provenance.
-- Evidence block generated by every analyzer (window, limits, percentiles,
-  patch intent, savings method, rollback conditions, expiry).
+- Evidence block generated by every analyzer (window, limits, percentiles, patch intent, savings method, rollback conditions, expiry).
 - Migration `0010`; RBAC and `k8s_client` helpers.
-- Exit criteria: VPA + native fixtures yield only VPA rightsizing; evidence
-  completeness validated per type; SQLite/Postgres parity tests pass.
+- Exit criteria: VPA + native fixtures yield only VPA rightsizing; evidence completeness validated per type; SQLite/Postgres parity tests pass.
 
 ### Phase 2 — Ranking, risk and review surfaces
 
@@ -794,32 +595,26 @@ Verification per phase: `pytest`, `ruff check`, `ruff format --check`, `pyrefly`
 - Migration `0011`; persistence of ranking/risk/expiry.
 - API filters, `/{id}` detail, `profile` param; Prometheus `source` label.
 - Frontend: badges, evidence panel, ranking explanation, filters.
-- Exit criteria: deterministic ranking tests; API backward compatibility tests;
-  frontend build and component tests pass.
+- Exit criteria: deterministic ranking tests; API backward compatibility tests; frontend build and component tests pass.
 
-### Phase 3 — Apply detection, verification and expiry (later)
+### Phase 3 — Apply detection, verification and expiry (complete)
 
-- Lifecycle v2, `recommendation_events`, `AppliedDetector` (K8s API only),
-  `verifier.py` (cost + health gates, rollback review), `expired` handling job.
+- Lifecycle v2, `recommendation_events`, `AppliedDetector` (K8s API only), `verifier.py` (cost + health gates, rollback review), `expired` handling job.
 - Migration `0012`; apps RBAC.
-- Exit criteria: simulated apply/drift/OOM scenarios produce the expected
-  transitions; savings attribution stops on rollback review.
+- Exit criteria: simulated apply/drift/OOM scenarios produce the expected transitions; savings attribution stops on rollback review.
 
-### Phase 4 — PR bot (later)
+### Phase 4 — PR bot (complete)
 
 - Implement `docs/automation-plan.md` with the PR body contract from §6.13.
-- Migration `0013`, `PullRequestRepository`, `apply-pr` endpoint, frontend
-  Create PR button. Webhooks explicitly deferred.
+- Migration `0013`, `PullRequestRepository`, `apply-pr` endpoint, frontend Create PR button. Webhooks explicitly deferred.
 
-### Phase 5 — Measured savings ledger (later)
+### Phase 5 — Measured savings ledger (complete)
 
-- Baselines, hybrid measurement, ledger `measurement_method`, Projected vs
-  Measured UI separation, demo data update. Migration `0014`.
+- Baselines, hybrid measurement, ledger `measurement_method`, Projected vs Measured UI separation, demo data update. Migration `0014`.
 
-### Phase 6 — Real connectors (later)
+### Phase 6 — Real connectors (complete)
 
-- Enable `VpaSource` by default when detected; implement Karpenter NodePool
-  consolidation recommendations.
+- Enable `VpaSource` by default when detected; implement Karpenter NodePool consolidation recommendations.
 
 ---
 
@@ -840,17 +635,11 @@ Verification per phase: `pytest`, `ruff check`, `ruff format --check`, `pyrefly`
 
 ## 15. Deferred decisions
 
-- **Webhook + polling for PR merge** — architecture supports
-  `application_method=webhook|polling`; implementation deferred per decision to
-  use Kubernetes API detection first.
-- **Multi-container rightsizing targeting** — v1 applies the same target to all
-  containers; per-container annotation planned with the Git patcher.
-- **Helm/Kustomize value-file patching** — Phase 4 follow-up per
-  `automation-plan.md`.
-- **Statistical significance for measured savings** — hybrid rule defined
-  (minimum samples + ratio); full hypothesis testing deferred.
-- **Recommendation priorities beyond `priority`** — superseded by
-  `ranking_score`; the legacy field is kept for compatibility.
+- **Webhook + polling for PR merge** — the enum includes `application_method=webhook|polling`; provider integrations are deferred in favor of Kubernetes API detection.
+- **Multi-container rightsizing targeting** — v1 applies the same target to all containers; per-container annotation planned with the Git patcher.
+- **Helm/Kustomize value-file patching** — Phase 4 follow-up per `automation-plan.md`.
+- **Statistical significance for measured savings** — hybrid rule defined (minimum samples + ratio); full hypothesis testing deferred.
+- **Recommendation priorities beyond `priority`** — superseded by `ranking_score`; the legacy field is kept for compatibility.
 
 ---
 
@@ -931,4 +720,4 @@ Verification per phase: `pytest`, `ruff check`, `ruff format --check`, `pyrefly`
 | API | `api/routers/recommendations.py`, `api/dependencies.py`, `api/schemas.py` |
 | Prometheus | `api/metrics_endpoint.py` |
 | Frontend | `frontend/src/routes/recommendations/+page.svelte`, `frontend/src/lib/api.js` |
-| Automation (later) | `automation/` per `docs/automation-plan.md` |
+| Automation | Implemented in `automation/`; see `docs/automation-plan.md` |

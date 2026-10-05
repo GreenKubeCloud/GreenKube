@@ -1,10 +1,13 @@
 # Configuration Reference
 
-GreenKube is configured exclusively through environment variables, which are managed via the Helm chart's `values.yaml`. All available options are listed below.
+The Helm chart maps `values.yaml` settings to GreenKube's environment-based configuration. The chart's [`values.yaml`](../helm-chart/values.yaml) is the authoritative list of deployment options; this page summarizes the commonly used settings. Selected integration URLs and tokens can also be changed at runtime from the Settings page. Runtime updates affect the running process and are persisted to the Kubernetes Secret on a best-effort basis; use Helm values for durable configuration.
 
 ## Helm values
 
-The full `values.yaml` is self-documented. The most important parameters are grouped below.
+The chart supports two deployment profiles:
+
+- `profile: standalone` (default) deploys the collector and API together.
+- `profile: production` renders separate API, controller, and automation deployments, including the worker that executes queued pull-request operations. The standalone profile does not run that worker. The default profile is not a substitute for production authentication or network controls.
 
 ### Image
 
@@ -20,10 +23,12 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `config.environment` | `development` | Runtime environment. Production configuration requires an API key when `config.apiAuthMode` is `api_key`. |
+| `config.apiAuthMode` | `api_key` | API authentication contract. API-key authentication is the currently supported request middleware mode. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
-| `config.defaultZone` | `""` | Electricity Maps zone code (e.g. `FR`, `DE`, `US-CAL-CISO`). Auto-discovered from node labels if empty. |
-| `config.defaultIntensity` | `500.0` | Fallback grid carbon intensity in gCO₂e/kWh when zone cannot be determined |
+| `config.defaultZone` | `""` | Fallback Electricity Maps zone code for nodes whose zone or region cannot be mapped (e.g. `FR`, `DE`, `US-CAL-CISO`) |
+| `config.defaultIntensity` | `500.0` | Global fallback grid intensity in gCO₂e/kWh when no zone-specific intensity is available |
 | `config.electricityProvider` | `electricity_maps` | Grid intensity data provider: `electricity_maps` (default) or `wattnet` (EU-only, free — see [docs/wattnet.md](wattnet.md)) |
 | `config.normalizationGranularity` | `hour` | Carbon intensity lookup granularity (`hour`, `day`, `none`) |
 | `config.nodeAnalysisInterval` | `5m` | Interval for analysing node state |
@@ -36,7 +41,7 @@ image:
 |-----|---------|-------------|
 | `config.metricsCompressionAgeHours` | `24` | Age in hours after which 5-min raw metrics are compressed into hourly aggregates |
 | `config.metricsRawRetentionDays` | `7` | Days to retain raw metrics before deletion after compression |
-| `config.metricsAggregatedRetentionDays` | `-1` | Days to retain hourly aggregates. `-1` means indefinite (recommended for CSRD/ESRS E1 yearly reporting) |
+| `config.metricsAggregatedRetentionDays` | `-1` | Days to retain hourly aggregates. `-1` means indefinite (useful for multi-year trend analysis) |
 
 ### Database (`config.db`)
 
@@ -54,7 +59,7 @@ image:
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 
-By default, GreenKube auto-discovers Prometheus and OpenCost in the cluster. Manual override:
+When the URLs are empty, GreenKube attempts in-cluster discovery for Prometheus and OpenCost. Set explicit URLs when discovery does not match your installation:
 
 ```yaml
 config:
@@ -66,8 +71,7 @@ config:
 
 ### Recommendation engine (`config.recommendations`)
 
-Analyzer thresholds and source selection live under `config.recommendations`.
-The values are wired to `RECOMMENDATION_*` environment variables. Key entries:
+Analyzer thresholds and source selection live under `config.recommendations`. The values are wired to `RECOMMENDATION_*` environment variables. Key entries:
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
@@ -87,11 +91,15 @@ The values are wired to `RECOMMENDATION_*` environment variables. Key entries:
 
 | Key | Description |
 |-----|-------------|
-| `secrets.electricityMapsToken` | Electricity Maps API token for real-time grid intensity. Without it, the default intensity is used. Get a free token at [electricitymaps.com](https://www.electricitymaps.com/) |
+| `secrets.apiKey` | API bearer token. Required for production when using `config.apiAuthMode: api_key`; with an empty key, development API routes are open. |
+| `secrets.electricityMapsToken` | Electricity Maps API token when `config.electricityProvider` is `electricity_maps`. Without it, GreenKube uses bundled zone-specific fallback data when available, then the configured global intensity. Get a token at [electricitymaps.com](https://www.electricitymaps.com/). |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
-| `secrets.gitToken` | Git personal access token used by the recommendation PR bot. Leave empty to disable PR automation. |
+| `secrets.boaviztaToken` | Optional Boavizta API token. |
+| `secrets.gitToken` | Git personal access token used by the recommendation PR bot. Leave empty to disable PR automation; a running automation worker is also required to execute queued operations. |
 | `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml` |
+| `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`). |
+| `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
 
 ### Monitoring (`monitoring`)
 
@@ -173,3 +181,9 @@ config:
   clusterName: "prod-eu-west"
   cloudProvider: aws
 ```
+
+### API authentication and runtime service settings
+
+The chart defaults to `environment: development`, `apiAuthMode: api_key`, and an empty `secrets.apiKey`, so protected API routes are open in the default configuration. Do not expose that configuration publicly. For a production installation, set a non-empty API key through a Kubernetes Secret and use network controls; see the [API authentication notes](api.md#authentication).
+
+The Settings page sends integration changes to `POST /api/v1/config/services`. The API updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.

@@ -49,9 +49,9 @@ helm upgrade greenkube greenkube/greenkube \
   --set monitoring.networkPolicy.enabled=true
 ```
 
-The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` every 30 seconds.
-It also restores custom metric labels (`cluster`, `region`, `zone`, `namespace`) that
-Prometheus would otherwise overwrite with the scrape-target labels.
+The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on the configured interval. It restores the exported `cluster`, `region`, `namespace`, and `pod` labels that Prometheus would otherwise rename because of scrape-target labels.
+
+When `secrets.apiKey` or `secrets.existingSecret` is configured, the chart adds bearer-token authentication to the `ServiceMonitor`. The referenced Secret must be available in `monitoring.serviceMonitor.namespace` and contain the `GREENKUBE_API_KEY` key. If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
 
 ### Without the Prometheus Operator
 
@@ -67,25 +67,26 @@ scrape_configs:
           - greenkube-api.greenkube.svc.cluster.local:8000
 ```
 
+If GreenKube API authentication is enabled, add the Prometheus `authorization`/bearer-token configuration for that scrape job as well.
+
 ---
 
-## 2. Cluster name auto-detection
+## 2. Cluster labels
 
-GreenKube reads `K8S_NODE_NAME` (injected via the Kubernetes Downward API) and resolves the
-cluster name in this order:
+Set `CLUSTER_NAME` (Helm: `config.clusterName`) to use a stable cluster label. When it is empty, GreenKube derives a name in this order:
 
-1. `CLUSTER_NAME` env var (if explicitly set)
-2. `K8S_NODE_NAME` → query node labels for EKS / GKE / AKS provider-specific cluster tag
-3. `K8S_NODE_NAME` itself (works on minikube and bare-metal)
-4. `"default"` (final fallback)
+1. `K8S_NODE_NAME`, if set. The Helm chart injects the Kubernetes node hosting the GreenKube pod, and GreenKube uses that value directly.
+2. If the environment variable is empty, query one Kubernetes node for a recognized EKS, GKE, AKS, or cluster-api label.
+3. The queried node's name, if no recognized label is present.
+4. `default` if detection fails.
 
-All emitted metrics carry a `cluster` label set to this resolved name.
+The dashboard metric families use the resolved cluster value. Control-loop metrics have their own labels, documented below, and do not all include `cluster`. The chart's `ServiceMonitor` restores `cluster`, `region`, `namespace`, and `pod` labels after Prometheus target-label renaming, and replaces an empty `cluster` label with `default`. Static scrape configurations do not get those chart relabelings.
 
 ---
 
 ## 3. Available Prometheus metrics
 
-Every metric is a Prometheus **Gauge** (point-in-time snapshot, refreshed on each scrape).
+The cluster, namespace, pod, node, recommendation, savings, and dashboard families below are Prometheus **Gauges**: point-in-time values rather than counters. Optimization control-loop instrumentation also appears on the endpoint, but includes counters, a histogram, and a timestamp gauge; it is listed separately below.
 
 ### Cluster-wide metrics
 
@@ -168,6 +169,7 @@ All node metrics share labels `node`, `instance_type`, `zone`, `region`, `cloud_
 | `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations. `sort_metric` is `co2` or `cost`; `value_metric` is `co2e_grams` or `cost_dollars` so Grafana can display both projected annual savings values for each ranked action |
 | `greenkube_co2e_savings_attributed_grams_total` | `cluster`, `recommendation_type` | Cumulative CO₂e savings since installation (g) — prefer `greenkube_dashboard_savings_co2e_grams_total` for windowed queries |
 | `greenkube_cost_savings_attributed_dollars_total` | `cluster`, `recommendation_type` | Cumulative cost savings since installation ($) — prefer `greenkube_dashboard_savings_cost_dollars_total` for windowed queries |
+| `greenkube_savings_measured_vs_projected_ratio` | `cluster` | Share of attributed CO₂e savings verified by measurement (0–1) |
 
 ### Pre-computed dashboard summary metrics
 
@@ -185,15 +187,25 @@ These gauges are refreshed on every Prometheus scrape and serve the `$dashboard_
 
 > **Dashboard window metrics vs. cumulative totals**
 >
-> Use `greenkube_dashboard_savings_co2e_grams_total` / `greenkube_dashboard_savings_cost_dollars_total` to
-> display exact savings for the selected `$dashboard_window`. These values are pre-computed from the DB on
-> each scrape — no `increase()` wrapper needed.
+> Use `greenkube_dashboard_savings_co2e_grams_total` / `greenkube_dashboard_savings_cost_dollars_total` to display exact savings for the selected `$dashboard_window`. These values are pre-computed from the DB on each scrape — no `increase()` wrapper needed.
 >
-> `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total`
-> are cumulative totals since installation and are kept for backward compatibility.
+> `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` are cumulative totals since installation and are kept for backward compatibility.
 >
-> The `greenkube_cluster_co2e_saved_grams_total` / `greenkube_cluster_cost_saved_dollars_total` cluster
-> metrics are *annual projections* only.
+> The `greenkube_cluster_co2e_saved_grams_total` / `greenkube_cluster_cost_saved_dollars_total` cluster metrics are *annual projections* only.
+
+### Optimization control-loop metrics
+
+These metrics are process-local. The `/prometheus/metrics` endpoint includes the registry of the API process serving the scrape; it does not aggregate registries from separate controller or automation pods.
+
+| Metric | Type and labels | Description |
+|---|---|---|
+| `greenkube_optimization_runs_total` | Counter; `status` | Completed optimization runs, with status `succeeded` or `failed` |
+| `greenkube_optimization_run_duration_seconds` | Histogram; no labels | Optimization-run duration in seconds |
+| `greenkube_optimization_analyzer_failures_total` | Counter; `source` | Failures by recommendation source |
+| `greenkube_recommendations_generated_total` | Counter; no labels | Recommendations emitted by completed optimization runs |
+| `greenkube_verification_outcomes_total` | Counter; `outcome` | Verification outcomes, including rollback reviews |
+| `greenkube_verification_health_gate_failures_total` | Counter; `gate` | Verification health-gate failures |
+| `greenkube_last_successful_optimization_run_timestamp_seconds` | Gauge; no labels | Unix timestamp of the last fully successful optimization run |
 
 ---
 
@@ -203,8 +215,7 @@ A pre-built dashboard is available at `dashboards/greenkube-grafana.json`.
 
 ### Import
 
-> ⚠️ Always use `/api/dashboards/import` (not `/api/dashboards/db`). Only the import endpoint
-> resolves the `${DS_PROMETHEUS}` variable; using `db` leaves all panels with "datasource is not set".
+> ⚠️ Always use `/api/dashboards/import` (not `/api/dashboards/db`). Only the import endpoint resolves the `${DS_PROMETHEUS}` variable; using `db` leaves all panels with "datasource is not set".
 
 **Via UI:** Dashboards → Import → Upload JSON file → select your Prometheus datasource.
 
@@ -240,8 +251,7 @@ with urllib.request.urlopen(req) as r:
     print(json.load(r).get("importedUrl"))
 ```
 
-Find your Prometheus datasource UID in Grafana → Connections → Data sources → select your
-Prometheus instance → copy the UID from the URL.
+Find your Prometheus datasource UID in Grafana → Connections → Data sources → select your Prometheus instance → copy the UID from the URL.
 
 ### Published dashboard on Grafana.com
 
@@ -313,7 +323,7 @@ EOF
 ### "No data" in all panels
 
 1. **ServiceMonitor not enabled** — in the Prometheus UI (`/targets`), verify `greenkube-api` is `UP`.
-2. **Missing `cluster` label** — run `greenkube_sustainability_score` in Prometheus Explore. If the result has no `cluster` label, verify that `K8S_NODE_NAME` is injected via the Downward API in the Helm deployment (`helm-chart/templates/deployment.yaml`).
+2. **Unexpected `cluster` label** — set `config.clusterName` (or `CLUSTER_NAME`) to a stable cluster identifier. If unset, the Helm deployment derives it from `K8S_NODE_NAME`, which is the node hosting the GreenKube pod.
 3. **`DS_PROMETHEUS` not resolved** — open dashboard settings → Variables. `DS_PROMETHEUS` must show your Prometheus datasource name, not the literal string `${DS_PROMETHEUS}`. Re-import using `/api/dashboards/import`.
 4. **GreenKube just started** — metrics are populated after the first scheduler run (≤ 5 minutes). Stat panels show `0` until then; they self-correct once the scheduler completes its first cycle.
 
@@ -323,9 +333,4 @@ The dashboard was imported via `/api/dashboards/db`. Re-import using the Python 
 
 ### Recommendations panels show "No data" when a specific namespace is selected
 
-`greenkube_recommendations_total` now emits one time-series per target namespace plus an
-aggregate series with `namespace="__all__"`. Namespace-specific panels filter on
-`namespace!="__all__"`, so they will show data only when there are recommendations targeting
-that particular namespace. Set the **Namespace** variable to **All** to see every recommendation
-regardless of its target namespace.
-
+`greenkube_recommendations_total` now emits one time-series per target namespace plus an aggregate series with `namespace="__all__"`. Namespace-specific panels filter on `namespace!="__all__"`, so they will show data only when there are recommendations targeting that particular namespace. Set the **Namespace** variable to **All** to see every recommendation regardless of its target namespace.

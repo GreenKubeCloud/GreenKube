@@ -1,10 +1,8 @@
 # Observability and SLOs
 
-GreenKube exposes dashboard metrics and control-loop telemetry at
-`/prometheus/metrics`. The endpoint is authenticated when
-`GREENKUBE_API_KEY` is configured and is scraped by the chart `ServiceMonitor`.
-Control-loop metrics use bounded labels only; workload names and namespaces
-remain in the existing dashboard gauges.
+GreenKube exposes dashboard metrics and control-loop telemetry at `/prometheus/metrics`. The endpoint is authenticated when `GREENKUBE_API_KEY` is configured and is scraped by the chart `ServiceMonitor`. Control-loop metrics use bounded labels only; workload names and namespaces remain in the existing dashboard gauges.
+
+The targets below are example operational objectives, not service guarantees or reported measurements. API availability requires ingress or service-level telemetry from the operator's environment.
 
 ## Service-level objectives
 
@@ -47,9 +45,4 @@ groups:
 
 ## Auditability
 
-Every optimization run emits a structured `optimization_run_completed` audit
-event with status, duration, and recommendation count. Every verification
-emits `verification_completed` with its verdict and failed health gates.
-Persisted optimization runs, recommendation lifecycle events, and the measured
-savings ledger remain the source of truth for reconstruction; Prometheus is
-for alerting and trend analysis, not financial accounting.
+Every optimization run emits a structured `optimization_run_completed` audit event with status, duration, and recommendation count. Every verification emits `verification_completed` with its verdict and failed health gates. Persisted optimization runs, recommendation lifecycle events, and the measured savings ledger remain the source of truth for reconstruction; Prometheus is for alerting and trend analysis, not financial accounting.

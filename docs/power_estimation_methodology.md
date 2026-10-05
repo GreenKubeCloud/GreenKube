@@ -2,6 +2,32 @@
 
 Since Cloud Carbon Footprint (CCF) does not provide default estimation constants for other cloud providers than AWS, GCP and Azure, we have derived provider-level estimates using the CCF methodology for "unknown micro-architectures".
 
+## CPU-to-energy estimate
+
+GreenKube estimates node power from observed CPU use and an instance power profile. For a collection step:
+
+```text
+node_utilization = min(total_node_cpu_cores / instance_vcores, 1)
+node_power_watts = min_watts + node_utilization × (max_watts - min_watts)
+node_energy_joules = node_power_watts × step_duration_seconds
+```
+
+For nodes with CPU usage, the estimated node energy is allocated to pods in proportion to their observed CPU use. If CPU use is zero but pods are present, the minimum (idle) node power is divided evenly between them. If the node has no pods, that idle energy is recorded as `System/Unallocated`.
+
+Known instance profiles use the provider's per-vCPU constants multiplied by the instance vCPU count. The currently loaded provider constants are:
+
+| Provider | Min Watts/vCPU | Max Watts/vCPU |
+|---|---:|---:|
+| AWS | 0.74 | 3.50 |
+| GCP | 0.71 | 4.26 |
+| Azure | 0.78 | 3.76 |
+| OVH | 0.80 | 3.52 |
+| Scaleway | 0.60 | 2.78 |
+
+Instance types absent from the bundled profile data use `config.defaults.instance` (default: 1 vCPU, 1–10 W); inferred `cpu-N` node profiles scale those configured per-vCPU defaults by `N`.
+
+For operational emissions, GreenKube converts joules to kWh (`joules / 3,600,000`) and multiplies by grid intensity and PUE. These are model-based estimates, not direct power-meter readings.
+
 ## Methodology
 
 The CCF methodology states:
@@ -53,7 +79,7 @@ We applied this approach by:
 - **Max Watts:** 2.78
 
 ## Usage
-These values are stored in `provider_power_estimates.csv` and are used to estimate energy consumption for any instance belonging to these providers, scaled by the number of vCPUs.
+The OVH and Scaleway values are stored in `provider_power_estimates.csv` and are used with the bundled instance profiles for known instance types. An unknown instance type uses the configured generic profile described above.
 
 ## GHG Protocol Scope Classification
 
@@ -61,10 +87,10 @@ GreenKube classifies carbon emissions according to the [GHG Protocol Corporate A
 
 | GHG Scope | GreenKube field | Description |
 |---|---|---|
-| **Scope 2** (market-based) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (real-time) or the configurable `DEFAULT_INTENSITY` fallback. |
+| **Scope 2** (location-based estimate) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (default) or optional Wattnet, with the configurable `DEFAULT_INTENSITY` fallback. |
 | **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU share — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **100 kg CO₂e**) when Boavizta does not recognise the provider or instance type. The Boavizta `/v1/cloud/instance` endpoint returns per-instance allocated GWP (typically 50–170 kg for common cloud VMs such as `aws/m5.large`); the fallback is calibrated to the same scale to avoid over-estimating Scope 3. |
 | **Scope 2 + Scope 3** | `total_co2e_grams` | Full pod carbon footprint — computed field on `CombinedMetric`, also exposed as `total_co2e_all_scopes` in API summary and timeseries responses. |
 
 **Scope 1** (direct combustion) is not applicable for cloud/virtualised Kubernetes workloads and is therefore not tracked.
 
-> **CSRD/ESRS E1 note:** For annual reporting under ESRS E1, `total_co2e_all_scopes` provides the combined Scope 2 + Scope 3 figure. Use `co2e_grams` for Scope 2-only reporting and `embodied_co2e_grams` for Scope 3 Category 1 disclosure. The data export (`GET /api/v1/report/export`) includes both fields in every row to support disaggregated reporting.
+For annual analysis, `total_co2e_all_scopes` combines the estimated Scope 2 and Scope 3 figures. The data export (`GET /api/v1/report/export`) includes `co2e_grams` and `embodied_co2e_grams` separately in each row so their underlying estimates can be examined independently.

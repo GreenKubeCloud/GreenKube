@@ -1,9 +1,6 @@
 # Progressive rollouts
 
-GreenKube keeps progressive rollout state separate from provider adapters. A
-rollout is a strictly increasing list of percentages (for example `10, 50,
-100`) and a dwell time for each step. The rollout reconciler is deterministic
-and safe to run repeatedly:
+GreenKube includes a deterministic progressive-rollout state machine. A rollout is a strictly increasing list of percentages (for example `10, 50, 100`) and a dwell time for each step. The rollout reconciler is deterministic and safe to run repeatedly:
 
 * a step is applied once, then must be observed at the requested percentage;
 * only a `healthy` verification observation after the dwell window advances;
@@ -11,7 +8,4 @@ and safe to run repeatedly:
 * an `unhealthy` observation requests rollback and never advances the state;
 * completion is terminal, so a replayed provider event cannot re-apply it.
 
-The controller persists the returned `ProgressiveRollout` after each
-reconciliation. Provider adapters should treat `RolloutAction.APPLY` and
-`ROLLBACK` as desired state, then report the observed percentage and health on
-the next loop. They must not mutate rollout state themselves.
+`RolloutReconciler.reconcile()` returns the next `ProgressiveRollout` state and an action. It does not persist state, apply provider changes, or run as part of the recommendation/API workflow. A caller integrating this state machine must persist the returned state, execute `APPLY` or `ROLLBACK`, then supply the observed percentage and health on the next reconciliation.

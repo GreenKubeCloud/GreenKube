@@ -2,8 +2,8 @@ apiVersion: v2
 name: greenkube
 description: >-
   GreenKube is an open-source FinGreenOps platform for Kubernetes. Measure,
-  report (CSRD/ESRS E1), and optimize the carbon footprint and cloud costs of
-  your workloads. Provides real-time CO₂e metrics, energy estimation, cost
+  analyze, and optimize the estimated carbon footprint and cloud costs of
+  your workloads. Provides estimated CO₂e metrics, energy estimation, cost
   optimization recommendations, Grafana dashboard, and a REST API — deployable
   in minutes with a single Helm install.
 type: application
@@ -22,8 +22,6 @@ keywords:
 - kubernetes
 - monitoring
 - energy
-- csrd
-- esrs
 - carbon-footprint
 - cloud-cost
 - prometheus
@@ -45,7 +43,7 @@ annotations:
     - url: https://artifacthub.io/packages/helm/opencost/opencost
   artifacthub.io/links: |
     - name: Documentation
-      url: https://greenkube.cloud/docs/
+      url: https://docs.greenkube.cloud/
     - name: GitHub
       url: https://github.com/GreenKubeCloud/GreenKube
     - name: Docker Hub
@@ -62,7 +60,7 @@ annotations:
         - linux/amd64
         - linux/arm64
   artifacthub.io/screenshots: |
-    - title: Real-time CO₂e & Energy Dashboard
+    - title: CO₂e & Energy Dashboard
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
     - title: Per-Pod Metrics Table
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-metrics.png
@@ -92,12 +90,10 @@ annotations:
     - kind: added
       description: "PostgreSQL: configurable connection pool size (DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE) and statement timeout (DB_STATEMENT_TIMEOUT_MS)"
     - kind: fixed
-      description: "aggregate_summary and aggregate_timeseries now query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for CSRD compliance"
+      description: "aggregate_summary and aggregate_timeseries query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for multi-year analysis"
     - kind: fixed
       description: "Trivy KSV-0014: added readOnlyRootFilesystem to PostgreSQL init container"
     - kind: fixed
       description: "Frontend npm audit: updated svelte, vite, rollup, picomatch, devalue to fix HIGH-severity advisories"
     - kind: changed
-      description: "Storage layer refactored into postgres/, sqlite/, elastic/ subpackages for cleaner architecture"
-
-
+      description: "Storage implementations organized into PostgreSQL and SQLite subpackages"

@@ -4,14 +4,9 @@
 
 **Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure.**
 
-GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps, SRE, and FinOps teams real-time carbon visibility and cost control — without complex setup or expensive SaaS tooling.
+GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps, SRE, and FinOps teams workload-level carbon visibility and cost control — without complex setup or expensive SaaS tooling.
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube)
-[![Python Coverage](https://img.shields.io/badge/coverage%20python-87%25-green)](tests/)
-[![Frontend Coverage](https://img.shields.io/badge/coverage%20frontend-93%25-brightgreen)](frontend/tests/)
-[![Tests](https://img.shields.io/badge/tests-1431%20passed-brightgreen)](tests/)
-[![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube) [![Build in Public](https://img.shields.io/badge/Build%20in-Public-blueviolet)](CHANGELOG.md)
 
 >**Live demo:** [demo.greenkube.cloud](https://demo.greenkube.cloud) — explore the full dashboard with realistic sample data, no install required.
 
@@ -20,9 +15,9 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 ## What it does
 
 - **Estimates** the energy consumption and CO₂e emissions of each Kubernetes workload, using CPU metrics from Prometheus and cloud instance power profiles.
-- **Visualises** those metrics in a real-time web dashboard with per-pod data, node inventory, and namespace breakdowns.
+- **Visualises** those metrics in a web dashboard with per-pod data, node inventory, and namespace breakdowns.
 - **Recommends** concrete optimizations to simultaneously reduce cloud spend and carbon footprint — rightsizing, zombie pod cleanup, autoscaling candidates, and more.
-- **Reports** historical emissions and cost data, exportable as CSV or JSON for CSRD/ESRS E1 compliance.
+- **Reports** historical estimated emissions and cost data, exportable as CSV or JSON for further analysis.
 - **Integrates** with Prometheus and Grafana to expose GreenKube metrics alongside the rest of your cluster observability stack.
 
 ---
@@ -80,6 +75,8 @@ helm install greenkube greenkube/greenkube \
   --create-namespace
 ```
 
+The chart defaults to the `standalone` profile and development configuration. An empty API key leaves protected API routes open, so configure authentication and network controls before exposing an installation. See the [configuration reference](docs/configuration.md#api-authentication-and-runtime-service-settings) for production settings and the `production` profile. Git pull-request operations also require the automation worker, which is rendered by the `production` profile; the standalone profile only queues operations.
+
 Once deployed, access the dashboard:
 
 ```bash
@@ -100,7 +97,7 @@ secrets:
 config:
   prometheus:
     url: ""              # Leave empty for automatic in-cluster discovery
-    queryRangeStep: 5m   # Metric collection window
+    queryRangeStep: 5m   # Prometheus query-range step
 ```
 
 Apply it:
@@ -141,7 +138,7 @@ docker run --rm -p 9000:9000 greenkube/greenkube demo --no-browser --port 9000
 # Open http://localhost:9000
 ```
 
-This generates 30 days of sample data for 22 pods across 5 namespaces and 3 nodes, including carbon emissions, costs, and optimization recommendations.
+The demo includes a two-year sample history, with hourly workload metrics in the recent window selected by `--days` (30 days by default) and daily metric and carbon-intensity points further back. It includes estimated emissions, costs, node history, and optimization recommendations.
 
 ---
 

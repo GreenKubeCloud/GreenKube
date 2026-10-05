@@ -159,9 +159,9 @@ config:
   #   3. Falls back to "default" when nothing is detectable.
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
-                  # Leave empty to let GreenKube auto-discover the zone from node labels.
-                  # Falls back to DEFAULT_INTENSITY (gCO2/kWh) if zone cannot be determined.
-  defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
+                  # Used when an individual node's zone and region cannot be mapped.
+                  # Leave empty to rely on mapped node zones.
+  defaultIntensity: 500.0 # gCO2e/kWh, global fallback when no zone-specific intensity is available
   # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
   # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
   # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
@@ -184,8 +184,7 @@ config:
   # Older raw rows are deleted after compression. Set -1 to disable deletion.
   metricsRawRetentionDays: 7
   # Maximum number of days to retain hourly aggregated metrics.
-  # Set -1 (default) to keep data indefinitely — required for multi-year
-  # comparison and CSRD/ESRS E1 yearly reporting.
+  # Set -1 (default) to keep data indefinitely for multi-year analysis.
   metricsAggregatedRetentionDays: -1
 
   # Timeout in seconds for Kubernetes API calls (list_node, list_pod, etc.).
@@ -402,8 +401,8 @@ secrets:
   # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
   existingSecret: ''
 
-  # Electricity Maps API Token — get yours at https://www.electricitymaps.com/
-  # Without it, GreenKube uses the default carbon intensity (config.defaultIntensity).
+  # Electricity Maps API token — used when config.electricityProvider is "electricity_maps".
+  # Without it, GreenKube uses the configured default grid intensity.
   electricityMapsToken: ''
 
   # Wattnet account credentials — used when config.electricityProvider is "wattnet".
@@ -415,7 +414,8 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API Key for GreenKube API authentication (optional — no auth if empty)
+  # API key for GreenKube API authentication. An empty key leaves development
+  # API routes open; production configuration requires a non-empty key.
   apiKey: ''
 
   # Git personal access token used by the recommendation PR bot to create

@@ -1,6 +1,6 @@
 # GreenKube Architecture
 
-This document describes the technical architecture of GreenKube. The goal is to create a lightweight, modular, and extensible platform to measure, report, and optimize the carbon footprint and cost of Kubernetes workloads.
+This document describes the current technical architecture of GreenKube, a lightweight platform for estimating, reporting, and optimizing the carbon footprint and cost of Kubernetes workloads.
 
 ## Architecture Diagram
 
@@ -92,12 +92,11 @@ flowchart TB
     API --> Grafana
     Storage --> Rec
     Rec --> API
-    Rec --> CLI
 ```
 
 ## Overview
 
-GreenKube operates as an **asynchronous** agent that collects, processes, analyzes, and reports data. It runs as both a scheduled service (continuous monitoring) and an on-demand CLI tool (ad-hoc reporting). 
+GreenKube runs scheduled collection and recommendation lifecycles alongside an API and dashboard for querying stored data. The CLI starts the collector or a local demo; it does not provide ad-hoc report or recommendation commands.
 
 The system is designed around the principles of **Clean Architecture** and **Hexagonal Architecture**:
 - **Core Business Logic** (domain layer) is independent of infrastructure
@@ -241,7 +240,7 @@ The main orchestrator that coordinates the data pipeline from collection to metr
   - **Phase 4** — Carbon-intensity prefetch and CombinedMetric assembly
 - **Range Mode (`run_range()`):** Historical analysis with day-sized chunking for memory efficiency
 
-**Implementation Pattern:** 
+**Implementation Pattern:**
 - Follows Clean Architecture principles with dependency injection
 - Uses internal collaborators for collection orchestration, zone mapping, resource aggregation, and metric assembly
 - Maintains separation between business logic and infrastructure concerns
@@ -272,14 +271,9 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 
 #### **OptimizationEngine**
 
-Analyzes `CombinedMetric` data to identify optimization opportunities. It is the
-single orchestration path used by the API, the startup scan and the CLI
-(`src/greenkube/core/optimization/`).
+Analyzes `CombinedMetric` data to identify optimization opportunities. It is the single orchestration path used by API recommendation requests and the startup scan (`src/greenkube/core/optimization/`). The CLI does not expose a recommendation command.
 
-**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB
-inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an
-**evidence** block and a **risk/confidence/effort** assessment → compute the
-multi-criteria **ranking score** → persist and reconcile.
+**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile.
 
 **Sources:**
 
@@ -295,24 +289,15 @@ multi-criteria **ranking score** → persist and reconcile.
    - **Node optimization:** overprovisioned / underutilized nodes.
    - **Orphaned PV / LoadBalancer cleanup.**
 
-2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers
-   (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same
-   workload, avoiding duplicate advice.
+2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice.
 
-3. **Karpenter (`karpenter`, reserved)** — node pool consolidation.
+3. **Karpenter (`karpenter`, optional)** — node-pool consolidation recommendations when compatible Karpenter CRDs are available.
 
-**Evidence, risk and ranking:** every recommendation carries observation window,
-utilization distribution, current vs proposed resources, expected savings and
-method, confidence, reliability risk, rollback conditions, a machine-readable
-patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`,
-`cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort,
-actionability and source authority.
+**Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort, actionability and source authority.
 
-See [docs/specs/optimization-engine.md](specs/optimization-engine.md) for the full
-specification.
+See [docs/specs/optimization-engine.md](specs/optimization-engine.md) for the full specification.
 
-**Configuration:** All thresholds, source flags and ranking settings are
-configurable via `config.py` and Helm values.
+**Configuration:** All thresholds, source flags and ranking settings are configurable via `config.py` and Helm values.
 
 ### Repositories (Output Ports)
 Repositories use asynchronous drivers for high-performance database interactions. All implement abstract base classes to ensure database agnosticism.
@@ -725,19 +710,20 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 - **Streaming:** Database cursors for large result sets
 
 ### Scalability
-- **PostgreSQL:** Handles 100K+ metrics/day with proper indexing
+- **PostgreSQL:** Production database backend; capacity depends on workload,
+retention, and database sizing.
 - **API:** FastAPI with async workers (Uvicorn)
 
 ## Testing Strategy
 
 ### Unit Tests
-- **Coverage:** 293 tests across all components
+- **Coverage:** The suite exercises backend components; current coverage is reported by the repository's test and CI tooling.
 - **Framework:** pytest with pytest-asyncio
 - **Mocking:** unittest.mock.AsyncMock for async components
 - **Fixtures:** Shared test data in conftest.py
 
 ### Integration Tests
-- **Database:** All repositories tested against real DB instances
+- **Database:** Selected repository contracts run against real SQLite and, when configured, PostgreSQL databases.
 - **API:** Full request/response cycle tests
 - **Collectors:** Mocked HTTP responses with respx
 
@@ -795,8 +781,7 @@ Follow conventional commits:
 
 ### Closed-loop reliability and recovery
 
-The recommendation-to-GitOps composition is intentionally fail-soft at
-external boundaries:
+The recommendation-to-GitOps composition is intentionally fail-soft at external boundaries:
 
 | Boundary | Recovery contract | Verification |
 |---|---|---|
@@ -804,10 +789,7 @@ external boundaries:
 | Savings ledger write | A transient ledger failure is logged and returns zero; the collection loop continues and can retry on its next period. | `tests/integration/test_gitops_closed_loop.py::test_savings_ledger_failure_is_recoverable` |
 | Rollback transition | Recommendations in `rollback_review` or `reverted` stop producing new ledger attribution while their history remains queryable. | `tests/integration/test_gitops_closed_loop.py::test_rollback_review_stops_future_savings_attribution` |
 
-The API liveness endpoint does not probe optional providers. Readiness is
-marked only after the database connection succeeds and is cleared before
-shutdown. This keeps restarts and provider outages observable without
-turning a transient dependency failure into a process-wide failure.
+The API liveness endpoint does not probe optional providers. Readiness is marked only after the database connection succeeds and is cleared before shutdown. This keeps restarts and provider outages observable without turning a transient dependency failure into a process-wide failure.
 
 ### Planned Enhancements
 
@@ -819,7 +801,6 @@ turning a transient dependency failure into a process-wide failure.
 **Advanced Analytics:**
 - Trend detection and forecasting
 - Anomaly detection
-- Cost optimization AI/ML
 
 **Real-Time Streaming:**
 - WebSocket-based live updates
@@ -833,7 +814,7 @@ turning a transient dependency failure into a process-wide failure.
 - Custom metrics via PromQL
 
 **Enhanced Reporting:**
-- CSRD/ESRS E1 compliant templates
+- Custom export templates
 - Multi-tenant isolation
 - PDF/Excel export
 
@@ -860,7 +841,7 @@ turning a transient dependency failure into a process-wide failure.
 ## Resources
 
 - **GitHub:** https://github.com/GreenKubeCloud/GreenKube
-- **Documentation:** https://greenkubecloud.github.io/GreenKube
+- **Documentation:** https://docs.greenkube.cloud
 - **Helm Chart:** https://greenkubecloud.github.io/GreenKube
 - **Issues:** https://github.com/GreenKubeCloud/GreenKube/issues
 - **Discussions:** https://github.com/GreenKubeCloud/GreenKube/discussions

@@ -1,129 +1,121 @@
 # API Reference
 
-The GreenKube REST API is available at `/api/v1`. Interactive documentation (Swagger UI) is served at `/api/v1/docs`.
+The GreenKube REST API is available under `/api/v1`. Interactive documentation and the OpenAPI schema are available at `/api/v1/docs` and `/api/v1/openapi.json`.
+
+## Authentication
+
+When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The default Helm values use the `development` environment with an empty key, which leaves protected API routes open; use that default only for local or otherwise protected installations. Production configuration requires an API key. The current API middleware supports API-key authentication; selecting another authentication mode does not enable an OIDC or session implementation.
 
 ## Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/v1/health` | Health check and version |
-| `GET` | `/api/v1/version` | Application version |
-| `GET` | `/api/v1/config` | Current runtime configuration |
-| `GET` | `/api/v1/metrics` | Per-pod metrics (`?namespace=&last=24h`) |
-| `GET` | `/api/v1/metrics/summary` | Aggregated cluster summary (`?namespace=&last=24h`) |
-| `GET` | `/api/v1/metrics/timeseries` | Time-series data (`?granularity=hour&last=7d`) |
-| `GET` | `/api/v1/namespaces` | List of active namespaces |
-| `GET` | `/api/v1/nodes` | Cluster node inventory |
-| `GET` | `/api/v1/recommendations` | Generate and persist optimization recommendations (`?namespace=`) |
-| `GET` | `/api/v1/recommendations/active` | Active recommendation records (`?namespace=&refresh=true&source=&risk_level=&capability=`) |
-| `GET` | `/api/v1/recommendations/top` | Highest-impact active recommendations (`?limit=5&metric=co2&namespace=&refresh=false&profile=`) |
-| `GET` | `/api/v1/recommendations/{id}` | Full recommendation detail including evidence, patch and verification state |
-| `GET` | `/api/v1/recommendations/{id}/events` | Lifecycle audit trail (created, applied, verified, expired, ...) |
-| `PATCH` | `/api/v1/recommendations/{id}/apply` | Mark applied (freezes the verification baseline) |
-| `PATCH` | `/api/v1/recommendations/{id}/ignore` | Ignore a recommendation |
-| `DELETE` | `/api/v1/recommendations/{id}/ignore` | Restore an ignored recommendation |
-| `POST` | `/api/v1/recommendations/{id}/apply-pr` | Preview (`dry_run`) or open a Git pull request |
-| `GET` | `/api/v1/recommendations/{id}/pull-requests` | Pull-request attempts for a recommendation |
-| `GET` | `/api/v1/automation/status` | PR bot readiness (provider, token, default branch) |
-| `GET` | `/api/v1/report/summary` | Report preview — row count and totals (`?namespace=&last=24h&aggregate=true&granularity=daily`) |
-| `GET` | `/api/v1/report/export` | Download report as CSV or JSON (`?format=csv&last=7d&aggregate=true&granularity=daily`) |
+All paths below are relative to `/api/v1`.
 
-## Query Parameters
+### Health and configuration
 
-### Time range (`last`)
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health status and application version. |
+| `GET` | `/version` | Application version. |
+| `GET` | `/config` | Current runtime configuration. |
+| `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). |
+| `GET` | `/health/services/{service_name}` | Health check for one data source. |
+| `POST` | `/config/services` | Apply selected integration URLs or tokens at runtime; see [Configuration](configuration.md). |
 
-All metric and report endpoints accept a `last` parameter to define the time window:
+The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from the OpenAPI schema.
 
-| Value | Description |
-|-------|-------------|
-| `1h`, `6h`, `24h` | Last N hours |
-| `7d`, `30d`, `90d` | Last N days |
-| `3m`, `6m`, `12m` | Last N months |
-| `ytd` | Year to date, from Jan 1 UTC through now |
+### Metrics and dashboard data
 
-### Granularity
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/metrics` | Paginated combined per-pod metrics. `last`, `namespace`, `offset`, `limit`, and `cursor` are supported. |
+| `GET` | `/metrics/summary` | Aggregated cluster or namespace totals (`last`, optional `namespace`). |
+| `GET` | `/metrics/timeseries` | Aggregated time series (`last`, optional `namespace`, `granularity=hour\|day\|week\|month`; default `hour`). |
+| `GET` | `/metrics/by-namespace` | Metrics grouped by namespace (`last`; optional `namespace` narrows the result). |
+| `GET` | `/metrics/top-pods` | Highest-emitting pods (`last`, optional `namespace`, `limit`, 1–50; default 10). |
+| `GET` | `/metrics/dashboard-summary` | Precomputed KPI values for dashboard windows (optional `namespace`). |
+| `GET` | `/metrics/dashboard-timeseries/{window_slug}` | Precomputed dashboard time series for `1h`, `6h`, `24h`, `7d`, `30d`, `1y`, or `ytd` (optional `namespace`). |
+| `POST` | `/metrics/dashboard-summary/refresh` | Schedule a dashboard-cache refresh for the optional `namespace`; returns `202 Accepted`. |
+| `GET` | `/namespaces` | List active namespaces. |
+| `GET` | `/nodes` | Cluster node inventory. |
 
-Used in timeseries and report endpoints:
+Raw `/metrics` listing accepts at most 30 days by default (`config.metricsListMaxRangeDays`); wider exports should use the report endpoints.
 
-| Value | Description |
-|-------|-------------|
-| `hour` | Hourly buckets (default) |
-| `day` | Daily buckets |
-| `week` | Weekly buckets |
-| `month` | Monthly buckets |
+### Recommendations and automation
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/recommendations` | Read active records in an optional `namespace`; generates records on an empty first read. `refresh=true` schedules a background refresh. |
+| `GET` | `/recommendations/active` | Read active records; `refresh=true` refreshes before returning. Supports `namespace`, `source`, `risk_level`, and `capability` filters. |
+| `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or a ranking `profile`; supports `namespace` and `refresh`; `limit` defaults to 5. |
+| `GET` | `/recommendations/ignored` | List ignored records, optionally filtered by `namespace`. |
+| `GET` | `/recommendations/applied` | List applied records, optionally filtered by `namespace`. |
+| `GET` | `/recommendations/history` | List records by required ISO-8601 `start`/`end`, optional `type`, and optional `namespace`. |
+| `GET` | `/recommendations/savings` | Read realized savings (`last`, `namespace`). |
+| `GET` | `/recommendations/{rec_id}` | Read a recommendation record. |
+| `GET` | `/recommendations/{rec_id}/events` | Read its lifecycle audit trail. |
+| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. |
+| `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore a recommendation. |
+| `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. |
+| `POST` | `/recommendations/{rec_id}/apply-pr` | Preview a manifest patch or enqueue a Git pull-request operation. |
+| `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | Check whether a recommendation can be submitted through the PR bot. |
+| `GET` | `/recommendations/{rec_id}/pull-requests` | List pull-request attempts for one recommendation. |
+| `GET` | `/automation/pull-requests` | List pending or open pull requests. |
+| `GET` | `/automation/status` | Report PR-bot provider and configuration readiness. |
+| `GET` | `/automation/operations/{operation_id}` | Read durable PR-operation status and integrity metadata. |
+
+For `POST /recommendations/{rec_id}/apply-pr`, pass `{"dry_run": true}` to receive a manifest diff without changing Git. A normal request is queued and returns `202 Accepted` with an `operation_id`; poll the operation endpoint for its state. A running automation worker is required to execute queued operations; the chart's `production` profile deploys one, while `standalone` does not. `Idempotency-Key` may be supplied to make client retries idempotent. The PR bot currently supports CPU and memory rightsizing recommendations on supported workload manifests.
+
+### Reports
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/report/summary` | Preview report row count and aggregate totals. |
+| `GET` | `/report/years` | List calendar years with reportable data. |
+| `GET` | `/report/export` | Stream a CSV or JSON report (`format=csv\|json`, default `csv`). |
+
+Report endpoints accept one of:
+
+- `last`: a duration such as `10min`, `2h`, `7d`, `3w`, `1m` (30 days), or `1y` (365 days); `ytd` means January 1 UTC through now. If omitted, the default window is 24 hours.
+- `start` and `end`: both required for a custom ISO date or datetime range.
+- Repeatable `years` values for calendar-year reports.
+- Optional `namespace` to restrict the report or year list to one namespace.
+
+With `aggregate=true`, report rows can be grouped using `granularity=hourly`, `daily`, `weekly`, `monthly`, or `yearly`, and `group_by=pod` (default) or `namespace`.
+
+### Repository bindings
+
+Repository bindings can be managed through this API, but the current PR bot resolves a workload's Git source from its Kubernetes annotations rather than from these bindings.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/repository-bindings` | List repository bindings; optional `cluster` filter. |
+| `GET` | `/repository-bindings/{namespace}/{workload_kind}/{workload_name}` | Read a binding; optional `cluster` filter. |
+| `POST` | `/repository-bindings` | Create or update a repository binding. |
+
+### Prometheus scrape endpoint
+
+GreenKube exposes Prometheus metrics at `GET /prometheus/metrics`. The endpoint is authenticated under the same API-key configuration as protected API routes. For the complete metric inventory and scrape setup, see [Prometheus & Grafana](prometheus-grafana.md).
 
 ## Examples
 
 ```bash
 # Health check
 curl http://localhost:8000/api/v1/health
-# {"status":"ok","version":"0.3.0"}
 
 # Per-pod metrics for the last 24 hours
 curl "http://localhost:8000/api/v1/metrics?last=24h"
 
-# Aggregated summary for a specific namespace over the last 7 days
-curl "http://localhost:8000/api/v1/metrics/summary?namespace=production&last=7d"
+# Time series at daily granularity
+curl "http://localhost:8000/api/v1/metrics/timeseries?last=7d&granularity=day"
 
-# Hourly time-series data for the last 7 days
-curl "http://localhost:8000/api/v1/metrics/timeseries?granularity=hour&last=7d"
+# Namespace-aggregated monthly report for a custom date range
+curl "http://localhost:8000/api/v1/report/export?start=2025-01-01&end=2025-12-31&aggregate=true&granularity=monthly&group_by=namespace"
 
-# Optimization recommendations for a namespace
-curl "http://localhost:8000/api/v1/recommendations?namespace=production"
+# Download an unaggregated JSON report
+curl -OJ "http://localhost:8000/api/v1/report/export?format=json&last=30d&namespace=production"
 
-# Active recommendation records, refreshed before returning
-curl "http://localhost:8000/api/v1/recommendations/active?namespace=production&refresh=true"
-
-# Top 5 actionable recommendations ranked by projected annual CO2e savings
-curl "http://localhost:8000/api/v1/recommendations/top?limit=5&metric=co2"
-
-# Top actionable recommendations for a namespace ranked by projected cost savings
-curl "http://localhost:8000/api/v1/recommendations/top?namespace=production&metric=cost&limit=5"
-
-# Preview the GitOps patch for a recommendation without touching Git
+# Preview the GitOps patch without touching Git
 curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
-  -H "Content-Type: application/json" -d '{"dry_run": true}'
-
-# Open the pull request
-curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
-  -H "Content-Type: application/json" -d '{}'
-
-# Inspect the lifecycle audit trail
-curl "http://localhost:8000/api/v1/recommendations/42/events"
-
-# Preview a report before downloading
-curl "http://localhost:8000/api/v1/report/summary?last=ytd&aggregate=true&granularity=monthly"
-
-# Download a daily CSV report for the last 7 days
-curl -O -J "http://localhost:8000/api/v1/report/export?format=csv&last=7d&aggregate=true&granularity=daily"
-
-# Download a raw JSON report for a namespace
-curl -O -J "http://localhost:8000/api/v1/report/export?format=json&last=30d&namespace=production"
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
 ```
-
-## Prometheus Metrics Endpoint
-
-GreenKube exposes its own computed metrics for scraping by Prometheus at:
-
-```
-GET /prometheus/metrics
-```
-
-Available metrics:
-
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `greenkube_pod_co2e_grams` | `cluster`, `namespace`, `pod`, `node`, `region` | CO₂e emissions per pod |
-| `greenkube_pod_energy_joules` | `cluster`, `namespace`, `pod` | Energy consumption per pod |
-| `greenkube_pod_cost_dollars` | `cluster`, `namespace`, `pod` | Cost per pod |
-| `greenkube_pod_cpu_usage_millicores` | `cluster`, `namespace`, `pod` | CPU usage |
-| `greenkube_pod_memory_usage_bytes` | `cluster`, `namespace`, `pod` | Memory usage |
-| `greenkube_pod_network_receive_bytes` | `cluster`, `namespace`, `pod` | Network received |
-| `greenkube_pod_network_transmit_bytes` | `cluster`, `namespace`, `pod` | Network transmitted |
-| `greenkube_sustainability_score` | `cluster` | Composite sustainability score (0–100) |
-| `greenkube_sustainability_dimension_score` | `cluster`, `dimension` | Per-dimension sustainability score |
-| `greenkube_carbon_intensity_score` | — | Energy-weighted average grid carbon intensity (gCO₂e/kWh) |
-| `greenkube_carbon_intensity_zone` | `zone` | Real-time grid carbon intensity per zone |
-| `greenkube_recommendations_total` | `cluster`, `namespace`, `type`, `priority` | Recommendation counts by type and priority |
-| `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations by projected annual savings |
-| `greenkube_node_info` | `instance_type`, `zone`, `capacity` | Node metadata |
