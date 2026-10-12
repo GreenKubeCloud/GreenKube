@@ -11,6 +11,41 @@ from .migrations import MigrationRunner
 logger = logging.getLogger(__name__)
 
 
+class _ReentrantAsyncLock:
+    """Serialize access to the shared SQLite connection, including nested scopes."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+        self._depth = 0
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("SQLite connection access requires an asyncio task")
+        if self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        if self._owner is not asyncio.current_task():
+            raise RuntimeError("SQLite connection lock released by a non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self) -> "_ReentrantAsyncLock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        self.release()
+
+
 class DatabaseManager:
     """Manage the application's SQLite connection or PostgreSQL pool."""
 
@@ -19,6 +54,7 @@ class DatabaseManager:
         self.connection: aiosqlite.Connection | None = None
         self.pool: asyncpg.Pool | None = None
         self._lock = asyncio.Lock()
+        self._sqlite_operation_lock = _ReentrantAsyncLock()
 
     @property
     def config(self) -> Config:
@@ -71,7 +107,8 @@ class DatabaseManager:
             return
         await self.ensure_connection()
         assert self.connection is not None
-        yield self.connection
+        async with self._sqlite_operation_lock:
+            yield self.connection
 
     async def ensure_connection(self) -> None:
         if self.db_type == "postgres":

@@ -107,6 +107,69 @@ class CarbonIntensityRepository(ABC):
         pass
 
 
+class ContainerMetricsRepository(ABC):
+    """Persistence contract for the container-scoped resource series used by actions."""
+
+    @abstractmethod
+    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+        """Persist container-keyed metrics without changing pod-level dashboard rows."""
+        pass
+
+    @abstractmethod
+    async def read_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Read container-level metric samples in the requested interval."""
+        pass
+
+    @abstractmethod
+    async def read_hourly_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Read compressed hourly container-level metric samples."""
+        pass
+
+    async def count_container_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Return the row count for the requested window, or ``None`` when unsupported."""
+        return None
+
+    async def read_container_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        """Merge raw and hourly container samples at the configured compression boundary."""
+        from datetime import timedelta
+        from datetime import timezone as tz
+
+        from ..core.config import get_config
+
+        compression_cutoff = datetime.now(tz.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+
+        if start_aware >= compression_cutoff - timedelta(minutes=1):
+            return await self.read_container_metrics(start_time, end_time, namespace)
+        if end_aware <= compression_cutoff:
+            return await self.read_hourly_container_metrics(start_time, end_time, namespace)
+
+        hourly = await self.read_hourly_container_metrics(start_time, compression_cutoff, namespace)
+        raw = await self.read_container_metrics(compression_cutoff, end_time, namespace)
+        return hourly + raw
+
+
 class CombinedMetricsRepository(ABC):
     """
     Abstract base class for combined metrics data repositories.
@@ -213,6 +276,15 @@ class CombinedMetricsRepository(ABC):
         start = end - timedelta(days=7)
         metrics = await self.read_combined_metrics(start, end)
         return sorted({m.namespace for m in metrics})
+
+    async def count_combined_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Return the row count for the requested window, or ``None`` when unsupported."""
+        return None
 
     async def read_combined_metrics_page(
         self,

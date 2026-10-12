@@ -1,13 +1,36 @@
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from ...core.exceptions import QueryError
 from ...models.metrics import CombinedMetric
-from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository, ContainerMetricsRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _container_metric_from_row(
+    row: Mapping[str, Any],
+    *,
+    timestamp_column: str,
+    hourly: bool = False,
+) -> CombinedMetric:
+    data = dict(row)
+    data.pop("id", None)
+    if hourly:
+        data.pop("sample_count", None)
+        data["timestamp"] = data.pop(timestamp_column, None)
+        data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
+        data["cpu_usage_max_millicores"] = data.pop("cpu_usage_max", None)
+        data["memory_usage_bytes"] = data.pop("memory_usage_avg", None)
+        data["memory_usage_max_bytes"] = data.pop("memory_usage_max", None)
+    if isinstance(data.get("estimation_reasons"), str):
+        try:
+            data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+        except json.JSONDecodeError:
+            data["estimation_reasons"] = []
+    return CombinedMetric(**data)
 
 
 class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
@@ -96,16 +119,19 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
             raise QueryError(f"Error saving history: {e}") from e
 
 
-class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
+class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetricsRepository):
     """PostgreSQL implementation for combined metrics data storage."""
 
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+        container_metrics = [metric for metric in metrics if metric.container_name]
+        metrics = [metric for metric in metrics if not metric.container_name]
         if not metrics:
-            return 0
+            return await self.write_container_metrics(container_metrics) if container_metrics else 0
 
+        saved_count = 0
         try:
             async with self.db_manager.connection_scope() as conn:
                 query = """
@@ -221,12 +247,15 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
                     )
 
                 await conn.executemany(query, metrics_data)
-                # No commit needed as asyncpg usually autocommits or we rely on explicit transaction
                 logger.info("Saved %s combined metrics to Postgres.", len(metrics))
-                return len(metrics)
+                saved_count = len(metrics)
         except Exception as e:
             logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
+
+        if container_metrics:
+            saved_count += await self.write_container_metrics(container_metrics)
+        return saved_count
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
@@ -307,6 +336,150 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logger.error("Error reading hourly metrics from Postgres: %s", e)
             raise QueryError(f"Error reading hourly metrics: {e}") from e
+
+    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+        if not metrics:
+            return 0
+
+        query = """
+            INSERT INTO container_metrics (
+                pod_name, namespace, container_name, total_cost, co2e_grams,
+                embodied_co2e_grams, pue, grid_intensity, joules,
+                cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
+                memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
+                timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21, $22
+            )
+            ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
+                total_cost = EXCLUDED.total_cost,
+                co2e_grams = EXCLUDED.co2e_grams,
+                embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
+                pue = EXCLUDED.pue,
+                grid_intensity = EXCLUDED.grid_intensity,
+                joules = EXCLUDED.joules,
+                cpu_request = EXCLUDED.cpu_request,
+                memory_request = EXCLUDED.memory_request,
+                cpu_usage_millicores = EXCLUDED.cpu_usage_millicores,
+                cpu_usage_max_millicores = EXCLUDED.cpu_usage_max_millicores,
+                memory_usage_bytes = EXCLUDED.memory_usage_bytes,
+                memory_usage_max_bytes = EXCLUDED.memory_usage_max_bytes,
+                owner_kind = EXCLUDED.owner_kind,
+                owner_name = EXCLUDED.owner_name,
+                duration_seconds = EXCLUDED.duration_seconds,
+                is_estimated = EXCLUDED.is_estimated,
+                estimation_reasons = EXCLUDED.estimation_reasons,
+                calculation_version = EXCLUDED.calculation_version
+        """
+        rows = []
+        for metric in metrics:
+            container_name = metric.container_name
+            timestamp = metric.timestamp
+            if not container_name or timestamp is None:
+                raise ValueError("container metrics require a container name and timestamp")
+            rows.append(
+                (
+                    metric.pod_name,
+                    metric.namespace,
+                    container_name,
+                    metric.total_cost,
+                    metric.co2e_grams,
+                    metric.embodied_co2e_grams,
+                    metric.pue,
+                    metric.grid_intensity,
+                    metric.joules,
+                    metric.cpu_request,
+                    metric.memory_request,
+                    metric.cpu_usage_millicores,
+                    metric.cpu_usage_max_millicores,
+                    metric.memory_usage_bytes,
+                    metric.memory_usage_max_bytes,
+                    metric.owner_kind,
+                    metric.owner_name,
+                    timestamp,
+                    metric.duration_seconds,
+                    metric.is_estimated,
+                    json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
+                    metric.calculation_version,
+                )
+            )
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                await conn.executemany(query, rows)
+            return len(rows)
+        except Exception as e:
+            logger.error("Error writing container metrics to Postgres: %s", e)
+            raise QueryError(f"Error writing container metrics: {e}") from e
+
+    async def read_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM container_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3
+                        ORDER BY timestamp
+                        """,
+                        start_time,
+                        end_time,
+                        namespace,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM container_metrics
+                        WHERE timestamp >= $1 AND timestamp <= $2
+                        ORDER BY timestamp
+                        """,
+                        start_time,
+                        end_time,
+                    )
+            return [_container_metric_from_row(row, timestamp_column="timestamp") for row in rows]
+        except Exception as e:
+            logger.error("Error reading container metrics from Postgres: %s", e)
+            raise QueryError(f"Error reading container metrics: {e}") from e
+
+    async def read_hourly_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                if namespace:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM container_metrics_hourly
+                        WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3
+                        ORDER BY hour_bucket
+                        """,
+                        start_time,
+                        end_time,
+                        namespace,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """
+                        SELECT * FROM container_metrics_hourly
+                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                        ORDER BY hour_bucket
+                        """,
+                        start_time,
+                        end_time,
+                    )
+            return [_container_metric_from_row(row, timestamp_column="hour_bucket", hourly=True) for row in rows]
+        except Exception as e:
+            logger.error("Error reading hourly container metrics from Postgres: %s", e)
+            raise QueryError(f"Error reading hourly container metrics: {e}") from e
 
     async def list_metric_years(self, namespace: Optional[str] = None) -> List[int]:
         """Return distinct metric years from raw and hourly Postgres tables."""
@@ -896,6 +1069,140 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository):
         except (ValueError, KeyError, TypeError) as e:
             logger.error("Error in cursor-paginated combined metrics: %s", e)
             raise QueryError(f"Cursor pagination failed: {e}") from e
+
+    async def count_combined_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count raw and hourly combined rows without materializing them."""
+        from datetime import timedelta, timezone
+
+        from greenkube.core.config import get_config
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                total = 0
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    if namespace:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM combined_metrics "
+                                "WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3",
+                                raw_start,
+                                end_aware,
+                                namespace,
+                            )
+                            or 0
+                        )
+                    else:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM combined_metrics WHERE timestamp >= $1 AND timestamp <= $2",
+                                raw_start,
+                                end_aware,
+                            )
+                            or 0
+                        )
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    if namespace:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM combined_metrics_hourly "
+                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3",
+                                start_aware,
+                                hourly_end,
+                                namespace,
+                            )
+                            or 0
+                        )
+                    else:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM combined_metrics_hourly "
+                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2",
+                                start_aware,
+                                hourly_end,
+                            )
+                            or 0
+                        )
+                return total
+        except Exception as exc:
+            logger.warning("Could not count combined metrics: %s", exc)
+            return None
+
+    async def count_container_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count raw and hourly container rows without materializing them."""
+        from datetime import timedelta, timezone
+
+        from greenkube.core.config import get_config
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                total = 0
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    if namespace:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM container_metrics "
+                                "WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3",
+                                raw_start,
+                                end_aware,
+                                namespace,
+                            )
+                            or 0
+                        )
+                    else:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= $1 AND timestamp <= $2",
+                                raw_start,
+                                end_aware,
+                            )
+                            or 0
+                        )
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    if namespace:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM container_metrics_hourly "
+                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3",
+                                start_aware,
+                                hourly_end,
+                                namespace,
+                            )
+                            or 0
+                        )
+                    else:
+                        total += int(
+                            await conn.fetchval(
+                                "SELECT COUNT(*) FROM container_metrics_hourly "
+                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2",
+                                start_aware,
+                                hourly_end,
+                            )
+                            or 0
+                        )
+                return total
+        except Exception as exc:
+            logger.warning("Could not count container metrics: %s", exc)
+            return None
 
     async def read_combined_metrics_page(
         self,

@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from greenkube.gitops.contracts import BindingStatus
+
 
 class BindingSource(StrEnum):
     """Source which supplied a repository binding."""
@@ -15,14 +17,6 @@ class BindingSource(StrEnum):
     ARGOCD = "argocd"
     FLUX = "flux"
     ANNOTATION = "annotation"
-
-
-class BindingStatus(StrEnum):
-    """Resolution status for a workload binding."""
-
-    RESOLVED = "resolved"
-    AMBIGUOUS = "ambiguous"
-    UNRESOLVED = "unresolved"
 
 
 class RepositoryBinding(BaseModel):

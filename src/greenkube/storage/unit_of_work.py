@@ -13,6 +13,7 @@ class UnitOfWork:
         self.connection: Any | None = None
         self._transaction: Any | None = None
         self._owns_connection = False
+        self._owns_sqlite_lock = False
 
     async def __aenter__(self) -> "UnitOfWork":
         if self.connection is not None:
@@ -28,7 +29,14 @@ class UnitOfWork:
             await self.manager.ensure_connection()
             self.connection = self.manager.connection
             assert self.connection is not None
-            await self.connection.execute("BEGIN")
+            await self.manager._sqlite_operation_lock.acquire()
+            self._owns_sqlite_lock = True
+            try:
+                await self.connection.execute("BEGIN")
+            except BaseException:
+                self.manager._sqlite_operation_lock.release()
+                self._owns_sqlite_lock = False
+                raise
             self._owns_connection = False
         return self
 
@@ -62,9 +70,12 @@ class UnitOfWork:
             if self._owns_connection and self.connection is not None:
                 assert self.manager.pool is not None
                 await self.manager.pool.release(self.connection)
+            if self._owns_sqlite_lock:
+                self.manager._sqlite_operation_lock.release()
             self.connection = None
             self._transaction = None
             self._owns_connection = False
+            self._owns_sqlite_lock = False
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Any]:

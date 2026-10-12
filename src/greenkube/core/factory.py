@@ -24,6 +24,7 @@ from ..core.processor import DataProcessor
 
 # --- GreenKube Core Imports ---
 from ..energy.estimator import BasicEstimator
+from ..storage.base_gitops_repository import GitOpsRepository
 
 # --- GreenKube Storage Imports ---
 from ..storage.base_repository import (
@@ -45,6 +46,20 @@ from ..storage.sqlite.summary_repository import SQLiteSummaryRepository
 from ..storage.sqlite.timeseries_cache_repository import SQLiteTimeseriesCacheRepository
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_gitops_repository() -> GitOpsRepository:
+    """Return the database-backed aggregate repository for GitOps state."""
+    from ..core.db import get_db_manager
+
+    if get_config().DB_TYPE == "postgres":
+        from ..storage.postgres.gitops_repository import PostgresGitOpsRepository
+
+        return PostgresGitOpsRepository(get_db_manager())
+    from ..storage.sqlite.gitops_repository import SQLiteGitOpsRepository
+
+    return SQLiteGitOpsRepository(get_db_manager())
 
 
 @lru_cache(maxsize=1)
@@ -252,17 +267,6 @@ def get_optimization_engine():
 
 
 @lru_cache(maxsize=1)
-def get_automation_service():
-    """Return the process-wide recommendation automation service."""
-    from ..automation.service import AutomationService
-
-    return AutomationService(
-        reco_repo=get_recommendation_repository(),
-        pr_repo=get_pull_request_repository(),
-    )
-
-
-@lru_cache(maxsize=1)
 def get_summary_refresher():
     """Return the process-wide dashboard summary refresher."""
     from ..core.summary_refresher import SummaryRefresher
@@ -367,7 +371,6 @@ def clear_caches():
     get_summary_repository.cache_clear()
     get_timeseries_cache_repository.cache_clear()
     get_optimization_engine.cache_clear()
-    get_automation_service.cache_clear()
     get_summary_refresher.cache_clear()
     get_electricity_provider.cache_clear()
     get_processor.cache_clear()
