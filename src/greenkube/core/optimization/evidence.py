@@ -43,18 +43,27 @@ def _humanize_bytes(value: int) -> str:
 def series_for(rec: Recommendation, context: "OptimizationContext") -> List[CombinedMetric]:
     """Returns the metric series backing a recommendation's target."""
     if rec.target_node:
-        return [m for m in context.metrics if m.node == rec.target_node]
-    if rec.owner_kind and rec.owner_name:
+        series = [m for m in context.metrics if m.node == rec.target_node]
+    elif rec.owner_kind and rec.owner_name:
         key = (rec.namespace or "", rec.owner_kind, rec.owner_name)
-        return context.target_series().get(key, [])
-    if rec.pod_name:
+        series = context.target_series().get(key, [])
+    elif rec.pod_name:
+        series = []
         for key, series in context.target_series().items():
             if key[0] == rec.namespace and key[2] == rec.pod_name:
-                return series
-        return [m for m in context.metrics if m.namespace == rec.namespace and m.pod_name == rec.pod_name]
-    if rec.namespace:
-        return [m for m in context.metrics if m.namespace == rec.namespace]
-    return []
+                break
+        else:
+            series = [m for m in context.metrics if m.namespace == rec.namespace and m.pod_name == rec.pod_name]
+    elif rec.namespace:
+        series = [m for m in context.metrics if m.namespace == rec.namespace]
+    else:
+        series = []
+
+    if rec.container_name is None:
+        return series
+    if not rec.container_name or rec.container_name.strip() != rec.container_name:
+        return []
+    return [metric for metric in series if metric.container_name == rec.container_name]
 
 
 def _utilization_stats(
@@ -195,11 +204,20 @@ def _savings_method(rec: Recommendation) -> str:
     return "unknown"
 
 
-def build_patch(rec: Recommendation) -> Optional[dict]:
-    """Builds a machine-readable action plan for the future GitOps patcher."""
+def build_patch(rec: Recommendation, action=None) -> Optional[dict]:
+    """Builds the legacy patch view, requiring an explicit namespace and container."""
     if rec.type not in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY):
         return None
-    if not rec.owner_kind or not rec.owner_name:
+    if (
+        not rec.owner_kind
+        or rec.owner_kind.strip() != rec.owner_kind
+        or not rec.owner_name
+        or rec.owner_name.strip() != rec.owner_name
+        or not rec.namespace
+        or rec.namespace.strip() != rec.namespace
+        or not rec.container_name
+        or rec.container_name.strip() != rec.container_name
+    ):
         return None
 
     operations: List[dict] = []
@@ -224,12 +242,16 @@ def build_patch(rec: Recommendation) -> Optional[dict]:
     if not operations:
         return None
 
-    return {
+    patch = {
         "kind": rec.owner_kind,
         "namespace": rec.namespace,
         "name": rec.owner_name,
+        "container_name": rec.container_name,
         "operations": operations,
     }
+    if action is not None:
+        patch["action"] = action.model_dump(mode="json")
+    return patch
 
 
 def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optional[RecommendationEvidence]:
@@ -257,7 +279,7 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
     restart_count = max((m.restart_count or 0 for m in series), default=0)
     total_cost = sum(m.total_cost for m in series)
     total_co2e = sum(m.co2e_grams for m in series)
-    cost_per_hour = (total_cost / window * 3600) if window else None
+    cost_per_hour = max(total_cost / window * 3600, 0.0) if window else None
     co2e_per_hour = (total_co2e / window * 3600) if window else None
 
     sample_count = max((cpu_usage.sample_count if cpu_usage else 0), (memory_usage.sample_count if memory_usage else 0))

@@ -24,9 +24,12 @@ class KubernetesHealthCollector(BaseCollector):
         return self._api
 
     async def collect(
-        self, namespace: Optional[str] = None, workload: Optional[str] = None
+        self,
+        namespace: Optional[str] = None,
+        workload: Optional[str] = None,
+        container_name: Optional[str] = None,
     ) -> KubernetesHealthObservation:
-        """Return a point-in-time health observation for a namespace/workload."""
+        """Return a point-in-time health observation for a namespace/workload/container."""
         api = await self._ensure_client()
         if api is None:
             logger.warning("Kubernetes client unavailable; health verification is inconclusive.")
@@ -59,6 +62,8 @@ class KubernetesHealthCollector(BaseCollector):
             ready += int(pod_ready)
             unavailable += int(not pod_ready)
             for status in statuses:
+                if container_name and getattr(status, "name", None) != container_name:
+                    continue
                 restarts += int(getattr(status, "restart_count", 0) or 0)
                 terminated = getattr(getattr(status, "last_state", None), "terminated", None)
                 oom_kills += int(getattr(terminated, "reason", "") == "OOMKilled")

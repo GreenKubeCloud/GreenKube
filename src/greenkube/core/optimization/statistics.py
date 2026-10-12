@@ -79,6 +79,11 @@ def annualized_window_total(total_value: float, analysis_window_seconds: Optiona
     return total_value * (SECONDS_PER_YEAR / analysis_window_seconds)
 
 
+def annualized_nonnegative_window_total(total_value: float, analysis_window_seconds: Optional[float]) -> float:
+    """Project a window value to annual savings without reporting negative savings."""
+    return max(annualized_window_total(total_value, analysis_window_seconds), 0.0)
+
+
 def resource_savings_ratio(current_value: int, recommended_value: int) -> float | None:
     """Returns the proportional request reduction, or None if no reduction exists."""
     if current_value <= 0 or recommended_value >= current_value:

@@ -23,6 +23,7 @@ from greenkube.models.verification import (
     MeasuredLedgerInput,
     TrafficSeasonalityControl,
 )
+from greenkube.storage.base_repository import ContainerMetricsRepository
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -65,6 +66,8 @@ class _Measured:
     memory_p95: Optional[float] = None
     restart_count: int = 0
     sample_count: int = 0
+    savings_sample_count_before: int = 0
+    savings_sample_count_after: int = 0
     oom_events: Optional[int] = None
     readiness_ratio: Optional[float] = None
     throttling_ratio: Optional[float] = None
@@ -153,33 +156,33 @@ class RecommendationVerifier:
         min_samples = int(getattr(self.config, "VERIFICATION_MIN_SAMPLES", 36))
 
         if measured.sample_count < min_samples:
-            baseline = dict(record.baseline or {})
-            if not baseline.get("verification_extended") and record.verification_status != "inconclusive":
-                baseline["verification_extended"] = True
-                updated = await self.lifecycle.transition(
-                    record.id,
-                    "verifying",
-                    event_type="verification_started",
-                    updates={
-                        "baseline": baseline,
-                        "verification_status": "in_progress",
-                        "verification_window_start": window_start,
-                        "verification_window_end": window_end + timedelta(hours=window_hours),
-                    },
-                    payload={"reason": "insufficient_samples_extended"},
-                )
-                return updated
-            from greenkube.core.observability import record_verification
-
-            record_verification("inconclusive", ["insufficient_samples"])
-            return await self.lifecycle.mark_inconclusive(
-                record.id,
-                reason=f"insufficient samples after extension ({measured.sample_count} < {min_samples})",
-                verification_window_start=window_start,
-                verification_window_end=now,
+            return await self._extend_or_mark_inconclusive(
+                record,
+                rec_id=record.id,
+                window_start=window_start,
+                window_end=window_end,
+                now=now,
+                window_hours=window_hours,
+                sample_count=measured.sample_count,
+                min_samples=min_samples,
+                reason="insufficient_samples",
             )
 
         outcome = self._evaluate(record, measured, window_start, now)
+        if outcome.outcome == "inconclusive":
+            sample_count = min(measured.savings_sample_count_before, measured.savings_sample_count_after)
+            return await self._extend_or_mark_inconclusive(
+                record,
+                rec_id=record.id,
+                window_start=window_start,
+                window_end=window_end,
+                now=now,
+                window_hours=window_hours,
+                sample_count=sample_count,
+                min_samples=min_samples,
+                reason=outcome.reasons[0] if outcome.reasons else "insufficient_trusted_savings_samples",
+            )
+
         from greenkube.core.observability import record_verification
 
         record_verification(outcome.outcome, outcome.reasons if outcome.outcome == "rollback_review" else [])
@@ -214,14 +217,69 @@ class RecommendationVerifier:
             verification_window_end=now,
         )
 
+    async def _extend_or_mark_inconclusive(
+        self,
+        record: RecommendationRecord,
+        *,
+        rec_id: int,
+        window_start: datetime,
+        window_end: datetime,
+        now: datetime,
+        window_hours: float,
+        sample_count: int,
+        min_samples: int,
+        reason: str,
+    ) -> RecommendationRecord:
+        baseline = dict(record.baseline or {})
+        if not baseline.get("verification_extended") and record.verification_status != "inconclusive":
+            baseline["verification_extended"] = True
+            return await self.lifecycle.transition(
+                rec_id,
+                "verifying",
+                event_type="verification_started",
+                updates={
+                    "baseline": baseline,
+                    "verification_status": "in_progress",
+                    "verification_window_start": window_start,
+                    "verification_window_end": window_end + timedelta(hours=window_hours),
+                },
+                payload={"reason": f"{reason}_extended"},
+            )
+
+        from greenkube.core.observability import record_verification
+
+        record_verification("inconclusive", [reason])
+        return await self.lifecycle.mark_inconclusive(
+            rec_id,
+            reason=f"{reason} after extension ({sample_count} < {min_samples})",
+            verification_window_start=window_start,
+            verification_window_end=now,
+        )
+
     async def _read_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
         """Reads the metric series for a target in a time range (best-effort)."""
         if not record.namespace:
             return []
         try:
-            metrics = await self.combined_repo.read_combined_metrics_smart(
-                start_time=start, end_time=end, namespace=record.namespace
-            )
+            if record.container_name is not None:
+                if not record.container_name or record.container_name.strip() != record.container_name:
+                    return []
+                if not isinstance(self.combined_repo, ContainerMetricsRepository):
+                    logger.warning(
+                        "Container-scoped verification is unavailable for recommendation %s: "
+                        "repository has no container metrics reader.",
+                        record.id,
+                    )
+                    return []
+                metrics = await self.combined_repo.read_container_metrics_smart(
+                    start_time=start,
+                    end_time=end,
+                    namespace=record.namespace,
+                )
+            else:
+                metrics = await self.combined_repo.read_combined_metrics_smart(
+                    start_time=start, end_time=end, namespace=record.namespace
+                )
         except Exception as exc:
             logger.warning("Could not read metrics for verification of %s: %s", record.id, exc)
             return []
@@ -242,26 +300,29 @@ class RecommendationVerifier:
         before_series = await self._read_series(record, start - span, start)
 
         after_points = _aggregate_series(after_series)
+        after_savings_points = _aggregate_series(_unestimated_savings_series(after_series))
+        before_savings_points = _aggregate_series(_unestimated_savings_series(before_series))
+        result.savings_sample_count_after = sum(point["samples"] for point in after_savings_points)
+        result.savings_sample_count_before = sum(point["samples"] for point in before_savings_points)
         result.cost_per_hour_after = _sample_rate(
-            sum(point["cost"] for point in after_points),
-            sum(point["samples"] for point in after_points),
+            sum(point["cost"] for point in after_savings_points),
+            result.savings_sample_count_after,
             step,
         )
         result.co2e_grams_per_hour_after = _sample_rate(
-            sum(point["co2"] for point in after_points),
-            sum(point["samples"] for point in after_points),
+            sum(point["co2"] for point in after_savings_points),
+            result.savings_sample_count_after,
             step,
         )
-        if before_series:
-            before_points = _aggregate_series(before_series)
+        if before_savings_points:
             result.cost_per_hour_before = _sample_rate(
-                sum(point["cost"] for point in before_points),
-                sum(point["samples"] for point in before_points),
+                sum(point["cost"] for point in before_savings_points),
+                result.savings_sample_count_before,
                 step,
             )
             result.co2e_grams_per_hour_before = _sample_rate(
-                sum(point["co2"] for point in before_points),
-                sum(point["samples"] for point in before_points),
+                sum(point["co2"] for point in before_savings_points),
+                result.savings_sample_count_before,
                 step,
             )
 
@@ -284,6 +345,7 @@ class RecommendationVerifier:
                 health = await self.health_collector.collect(
                     namespace=record.namespace,
                     workload=record.owner_name or record.pod_name,
+                    container_name=record.container_name,
                 )
                 if isinstance(health, KubernetesHealthObservation):
                     result.restart_count = max(result.restart_count, health.restart_count)
@@ -368,6 +430,19 @@ class RecommendationVerifier:
                 window_start=window_start,
                 window_end=window_end,
                 ledger_input=ledger_input,
+            )
+
+        min_savings_samples = int(getattr(self.config, "VERIFICATION_MIN_SAMPLES", 36))
+        if (
+            measured.savings_sample_count_before < min_savings_samples
+            or measured.savings_sample_count_after < min_savings_samples
+        ):
+            return VerificationOutcome(
+                outcome="inconclusive",
+                reasons=["insufficient_trusted_savings_samples"],
+                sample_count=measured.sample_count,
+                window_start=window_start,
+                window_end=window_end,
             )
 
         # --- Cost and carbon gates ---------------------------------------
@@ -514,6 +589,21 @@ def _aggregate_series(series: Sequence) -> List[dict]:
     return list(buckets.values())
 
 
+def _unestimated_savings_series(series: Sequence) -> List:
+    """Return only complete timestamp groups explicitly marked non-estimated."""
+    estimated_keys = {
+        metric.timestamp if metric.timestamp is not None else index
+        for index, metric in enumerate(series)
+        if metric.is_estimated is not False
+    }
+    return [
+        metric
+        for index, metric in enumerate(series)
+        if metric.is_estimated is False
+        and (metric.timestamp if metric.timestamp is not None else index) not in estimated_keys
+    ]
+
+
 def _optional_values(series: Sequence, names: tuple[str, ...]) -> Optional[List[float]]:
     values = []
     found = False
@@ -546,13 +636,20 @@ def _series_for_record(record: RecommendationRecord, metrics: Sequence) -> List:
     """Filters post-apply metrics down to the recommendation target."""
     from greenkube.core.optimization.targeting import group_by_recommendation_target
 
+    def for_container(series: List) -> List:
+        if record.container_name is None:
+            return series
+        if not record.container_name or record.container_name.strip() != record.container_name:
+            return []
+        return [metric for metric in series if metric.container_name == record.container_name]
+
     grouped = group_by_recommendation_target(list(metrics))
     if record.owner_kind and record.owner_name:
         series = grouped.get((record.namespace or "", record.owner_kind, record.owner_name))
         if series:
-            return series
+            return for_container(series)
     if record.pod_name:
         for key, series in grouped.items():
             if key[0] == record.namespace and key[2] == record.pod_name:
-                return series
+                return for_container(series)
     return []

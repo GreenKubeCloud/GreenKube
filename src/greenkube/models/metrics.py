@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
+from greenkube.gitops.contracts import ActionPlanV3
 from greenkube.models.evidence import RecommendationEvidence
 
 
@@ -156,6 +157,9 @@ class RecommendationStatus(str, Enum):
     ROLLBACK_REVIEW = "rollback_review"
     REVERTED = "reverted"
     FAILED = "failed"
+    PLAN_CREATED = "plan_created"
+    PLAN_STATUS_CHANGED = "plan_status_changed"
+    PLAN_ACTION_STATUS_CHANGED = "plan_action_status_changed"
 
 
 class ApplicationMethod(str, Enum):
@@ -228,7 +232,7 @@ class PatchOperation(BaseModel):
 
 
 class RecommendationPatchV2(BaseModel):
-    """Versioned, typed patch payload persisted with a recommendation."""
+    """Legacy-compatible patch view with an optional typed v3 action."""
 
     version: int = 2
     operations: List[PatchOperation] = Field(default_factory=list)
@@ -237,6 +241,7 @@ class RecommendationPatchV2(BaseModel):
     kind: Optional[str] = None
     namespace: Optional[str] = None
     name: Optional[str] = None
+    action: Optional[ActionPlanV3] = Field(None, description="Typed v3 action stored alongside the legacy patch.")
 
     def __getitem__(self, key: str) -> object:
         """Preserve mapping-style access for legacy patch consumers."""
@@ -277,6 +282,7 @@ class RecommendationEventPayload(BaseModel):
 class Recommendation(BaseModel):
     """Represents a single actionable optimization recommendation."""
 
+    id: Optional[int] = Field(None, description="Persisted recommendation ID, when available.")
     pod_name: Optional[str] = Field(
         None, description="The name of the target pod (None for namespace/node-level recs)."
     )
@@ -331,8 +337,9 @@ class Recommendation(BaseModel):
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
     ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
     ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
-        None, description="Machine-readable action plan for the GitOps patcher."
+        None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
     )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
@@ -342,6 +349,10 @@ class Recommendation(BaseModel):
     def _derive_capability(self) -> "Recommendation":
         if self.capability is None:
             self.capability = capability_for_type(self.type)
+        if self.action is None and self.patch is not None:
+            self.action = self.patch.action
+        elif self.action is not None and self.patch is not None and self.patch.action != self.action:
+            self.patch = self.patch.model_copy(update={"action": self.action})
         return self
 
 
@@ -370,7 +381,7 @@ class RecommendationRecord(BaseModel):
     recommended_memory_request_bytes: Optional[int] = Field(None, description="Recommended memory request in bytes.")
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
-    identity_version: int = Field(2, description="Identity algorithm version.")
+    identity_version: int = Field(3, description="Identity algorithm version.")
     fingerprint: Optional[str] = Field(None, description="Stable v2 recommendation identity fingerprint.")
     # Source and provenance
     source: RecommendationSource = Field(
@@ -392,8 +403,9 @@ class RecommendationRecord(BaseModel):
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
     ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
     ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
-        None, description="Machine-readable action plan for the GitOps patcher."
+        None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
     )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
@@ -439,6 +451,10 @@ class RecommendationRecord(BaseModel):
     def _derive_capability(self) -> "RecommendationRecord":
         if self.capability is None:
             self.capability = capability_for_type(self.type)
+        if self.action is None and self.patch is not None:
+            self.action = self.patch.action
+        elif self.action is not None and self.patch is not None and self.patch.action != self.action:
+            self.patch = self.patch.model_copy(update={"action": self.action})
         if not self.fingerprint:
             self.fingerprint = ":".join(
                 (
@@ -448,6 +464,8 @@ class RecommendationRecord(BaseModel):
                     self.pod_name or "",
                     self.container_name or "",
                     self.target_node or "",
+                    self.owner_kind or "",
+                    self.owner_name or "",
                     self.type.value,
                 )
             )
@@ -467,6 +485,7 @@ class RecommendationRecord(BaseModel):
             A new RecommendationRecord instance.
         """
         return cls(
+            id=rec.id,
             pod_name=rec.pod_name,
             container_name=rec.container_name,
             namespace=rec.namespace,
@@ -498,6 +517,7 @@ class RecommendationRecord(BaseModel):
             effort=rec.effort,
             ranking_score=rec.ranking_score,
             ranking_factors=dict(rec.ranking_factors),
+            action=rec.action,
             patch=rec.patch,
             expires_at=rec.expires_at,
             reversible=rec.reversible,
@@ -571,6 +591,18 @@ class PullRequestRecord(BaseModel):
         description="When the attempt was recorded.",
     )
     updated_at: Optional[datetime] = Field(None, description="When the attempt was last updated.")
+    plan_id: Optional[str] = Field(None, description="Automation plan associated with the pull request.")
+    provider_id: Optional[str] = Field(None, description="Configured Git provider identity.")
+    commit_sha: Optional[str] = Field(None, description="Head commit SHA associated with the pull request.")
+    merge_commit_sha: Optional[str] = Field(None, description="Commit SHA produced by merging the pull request.")
+    merged_at: Optional[datetime] = Field(None, description="When the pull request was merged.")
+    closed_at: Optional[datetime] = Field(None, description="When the pull request was closed.")
+    sync_status: Optional[str] = Field(None, description="Latest synchronization status.")
+    sync_revision: Optional[str] = Field(None, description="Revision last observed by synchronization.")
+    sync_observed_at: Optional[datetime] = Field(
+        None, description="When synchronization last observed the pull request."
+    )
+    sync_error_code: Optional[str] = Field(None, description="Latest synchronization error code.")
 
 
 class ApplyPrRequest(BaseModel):
@@ -584,6 +616,7 @@ class ApplyPrResponse(BaseModel):
     """Result of an apply-pr request (dry run preview or opened pull request)."""
 
     status: str = Field(..., description="dry_run, pr_open or error.")
+    policy_result: dict[str, Any] = Field(default_factory=dict)
     provider: Optional[str] = Field(None, description="Git provider used.")
     repo: Optional[str] = Field(None, description="Repository in owner/name form.")
     base_branch: Optional[str] = Field(None, description="Target branch of the pull request.")
@@ -785,6 +818,10 @@ class CombinedMetric(BaseModel):
     # Ownership metadata
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
+    container_name: Optional[str] = Field(
+        None,
+        description="Container identity when resource requests and usage are container-level; None means aggregated.",
+    )
     # Optional aggregation period (e.g., '2025-11' or '2025')
     period: Optional[str] = None
     # Timestamp for the metric window start (e.g., from Prometheus)

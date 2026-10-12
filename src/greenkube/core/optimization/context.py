@@ -24,6 +24,7 @@ class OptimizationContext:
 
     config: "Config"
     metrics: List[CombinedMetric] = field(default_factory=list)
+    container_metrics: List[CombinedMetric] = field(default_factory=list)
     namespace: Optional[str] = None
     analysis_window_seconds: Optional[float] = None
     window_start: Optional[datetime] = None
@@ -41,5 +42,10 @@ class OptimizationContext:
         if self._target_series_cache is None:
             from greenkube.core.optimization.targeting import group_by_recommendation_target
 
-            self._target_series_cache = group_by_recommendation_target(self.metrics)
+            containerized_pods = {(metric.namespace, metric.pod_name) for metric in self.container_metrics}
+            target_metrics = [
+                metric for metric in self.metrics if (metric.namespace, metric.pod_name) not in containerized_pods
+            ]
+            target_metrics.extend(self.container_metrics)
+            self._target_series_cache = group_by_recommendation_target(target_metrics)
         return self._target_series_cache

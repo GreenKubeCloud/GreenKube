@@ -18,6 +18,7 @@ from typing import Dict, List, Set
 
 from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..collectors.boavizta_collector import BoaviztaCollector
+from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -59,6 +60,7 @@ class DataProcessor:
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
         config: Config | None = None,
+        metrics_server_collector: MetricsServerCollector | None = None,
     ):
         self._config = config if config is not None else get_config()
         self.calculator = calculator
@@ -68,6 +70,7 @@ class DataProcessor:
         self.boavizta_collector = boavizta_collector
         self.repository = repository
         self.embodied_repository = embodied_repository
+        self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
 
         # --- Internal collaborators ---
         self._orchestrator = CollectionOrchestrator(
@@ -106,6 +109,7 @@ class DataProcessor:
             assembler=self._assembler,
             zone_mapper=self._zone_mapper,
             config=self._config,
+            metrics_server_collector=self._metrics_server_collector,
         )
 
     # ------------------------------------------------------------------
@@ -163,9 +167,16 @@ class DataProcessor:
         #          but use Phase-1/2 data for enrichment)
         # ------------------------------------------------------------------
         logger.debug("Phase 3: Collecting Prometheus/OpenCost/Pod metrics and Boavizta profiles in parallel...")
-        cr, boavizta_cache = await asyncio.gather(
+
+        async def collect_container_usage():
+            if not self._config.KUBERNETES_METRICS_API_ENABLED:
+                return []
+            return await self._metrics_server_collector.collect()
+
+        cr, boavizta_cache, container_usages = await asyncio.gather(
             self._orchestrator.collect_all(nodes_info=nodes_info),
             self._embodied_service.prepare_embodied_data(nodes_info),
+            collect_container_usage(),
         )
 
         prom_metrics = cr.prom_metrics
@@ -273,7 +284,11 @@ class DataProcessor:
             energy_metrics = []
 
         # Build per-pod resource maps from Prometheus data
-        resource_maps = PrometheusResourceMapper.build(prom_metrics, estimation_prom_metrics)
+        resource_maps = PrometheusResourceMapper.build(
+            prom_metrics,
+            estimation_prom_metrics,
+            container_usages=container_usages,
+        )
 
         # ------------------------------------------------------------------
         # Phase 4: Prefetch carbon intensities and assemble CombinedMetrics
@@ -294,6 +309,7 @@ class DataProcessor:
             cpu_adjusted_nodes=cpu_adjusted_nodes,
             steps_per_day=steps_per_day,
             resource_maps=resource_maps,
+            pod_metrics=cr.pod_metrics_list,
         )
 
         logger.info(

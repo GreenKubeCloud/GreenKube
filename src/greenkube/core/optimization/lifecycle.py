@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -262,6 +262,37 @@ class RecommendationLifecycle:
             payload={"reasons": reasons},
         )
 
+    async def mark_reverted(
+        self,
+        rec_id: int,
+        *,
+        rollback_plan_id: str,
+        rollback_of_plan_id: str,
+        actual_cpu_request_millicores: Optional[int],
+        actual_memory_request_bytes: Optional[int],
+        actor: str = "system",
+    ) -> RecommendationRecord:
+        """Mark a rollback complete after its synced per-container state is verified."""
+        return await self.transition(
+            rec_id,
+            RecommendationStatus.REVERTED,
+            event_type=RecommendationEventType.REVERTED,
+            updates={
+                "verified_at": datetime.now(timezone.utc),
+                "verification_status": VerificationStatus.PASSED.value,
+                "measured_co2e_saved_grams": None,
+                "measured_cost_saved": None,
+                "savings_realized": False,
+            },
+            actor=actor,
+            payload={
+                "rollback_plan_id": rollback_plan_id,
+                "rollback_of_plan_id": rollback_of_plan_id,
+                "actual_cpu_request_millicores": actual_cpu_request_millicores,
+                "actual_memory_request_bytes": actual_memory_request_bytes,
+            },
+        )
+
     async def mark_inconclusive(
         self,
         rec_id: int,
@@ -270,16 +301,26 @@ class RecommendationLifecycle:
         verification_window_start: Optional[datetime] = None,
         verification_window_end: Optional[datetime] = None,
     ) -> RecommendationRecord:
+        record = await self.repo.get_recommendation_by_id(rec_id)
+        updates: dict[str, Any] = {
+            "verification_status": VerificationStatus.INCONCLUSIVE.value,
+            "verification_window_start": verification_window_start,
+            "verification_window_end": verification_window_end,
+            "verified_at": None,
+            "measured_co2e_saved_grams": None,
+            "measured_cost_saved": None,
+            "savings_realized": False,
+        }
+        if record is not None and record.baseline:
+            baseline = dict(record.baseline)
+            if "measured_ledger_input" in baseline:
+                baseline.pop("measured_ledger_input")
+                updates["baseline"] = baseline
         return await self.transition(
             rec_id,
             RecommendationStatus.APPLIED,
             event_type=RecommendationEventType.VERIFIED,
-            updates={
-                "verification_status": VerificationStatus.INCONCLUSIVE.value,
-                "verification_window_start": verification_window_start,
-                "verification_window_end": verification_window_end,
-                "savings_realized": False,
-            },
+            updates=updates,
             payload={"reason": reason},
         )
 
