@@ -19,11 +19,12 @@ from typing import List, Sequence
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 from greenkube.core.config import get_config
-from greenkube.core.observability import generate_latest_observability
+from greenkube.core.observability import generate_latest_observability, record_automation_backlog
 from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, Recommendation, RecommendationRecord
 from greenkube.models.node import NodeInfo
+from greenkube.storage.base_gitops_repository import GitOpsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -1093,7 +1094,14 @@ def get_metrics_output() -> bytes:
     return generate_latest(REGISTRY) + generate_latest_observability()
 
 
-async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_repo=None, summary_repo=None) -> None:
+async def refresh_metrics_from_db(
+    combined_repo,
+    node_repo,
+    reco_repo,
+    savings_repo=None,
+    summary_repo=None,
+    gitops_repository: GitOpsRepository | None = None,
+) -> None:
     """Read the latest metrics from the database and refresh all Prometheus gauges.
 
     This is the critical bridge between the scheduler container (which writes
@@ -1224,6 +1232,15 @@ async def refresh_metrics_from_db(combined_repo, node_repo, reco_repo, savings_r
                     )
         except Exception as exc:
             logger.warning("refresh_metrics_from_db: failed to refresh attributed savings metrics: %s", exc)
+
+    if gitops_repository is not None:
+        try:
+            backlog = await gitops_repository.get_automation_backlog_summary(stale_before=now - timedelta(minutes=15))
+            record_automation_backlog(backlog.as_metrics())
+        except NotImplementedError:
+            logger.debug("refresh_metrics_from_db: GitOps repository does not expose backlog metrics")
+        except Exception as exc:
+            logger.warning("refresh_metrics_from_db: failed to refresh automation backlog metrics: %s", exc)
 
     # --- Pre-computed dashboard summary windows ---
     if summary_repo is not None:

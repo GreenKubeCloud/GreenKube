@@ -19,12 +19,18 @@ export function clearApiToken() {
 }
 
 export class ApiError extends Error {
-	constructor(message, { status, detail, action, retryable = false, retryAfter } = {}) {
+	constructor(
+		message,
+		{ status, detail, code, action, policyResult, mappingOptions, retryable = false, retryAfter } = {}
+	) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
 		this.detail = detail;
+		this.code = code;
 		this.action = action;
+		this.policyResult = policyResult;
+		this.mappingOptions = mappingOptions;
 		this.retryable = retryable;
 		this.retryAfter = retryAfter;
 	}
@@ -55,6 +61,9 @@ function errorDetails(body, status) {
 	return {
 		message: detail || `API error ${status}`,
 		detail,
+		code: body?.code || body?.error_code || body?.detail?.code || body?.detail?.error_code,
+		policyResult: body?.policy_result || body?.policyResult || body?.detail?.policy_result,
+		mappingOptions: body?.mapping_options || body?.mappingOptions || body?.detail?.mapping_options,
 		action: body?.action || body?.detail?.action,
 		retryable: body?.retryable === true || status === 408 || status === 429 || status >= 500,
 		retryAfter: body?.retry_after || body?.detail?.retry_after
@@ -333,24 +342,74 @@ export async function unignoreRecommendation(id) {
 }
 
 /**
- * Preview or open a pull request that applies a rightsizing recommendation.
- * @param {number} id
- * @param {{ dry_run?: boolean, base_branch?: string }} [body]
+ * Create a server-resolved, digest-addressed GitOps plan.
+ * The optional values mapping contains only a Git-managed file, container, and key path.
+ * @param {number[]} recommendationIds
+ * @param {{file_path: string, container: string, path: string[]}} [valuesMapping]
  * @returns {Promise<Object>}
  */
-export async function applyRecommendationPr(id, body = {}) {
-	const url = new URL(`${BASE}/recommendations/${id}/apply-pr`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
+export function createAutomationPlan(recommendationIds, valuesMapping = null) {
+	const body = { recommendation_ids: recommendationIds };
+	if (valuesMapping) body.values_mapping = valuesMapping;
+	return request(`${BASE}/automation/plans`, {}, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
-	}));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+	});
+}
+
+/**
+ * Read the current lifecycle state of a plan.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function getAutomationPlan(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}`);
+}
+
+/**
+ * Read the execution state of one plan operation.
+ * @param {string} operationId
+ * @returns {Promise<Object>}
+ */
+export function getAutomationOperation(operationId) {
+	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`);
+}
+
+/**
+ * Approve a previously previewed plan using the digest returned by the API.
+ * @param {string} planId
+ * @param {string} digest
+ * @returns {Promise<Object>}
+ */
+export function approveAutomationPlan(planId, digest) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/approve`, {}, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ digest })
+	});
+}
+
+/**
+ * Cancel a plan before it starts applying.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function cancelAutomationPlan(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/cancel`, {}, {
+		method: 'POST'
+	});
+}
+
+/**
+ * Create or retrieve the persisted rollback preview for a synced plan.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function previewAutomationPlanRollback(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/rollback-preview`, {}, {
+		method: 'POST'
+	});
 }
 
 /**
@@ -359,10 +418,6 @@ export async function applyRecommendationPr(id, body = {}) {
  */
 export function getRecommendationPullRequests(id) {
 	return request(`${BASE}/recommendations/${id}/pull-requests`);
-}
-
-export function getRecommendationPrEligibility(id) {
-	return request(`${BASE}/recommendations/${id}/apply-pr/eligibility`);
 }
 
 export function getOpenPullRequests() {
@@ -380,6 +435,61 @@ export function getRecommendationEvents(id) {
 /** @returns {Promise<Object>} */
 export function getAutomationStatus() {
 	return request(`${BASE}/automation/status`);
+}
+
+/** @returns {Promise<Object>} */
+export function getGitOpsStatus() {
+	return request(`${BASE}/gitops/status`);
+}
+
+/** @param {{cluster?: string}} [params] */
+export function refreshGitOpsDiscovery({ cluster } = {}) {
+	return request(
+		`${BASE}/gitops/refresh`,
+		{ cluster },
+		{ method: 'POST' }
+	);
+}
+
+/** @returns {Promise<Object>} */
+export function getGitOpsCoverage() {
+	return request(`${BASE}/gitops/coverage`);
+}
+
+/** @param {{cluster?: string, status?: string[], limit?: number}} [params] */
+export function getGitOpsBindings({
+	cluster,
+	status = ['ambiguous', 'unresolved', 'blocked', 'stale'],
+	limit = 100
+} = {}) {
+	return request(`${BASE}/gitops/bindings`, { cluster, status, limit });
+}
+
+/**
+ * Resolve a workload using only a candidate and generation returned by GitOps discovery.
+ * @param {{cluster?: string, namespace: string, workload_kind: string, workload_name: string,
+ *   candidate_id: string, generation_token: string, confirmed: boolean}} resolution
+ */
+export function resolveGitOpsBinding(resolution) {
+	const {
+		cluster,
+		namespace,
+		workload_kind,
+		workload_name,
+		candidate_id,
+		generation_token,
+		confirmed
+	} = resolution;
+	const path = `${BASE}/gitops/bindings/${encodeURIComponent(namespace)}/${encodeURIComponent(workload_kind)}/${encodeURIComponent(workload_name)}/resolve`;
+	return request(
+		path,
+		{ cluster },
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ candidate_id, generation_token, confirmed })
+		}
+	);
 }
 
 /**
@@ -515,39 +625,4 @@ export async function downloadReport(params = {}) {
 	} finally {
 		URL.revokeObjectURL(objectUrl);
 	}
-}
-
-/** Return the durable status of an asynchronous automation operation. */
-export function getAutomationOperation(operationId, { signal } = {}) {
-	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`, {}, { signal });
-}
-
-/**
- * Poll an asynchronous operation until it reaches a terminal state.
- * The operation endpoint is authoritative; no browser secret or operation
- * payload is retained between attempts.
- */
-export async function waitForAutomationOperation(
-	operationId,
-	{ intervalMs = 1000, maxAttempts = 30, onUpdate, signal } = {}
-) {
-	let last;
-	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-		last = await getAutomationOperation(operationId, { signal });
-		onUpdate?.(last);
-		if (['completed', 'succeeded', 'failed', 'error', 'cancelled'].includes(last?.status)) return last;
-		if (attempt < maxAttempts - 1) {
-			await new Promise((resolve, reject) => {
-				const timer = setTimeout(resolve, intervalMs);
-				signal?.addEventListener('abort', () => {
-					clearTimeout(timer);
-					reject(signal.reason || new DOMException('Aborted', 'AbortError'));
-				}, { once: true });
-			});
-		}
-	}
-	throw new ApiError('The operation is still in progress. Try again to check its status.', {
-		retryable: true,
-		action: 'Check the operation status again.'
-	});
 }

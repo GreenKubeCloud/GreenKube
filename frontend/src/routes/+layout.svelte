@@ -18,6 +18,7 @@
 	const navItems = [
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/automation', label: 'Automation' },
 		{ href: '/report', label: 'Report' },
 		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/settings', label: 'Settings' }

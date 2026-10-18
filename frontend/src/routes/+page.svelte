@@ -46,6 +46,8 @@
 	let error = null;
 	let requestController = new AbortController();
 
+	onDestroy(() => requestController.abort());
+
 	$: params = { namespace: $selectedNamespace, last: $selectedTimeRange };
 	$: if (params) loadData();
 
@@ -141,8 +143,6 @@
 				recommendations = [];
 				savings = null;
 			}
-
-			onDestroy(() => requestController.abort());
 		} finally {
 			if (seq === loadSeq) recoLoading = false;
 		}

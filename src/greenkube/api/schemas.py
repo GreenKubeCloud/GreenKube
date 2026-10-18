@@ -4,12 +4,266 @@ Pydantic response schemas for the API.
 Keeps API-specific response shapes separate from internal domain models.
 """
 
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
+from greenkube.gitops.contracts import (
+    BindingStatus,
+    ControllerKind,
+    OperationStatus,
+    PlanStatus,
+    RendererKind,
+)
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 from greenkube.models.node import NodeInfo
+
+
+class GitOpsResponseModel(BaseModel):
+    """Base model for explicit, secret-safe GitOps API responses."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GitOpsCapabilityResponse(GitOpsResponseModel):
+    """Availability of one Kubernetes controller or source CRD."""
+
+    available: bool
+    reason: Optional[str] = None
+
+
+class GitOpsDiscoveryCapabilitiesResponse(GitOpsResponseModel):
+    """Capabilities reported by the Kubernetes discovery source."""
+
+    argocd: GitOpsCapabilityResponse
+    flux_kustomization: GitOpsCapabilityResponse
+    flux_helm_release: GitOpsCapabilityResponse
+    flux_source_git_repository: GitOpsCapabilityResponse
+    flux_source_oci_repository: GitOpsCapabilityResponse
+    flux_source_helm_repository: GitOpsCapabilityResponse
+    flux_source_bucket: GitOpsCapabilityResponse
+
+
+class GitOpsCoverageResponse(GitOpsResponseModel):
+    """Freshness-aware workload binding counts by resolution status."""
+
+    total: int = Field(ge=0)
+    resolved: int = Field(ge=0)
+    ambiguous: int = Field(ge=0)
+    unresolved: int = Field(ge=0)
+    blocked: int = Field(ge=0)
+    stale: int = Field(ge=0)
+    ratio: float = Field(ge=0, le=1)
+
+
+class GitOpsDiscoveryStatusResponse(GitOpsResponseModel):
+    """Read-only controller capability status and most recent binding coverage."""
+
+    cluster: str
+    discovery: GitOpsDiscoveryCapabilitiesResponse
+    last_refresh: Optional[datetime] = None
+    coverage: GitOpsCoverageResponse
+
+
+class GitOpsDiscoveryRefreshResponse(GitOpsResponseModel):
+    """Outcome of one explicit discovery refresh."""
+
+    cluster: str
+    refreshed_at: datetime
+    coverage: GitOpsCoverageResponse
+
+
+class GitOpsWorkloadSourceResponse(GitOpsResponseModel):
+    """Safe API projection of a discovered source candidate."""
+
+    id: str
+    controller: str
+    controller_kind: ControllerKind
+    controller_name: str
+    controller_namespace: str
+    provider_id: str
+    repo_url: str
+    path: str
+    renderer: RendererKind
+    confidence: float = Field(ge=0, le=1)
+    status: BindingStatus
+    reason: Optional[str] = None
+    revision: Optional[str] = None
+    source_revision: Optional[str] = None
+    observed_at: datetime
+    expires_at: Optional[datetime] = None
+    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class GitOpsBindingProvenanceResponse(GitOpsResponseModel):
+    """Safe source/controller provenance for one binding candidate."""
+
+    source_id: str
+    controller: str
+    controller_kind: ControllerKind
+    controller_name: str
+    controller_namespace: str
+    provider_id: str
+    repo_url: str
+    path: str
+    renderer: RendererKind
+    revision: Optional[str] = None
+    source_revision: Optional[str] = None
+    observed_at: datetime
+
+
+class GitOpsWorkloadBindingResponse(GitOpsResponseModel):
+    """One workload binding, its candidates, resolver reason and provenance."""
+
+    cluster: str
+    namespace: str
+    workload_kind: str
+    workload_name: str
+    status: BindingStatus
+    confidence: float = Field(ge=0, le=1)
+    binding: Optional[GitOpsWorkloadSourceResponse] = None
+    candidates: List[GitOpsWorkloadSourceResponse] = Field(default_factory=list)
+    candidates_truncated: bool = False
+    reason: Optional[str] = None
+    provenance: List[GitOpsBindingProvenanceResponse] = Field(default_factory=list)
+    observed_at: datetime
+    expires_at: Optional[datetime] = None
+
+
+class GitOpsWorkloadBindingListResponse(GitOpsResponseModel):
+    """Bounded page of safe workload binding projections."""
+
+    items: List[GitOpsWorkloadBindingResponse] = Field(max_length=100)
+    limit: int = Field(ge=1, le=100)
+    has_more: bool
+    next_cursor: Optional[StrictStr] = None
+
+
+class GitOpsManualBindingResolutionRequest(GitOpsResponseModel):
+    """Explicit confirmation of one current server-returned candidate."""
+
+    candidate_id: StrictStr = Field(min_length=1, max_length=256)
+    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    confirmed: Literal[True]
+
+
+class GitOpsErrorResponse(GitOpsResponseModel):
+    """Stable error body for documented GitOps API errors."""
+
+    detail: str
+
+
+class AutomationPlanValuesMappingRequest(GitOpsResponseModel):
+    """One-time Argo Helm values mapping; repository identity remains server-resolved."""
+
+    file_path: StrictStr = Field(min_length=1, max_length=1024)
+    container: StrictStr = Field(min_length=1, max_length=253)
+    path: List[StrictStr] = Field(min_length=1, max_length=32)
+
+    @field_validator("file_path", "container")
+    @classmethod
+    def validate_canonical_value(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("mapping file_path and container must be non-blank and canonical")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def validate_resources_path(cls, value: List[str]) -> List[str]:
+        if any(not segment.strip() or segment != segment.strip() for segment in value) or value[-1] != "resources":
+            raise ValueError("mapping path must contain canonical keys and end in resources")
+        return value
+
+
+class AutomationPlanMappingOptionsResponse(GitOpsResponseModel):
+    """Server-resolved choices for a one-time ambiguous Helm mapping."""
+
+    files: List[StrictStr] = Field(min_length=1, max_length=100)
+    containers: List[StrictStr] = Field(min_length=1, max_length=32)
+
+
+class AutomationPlanCreateRequest(GitOpsResponseModel):
+    """Recommendation IDs and an optional mapping; action/source inputs stay server-side."""
+
+    recommendation_ids: List[StrictInt] = Field(min_length=1, max_length=100)
+    values_mapping: Optional[AutomationPlanValuesMappingRequest] = None
+
+    @field_validator("recommendation_ids")
+    @classmethod
+    def validate_recommendation_ids(cls, value: List[int]) -> List[int]:
+        if any(recommendation_id <= 0 for recommendation_id in value):
+            raise ValueError("recommendation_ids must contain positive integers")
+        if len(value) != len(set(value)):
+            raise ValueError("recommendation_ids must be unique")
+        return value
+
+
+class AutomationPlanApproveRequest(GitOpsResponseModel):
+    """Approval for the exact digest returned by plan creation or read."""
+
+    digest: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class AutomationPlanSourceResponse(GitOpsResponseModel):
+    """Safe source summary that omits provider configuration and resolver evidence."""
+
+    controller: str
+    repo: str
+    base_branch: str
+    base_revision: Optional[str] = None
+    path: str
+    renderer: RendererKind
+
+
+class AutomationPlanFileResponse(GitOpsResponseModel):
+    """Public file-edit metadata without repository file contents."""
+
+    path: str
+    operation: Literal["create", "update", "delete"]
+    original_sha: Optional[str] = None
+
+
+class AutomationPlanValidationResponse(GitOpsResponseModel):
+    """Safe render-validation summary without internal warnings or evidence."""
+
+    passed: bool
+    target_changed: bool
+    unrelated_changes: bool
+    requests_within_limits: bool
+    renderer: RendererKind
+    output_digest: str
+
+
+class AutomationPlanResponse(GitOpsResponseModel):
+    """Explicit plan projection; never serializes the internal action/source models."""
+
+    plan_id: str
+    recommendation_ids: List[int]
+    status: PlanStatus
+    digest: Optional[str] = None
+    policy_result: Dict[str, Any] = Field(default_factory=dict)
+    operation_id: Optional[str] = None
+    operation_status: Optional[OperationStatus] = None
+    rollback_of_plan_id: Optional[str] = None
+    source: AutomationPlanSourceResponse
+    files: List[AutomationPlanFileResponse] = Field(default_factory=list)
+    diff: Optional[str] = None
+    rendered_diff: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+    warnings_truncated: bool = False
+    validation: Optional[AutomationPlanValidationResponse] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+
+
+class AutomationPlanErrorResponse(GitOpsResponseModel):
+    """Stable, redacted error response for plan operations."""
+
+    code: str
+    detail: str
+    policy_result: Optional[Dict[str, Any]] = None
+    mapping_options: Optional[AutomationPlanMappingOptionsResponse] = None
 
 
 class HealthResponse(BaseModel):

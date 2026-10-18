@@ -3,8 +3,6 @@
 	import { onDestroy } from 'svelte';
 	import {
 		getActiveRecommendations,
-		getRecommendation,
-		getRecommendationPrEligibility,
 		getIgnoredRecommendations,
 		getAppliedRecommendations,
 		getRecommendationSavings,
@@ -12,9 +10,13 @@
 		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation,
-		applyRecommendationPr,
-		getRecommendationEvents,
-		waitForAutomationOperation
+		createAutomationPlan,
+		getAutomationPlan,
+		getAutomationOperation,
+		approveAutomationPlan,
+		cancelAutomationPlan,
+		previewAutomationPlanRollback,
+		getRecommendationEvents
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
 	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
@@ -26,7 +28,6 @@
 	let appliedRecs = [];
 	let openPullRequests = [];
 	let openPullRequestKeys = new Set();
-	let prEligibility = {};
 	let savings = null;
 	let loading = true;
 	let error = null;
@@ -55,15 +56,26 @@
 	let ignoreLoading = false;
 	let ignoreError = null;
 
-	// Create-PR modal state (Phase 4)
+	// GitOps plan preview state
 	let prModal = null; // { rec } | null
-	let prBaseBranch = '';
-	let prDiff = null;
-	let prResult = null;
+	let prPlan = null;
+	let planApproval = null;
+	let planApprovalBlocked = false;
+	let planFeedback = '';
+	let planPolling = false;
+	let planPollingError = '';
 	let prLoading = false;
 	let prError = null;
+	let chartMappingOptions = null;
+	let chartMappingSelection = null;
+	let chartMappingFile = '';
+	let chartMappingContainer = '';
+	let chartMappingPath = '';
 	let modalTitleId = 'recommendation-modal-title';
-	let prOperation = null;
+	let planPollTimer = null;
+	let planPollGeneration = 0;
+
+	const PLAN_POLL_INTERVAL_MS = 3000;
 
 	// Verification event trail per applied recommendation
 	let eventsByRec = {}; // { [id]: Event[] }
@@ -75,7 +87,10 @@
 
 	let loadSeq = 0;
 	let requestController = new AbortController();
-	onDestroy(() => requestController.abort());
+	onDestroy(() => {
+		requestController.abort();
+		stopPlanStatusPolling();
+	});
 
 	async function loadData() {
 		// Guard against overlapping loads: a slower response must not overwrite
@@ -99,30 +114,10 @@
 			appliedRecs = applied;
 			savings = sav;
 			openPullRequests = openPrs;
-			const openPrDetails = await Promise.all(
-				openPrs.map(async (pr) => {
-					try {
-						return await getRecommendation(pr.recommendation_id);
-					} catch {
-						return null;
-					}
-				})
-			);
+			const openPrIds = new Set(openPrs.map((pr) => pr.recommendation_id));
 			openPullRequestKeys = new Set(
-				openPrDetails.filter(Boolean).map((rec) => recommendationKey(rec))
+				active.filter((rec) => openPrIds.has(rec.id)).map((rec) => recommendationKey(rec))
 			);
-			const eligibilityEntries = await Promise.all(
-				active
-					.filter((rec) => rec.scope === 'workload' && rec.owner_kind && rec.owner_name)
-					.map(async (rec) => {
-						try {
-							return [rec.id, await getRecommendationPrEligibility(rec.id)];
-						} catch {
-							return [rec.id, { eligible: false, reason: 'Could not check GitOps PR eligibility.' }];
-						}
-					})
-			);
-			prEligibility = Object.fromEntries(eligibilityEntries);
 		} catch (e) {
 			if (seq === loadSeq && e.name !== 'AbortError') error = e.message;
 		} finally {
@@ -201,7 +196,7 @@
 		}
 	}
 
-	// --- Create PR ---
+	// --- GitOps plan preview ---
 	const RIGHTSIZING_TYPES = ['RIGHTSIZING_CPU', 'RIGHTSIZING_MEMORY'];
 
 	function recommendationKey(rec) {
@@ -209,7 +204,8 @@
 			rec.namespace ?? '',
 			rec.type ?? '',
 			rec.owner_kind ?? '',
-			rec.owner_name ?? ''
+			rec.owner_name ?? '',
+			rec.container_name ?? ''
 		].join('|');
 	}
 
@@ -217,83 +213,642 @@
 		return openPrRecommendationIds.has(rec.id) || openPullRequestKeys.has(recommendationKey(rec));
 	}
 
-	function canCreatePr(rec) {
+	function safeActionFor(rec) {
+		const action = rec?.action ?? rec?.patch?.action;
+		const id = Number(rec?.id);
+		const target = action?.target;
+		const recommendationIds = Array.isArray(action?.recommendation_ids)
+			? action.recommendation_ids.map(Number)
+			: [];
+		if (
+			!Number.isInteger(id) ||
+			id <= 0 ||
+			action?.version !== 3 ||
+			!action.action_id ||
+			!recommendationIds.length ||
+			!recommendationIds.every((recommendationId) => Number.isInteger(recommendationId) && recommendationId > 0) ||
+			new Set(recommendationIds).size !== recommendationIds.length ||
+			!recommendationIds.includes(id) ||
+			action.constraints?.container_targeted !== true ||
+			rec.scope !== 'workload' ||
+			!rec.owner_kind ||
+			!rec.owner_name ||
+			!rec.namespace ||
+			!rec.container_name ||
+			!target?.api_version ||
+			target?.kind !== rec.owner_kind ||
+			target?.name !== rec.owner_name ||
+			target?.namespace !== rec.namespace ||
+			!Array.isArray(action.operations) ||
+			!action.operations.length
+		) {
+			return null;
+		}
+
+		const containers = action.operations.map((operation) => operation?.container);
+		if (
+			new Set(containers).size !== containers.length ||
+			!action.operations.some((operation) => operation?.container === rec.container_name) ||
+			action.operations.some((operation) => {
+				const requests = operation?.resources?.requests;
+				return (
+					operation?.op !== 'set_container_resources' ||
+					typeof operation.container !== 'string' ||
+					!operation.container.trim() ||
+					!requests ||
+					typeof requests !== 'object' ||
+					Array.isArray(requests) ||
+					!Object.keys(requests).length ||
+					Object.entries(requests).some(
+						([resource, quantity]) =>
+							!['cpu', 'memory'].includes(resource) ||
+							typeof quantity !== 'string' ||
+							!quantity.trim()
+					)
+				);
+			})
+		) {
+			return null;
+		}
+
+		return { action, recommendationIds };
+	}
+
+	function hasSafePerContainerAction(rec) {
+		return Boolean(safeActionFor(rec));
+	}
+
+	function canPreviewRecommendation(rec) {
+		return Boolean(safeActionFor(rec)) && !hasOpenPr(rec);
+	}
+
+	const PLAN_ERROR_MESSAGES = {
+		unsupported_source: 'This GitOps source or renderer is not supported for plan preview.',
+		needs_chart_mapping:
+			'This Argo CD Helm source needs a one-time values mapping. Choose a Git-managed values file, target container, and resources key path below if mapping choices are available.',
+		ambiguous_binding: 'The GitOps binding is ambiguous. Resolve the workload binding before creating a plan.',
+		plan_stale: 'This plan is stale because its source changed. Preview a new plan before approving.',
+		source_changed: 'The source changed after planning. Refresh and preview a new plan.',
+		plan_expired: 'This plan has expired. Preview a new plan before approving.',
+		revision_conflict: 'The source revision changed. Preview a new plan before approving.',
+		provider_not_ready: 'The Git provider is unavailable or not configured for plan preview.',
+		provider_capability_missing: 'The configured Git provider does not support the required plan operation.',
+		requires_container_target: 'This recommendation does not have a safe per-container action target.',
+		rollback_not_ready: 'This plan is not ready for rollback preview.',
+		rollback_unsupported: 'This plan cannot be safely rolled back.',
+		rollback_conflict: 'The original plan or current source changed; refresh before retrying.',
+		plan_preview_unavailable: 'Plan preview is unavailable for this recommendation.',
+		plan_preparation_unavailable: 'Server-side plan preparation is unavailable for this recommendation.'
+	};
+
+	function planErrorCode(value) {
+		const statusCodes = {
+			unsupported: 'unsupported_source',
+			ambiguous: 'ambiguous_binding',
+			stale: 'plan_stale',
+			needs_mapping: 'needs_chart_mapping',
+			plan_preview_unavailable: 'plan_preview_unavailable',
+			plan_preparation_unavailable: 'plan_preparation_unavailable',
+			unsupported_source: 'unsupported_source',
+			ambiguous_binding: 'ambiguous_binding',
+			plan_stale: 'plan_stale',
+			provider_not_ready: 'provider_not_ready',
+			provider_capability_missing: 'provider_capability_missing',
+			rollback_not_ready: 'rollback_not_ready',
+			rollback_unsupported: 'rollback_unsupported',
+			rollback_conflict: 'rollback_conflict'
+		};
+		const statusCode = [
+			value?.binding_status,
+			value?.source?.status,
+			value?.binding?.status,
+			value?.status
+		]
+			.map((status) => (typeof status === 'string' ? statusCodes[status.toLowerCase()] : ''))
+			.find(Boolean);
+		const code =
+			value?.code ??
+			value?.error_code ??
+			value?.error?.code ??
+			value?.detail?.code ??
+			value?.detail?.error_code ??
+			statusCode ??
+			'';
+		if (code) return String(code).toLowerCase();
+		const text = [
+			value?.message,
+			typeof value?.detail === 'string' ? value.detail : value?.detail?.message,
+			value?.error?.message
+		]
+			.filter(Boolean)
+			.join(' ');
+		if (/plan[\s_-]+preview[\s_-]+unavailable/i.test(text)) return 'plan_preview_unavailable';
+		const match = text.match(
+			/\b(plan_preview_unavailable|plan_preparation_unavailable|unsupported_source|needs_chart_mapping|ambiguous_binding|plan_stale|source_changed|plan_expired|revision_conflict|provider_not_ready|provider_capability_missing|requires_container_target|rollback_not_ready|rollback_unsupported|rollback_conflict)\b/i
+		);
+		return match?.[1]?.toLowerCase() ?? '';
+	}
+
+	function planErrorMessage(value) {
+		const code = planErrorCode(value);
+		if (PLAN_ERROR_MESSAGES[code]) return PLAN_ERROR_MESSAGES[code];
 		return (
-			RIGHTSIZING_TYPES.includes(rec.type) &&
-			rec.scope === 'workload' &&
-			Boolean(rec.owner_kind && rec.owner_name) &&
-			!hasOpenPr(rec) &&
-			prEligibility[rec.id]?.eligible === true
+			value?.message ??
+			(typeof value?.detail === 'string' ? value.detail : value?.detail?.message) ??
+			value?.error?.message ??
+			'Could not prepare an automation plan.'
+		);
+	}
+
+	function planNeedsReplan(value) {
+		return ['plan_stale', 'source_changed', 'plan_expired', 'revision_conflict'].includes(
+			planErrorCode(value)
+		);
+	}
+
+	function comparableRevision(value) {
+		if (typeof value !== 'string') return '';
+		const revision = value.trim().toLowerCase();
+		const embedded = revision.match(/@sha(?:1|256):([0-9a-f]{40}|[0-9a-f]{64})$/);
+		return embedded?.[1] ?? revision;
+	}
+
+	function planPresentation(response) {
+		const plan = response?.plan ?? response ?? {};
+		const filePlan = plan.file_plan ?? plan.filePlan ?? {};
+		const source = plan.source ?? plan.binding?.binding ?? {};
+		const validation = plan.validation ?? filePlan.validation ?? plan.render_validation ?? {};
+		const rawPolicyResult =
+			plan.policy_result ?? plan.policyResult ?? response?.policy_result ?? response?.policyResult;
+		const policyResult =
+			rawPolicyResult && typeof rawPolicyResult === 'object' && !Array.isArray(rawPolicyResult)
+				? rawPolicyResult
+				: null;
+		const rawFiles = plan.files ?? filePlan.files ?? [];
+		const files = Array.isArray(rawFiles) ? rawFiles : [];
+		const rawWarnings = [
+			...(Array.isArray(plan.warnings) ? plan.warnings : []),
+			...(Array.isArray(filePlan.warnings) ? filePlan.warnings : []),
+			...(Array.isArray(validation.warnings) ? validation.warnings : [])
+		];
+		const warnings = [...new Set(rawWarnings.map((warning) => {
+			if (warning === 'render-warning') {
+				return 'Renderer reported a non-blocking warning; details are omitted for safety.';
+			}
+			if (typeof warning === 'string') return warning;
+			return warning?.message ?? warning?.detail ?? '';
+		}).filter(Boolean))];
+		const controllerValue = source.controller;
+		const controller =
+			(typeof controllerValue === 'string' && controllerValue) ||
+			(controllerValue && typeof controllerValue === 'object'
+				? [
+						controllerValue.kind ?? controllerValue.controller_kind,
+						controllerValue.name ?? controllerValue.controller_name
+					]
+						.filter(Boolean)
+						.join('/')
+				: '') ||
+			[source.controller_kind, source.controller_name]
+				.filter(Boolean)
+				.join('/');
+		const validationPassed =
+			typeof validation.passed === 'boolean'
+				? validation.passed
+				: typeof validation.target_changed === 'boolean' &&
+					  typeof validation.unrelated_changes === 'boolean' &&
+					  typeof validation.requests_within_limits === 'boolean'
+					? validation.target_changed &&
+					  !validation.unrelated_changes &&
+					  validation.requests_within_limits
+					: false;
+		const expiresAt = plan.expires_at ?? plan.expiresAt ?? '';
+		const expiryTimestamp = Date.parse(expiresAt);
+		const baseRevision =
+			filePlan.base_revision ?? source.base_revision ?? source.revision ?? '';
+		const controllerRevision = source.source_revision ?? '';
+		const revisionDrift =
+			Boolean(comparableRevision(baseRevision)) &&
+			Boolean(comparableRevision(controllerRevision)) &&
+			comparableRevision(baseRevision) !== comparableRevision(controllerRevision);
+		return {
+			plan,
+			filePlan,
+			source,
+			validation,
+			policyResult,
+			files,
+			warnings,
+			controller,
+			repository:
+				source.repo_url ?? source.repo ?? source.repository ?? source.repository_url ?? '',
+			path: source.path ?? '',
+			renderer: source.renderer ?? filePlan.renderer ?? validation.renderer ?? plan.renderer ?? '',
+			sourceRevision: baseRevision || controllerRevision || filePlan.source_revision || '',
+			baseRevision,
+			controllerRevision,
+			revisionDrift,
+			sourceDiff: plan.source_diff ?? plan.diff ?? filePlan.source_diff ?? filePlan.diff ?? '',
+			renderedDiff: plan.rendered_diff ?? filePlan.rendered_diff ?? '',
+			digest: plan.digest ?? filePlan.digest ?? '',
+			planId: plan.plan_id ?? plan.id ?? '',
+			operationId: plan.operation_id ?? plan.operationId ?? '',
+			status: String(plan.status ?? '').toLowerCase(),
+			operationStatus: String(plan.operation_status ?? '').toLowerCase(),
+			rollbackOfPlanId: plan.rollback_of_plan_id ?? '',
+			expiresAt,
+			expiryValid: Number.isFinite(expiryTimestamp) && expiryTimestamp > Date.now(),
+			bindingStatus: String(source.status ?? source.binding_status ?? plan.binding_status ?? '').toLowerCase(),
+			validationPassed
+		};
+	}
+
+	function canApprovePlan(response) {
+		const preview = planPresentation(response);
+		return Boolean(
+			preview.planId &&
+				preview.status === 'validated' &&
+				preview.digest &&
+			preview.expiryValid &&
+				preview.controller &&
+				preview.repository &&
+				preview.path &&
+				preview.renderer &&
+				preview.files.length > 0 &&
+				preview.sourceDiff &&
+				preview.renderedDiff &&
+				preview.validationPassed &&
+				(!preview.bindingStatus || preview.bindingStatus === 'resolved')
+		);
+	}
+
+	function canCancelPlan(response) {
+		const preview = planPresentation(response);
+		return Boolean(
+			preview.planId &&
+				['draft', 'validated', 'approved'].includes(preview.status) &&
+				!planApprovalBlocked
+		);
+	}
+
+	function canReplan(response) {
+		const preview = planPresentation(response);
+		return Boolean(
+			prModal &&
+				safeActionFor(prModal.rec) &&
+				!preview.rollbackOfPlanId &&
+				(
+					planApprovalBlocked ||
+					['stale', 'failed', 'closed', 'superseded', 'rejected'].includes(preview.status) ||
+					(preview.status === 'validated' && preview.expiresAt && !preview.expiryValid)
+				)
+		);
+	}
+
+	function canPreviewRollback(response) {
+		const preview = planPresentation(response);
+		return Boolean(
+			preview.planId &&
+				['synced', 'applied'].includes(preview.status) &&
+				!preview.rollbackOfPlanId
+		);
+	}
+
+	function operationStatusLabel(value) {
+		const labels = {
+			queued: 'Queued',
+			running: 'Running',
+			retrying: 'Retrying',
+			succeeded: 'Succeeded',
+			failed: 'Failed',
+			cancelled: 'Cancelled'
+		};
+		return labels[String(value ?? '').toLowerCase()] ?? 'Unknown';
+	}
+
+	function isOperationPending(response) {
+		return ['queued', 'running', 'retrying'].includes(planPresentation(response).operationStatus);
+	}
+
+	function stopPlanStatusPolling() {
+		planPollGeneration += 1;
+		if (planPollTimer !== null) clearTimeout(planPollTimer);
+		planPollTimer = null;
+		planPolling = false;
+	}
+
+	function schedulePlanStatusPolling(modal = prModal) {
+		if (!modal || modal !== prModal || !planApproval || !isOperationPending(prPlan)) {
+			if (!planApproval || !isOperationPending(prPlan)) {
+				if (planPollTimer !== null) clearTimeout(planPollTimer);
+				planPollTimer = null;
+				planPolling = false;
+			}
+			return;
+		}
+
+		if (planPollTimer !== null) clearTimeout(planPollTimer);
+		const generation = planPollGeneration;
+		const preview = planPresentation(prPlan);
+		if (!preview.planId) return;
+
+		planPollTimer = setTimeout(async () => {
+			if (generation !== planPollGeneration || prModal !== modal) return;
+			planPollTimer = null;
+			planPolling = true;
+			try {
+				const response = preview.operationId
+					? await getAutomationOperation(preview.operationId)
+					: await getAutomationPlan(preview.planId);
+				if (generation !== planPollGeneration || prModal !== modal) return;
+				prPlan = preview.operationId
+					? {
+							...prPlan,
+							operation_id: response?.operation_id ?? preview.operationId,
+							operation_status: response?.status ?? prPlan?.operation_status,
+							status: response?.result?.plan_status ?? prPlan?.status
+						}
+					: response?.plan ?? response;
+				planPollingError = '';
+			} catch {
+				if (generation === planPollGeneration && prModal === modal) {
+					planPollingError = 'Operation status could not be refreshed; automatic polling will retry.';
+				}
+			} finally {
+				if (generation === planPollGeneration && prModal === modal) {
+					planPolling = false;
+					schedulePlanStatusPolling(modal);
+				}
+			}
+		}, PLAN_POLL_INTERVAL_MS);
+	}
+
+	function planResponseError(response) {
+		return planErrorCode(response) ? planErrorMessage(response) : null;
+	}
+
+	function applyPlanPreview(response, feedback = '') {
+		const responseError = planResponseError(response);
+		if (responseError) {
+			if (response?.policy_result || response?.policyResult) {
+				prPlan = { status: 'rejected', policy_result: response.policy_result ?? response.policyResult };
+			}
+			prError = responseError;
+			planApprovalBlocked = planNeedsReplan(response);
+			return false;
+		}
+		prPlan = response?.plan ?? response;
+		if (!canApprovePlan(prPlan)) {
+			const preview = planPresentation(prPlan);
+			prError = preview.expiresAt && !preview.expiryValid
+				? PLAN_ERROR_MESSAGES.plan_expired
+				: 'Plan approval is unavailable until the API returns a validated preview with a resolved source, files, diffs, digest, and expiry.';
+			return false;
+		}
+		planFeedback = feedback;
+		return true;
+	}
+
+	async function requestPlanPreview(rec, modal, feedback = '', valuesMapping = null) {
+		const action = safeActionFor(rec);
+		if (!action || prModal !== modal) return;
+		stopPlanStatusPolling();
+		prPlan = null;
+		planApproval = null;
+		planApprovalBlocked = false;
+		planFeedback = '';
+		planPollingError = '';
+		prError = null;
+		prLoading = true;
+		try {
+			const response = valuesMapping
+				? await createAutomationPlan(action.recommendationIds, valuesMapping)
+				: await createAutomationPlan(action.recommendationIds);
+			if (prModal !== modal) return;
+			applyPlanPreview(response, feedback);
+		} catch (e) {
+			if (prModal === modal) {
+				prError = planErrorMessage(e);
+				planApprovalBlocked = planNeedsReplan(e);
+				const options = e?.mappingOptions ?? e?.mapping_options;
+				if (planErrorCode(e) === 'needs_chart_mapping' && options) {
+					chartMappingOptions = options;
+					const files = Array.isArray(options.files) ? options.files : [];
+					const containers = Array.isArray(options.containers) ? options.containers : [];
+					if (!files.includes(chartMappingFile)) chartMappingFile = files[0] ?? '';
+					if (!containers.includes(chartMappingContainer)) {
+						chartMappingContainer = containers[0] ?? '';
+					}
+					if (!chartMappingPath && chartMappingSelection?.path) {
+						chartMappingPath = chartMappingSelection.path.join('.');
+					}
+				}
+				if (e?.policyResult) prPlan = { status: 'rejected', policy_result: e.policyResult };
+			}
+		} finally {
+			if (prModal === modal) prLoading = false;
+		}
+	}
+
+	async function submitChartMapping() {
+		const modal = prModal;
+		if (!modal || prLoading || !chartMappingOptions) return;
+		const path = chartMappingPath.split('.').map((segment) => segment.trim());
+		if (
+			!chartMappingOptions.files?.includes(chartMappingFile) ||
+			!chartMappingOptions.containers?.includes(chartMappingContainer) ||
+			!path.length ||
+			path.some((segment) => !segment) ||
+			path.length > 32 ||
+			path[path.length - 1] !== 'resources'
+		) {
+			prError = 'Select an available values file and container, and enter a key path ending in resources.';
+			return;
+		}
+		const valuesMapping = {
+			file_path: chartMappingFile,
+			container: chartMappingContainer,
+			path
+		};
+		chartMappingSelection = valuesMapping;
+		await requestPlanPreview(
+			modal.rec,
+			modal,
+			'One-time mapping validated. Review the plan before approving.',
+			valuesMapping
 		);
 	}
 
 	async function openPrModal(rec) {
-		prModal = { rec };
-		prBaseBranch = '';
-		prDiff = null;
-		prResult = null;
-		prOperation = null;
-		prError = null;
-		prLoading = true;
-		try {
-			const preview = await applyRecommendationPr(rec.id, { dry_run: true });
-			if (preview.status === 'error') {
-				prError = preview.message ?? 'Could not prepare the pull request.';
-			} else {
-				prDiff = preview.diff;
-				prBaseBranch = preview.base_branch ?? '';
-			}
-		} catch (e) {
-			prError = e.message;
-		} finally {
-			prLoading = false;
-		}
+		const action = safeActionFor(rec);
+		if (!action || hasOpenPr(rec)) return;
+		const modal = { rec };
+		prModal = modal;
+		chartMappingOptions = null;
+		chartMappingSelection = null;
+		chartMappingFile = '';
+		chartMappingContainer = '';
+		chartMappingPath = '';
+		await requestPlanPreview(rec, modal);
+	}
+
+	async function rePlan() {
+		const modal = prModal;
+		if (!modal || !canReplan(prPlan)) return;
+		await requestPlanPreview(
+			modal.rec,
+			modal,
+			'New plan preview ready. Review it before approving.',
+			chartMappingSelection
+		);
 	}
 
 	function closePrModal() {
+		stopPlanStatusPolling();
 		prModal = null;
-		prDiff = null;
-		prResult = null;
-		prOperation = null;
+		prPlan = null;
+		planApproval = null;
+		planApprovalBlocked = false;
+		planFeedback = '';
+		planPollingError = '';
 		prError = null;
+		prLoading = false;
+		chartMappingOptions = null;
+		chartMappingSelection = null;
+		chartMappingFile = '';
+		chartMappingContainer = '';
+		chartMappingPath = '';
 	}
 
-	async function confirmPr() {
+	async function approvePlan() {
+		if (!prModal || !canApprovePlan(prPlan)) return;
+		const modal = prModal;
+		const preview = planPresentation(prPlan);
+		stopPlanStatusPolling();
 		prLoading = true;
 		prError = null;
+		planFeedback = '';
+		planPollingError = '';
+		planApproval = null;
 		try {
-			const result = await applyRecommendationPr(prModal.rec.id, {
-				dry_run: false,
-				base_branch: prBaseBranch || undefined
-			});
-			prResult = result;
-			if (result.operation_id) {
-				prOperation = result;
-				prResult = {
-					...await waitForAutomationOperation(result.operation_id, {
-					intervalMs: 750,
-					onUpdate: (state) => { prOperation = { ...result, ...state }; }
-					}),
-					operation_id: result.operation_id
-				};
+			const result = await approveAutomationPlan(preview.planId, preview.digest);
+			if (prModal !== modal) return;
+			planApproval = result;
+			if (result?.plan_id || result?.plan) {
+				prPlan = result.plan ?? result;
 			}
-
-			function retryPr() {
-				prResult = null;
-				prOperation = null;
-				confirmPr();
-			}
-			if (['error', 'failed', 'cancelled'].includes(prResult.status)) {
-				prError = prResult.error || prResult.message || 'The operation failed. Retry the pull request.';
-			}
-			if (prResult.status === 'pr_open' || prResult.status === 'completed' || prResult.status === 'succeeded') {
-				await loadData();
+			if (['error', 'failed', 'cancelled', 'stale'].includes(String(result?.status).toLowerCase())) {
+				prError = planErrorMessage(result);
+				planApprovalBlocked = planNeedsReplan(result);
 			}
 		} catch (e) {
-			prError = e.message;
+			if (prModal === modal) {
+				prError = planErrorMessage(e);
+				planApprovalBlocked = planNeedsReplan(e);
+				if (e?.policyResult) {
+					prPlan = { ...(prPlan ?? {}), policy_result: e.policyResult };
+				}
+			}
 		} finally {
-			prLoading = false;
+			if (prModal === modal) {
+				prLoading = false;
+				schedulePlanStatusPolling(modal);
+			}
 		}
+	}
+
+	async function cancelPlan() {
+		if (!prModal || !canCancelPlan(prPlan) || prLoading) return;
+		const modal = prModal;
+		const preview = planPresentation(prPlan);
+		stopPlanStatusPolling();
+		prLoading = true;
+		prError = null;
+		planFeedback = '';
+		planPollingError = '';
+		try {
+			const result = await cancelAutomationPlan(preview.planId);
+			if (prModal !== modal) return;
+			prPlan = result?.plan ?? result;
+			planApproval = null;
+			planApprovalBlocked = String(prPlan?.status ?? '').toLowerCase() === 'stale';
+			planFeedback = planApprovalBlocked
+				? 'Plan cancelled. Preview a new plan before approving.'
+				: 'Plan status updated.';
+		} catch (e) {
+			if (prModal === modal) prError = planErrorMessage(e);
+		} finally {
+			if (prModal === modal) prLoading = false;
+		}
+	}
+
+	async function previewPlanRollback() {
+		if (!prModal || !canPreviewRollback(prPlan) || prLoading) return;
+		const modal = prModal;
+		const preview = planPresentation(prPlan);
+		stopPlanStatusPolling();
+		prLoading = true;
+		prError = null;
+		planFeedback = '';
+		planPollingError = '';
+		planApproval = null;
+		planApprovalBlocked = false;
+		try {
+			const result = await previewAutomationPlanRollback(preview.planId);
+			if (prModal !== modal) return;
+			applyPlanPreview(result, 'Rollback preview ready. Review it before approving.');
+		} catch (e) {
+			if (prModal === modal) prError = planErrorMessage(e);
+		} finally {
+			if (prModal === modal) prLoading = false;
+		}
+	}
+
+	async function refreshPlanStatus() {
+		if (!prPlan || prLoading) return;
+		const modal = prModal;
+		const preview = planPresentation(prPlan);
+		if (!preview.planId) return;
+		stopPlanStatusPolling();
+		prLoading = true;
+		prError = null;
+		planPollingError = '';
+		try {
+			const result = await getAutomationPlan(preview.planId);
+			if (prModal !== modal) return;
+			prPlan = result?.plan ?? result;
+		} catch (e) {
+			if (prModal === modal) prError = planErrorMessage(e);
+		} finally {
+			if (prModal === modal) {
+				prLoading = false;
+				schedulePlanStatusPolling(modal);
+			}
+		}
+	}
+
+	function planLifecycleLabel(status) {
+		const labels = {
+			draft: 'Draft plan',
+			validated: 'Validated; awaiting approval',
+			approved: 'Queued for a worker',
+			applying: 'Creating the pull request',
+			pr_open: 'Pull request open',
+			merged: 'Merged; waiting for controller sync',
+			synced: 'Synced; waiting for workload apply',
+			sync_pending: 'Waiting for workload apply',
+			sync_failed: 'Sync failed; operator attention required',
+			applied: 'Applied to the workload',
+			closed: 'Pull request closed without merge',
+			failed: 'Plan execution failed',
+			stale: 'Plan is stale',
+			needs_mapping: 'Chart mapping required',
+			ambiguous: 'Workload binding is ambiguous',
+			rejected: 'Plan rejected',
+			superseded: 'Plan superseded'
+		};
+		const normalized = String(status ?? '').toLowerCase();
+		return labels[normalized] ?? (normalized || 'Unknown');
 	}
 
 	// --- Verification events ---
@@ -389,6 +944,48 @@
 		return typeConfig[type] ?? { icon: '❓', label: type, color: 'blue', desc: '' };
 	}
 
+	const DIALOG_FOCUSABLE_SELECTOR =
+		'a[href], button:not([disabled]), input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+	function trapDialogFocus(node) {
+		const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const focusableElements = () =>
+			Array.from(node.querySelectorAll(DIALOG_FOCUSABLE_SELECTOR)).filter(
+				(element) =>
+					!element.hasAttribute('hidden') &&
+					element.getAttribute('aria-hidden') !== 'true' &&
+					!element.closest('[hidden], [inert]')
+			);
+
+		function handleTab(event) {
+			if (event.key !== 'Tab') return;
+			const elements = focusableElements();
+			if (elements.length === 0) {
+				event.preventDefault();
+				node.focus();
+				return;
+			}
+			const first = elements[0];
+			const last = elements[elements.length - 1];
+			if (event.shiftKey && (document.activeElement === first || !node.contains(document.activeElement))) {
+				event.preventDefault();
+				last.focus();
+			} else if (!event.shiftKey && (document.activeElement === last || !node.contains(document.activeElement))) {
+				event.preventDefault();
+				first.focus();
+			}
+		}
+
+		node.addEventListener('keydown', handleTab);
+		(focusableElements()[0] ?? node).focus();
+		return {
+			destroy() {
+				node.removeEventListener('keydown', handleTab);
+				if (previousFocus?.isConnected) previousFocus.focus();
+			}
+		};
+	}
+
 	function handleEscape(event) {
 		if (event.key === 'Escape') {
 			if (ignoreModal) closeIgnoreModal();
@@ -408,7 +1005,14 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
 		on:click|self={closeIgnoreModal}
 	>
-		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4" role="dialog" aria-modal="true" aria-labelledby={modalTitleId}>
+		<div
+			class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby={modalTitleId}
+			tabindex="-1"
+			use:trapDialogFocus
+		>
 			<div class="flex items-start justify-between gap-4">
 				<div>
 					<h2 id={modalTitleId} class="text-base font-semibold text-dark-100">Ignore recommendation</h2>
@@ -458,7 +1062,7 @@
 	</div>
 {/if}
 
-<!-- ─── Create PR Modal ──────────────────────────────────────────────────── -->
+<!-- ─── Plan Preview / Pull Request Modal ─────────────────────────────────── -->
 {#if prModal}
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div
@@ -466,10 +1070,18 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
 		on:click|self={closePrModal}
 	>
-		<div class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby={modalTitleId}>
+		<div
+			class="bg-dark-900 border border-dark-700 rounded-xl shadow-2xl w-full max-w-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby={modalTitleId}
+			aria-busy={prLoading}
+			tabindex="-1"
+			use:trapDialogFocus
+		>
 			<div class="flex items-start justify-between gap-4">
 				<div>
-					<h2 class="text-base font-semibold text-dark-100">Apply via pull request</h2>
+					<h2 id={modalTitleId} class="text-base font-semibold text-dark-100">Review automation plan</h2>
 					<p class="text-xs text-dark-500 mt-1 break-words">
 						{getTypeConfig(prModal.rec.type).icon}
 						{prModal.rec.owner_kind ? `${prModal.rec.owner_kind}/${prModal.rec.owner_name}` : prModal.rec.pod_name}
@@ -483,65 +1095,316 @@
 				>✕</button>
 			</div>
 
-			{#if prLoading && !prDiff && !prResult}
+			{#if prLoading && !prPlan}
 				<p class="text-xs text-dark-400 flex items-center gap-2"><span class="animate-spin">⟳</span> Preparing preview…</p>
 			{/if}
 
 			{#if prError}
-				<div class="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded-lg px-3 py-2">
+				<div
+					role="alert"
+					class="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded-lg px-3 py-2"
+				>
 					{prError}
-					{#if prOperation?.attempts != null}
-						<span class="block mt-1 text-dark-500">Attempt {prOperation.attempts}. You can retry this operation.</span>
+				</div>
+			{/if}
+
+			{#if chartMappingOptions && !prPlan}
+				<form
+					class="space-y-3 rounded-lg border border-dark-700 bg-dark-950/60 p-3"
+					on:submit|preventDefault={submitChartMapping}
+				>
+					<div>
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">One-time Helm values mapping</h3>
+						<p class="mt-1 text-xs text-dark-500">
+							This choice is validated against the server-resolved Git snapshot and applies only to this plan.
+							It does not edit the Argo CD Application or send repository credentials.
+						</p>
+					</div>
+					<label class="block space-y-1 text-xs text-dark-400">
+						<span>Git-managed values file</span>
+						<select
+							aria-label="Git-managed values file"
+							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							bind:value={chartMappingFile}
+							required
+							disabled={prLoading}
+						>
+							{#each chartMappingOptions.files ?? [] as filePath}
+								<option value={filePath}>{filePath}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="block space-y-1 text-xs text-dark-400">
+						<span>Container</span>
+						<select
+							aria-label="Container"
+							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							bind:value={chartMappingContainer}
+							required
+							disabled={prLoading}
+						>
+							{#each chartMappingOptions.containers ?? [] as container}
+								<option value={container}>{container}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="block space-y-1 text-xs text-dark-400">
+						<span>Resources key path</span>
+						<input
+							aria-label="Resources key path"
+							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							type="text"
+							placeholder="app.resources"
+							bind:value={chartMappingPath}
+							required
+							disabled={prLoading}
+						/>
+						<span class="block text-[11px] text-dark-600">Use dot-separated keys ending in resources.</span>
+					</label>
+					<button
+						class="btn-primary text-xs disabled:opacity-50"
+						type="submit"
+						disabled={prLoading || !chartMappingFile || !chartMappingContainer || !chartMappingPath.trim()}
+					>
+						{prLoading ? 'Validating mapping…' : 'Validate mapping and preview'}
+					</button>
+				</form>
+			{/if}
+
+			{#if planFeedback && !prError}
+				<p class="text-xs text-green-400" role="status">{planFeedback}</p>
+			{/if}
+
+			{#if planApproval && !prError}
+				<div
+					role={prPlan?.status === 'sync_failed' || prPlan?.operation_status === 'failed' ? 'alert' : 'status'}
+					class={`text-xs rounded-lg px-3 py-2 border ${
+						prPlan?.status === 'sync_failed' || prPlan?.operation_status === 'failed'
+							? 'text-red-400 bg-red-600/10 border-red-600/30'
+							: 'text-green-400 bg-green-600/10 border-green-600/30'
+					}`}
+				>
+					Plan approved: {planApproval.status ?? 'approved'}
+					{#if planApproval.operation_id} · Operation {planApproval.operation_id}{/if}
+					<span class="block mt-1">Plan lifecycle: {planLifecycleLabel(prPlan?.status ?? planApproval.status)}</span>
+					{#if prPlan?.operation_status}
+						<span class="block mt-1">
+							Operation status: {operationStatusLabel(prPlan.operation_status)}
+							{#if isOperationPending(prPlan)}
+								· {planPolling ? 'Refreshing now…' : 'Polling automatically'}
+							{/if}
+						</span>
 					{/if}
+					{#if planPollingError}
+						<span class="block mt-1 text-yellow-300">{planPollingError}</span>
+					{/if}
+					<button
+						type="button"
+						class="mt-2 underline underline-offset-2 disabled:opacity-50"
+						disabled={prLoading}
+						on:click={refreshPlanStatus}
+					>
+						{prLoading ? 'Refreshing…' : 'Refresh plan status'}
+					</button>
 				</div>
 			{/if}
 
-			{#if prOperation && !prResult?.pr_url && !prError}
-				<div class="text-xs text-blue-300 bg-blue-600/10 border border-blue-600/30 rounded-lg px-3 py-2">
-					<span class="animate-pulse">●</span>
-					Operation {prOperation.status ?? 'queued'}.
-					{#if prOperation.attempts != null} Attempt {prOperation.attempts}.{/if}
-				</div>
-			{/if}
+			{#if prPlan}
+				{@const preview = planPresentation(prPlan)}
+				{@const policyChecks = Array.isArray(preview.policyResult?.checks) ? preview.policyResult.checks : []}
+				{@const policyRejections = Array.isArray(preview.policyResult?.rejections) ? preview.policyResult.rejections : []}
+				<div class="space-y-4">
+					<section class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Plan source</h3>
+						<dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
+							<div>
+								<dt class="text-dark-500">Controller</dt>
+								<dd class="text-dark-200 break-words">{preview.controller || 'Not provided'}</dd>
+							</div>
+							<div>
+								<dt class="text-dark-500">Repository</dt>
+								<dd class="text-dark-200 break-all">{preview.repository || 'Not provided'}</dd>
+							</div>
+							<div>
+								<dt class="text-dark-500">Path</dt>
+								<dd class="text-dark-200 break-all">{preview.path || 'Not provided'}</dd>
+							</div>
+							<div>
+								<dt class="text-dark-500">Renderer</dt>
+								<dd class="text-dark-200">{preview.renderer || 'Not provided'}</dd>
+							</div>
+							{#if preview.rollbackOfPlanId}
+								<div class="sm:col-span-2">
+									<dt class="text-dark-500">Rollback of</dt>
+									<dd class="text-dark-200 break-all">{preview.rollbackOfPlanId}</dd>
+								</div>
+							{/if}
+							{#if preview.sourceRevision}
+								<div class="sm:col-span-2">
+									<dt class="text-dark-500">Branch revision used by plan</dt>
+									<dd class="text-dark-200 break-all">{preview.sourceRevision}</dd>
+								</div>
+							{/if}
+							{#if preview.controllerRevision}
+								<div class="sm:col-span-2">
+									<dt class="text-dark-500">Controller-reported revision</dt>
+									<dd class="text-dark-200 break-all">{preview.controllerRevision}</dd>
+								</div>
+							{/if}
+						</dl>
+						{#if preview.revisionDrift}
+							<p role="alert" class="rounded border border-amber-700/70 bg-amber-950/40 p-2 text-xs text-amber-200">
+								The plan targets the current repository branch head, which differs from the revision reported by the GitOps controller. Refresh discovery or sync the controller before approving if the live revision is required.
+							</p>
+						{/if}
+					</section>
 
-			{#if prResult?.status === 'pr_open'}
-				<div class="text-xs text-green-400 bg-green-600/10 border border-green-600/30 rounded-lg px-3 py-2">
-					Pull request opened:
-					<a class="underline" href={prResult.pr_url} target="_blank" rel="noreferrer">{prResult.pr_url}</a>
-				</div>
-			{/if}
+					{#if preview.policyResult}
+						<section class="space-y-2 rounded-lg border border-dark-700 bg-dark-950/60 p-3">
+							<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Automation policy</h3>
+							<p class="text-xs {preview.policyResult.allowed ? 'text-green-400' : 'text-amber-400'}">
+								{preview.policyResult.allowed ? 'Policy checks passed' : 'Policy blocks this plan'}
+							</p>
+							{#if policyChecks.length}
+								<ul class="space-y-2">
+									{#each policyChecks as check}
+										<li class="text-xs">
+											<div class="flex flex-wrap items-center gap-2">
+												<span class="text-dark-200">{String(check.gate ?? 'policy').replaceAll('_', ' ')}</span>
+												<span class="rounded bg-dark-800 px-1.5 py-0.5 text-[10px] text-dark-400">
+													{String(check.state ?? 'unknown').replaceAll('_', ' ')}
+												</span>
+											</div>
+											<p class="mt-1 text-dark-400">{check.message ?? 'No policy explanation was returned.'}</p>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+							{#if policyRejections.length}
+								<p class="text-xs text-amber-300">{policyRejections[0]?.detail ?? 'A policy gate rejected this plan.'}</p>
+							{/if}
+						</section>
+					{/if}
 
-			{#if prDiff}
-				<div class="space-y-1">
-					<p class="text-xs text-dark-400 font-medium">Proposed diff</p>
-					<pre class="text-[11px] leading-relaxed text-dark-300 bg-dark-950 border border-dark-700 rounded-lg p-3 overflow-x-auto whitespace-pre">{prDiff}</pre>
-				</div>
+					<section class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Files</h3>
+						{#if preview.files.length}
+							<ul class="space-y-1 text-xs">
+								{#each preview.files as file}
+									{@const filePath = typeof file === 'string' ? file : file?.path ?? file?.file_path ?? 'Unknown file'}
+									{@const fileOperation = typeof file === 'string' ? '' : file?.operation ?? ''}
+									<li class="flex flex-wrap items-center gap-2 text-dark-200">
+										<span class="break-all">{filePath}</span>
+										{#if fileOperation}
+											<span class="rounded bg-dark-700 px-1.5 py-0.5 text-[10px] text-dark-400">{fileOperation}</span>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{:else}
+							<p class="text-xs text-dark-500">No files were returned.</p>
+						{/if}
+					</section>
 
-				<div class="space-y-1">
-					<label class="text-xs text-dark-400 font-medium" for="pr-base-branch">Base branch</label>
-					<input
-						id="pr-base-branch"
-						bind:value={prBaseBranch}
-						placeholder="main"
-						class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-dark-100
-						       placeholder-dark-600 focus:outline-none focus:border-green-600"
-					/>
+					<section class="space-y-1">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Source diff</h3>
+						<pre class="text-[11px] leading-relaxed text-dark-300 bg-dark-950 border border-dark-700 rounded-lg p-3 overflow-x-auto whitespace-pre">{preview.sourceDiff || 'No source diff was returned.'}</pre>
+					</section>
+
+					<section class="space-y-1">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Rendered diff</h3>
+						<pre class="text-[11px] leading-relaxed text-dark-300 bg-dark-950 border border-dark-700 rounded-lg p-3 overflow-x-auto whitespace-pre">{preview.renderedDiff || 'No rendered diff was returned.'}</pre>
+					</section>
+
+					<section class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Validation</h3>
+						<p class="text-xs {preview.validationPassed ? 'text-green-400' : 'text-red-400'}">
+							{preview.validationPassed ? 'Validation passed' : 'Validation did not pass'}
+						</p>
+						<ul class="space-y-1 text-xs text-dark-400">
+							{#if preview.validation.target_changed != null}
+								<li>Target changed: {preview.validation.target_changed ? 'yes' : 'no'}</li>
+							{/if}
+							{#if preview.validation.unrelated_changes != null}
+								<li>Unrelated changes: {preview.validation.unrelated_changes ? 'yes' : 'no'}</li>
+							{/if}
+							{#if preview.validation.requests_within_limits != null}
+								<li>Requests within limits: {preview.validation.requests_within_limits ? 'yes' : 'no'}</li>
+							{/if}
+						</ul>
+						{#if preview.validation.reason}
+							<p class="text-xs text-dark-400">{preview.validation.reason}</p>
+						{/if}
+						{#if preview.validation.output_digest}
+							<p class="text-xs text-dark-500 break-all">
+								Rendered output digest: <span class="text-dark-300">{preview.validation.output_digest}</span>
+							</p>
+						{/if}
+					</section>
+
+					<section class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wide text-dark-300">Warnings</h3>
+						{#if preview.warnings.length}
+							<ul class="list-disc pl-5 space-y-1 text-xs text-yellow-400">
+								{#each preview.warnings as warning}
+									<li>{warning}</li>
+								{/each}
+							</ul>
+						{:else}
+							<p class="text-xs text-dark-500">No API-reported warnings.</p>
+						{/if}
+					</section>
+
+					<section class="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-dark-700 pt-3">
+						<div>
+							<p class="text-xs text-dark-500">Digest</p>
+							<p class="text-xs text-dark-200 break-all">{preview.digest || 'Not provided'}</p>
+						</div>
+						<div>
+							<p class="text-xs text-dark-500">Expires</p>
+							<p class="text-xs text-dark-200 break-all">{preview.expiresAt || 'Not provided'}</p>
+						</div>
+					</section>
 				</div>
 			{/if}
 
 			<div class="flex gap-3 justify-end pt-1">
 				<button class="btn-secondary text-xs" on:click={closePrModal}>Close</button>
-				{#if prError && prResult?.operation_id}
-					<button class="btn-secondary text-xs" on:click={retryPr} disabled={prLoading}>Retry operation</button>
+				{#if canCancelPlan(prPlan)}
+					<button
+						class="btn-secondary text-xs disabled:opacity-50"
+						disabled={prLoading}
+						on:click={cancelPlan}
+					>
+						{prLoading ? 'Cancelling…' : 'Cancel plan'}
+					</button>
 				{/if}
-				{#if !prResult && prDiff}
+				{#if canReplan(prPlan)}
+					<button
+						class="btn-secondary text-xs disabled:opacity-50"
+						disabled={prLoading}
+						on:click={rePlan}
+					>
+						Re-plan
+					</button>
+				{/if}
+				{#if canPreviewRollback(prPlan)}
+					<button
+						class="btn-secondary text-xs disabled:opacity-50"
+						disabled={prLoading}
+						on:click={previewPlanRollback}
+					>
+						{prLoading ? 'Preparing rollback…' : 'Preview rollback'}
+					</button>
+				{/if}
+				{#if prPlan && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
 					<button
 						class="btn-primary text-xs flex items-center gap-2 disabled:opacity-50"
 						disabled={prLoading}
-						on:click={confirmPr}
+						on:click={approvePlan}
 					>
 						{#if prLoading}<span class="animate-spin">⟳</span>{/if}
-						Create pull request
+						Approve plan
 					</button>
 				{/if}
 			</div>
@@ -946,6 +1809,13 @@
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
+												{#if hasSafePerContainerAction(rec)}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-green-600/10 text-green-400">Container action ready</span>
+												{:else if RIGHTSIZING_TYPES.includes(rec.type)}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-500">No safe container action</span>
+												{:else}
+													<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-400" title="This recommendation has no GitOps action planner; apply it manually.">Manual change required</span>
+												{/if}
 												<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-300">
 													{getSourceConfig(rec.source).label}
 												</span>
@@ -975,13 +1845,15 @@
 												</div>
 											{/if}
 											{#if activeTab === 'active'}
-												{#if canCreatePr(rec)}
+												{#if canPreviewRecommendation(rec)}
 													<button
 														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 														       hover:border-green-600/50 hover:text-green-400 transition-colors"
-														title="Open a pull request that applies this recommendation"
+														title="Preview the server-resolved GitOps plan for this container action"
 														on:click={() => openPrModal(rec)}
-													>Create PR</button>
+													>
+														Preview plan
+													</button>
 												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && hasOpenPr(rec)}
 													<button
 														class="text-xs px-3 py-1.5 rounded-lg border border-blue-600/30 text-blue-400/70
@@ -989,12 +1861,6 @@
 														title="A pull request is already open for this workload recommendation"
 														disabled
 													>PR created</button>
-												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && prEligibility[rec.id] && !prEligibility[rec.id].eligible}
-													<button
-														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-500 cursor-not-allowed"
-														title={prEligibility[rec.id].reason}
-														disabled
-													>GitOps unavailable</button>
 												{/if}
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400

@@ -67,12 +67,12 @@ async def update_service_config(update: ServiceConfigUpdate, response: Response)
     if update.prometheus_url is not None:
         validate_service_url(update.prometheus_url)
         updates["PROMETHEUS_URL"] = update.prometheus_url
-        logger.info("Prometheus URL updated to: %s", update.prometheus_url)
+        logger.info("Prometheus service URL updated.")
 
     if update.opencost_url is not None:
         validate_service_url(update.opencost_url)
         updates["OPENCOST_API_URL"] = update.opencost_url
-        logger.info("OpenCost URL updated to: %s", update.opencost_url)
+        logger.info("OpenCost service URL updated.")
 
     if update.electricity_maps_token is not None:
         updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
@@ -81,7 +81,7 @@ async def update_service_config(update: ServiceConfigUpdate, response: Response)
     if update.boavizta_url is not None:
         validate_service_url(update.boavizta_url)
         updates["BOAVIZTA_API_URL"] = update.boavizta_url
-        logger.info("Boavizta URL updated to: %s", update.boavizta_url)
+        logger.info("Boavizta service URL updated.")
 
     if update.wattnet_email is not None:
         updates["WATTNET_EMAIL"] = update.wattnet_email
