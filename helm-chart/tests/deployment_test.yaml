@@ -1,6 +1,7 @@
 suite: deployment
 templates:
   - templates/deployment.yaml
+  - templates/automation-worker.yaml
   - templates/configmap.yaml
   - templates/secret.yaml
 
@@ -90,6 +91,8 @@ tests:
   # Collector container (first container)
   # --------------------------------------------------------------------------
   - it: collector container should run greenkube start
+    set:
+      automation.enabled: true
     templates:
       - templates/deployment.yaml
     asserts:
@@ -99,6 +102,103 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args
           value: ["start"]
+      - equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "true"
+      - equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: inline
+
+  - it: should not create a standalone worker in inline mode
+    set:
+      automation.enabled: true
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should disable inline processing and run the worker CLI in worker mode
+    set:
+      automation.enabled: true
+      automation.mode: worker
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "false"
+      - equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: disabled
+
+  - it: should run exactly one standalone operation worker
+    set:
+      automation.enabled: true
+      automation.mode: worker
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["python"]
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: ["-m", "greenkube.cli.automation_worker", "--queue", "plans"]
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].name
+          value: worker-metrics
+      - equal:
+          path: spec.template.spec.containers[0].env[2].name
+          value: GREENKUBE_WORKER_METRICS_PORT
+
+  - it: should disable automation in disabled mode
+    set:
+      automation.mode: disabled
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "false"
+      - equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: disabled
+
+  - it: should not create a worker in disabled mode
+    set:
+      automation.mode: disabled
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create a standalone worker when automation is disabled
+    set:
+      automation.enabled: false
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
 
   # --------------------------------------------------------------------------
   # API container (second container, enabled by default)
@@ -169,16 +269,22 @@ tests:
   # --------------------------------------------------------------------------
   # Volumes — postgres mode (default)
   # --------------------------------------------------------------------------
-  - it: should mount the secrets volume
+  - it: should mount separate projected secrets for controller and API
     templates:
       - templates/deployment.yaml
     asserts:
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: secrets
-            secret:
-              secretName: RELEASE-NAME-greenkube
+      - equal:
+          path: spec.template.spec.volumes[0].name
+          value: controller-secrets
+      - equal:
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.name
+          value: RELEASE-NAME-greenkube
+      - equal:
+          path: spec.template.spec.volumes[1].name
+          value: api-secrets
+      - equal:
+          path: spec.template.spec.volumes[1].projected.sources[0].secret.name
+          value: RELEASE-NAME-greenkube
 
   - it: should not add a data volume in postgres mode
     templates:
@@ -366,7 +472,7 @@ tests:
       - templates/deployment.yaml
     asserts:
       - equal:
-          path: spec.template.spec.volumes[0].secret.secretName
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.name
           value: RELEASE-NAME-greenkube
 
   - it: should reference an external secret when existingSecret is set
@@ -376,11 +482,10 @@ tests:
       - templates/deployment.yaml
     asserts:
       - equal:
-          path: spec.template.spec.volumes[0].secret.secretName
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.name
           value: my-external-secret
-      - contains:
-          path: spec.template.spec.containers[0].envFrom
-          content:
-            secretRef:
-              name: my-external-secret
-              optional: true
+      - equal:
+          path: spec.template.spec.volumes[1].projected.sources[0].secret.name
+          value: my-external-secret
+      - isNull:
+          path: spec.template.spec.containers[0].envFrom[1].secretRef

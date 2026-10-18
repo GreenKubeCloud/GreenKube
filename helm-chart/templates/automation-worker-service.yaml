@@ -1,0 +1,23 @@
+{{- $workerComponent := "automation" -}}
+{{- if ne .Values.profile "production" -}}
+  {{- $workerComponent = "automation-worker" -}}
+{{- end -}}
+{{- if and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "worker") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "greenkube.fullname" . }}-automation-worker-metrics
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: automation-worker-metrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: worker-metrics
+      port: {{ include "greenkube.workerMetricsPort" . }}
+      targetPort: worker-metrics
+      protocol: TCP
+  selector:
+    {{- include "greenkube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $workerComponent }}
+{{- end }}

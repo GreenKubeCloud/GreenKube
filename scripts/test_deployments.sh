@@ -11,12 +11,13 @@
 #   - minikube running
 #   - helm 3 installed
 #   - kubectl configured
-#   - Docker image built: eval $(minikube docker-env) && docker build -t greenkube/greenkube:0.2.3-test .
+#   - Docker image built locally; the script loads it into the selected profile.
 #
 # Usage:
 #   ./scripts/test_deployments.sh              # Run all scenarios
 #   ./scripts/test_deployments.sh --quick      # Skip slow scenarios (demo)
 #   ./scripts/test_deployments.sh --scenario 3 # Run a single scenario
+#   MINIKUBE_PROFILE=greenkube-qa KUBECONFIG=/tmp/greenkube-qa-kubeconfig ./scripts/test_deployments.sh
 #
 # =============================================================================
 
@@ -25,8 +26,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-CHART_DIR="$(cd "$(dirname "$0")/../helm-chart" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CHART_DIR="$REPO_ROOT/helm-chart"
 IMAGE_TAG="greenkube/greenkube:0.2.3-test"
+MINIKUBE_PROFILE="${MINIKUBE_PROFILE:-minikube}"
+MINIKUBE_NODE=""
 WAIT_TIMEOUT=120   # seconds to wait for pods
 HEALTH_RETRIES=30  # retries for health check (x 4s = 120s max)
 QUICK=false
@@ -238,22 +242,27 @@ if ! command -v minikube &>/dev/null; then echo "❌ minikube not found"; exit 1
 if ! command -v helm &>/dev/null;     then echo "❌ helm not found"; exit 1; fi
 if ! command -v kubectl &>/dev/null;  then echo "❌ kubectl not found"; exit 1; fi
 
-if ! minikube status 2>/dev/null | grep -q "host: Running"; then
-    log_fail "Minikube is not running. Start it with: minikube start"
+if ! minikube -p "$MINIKUBE_PROFILE" status 2>/dev/null | grep -q "host: Running"; then
+    log_fail "Minikube profile $MINIKUBE_PROFILE is not running. Start it with: minikube -p $MINIKUBE_PROFILE start"
     exit 1
 fi
+minikube -p "$MINIKUBE_PROFILE" update-context >/dev/null
 log_pass "All prerequisites met."
 
 # Make sure we're in default namespace context
 kubectl config set-context --current --namespace=default &>/dev/null
-
-# Check if the test image exists in minikube
-eval $(minikube docker-env 2>/dev/null) || true
-if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
-    log_warn "Image $IMAGE_TAG not found in minikube Docker. Building..."
-    cd "$(dirname "$0")/.."
-    docker build -t "$IMAGE_TAG" . 2>&1 | tail -3
+MINIKUBE_NODE="$(kubectl get nodes --no-headers -o custom-columns=:metadata.name | head -1)"
+if [[ -z "$MINIKUBE_NODE" ]]; then
+    log_fail "No Kubernetes node is available in Minikube profile $MINIKUBE_PROFILE."
+    exit 1
 fi
+
+# Ensure the test image is available locally and load it into the selected profile.
+if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
+    log_warn "Image $IMAGE_TAG not found locally. Building..."
+    docker build -t "$IMAGE_TAG" "$REPO_ROOT"
+fi
+minikube -p "$MINIKUBE_PROFILE" image load "$IMAGE_TAG"
 
 # Verify Helm templates render without errors
 log_info "Verifying Helm chart template rendering..."
@@ -461,7 +470,7 @@ if should_run 6; then
     cleanup_namespace "$NS"
 
     # Label minikube node with a zone
-    kubectl label nodes minikube topology.kubernetes.io/zone=FR --overwrite 2>/dev/null || true
+    kubectl label nodes "$MINIKUBE_NODE" topology.kubernetes.io/zone=FR --overwrite 2>/dev/null || true
 
     if helm install greenkube "$CHART_DIR" \
         -n "$NS" --create-namespace \
@@ -491,7 +500,7 @@ if should_run 6; then
         record_result 6 "On-prem with node labels" "FAIL"
     fi
     # Remove label
-    kubectl label nodes minikube topology.kubernetes.io/zone- 2>/dev/null || true
+    kubectl label nodes "$MINIKUBE_NODE" topology.kubernetes.io/zone- 2>/dev/null || true
     cleanup_namespace "$NS"
 fi
 

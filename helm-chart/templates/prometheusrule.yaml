@@ -1,0 +1,69 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "greenkube.fullname" . }}-automation
+  namespace: {{ .Values.monitoring.prometheusRule.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: greenkube.automation
+      rules:
+        - alert: GreenKubeAutomationOperationsStuck
+          expr: greenkube_automation_backlog{queue="operations",state="stuck"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube plan operations are stuck
+            description: One or more automation operations have exceeded their stale threshold.
+        - alert: GreenKubeAutomationOperationFailed
+          expr: greenkube_automation_backlog{queue="operations",state="failed"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube plan operations failed
+            description: One or more automation operations exhausted their retry policy.
+        - alert: GreenKubeAutomationPlansStuck
+          expr: greenkube_automation_backlog{queue="plans",state="stuck"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube plans are waiting too long
+            description: One or more applying or merged plans have not advanced within the stale threshold.
+        - alert: GreenKubeAutomationSyncFailed
+          expr: greenkube_automation_backlog{queue="plans",state="sync_failed"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube GitOps synchronization failed
+            description: One or more plans require operator review after a controller sync failure.
+        - alert: GreenKubeWebhookDeliveriesStuck
+          expr: greenkube_automation_backlog{queue="webhooks",state="stuck"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube webhook deliveries are not reconciling
+            description: One or more verified provider deliveries remain non-terminal beyond the stale threshold.
+        - alert: GreenKubeAutomationWorkerStale
+          expr: |
+            greenkube_automation_backlog{queue="workers",state="stale"} > 0
+            and on (job, instance)
+            sum by (job, instance) (
+              greenkube_automation_backlog{queue="operations",state=~"queued|retrying"}
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube automation worker heartbeat is stale
+            description: At least one persisted automation worker heartbeat is older than the stale threshold.
+{{- end }}

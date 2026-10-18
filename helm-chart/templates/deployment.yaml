@@ -7,7 +7,7 @@ metadata:
     {{- include "greenkube.labels" . | nindent 4 }}
 spec:
   # NOTE (ARCH-009): The pod runs two containers — the collector/scheduler and
-  # the API server.  Both share the same database via envFrom secrets.  The
+  # the API server. Both use explicitly projected database credentials. The
   # collector writes metrics with ON CONFLICT DO UPDATE semantics, so the API
   # may briefly serve stale or partially-updated data between collection cycles.
   # This eventual-consistency trade-off is acceptable for a monitoring tool and
@@ -86,15 +86,16 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
-            - secretRef:
-                name: {{ include "greenkube.secretName" . }}
-                optional: true
 
 
           # Explicitly map Prometheus-related variables from the ConfigMap/Secret
           # using valueFrom. These explicit env entries take precedence over
           # envFrom and avoid any chance of multi-line rendering issues.
           env:
+            - name: AUTOMATION_ENABLED
+              value: {{ and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline") | quote }}
+            - name: AUTOMATION_MODE
+              value: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline")) | quote }}
             {{- if eq .Values.config.db.type "postgres" }}
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
@@ -135,9 +136,10 @@ spec:
           {{- end }}
 
           volumeMounts:
-            - name: secrets
-              mountPath: /etc/greenkube/secrets
-              readOnly: true
+            {{ include "greenkube.applicationSecretVolumeMount" (dict "volumeName" "controller-secrets") | nindent 12 }}
+            {{- if and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline") }}
+            {{ include "greenkube.gitProviderVolumeMount" . | nindent 12 }}
+            {{- end }}
             - name: tmp
               mountPath: /tmp
             {{- if eq .Values.config.db.type "sqlite" }}
@@ -161,10 +163,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
-            - secretRef:
-                name: {{ include "greenkube.secretName" . }}
-                optional: true
           env:
+            {{- if eq .Values.config.apiAuthMode "api_key" }}
+            - name: GREENKUBE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.secretName" . }}
+                  key: GREENKUBE_API_KEY
+                  optional: true
+            {{- end }}
             {{- if eq .Values.config.db.type "postgres" }}
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
@@ -189,9 +196,9 @@ spec:
               exec:
                 command: ["sleep", "5"]
           volumeMounts:
-            - name: secrets
-              mountPath: /etc/greenkube/secrets
-              readOnly: true
+            {{ include "greenkube.applicationSecretVolumeMount" (dict "volumeName" "api-secrets") | nindent 12 }}
+            {{ include "greenkube.gitProviderVolumeMount" . | nindent 12 }}
+            {{ include "greenkube.webhookSecretVolumeMount" . | nindent 12 }}
             - name: tmp-api
               mountPath: /tmp
             {{- if eq .Values.config.db.type "sqlite" }}
@@ -224,15 +231,22 @@ spec:
             {{- toYaml .Values.apiResources | nindent 12 }}
         {{- end }}
       volumes:
-        - name: secrets
-          secret:
-            secretName: {{ include "greenkube.secretName" . }}
+        {{ include "greenkube.applicationSecretVolume" (dict "context" . "component" "controller" "volumeName" "controller-secrets") | nindent 8 }}
+        {{- if .Values.config.api.enabled }}
+        {{ include "greenkube.applicationSecretVolume" (dict "context" . "component" "api" "volumeName" "api-secrets") | nindent 8 }}
+        {{- end }}
+        {{- if or .Values.config.api.enabled (and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline")) }}
+        {{ include "greenkube.gitProviderVolume" . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.config.api.enabled }}
+        {{ include "greenkube.webhookSecretVolume" . | nindent 8 }}
+        {{- end }}
         - name: tmp
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
         - name: tmp-api
           emptyDir:
-            sizeLimit: 64Mi
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
         {{- if eq .Values.config.db.type "sqlite" }}
         - name: data
           {{- if .Values.config.persistence.enabled }}

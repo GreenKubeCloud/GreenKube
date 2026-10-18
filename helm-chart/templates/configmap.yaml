@@ -1,3 +1,39 @@
+{{- $automationMode := include "greenkube.automationMode" . }}
+{{- $gitProviderConfig := include "greenkube.gitProviderConfigJson" . }}
+{{- if not (kindIs "map" .Values.automation.policy) }}
+{{- fail "automation.policy must be a map" }}
+{{- end }}
+{{- if not (kindIs "map" .Values.automation.pullRequests) }}
+{{- fail "automation.pullRequests must be a map" }}
+{{- end }}
+{{- $prPollInterval := .Values.automation.prPollIntervalSeconds | toString }}
+{{- if not (regexMatch "^[0-9]+$" $prPollInterval) }}
+{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
+{{- end }}
+{{- $prPollIntervalSeconds := int $prPollInterval }}
+{{- if or (lt $prPollIntervalSeconds 10) (gt $prPollIntervalSeconds 86400) }}
+{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
+{{- end }}
+{{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | toString }}
+{{- if not (regexMatch "^[0-9]+$" $syncPollInterval) }}
+{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
+{{- end }}
+{{- $syncPollIntervalSeconds := int $syncPollInterval }}
+{{- if or (lt $syncPollIntervalSeconds 10) (gt $syncPollIntervalSeconds 86400) }}
+{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
+{{- end }}
+{{- $syncTimeout := .Values.automation.syncTimeoutSeconds | toString }}
+{{- if not (regexMatch "^[0-9]+$" $syncTimeout) }}
+{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
+{{- end }}
+{{- $syncTimeoutSeconds := int $syncTimeout }}
+{{- if or (lt $syncTimeoutSeconds 60) (gt $syncTimeoutSeconds 86400) }}
+{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
+{{- end }}
+{{- include "greenkube.validateAutomationWebhooks" . -}}
+{{- if not (has $automationMode (list "inline" "worker" "disabled")) }}
+{{- fail "automation.mode must be inline, worker, or disabled" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,6 +50,28 @@ data:
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   ENVIRONMENT: {{ .Values.config.environment | quote }}
   API_AUTH_MODE: {{ .Values.config.apiAuthMode | quote }}
+  SERVICE_URL_ALLOWLIST: {{ join "," (.Values.config.serviceUrlAllowlist | default (list)) | quote }}
+  AUTOMATION_ENABLED: {{ and .Values.automation.enabled (eq $automationMode "inline") | quote }}
+  AUTOMATION_MODE: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq $automationMode "inline")) | quote }}
+  GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
+  GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
+  GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
+  GITOPS_SYNC_POLL_INTERVAL: {{ $syncPollInterval | quote }}
+  GITOPS_SYNC_TIMEOUT: {{ $syncTimeout | quote }}
+  GITOPS_POLICY_JSON: {{ .Values.automation.policy | toJson | quote }}
+  GITOPS_PULL_REQUESTS_JSON: {{ .Values.automation.pullRequests | toJson | quote }}
+  {{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
+  GITOPS_RENDERER_URL: {{ printf "http://%s-renderer:%v" (include "greenkube.fullname" .) .Values.rendererSandbox.servicePort | quote }}
+  GITOPS_RENDERER_EGRESS_FIREWALL: {{ .Values.rendererSandbox.egressFirewall.enabled | quote }}
+  {{- else }}
+  GITOPS_RENDERER_URL: ""
+  GITOPS_RENDERER_EGRESS_FIREWALL: "false"
+  {{- end }}
+  GITOPS_SECRET_MOUNT: "/etc/greenkube/git-providers"
+  {{- if .Values.automation.webhooks.enabled }}
+  GITOPS_WEBHOOK_SECRET_FILE: {{ include "greenkube.webhookSecretFilePath" . | quote }}
+  {{- end }}
+  GITOPS_PROVIDERS_JSON: {{ $gitProviderConfig | quote }}
   # Name of the Helm-managed Secret — used by the API to persist runtime
   # configuration overrides (UI-set tokens/URLs) back into the Secret.
   GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}
@@ -32,6 +90,9 @@ data:
   METRICS_RAW_RETENTION_DAYS: {{ .Values.config.metricsRawRetentionDays | quote }}
   METRICS_AGGREGATED_RETENTION_DAYS: {{ .Values.config.metricsAggregatedRetentionDays | quote }}
   K8S_REQUEST_TIMEOUT: {{ .Values.config.k8sRequestTimeout | quote }}
+  KUBERNETES_METRICS_API_ENABLED: {{ .Values.config.kubernetesMetricsApiEnabled | quote }}
+  GITOPS_HELM_KUBE_VERSION: {{ .Capabilities.KubeVersion.Version | quote }}
+  GITOPS_HELM_API_VERSIONS_JSON: {{ .Capabilities.APIVersions | toJson | quote }}
 
   # --- Database Config ---
   DB_TYPE: {{ .Values.config.db.type | quote }}
@@ -78,6 +139,7 @@ data:
   # --- Recommendation Engine Config ---
   {{- with .Values.config.recommendations }}
   RECOMMENDATION_LOOKBACK_DAYS: {{ .lookbackDays | quote }}
+  RECOMMENDATION_MAX_METRIC_ROWS: {{ .maxMetricRows | default 750000 | int | quote }}
   RIGHTSIZING_CPU_THRESHOLD: {{ .rightsizingCpuThreshold | quote }}
   RIGHTSIZING_MEMORY_THRESHOLD: {{ .rightsizingMemoryThreshold | quote }}
   RIGHTSIZING_HEADROOM: {{ .rightsizingHeadroom | quote }}
@@ -112,12 +174,5 @@ data:
   VERIFICATION_MIN_READINESS: {{ .minReadiness | default 0.99 | quote }}
   VERIFICATION_MAX_THROTTLE_RATIO: {{ .maxThrottleRatio | default 0.05 | quote }}
   RECOMMENDATION_LIFECYCLE_INTERVAL: {{ .lifecycleInterval | default "5m" | quote }}
-  {{- end }}
-  {{- with .git }}
-  GIT_PROVIDER: {{ .provider | default "github" | quote }}
-  GIT_API_BASE_URL: {{ .apiBaseUrl | default "" | quote }}
-  GIT_DEFAULT_BRANCH: {{ .defaultBranch | default "main" | quote }}
-  GIT_COMMIT_AUTHOR_NAME: {{ .commitAuthorName | default "GreenKube Bot" | quote }}
-  GIT_COMMIT_AUTHOR_EMAIL: {{ .commitAuthorEmail | default "bot@greenkube.cloud" | quote }}
   {{- end }}
   {{- end }}

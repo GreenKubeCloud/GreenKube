@@ -1,0 +1,194 @@
+suite: dedicated automation worker metrics
+templates:
+  - templates/production-deployments.yaml
+  - templates/automation-worker.yaml
+  - templates/automation-worker-service.yaml
+  - templates/automation-worker-servicemonitor.yaml
+
+tests:
+  - it: enables a metrics listener in production worker mode
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].ports[0].name
+          value: worker-metrics
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 8001
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].env[2]
+          value:
+            name: GREENKUBE_WORKER_METRICS_PORT
+            value: "8001"
+
+  - it: renders an internal worker metrics service in production worker mode
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/automation-worker-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0].port
+          value: 8001
+      - equal:
+          path: spec.ports[0].targetPort
+          value: worker-metrics
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: automation
+
+  - it: renders an internal metrics service for standalone worker mode
+    set:
+      automation.enabled: true
+      automation.mode: worker
+    templates:
+      - templates/automation-worker-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: automation-worker
+
+  - it: renders a worker ServiceMonitor in worker mode
+    set:
+      automation.enabled: true
+      automation.mode: worker
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: observability
+    templates:
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.namespace
+          value: observability
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: automation-worker-metrics
+      - equal:
+          path: spec.endpoints[0].port
+          value: worker-metrics
+      - equal:
+          path: spec.endpoints[0].path
+          value: /prometheus/metrics
+
+  - it: scrapes a standalone worker using its deployment selector
+    set:
+      automation.enabled: true
+      automation.mode: worker
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/automation-worker-service.yaml
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - template: templates/automation-worker-service.yaml
+        equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: automation-worker
+      - template: templates/automation-worker-servicemonitor.yaml
+        isKind:
+          of: ServiceMonitor
+
+  - it: authenticates the worker scrape with the configured API key
+    set:
+      profile: production
+      automation.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      secrets.apiKey: test-key
+    templates:
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.type
+          value: Bearer
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.key
+          value: GREENKUBE_API_KEY
+
+  - it: uses the generated API key for worker scrape credentials by default
+    set:
+      profile: production
+      automation.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.endpoints[0].authorization.credentials.name
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.key
+          value: GREENKUBE_API_KEY
+
+  - it: uses the existing Secret for worker scrape credentials
+    set:
+      profile: production
+      automation.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      secrets.existingSecret: shared-greennkube-secrets
+    templates:
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.name
+          value: shared-greennkube-secrets
+
+  - it: does not render a worker ServiceMonitor when monitoring is disabled
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does not render worker monitoring when production automation is inline or disabled
+    set:
+      profile: production
+      automation.enabled: true
+      automation.mode: inline
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/automation-worker-service.yaml
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does not render worker monitoring when production automation is disabled
+    set:
+      profile: production
+      automation.enabled: false
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/automation-worker-service.yaml
+      - templates/automation-worker-servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: validates the worker metrics port
+    set:
+      profile: production
+      automation.enabled: true
+      automation.workerMetricsPort: 65536
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.workerMetricsPort must be an integer between 1 and 65535

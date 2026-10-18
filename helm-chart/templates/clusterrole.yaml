@@ -39,6 +39,13 @@ rules:
   verbs:
   - get
   - list
+  # PDB interaction evidence is evaluated before a plan is created or approved.
+- apiGroups: ["policy"]
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - get
+  - list
   # GreenKube reads recommendation-mode VPAs (updateMode: Off) when the VPA
   # connector is enabled. Read-only and harmless when the CRD is absent.
 - apiGroups: ["autoscaling.k8s.io"]
@@ -66,4 +73,45 @@ rules:
   verbs:
   - get
   - list
-{{- end }}
+  # GitOps discovery reads Argo CD Applications and projects.
+- apiGroups: ["argoproj.io"]
+  resources:
+  - applications
+  - appprojects
+  verbs:
+  - get
+  - list
+  - watch
+  # Flux discovery reads source, HelmChart, Kustomization, and HelmRelease resources.
+- apiGroups: ["source.toolkit.fluxcd.io"]
+  resources:
+  - gitrepositories
+  - ocirepositories
+  - helmrepositories
+  - buckets
+  - helmcharts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["kustomize.toolkit.fluxcd.io"]
+  resources:
+  - kustomizations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["helm.toolkit.fluxcd.io"]
+  resources:
+  - helmreleases
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["metrics.k8s.io"]
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  {{- end }}

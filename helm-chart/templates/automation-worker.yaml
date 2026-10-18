@@ -1,0 +1,116 @@
+{{- if and (ne .Values.profile "production") .Values.automation.enabled (eq (include "greenkube.automationMode" .) "worker") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-automation-worker" (include "greenkube.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: automation-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: automation-worker
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: automation-worker
+    spec:
+      serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}
+          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - sh
+            - -c
+            - until nc -z {{ include "greenkube.fullname" . }}-postgres 5432; do echo waiting for postgres; sleep 2; done
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}-automation-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          command: ["python"]
+          args: ["-m", "greenkube.cli.automation_worker", "--queue", "plans"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "greenkube.fullname" . }}
+          env:
+            - name: AUTOMATION_ENABLED
+              value: "true"
+            - name: AUTOMATION_MODE
+              value: worker
+            - name: GREENKUBE_WORKER_METRICS_PORT
+              value: {{ include "greenkube.workerMetricsPort" . | quote }}
+            {{- if eq .Values.config.db.type "postgres" }}
+            - name: DB_SCHEMA
+              value: {{ .Values.config.db.schema | quote }}
+            - name: DB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "greenkube.secretName" . }}
+                  key: DB_CONNECTION_STRING
+            {{- end }}
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: worker-metrics
+              containerPort: {{ include "greenkube.workerMetricsPort" . }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{ include "greenkube.applicationSecretVolumeMount" (dict "volumeName" "worker-secrets") | nindent 12 }}
+            {{ include "greenkube.gitProviderVolumeMount" . | nindent 12 }}
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq .Values.config.db.type "sqlite" }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        {{ include "greenkube.applicationSecretVolume" (dict "context" . "component" "automation-worker" "volumeName" "worker-secrets") | nindent 8 }}
+        {{ include "greenkube.gitProviderVolume" . | nindent 8 }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
+        {{- if eq .Values.config.db.type "sqlite" }}
+        - name: data
+          {{- if .Values.config.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "greenkube.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+{{- end }}

@@ -7,8 +7,8 @@ metadata:
     {{- include "greenkube.labels" . | nindent 4 }}
     app.kubernetes.io/component: migration
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.production.migration.backoffLimit }}
@@ -20,8 +20,7 @@ spec:
     spec:
       restartPolicy: OnFailure
       # The migration hook runs before production component resources are
-      # created, so it must use the namespace's default service account.
-      # It does not call the Kubernetes API.
+      # considered ready; it does not call the Kubernetes API.
       serviceAccountName: default
       automountServiceAccountToken: false
       securityContext:
@@ -30,6 +29,31 @@ spec:
         runAsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      {{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}
+          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - sh
+            - -c
+            - >-
+              for attempt in $(seq 1 60); do
+                if nc -z {{ include "greenkube.fullname" . }}-postgres 5432; then exit 0; fi;
+                sleep 2;
+              done;
+              echo "PostgreSQL did not become ready for schema migrations" >&2;
+              exit 1
+      {{- end }}
       containers:
         - name: migration
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

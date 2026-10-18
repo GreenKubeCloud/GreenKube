@@ -74,6 +74,65 @@ If secrets.existingSecret is set, use that; otherwise use the chart-managed name
 {{- end -}}
 
 {{/*
+Project only the application Secret keys required by one component.
+*/}}
+{{- define "greenkube.applicationSecretItems" -}}
+{{- $context := .context -}}
+{{- $component := .component -}}
+{{- $keys := list -}}
+{{- if eq $context.Values.config.db.type "postgres" -}}
+  {{- $keys = append $keys "DB_CONNECTION_STRING" -}}
+{{- end -}}
+{{- if or (eq $component "api") (eq $component "controller") (eq $component "app") -}}
+  {{- range $key := list
+      "ELECTRICITY_MAPS_TOKEN"
+      "BOAVIZTA_TOKEN"
+      "PROMETHEUS_URL"
+      "PROMETHEUS_USERNAME"
+      "PROMETHEUS_PASSWORD"
+      "PROMETHEUS_BEARER_TOKEN"
+      "OPENCOST_API_URL"
+      "OPENCOST_USERNAME"
+      "OPENCOST_PASSWORD"
+      "OPENCOST_BEARER_TOKEN"
+      "BOAVIZTA_API_URL"
+      "WATTNET_EMAIL"
+      "WATTNET_PASSWORD"
+  -}}
+    {{- $keys = append $keys $key -}}
+  {{- end -}}
+{{- end -}}
+{{- if or (eq $component "api") (eq $component "automation") (eq $component "automation-worker") -}}
+  {{- $keys = append $keys "GREENKUBE_API_KEY" -}}
+{{- end -}}
+{{- range $key := $keys }}
+- key: {{ $key }}
+  path: {{ $key }}
+{{- end -}}
+{{- end -}}
+
+{{- define "greenkube.applicationSecretVolumeMount" -}}
+{{- $volumeName := .volumeName | default "secrets" -}}
+- name: {{ $volumeName }}
+  mountPath: /etc/greenkube/secrets
+  readOnly: true
+{{- end -}}
+
+{{- define "greenkube.applicationSecretVolume" -}}
+{{- $context := .context -}}
+{{- $component := .component -}}
+{{- $volumeName := .volumeName | default "secrets" -}}
+- name: {{ $volumeName }}
+  projected:
+    sources:
+      - secret:
+          name: {{ include "greenkube.secretName" $context }}
+          optional: true
+          items:
+            {{- include "greenkube.applicationSecretItems" (dict "context" $context "component" $component) | nindent 12 }}
+{{- end -}}
+
+{{/*
 Return the ServiceAccount used by a production component.
 */}}
 {{- define "greenkube.componentServiceAccountName" -}}
@@ -85,4 +144,33 @@ Return the production Lease name.
 */}}
 {{- define "greenkube.leaseName" -}}
 {{- default (printf "%s-leader" (include "greenkube.fullname" .)) .Values.production.leaderElection.leaseName | trunc 63 | trimSuffix "-" }}
+{{- end -}}
+
+{{/*
+Return the configured automation mode, defaulting by deployment profile.
+*/}}
+{{- define "greenkube.automationMode" -}}
+{{- $mode := .Values.automation.mode | default "" -}}
+{{- if $mode -}}
+{{- $mode -}}
+{{- else if eq .Values.profile "production" -}}
+worker
+{{- else -}}
+inline
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate and return the dedicated worker metrics port.
+*/}}
+{{- define "greenkube.workerMetricsPort" -}}
+{{- $rawPort := .Values.automation.workerMetricsPort | toString -}}
+{{- if not (regexMatch "^[0-9]+$" $rawPort) -}}
+{{- fail "automation.workerMetricsPort must be an integer between 1 and 65535" -}}
+{{- end -}}
+{{- $port := int $rawPort -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail "automation.workerMetricsPort must be an integer between 1 and 65535" -}}
+{{- end -}}
+{{- $port -}}
 {{- end -}}
