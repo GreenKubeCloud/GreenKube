@@ -172,6 +172,14 @@ instance should be used to validate authentication, separated components,
 leader election, migrations, and HTTPRoute behavior. Neither instance should
 be exposed publicly without authentication and network controls.
 
+In the production profile, `production.leaderElection.enabled` configures the
+controller's namespaced Kubernetes Lease. The chart supplies
+`LEADER_ELECTION_ENABLED`, `LEADER_ELECTION_LEASE_NAME`, and
+`LEADER_ELECTION_LEASE_NAMESPACE`; only the Lease holder runs controller jobs,
+GitOps discovery, and sync observation. A controller that cannot read or update
+the Lease stays in standby. Leader election defaults to disabled outside this
+profile, preserving single-process and standalone operation.
+
 ## Local Gitea pull requests
 
 The local validation repository is:
@@ -186,18 +194,13 @@ Create the Gitea port-forward when needed:
 kubectl -n gitea port-forward svc/gitea-http 18086:3000
 ```
 
-The configured account is `greenkube`. GreenKube uses the Git token stored in
-the production Secret; retrieve it without printing it:
-
-```bash
-kubectl -n greenkube-local-prod get secret greenkube-local-prod \
-  -o jsonpath='{.data.GIT_TOKEN}' | base64 -d
-```
-
-Use that value as the password/token for local API or Git operations. The
-Recommendations page places pending and open pull requests in the **Pull
-requests** tab and removes those recommendations from **Active** until their
-pull request is closed.
+Configure a namespaced Kubernetes Secret and reference its key from
+`automation.providers`; do not copy provider credentials into Helm values,
+ConfigMaps, or shell output. The API and worker mount only the configured
+provider keys read-only, and the provider allowlist should include only the
+local test repository. The Recommendations page places pending and open pull
+requests in the **Pull requests** tab and removes those recommendations from
+**Active** until their pull request is closed.
 
 In the production profile, the API ServiceAccount has read-only Kubernetes
 permissions for health and inventory endpoints. The controller and automation

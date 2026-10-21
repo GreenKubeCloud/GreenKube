@@ -295,7 +295,7 @@ Analyzes `CombinedMetric` data to identify optimization opportunities. It is the
 
 **Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort, actionability and source authority.
 
-See [docs/specs/optimization-engine.md](specs/optimization-engine.md) for the full specification.
+See [docs/specs/gitops-automation.md](specs/gitops-automation.md) for the target actionable-optimization and GitOps source-graph specification.
 
 **Configuration:** All thresholds, source flags and ranking settings are configurable via `config.py` and Helm values.
 

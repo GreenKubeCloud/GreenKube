@@ -40,6 +40,19 @@ The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from t
 
 Raw `/metrics` listing accepts at most 30 days by default (`config.metricsListMaxRangeDays`); wider exports should use the report endpoints.
 
+### GitOps discovery
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/gitops/status` | Check controller/source CRD availability with bounded probes and return freshness-aware coverage. |
+| `POST` | `/gitops/refresh` | Run and persist one explicit discovery refresh. |
+| `GET` | `/gitops/bindings` | Read one cursor-paginated binding page (`limit` defaults to 50, maximum 100; optional repeated `status` filters and opaque `cursor`). |
+| `GET` | `/gitops/bindings/{namespace}/{workload_kind}/{workload_name}` | Read one binding and bounded candidate provenance. |
+| `POST` | `/gitops/bindings/{namespace}/{workload_kind}/{workload_name}/resolve` | Select one current candidate using its server-issued generation token. |
+| `GET` | `/gitops/coverage` | Return freshness-aware binding counts without loading the binding table into the API process. |
+
+When a binding page has more items, `has_more` is true and `next_cursor` can be sent as the next request's `cursor`. A resolved or ambiguous binding/candidate whose observation is at least 30 minutes old or whose expiry has passed is reported as `stale` on read; `blocked` remains a distinct status. `POST /gitops/refresh` remains the explicit discovery trigger.
+
 ### Recommendations and automation
 
 | Method | Path | Description |
@@ -56,14 +69,35 @@ Raw `/metrics` listing accepts at most 30 days by default (`config.metricsListMa
 | `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. |
 | `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore a recommendation. |
 | `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. |
-| `POST` | `/recommendations/{rec_id}/apply-pr` | Preview a manifest patch or enqueue a Git pull-request operation. |
-| `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | Check whether a recommendation can be submitted through the PR bot. |
+| `POST` | `/recommendations/{rec_id}/apply-pr` | Compatibility endpoint that previews or queues a validated GitOps plan. |
+| `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | Check eligibility with a read-only plan preview. |
 | `GET` | `/recommendations/{rec_id}/pull-requests` | List pull-request attempts for one recommendation. |
 | `GET` | `/automation/pull-requests` | List pending or open pull requests. |
-| `GET` | `/automation/status` | Report PR-bot provider and configuration readiness. |
-| `GET` | `/automation/operations/{operation_id}` | Read durable PR-operation status and integrity metadata. |
+| `GET` | `/automation/status` | Report secret-free automation readiness: worker heartbeat, queue depth, plan backlog, discovery freshness, renderer configuration, and provider capability/preflight state. |
+| `GET` | `/automation/operations/{operation_id}` | Read durable plan-operation state through the compatibility route. |
+| `POST` | `/automation/plans` | Create a render-validated preview from persisted recommendation IDs and the server-resolved GitOps binding. |
+| `GET` | `/automation/plans/{plan_id}` | Read a secret-safe plan preview, including source and rendered diffs. |
+| `POST` | `/automation/plans/{plan_id}/rollback-preview` | Create a validated inverse preview from a synced plan whose linked recommendations remain in `rollback_review`. |
+| `POST` | `/automation/plans/{plan_id}/approve` | Approve the exact `sha256:` digest returned by preview and enqueue the plan. |
+| `POST` | `/automation/plans/{plan_id}/cancel` | Mark a draft, validated, or approved plan stale before application. |
 
-For `POST /recommendations/{rec_id}/apply-pr`, pass `{"dry_run": true}` to receive a manifest diff without changing Git. A normal request is queued and returns `202 Accepted` with an `operation_id`; poll the operation endpoint for its state. A running automation worker is required to execute queued operations; the chart's `production` profile deploys one, while `standalone` does not. `Idempotency-Key` may be supplied to make client retries idempotent. The PR bot currently supports CPU and memory rightsizing recommendations on supported workload manifests.
+For `POST /automation/plans`, send recommendation IDs; when the server reports `needs_chart_mapping`, the one-time Argo Helm flow may also send `values_mapping` with `file_path`, `container`, and a string-key `path` ending in `resources`. The error's `mapping_options` contains only Git-managed files and containers resolved by the server. Repository URLs, paths outside those choices, providers, source bindings, source indices, and credentials are never accepted from the UI. The API re-resolves the binding and render-validates the mapping against the immutable repository snapshot; it is recorded only in that plan. A successful preview includes a digest, changed files, source diff, rendered diff, validation result, and expiry. Approval must include that exact digest; a stale source or digest returns `409` and a successful approval returns the durable `operation_id` and `operation_status`. A read-only eligibility request or legacy `dry_run` does not persist or supersede plans. The plan API supports validated raw YAML/JSON manifests, Kustomize overlays, auto-inferred Argo CD local-chart values mappings (with a one-time mapping flow and the Application annotation as an explicit override), and a fail-closed Flux HelmRelease subset. Flux supports same-snapshot GitRepository charts, `chartRef` to a Git-backed `HelmChart`, safe `chart.spec.valuesFiles`, and Git-inventoried same-repository ConfigMap/Secret `valuesFrom` inputs; the plan continues to update only the HelmRelease's managed post-renderer. Direct remote chart artifacts, cross-repository/revision values, runtime-only or ambiguous references, `valuesFrom.targetPath`, unsupported dependencies, and inline Argo overrides fail with typed reasons.
+
+Example one-time mapping request body: `{"recommendation_ids":[42],"values_mapping":{"file_path":"apps/payments/values.yaml","container":"api","path":["app","resources"]}}`.
+
+Resource recommendations for multiple containers in one workload are composed into one action and plan with one explicit operation per container. If the source renderer cannot safely apply the complete set, the request fails closed rather than silently dropping a container.
+
+Rollback preview takes only the original plan ID. GreenKube snapshots the current immutable ref, retrieves updated files at the original plan's base revision through the authorized provider resolver, and rejects changed paths or any rendered effect outside the exact target. Approval uses the same exact-digest endpoint and worker queue as other plans. Recommendations remain in `rollback_review` through merge and controller sync; they become `reverted` (and their actions `reverted`) only after the rollback plan is `synced`, a post-baseline workload generation is observed, and live per-container requests match the original pre-apply baseline. RAW rollback is built in; Kustomize requires an explicitly configured exact-target rollback adapter; Argo CD `HELM_VALUES` rollback supports only the explicitly mapped local-chart subset. Flux `HELM_RELEASE` rollback restores the original Git-owned HelmRelease file and uses the same local same-revision chart, snapshot-resolvable `valuesFiles`/`valuesFrom`, and GreenKube-managed post-renderer subset as forward planning. It fails closed on stale refs, changed forward files or render output, missing baselines, unrelated rendered changes, remote/cross-revision charts, chart dependencies, runtime-only or cross-repository `valuesFrom`, unsupported `targetPath` merging, unmanaged post-renderers, or unsupported operations.
+
+`POST /recommendations/{rec_id}/apply-pr` remains as a compatibility endpoint, but it uses the same server-resolved, render-validated plan path; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest, returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. The standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].tokenSecret` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
+
+### Provider webhooks
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/webhooks/{provider_id}` | Verify, deduplicate, persist, and reconcile a signed GitHub/Gitea/GitLab pull-request event for an enabled configured provider. |
+
+When `GREENKUBE_API_KEY` is configured, only this `POST` route with a single provider ID segment is exempt from bearer authentication. The provider-native signature/token check is still mandatory. Close events are re-fetched through the allowlisted provider adapter before plan and action state can change; delivery status and safe correlation fields are returned without echoing request payloads or credentials. Merged actions enter `sync_pending`; the controller observes the exact Argo CD/Flux source revision and readiness before moving the plan to `synced`. A sync timeout moves the plan to `sync_failed`. Apply detection requires a synced plan and exact per-container request match. Configure the read-only API Secret projection described in [Configuration](configuration.md#signed-git-provider-webhooks). Provider schemes do not include signed timestamps; polling is the recovery path for missed or unreconciled events.
 
 ### Reports
 
@@ -84,13 +118,33 @@ With `aggregate=true`, report rows can be grouped using `granularity=hourly`, `d
 
 ### Repository bindings
 
-Repository bindings can be managed through this API, but the current PR bot resolves a workload's Git source from its Kubernetes annotations rather than from these bindings.
+GitOps bindings are discovered from Argo CD and Flux controller state. Discovery is read-only except for the operator-approved, expiring resolution of an ambiguous or unresolved binding. All GitOps endpoints use the existing API-key middleware. See the [GitOps automation specification](specs/gitops-automation.md) for supported source layouts and safety rules.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/repository-bindings` | List repository bindings; optional `cluster` filter. |
-| `GET` | `/repository-bindings/{namespace}/{workload_kind}/{workload_name}` | Read a binding; optional `cluster` filter. |
-| `POST` | `/repository-bindings` | Create or update a repository binding. |
+| `GET` | `/gitops/status` | Controller CRD availability, discovery freshness, and binding coverage for an optional `cluster`. |
+| `GET` | `/gitops/bindings` | Bounded binding list; repeat `status=ambiguous&status=unresolved` for actionable bindings and optionally set `limit` (maximum 100). |
+| `GET` | `/gitops/bindings/{namespace}/{workload_kind}/{workload_name}` | Read the resolved binding, candidate sources, and safe provenance; optional `cluster`. |
+| `POST` | `/gitops/bindings/{namespace}/{workload_kind}/{workload_name}/resolve` | Approve one server-provided current candidate; optional `cluster`. Writes an expiring manual resolution and a durable audit event. |
+| `GET` | `/gitops/coverage` | Count resolved, ambiguous, unresolved, blocked, and stale workload bindings; optional `cluster`. |
+
+The resolution request accepts only the candidate ID, its opaque generation token, and explicit confirmation:
+
+```json
+{
+  "candidate_id": "argocd-...",
+  "generation_token": "sha256:<64 lowercase hexadecimal characters>",
+  "confirmed": true
+}
+```
+
+Repository URLs, provider IDs, paths, and renderer configuration are never accepted from the client. The candidate must still belong to an unresolved or ambiguous binding and its controller/source generation must match the token returned by discovery; otherwise the API returns `409` and the operator must refresh candidates. Manual resolutions expire no later than the binding TTL (30 minutes by default) and are re-evaluated by discovery when controller or source identity changes.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/repository-bindings` | Legacy binding view; optional `cluster` filter. |
+| `GET` | `/repository-bindings/{namespace}/{workload_kind}/{workload_name}` | Legacy binding lookup; optional `cluster` filter. |
+| `POST` | `/repository-bindings` | Legacy manual binding endpoint. |
 
 ### Prometheus scrape endpoint
 
@@ -118,4 +172,16 @@ curl -OJ "http://localhost:8000/api/v1/report/export?format=json&last=30d&namesp
 curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
   -H "Content-Type: application/json" \
   -d '{"dry_run": true}'
+
+# Create a digest-addressed GitOps plan preview
+curl -X POST "http://localhost:8000/api/v1/automation/plans" \
+  -H "Authorization: Bearer $GREENKUBE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"recommendation_ids":[42]}'
+
+# Approve the exact digest returned by the preview
+curl -X POST "http://localhost:8000/api/v1/automation/plans/<plan_id>/approve" \
+  -H "Authorization: Bearer $GREENKUBE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"digest":"sha256:<preview-digest>"}'
 ```

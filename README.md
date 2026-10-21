@@ -54,7 +54,7 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 | [API Reference](docs/api.md) | REST API endpoints, parameters, and examples |
 | [CLI Reference](docs/cli.md) | `greenkube start`, `demo`, and other CLI commands |
 | [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, persisted, actioned, and measured |
-| [Optimization engine specification](docs/specs/optimization-engine.md) | Technical specification: multi-source engine, evidence model, ranking, verification |
+| [Actionable optimization & GitOps specification](docs/specs/gitops-automation.md) | Target architecture: source graph, Kustomize/Helm planning, PR lifecycle, multi-agent delivery plan |
 | [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and Grafana dashboard import |
 | [Sustainability score](docs/sustainability-score.md) | How the 0–100 composite score is computed |
 | [Changelog](CHANGELOG.md) | Version history |
@@ -75,7 +75,7 @@ helm install greenkube greenkube/greenkube \
   --create-namespace
 ```
 
-The chart defaults to the `standalone` profile and development configuration. An empty API key leaves protected API routes open, so configure authentication and network controls before exposing an installation. See the [configuration reference](docs/configuration.md#api-authentication-and-runtime-service-settings) for production settings and the `production` profile. Git pull-request operations also require the automation worker, which is rendered by the `production` profile; the standalone profile only queues operations.
+The chart defaults to the `standalone` profile, production authentication, a generated API key, and disabled GitOps automation. Retrieve the key from the chart-managed Secret before calling protected API routes. Enable automation only after configuring a Git provider and its repository allowlist. See the [configuration reference](docs/configuration.md#api-authentication-and-runtime-service-settings) for deployment profiles and provider settings.
 
 Once deployed, access the dashboard:
 

@@ -1,6 +1,6 @@
 # Recommendation Lifecycle
 
-> **Note:** The recommendation component is a multi-source optimization engine. The [Optimization engine specification](specs/optimization-engine.md) preserves its design and completed phased plan; this page documents current end-to-end behavior.
+> **Note:** The recommendation component is a multi-source optimization engine. The [Actionable optimization and GitOps specification](specs/gitops-automation.md) defines the target source-graph, Kustomize/Helm planning and PR lifecycle; this page documents current end-to-end behavior.
 
 This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/optimization/`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
 
@@ -122,18 +122,18 @@ All recommendation API paths are under `/api/v1`.
 | `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied, freezes the verification baseline, and records realized savings. |
 | `PATCH` | `/recommendations/{id}/ignore` | Marks a recommendation as `ignored` and stores the reason. |
 | `DELETE` | `/recommendations/{id}/ignore` | Restores an ignored recommendation to `active`. |
-| `POST` | `/recommendations/{id}/apply-pr` | Resolves the workload's Git source from its annotations and patches the manifest. `dry_run=true` returns a diff immediately; a normal request queues a durable operation and returns `202 Accepted`. |
+| `POST` | `/recommendations/{id}/apply-pr` | Compatibility route to the validated GitOps plan path. `dry_run=true` returns the plan diff; a normal request approves and queues that plan. |
 | `GET` | `/recommendations/{id}/pull-requests` | Lists the pull-request attempts and their status for a recommendation. |
-| `GET` | `/automation/status` | Reports whether the PR bot is configured (provider, token, default branch). |
+| `GET` | `/automation/status` | Reports secret-free automation readiness, worker heartbeat, queue depth, discovery freshness, renderer configuration, and provider capability/preflight state. |
 
-### GitOps PR bot
+### GitOps plan and PR workflow
 
-The bot is documented in detail in the [automation plan](automation-plan.md). In short:
+The bot resolves workload sources from Argo CD and Flux discovery, not from mandatory workload annotations:
 
-1. It reads `greenkube.cloud/git-repo`, `greenkube.cloud/git-path` and `greenkube.cloud/git-branch` annotations from the workload (Deployment, StatefulSet or DaemonSet).
-2. It fetches the manifest through the configured Git provider (`github`, `gitlab` or `gitea`), applies the rightsizing patch with a round-trip YAML editor (comments and formatting are preserved) and renders the PR body from the stored evidence block.
-3. It creates a `greenkube/reco-<id>-<target>` branch, commits the change and opens a pull request. The recommendation moves to `pr_open` and an audit event is written.
-4. After the PR is merged (and ArgoCD or the user syncs it), the **apply detector** observes the lowered request on the live workload, freezes the verification baseline and moves the recommendation to `applied` with `application_method=pr_merge`. The **verifier** later confirms the outcome and switches the ledger from prorated to measured savings.
+1. GreenKube discovers the Git source through Argo CD or Flux and persists a generation-bound workload binding.
+2. The plan API accepts recommendation IDs only, snapshots the authorized Git revision, and validates the source and rendered diff for raw YAML/JSON, Kustomize, and the supported Helm subsets.
+3. Approval binds to the exact preview digest. A durable idempotent worker creates one commit and PR per plan; duplicate requests reuse the same plan operation.
+4. After the PR merges, the controller observes the exact Argo CD/Flux revision and workload readiness. Apply detection compares the post-baseline workload identity and per-container requests; verification attributes measured savings only after its health and evidence gates pass.
 
 Example lifecycle calls:
 
@@ -257,12 +257,8 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `VERIFICATION_MIN_READINESS` | `config.recommendations.verification.minReadiness` | `0.99` |
 | `VERIFICATION_MAX_THROTTLE_RATIO` | `config.recommendations.verification.maxThrottleRatio` | `0.05` |
 | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `config.recommendations.verification.lifecycleInterval` | `5m` |
-| `GIT_PROVIDER` | `config.recommendations.git.provider` | `github` |
-| `GIT_API_BASE_URL` | `config.recommendations.git.apiBaseUrl` | `""` |
-| `GIT_DEFAULT_BRANCH` | `config.recommendations.git.defaultBranch` | `main` |
-| `GIT_TOKEN` (secret) | `secrets.gitToken` / `secrets.existingSecret` | unset (PR bot disabled) |
-
-`RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: the lifecycle job compares live workload requests against the stored current values and marks a recommendation applied when the request dropped by more than the tolerance, or matches the recommended value within it.
+| `RECOMMENDATION_APPLY_TOLERANCE` | Environment variable | `0.25` (must be within `0`–`1`) |
+`RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance. A decrease by itself, including an unrelated large decrease, is not sufficient. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
 
 The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes in the collector/scheduler container) runs apply detection, outcome verification and TTL expiry.
 
