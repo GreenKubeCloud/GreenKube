@@ -58,6 +58,16 @@ async def test_get_server_impact_error(collector):
 
 
 @pytest.mark.asyncio
+async def test_non_cloud_provider_skips_cloud_instance_lookup(collector):
+    with respx.mock(base_url=config.BOAVIZTA_API_URL) as respx_mock:
+        result = await collector.get_server_impact(provider="unknown", instance_type="cpu-6")
+
+        assert result is None
+        assert not respx_mock.calls
+        assert collector._client is None
+
+
+@pytest.mark.asyncio
 async def test_collect_returns_empty_and_missing_parameters_skip_lookup(collector):
     assert await collector.collect() == []
     assert await collector.get_server_impact() is None

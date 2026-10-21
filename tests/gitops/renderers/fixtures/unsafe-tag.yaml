@@ -1,0 +1,1 @@
+!!python/object/apply:builtins.print ["unsafe constructor must not run"]

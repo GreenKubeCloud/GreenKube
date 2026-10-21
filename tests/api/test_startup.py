@@ -103,16 +103,9 @@ def test_heartbeat_route_is_registered_and_public():
     assert response.json()["status"] == "ok"
 
 
-def test_factory_dependencies_share_composed_services():
-    from greenkube.api.dependencies import get_automation_service, get_optimization_engine
-    from greenkube.core.factory import (
-        get_automation_service as factory_automation,
-    )
-    from greenkube.core.factory import (
-        get_optimization_engine as factory_engine,
-    )
+def test_optimization_factory_dependency_is_cached():
+    from greenkube.api.dependencies import get_optimization_engine
+    from greenkube.core.factory import get_optimization_engine as factory_engine
 
-    assert get_automation_service.__name__ == "get_automation_service"
     assert get_optimization_engine.__name__ == "get_optimization_engine"
-    assert factory_automation.cache_info().maxsize == 1
     assert factory_engine.cache_info().maxsize == 1

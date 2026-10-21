@@ -1,11 +1,13 @@
 # tests/core/test_processor.py
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from greenkube.collectors.metrics_server_collector import MetricsServerCollector
 from greenkube.core.calculator import CarbonCalculationResult
-from greenkube.core.config import config
+from greenkube.core.config import Config, config
 from greenkube.core.processor import DataProcessor
 from greenkube.energy.estimator import BasicEstimator
 from greenkube.models.metrics import (
@@ -14,7 +16,7 @@ from greenkube.models.metrics import (
     PodMetric,
 )
 from greenkube.models.node import NodeInfo
-from greenkube.models.prometheus_metrics import PrometheusMetric
+from greenkube.models.prometheus_metrics import ContainerResourceUsage, PrometheusMetric
 
 # Sample data for mocking collectors
 SAMPLE_ENERGY_METRICS = [
@@ -887,3 +889,192 @@ async def test_run_range_uses_historical_node_data(
     args, kwargs = calls[0]
     assert kwargs["node_name"] == "node-1"
     assert kwargs["node_profile"]["vcores"] == 2
+
+
+@pytest.mark.asyncio
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
+async def test_run_range_preserves_container_metrics_for_the_scheduled_pipeline(
+    mock_translator,
+    data_processor,
+    mock_prometheus_collector,
+    mock_pod_collector,
+    mock_node_repository,
+):
+    start = datetime(2023, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2023, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+    mock_translator.return_value = "FR"
+    data_processor._range_processor.combined_metrics_repository.read_combined_metrics = AsyncMock(return_value=[])
+    data_processor._range_processor.opencost_collector.collect_range = AsyncMock(return_value=[])
+    mock_prometheus_collector.collect_pod_storage = AsyncMock(return_value={})
+    mock_pod_collector.collect = AsyncMock(
+        return_value=[
+            PodMetric(
+                pod_name="pod-A",
+                namespace="ns-1",
+                container_name="web",
+                cpu_request=500,
+                memory_request=256 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            PodMetric(
+                pod_name="pod-A",
+                namespace="ns-1",
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                memory_request=64 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+    )
+
+    async def collect_range(*, start, end, step=None, query=None, namespace=None):
+        if query and "container_cpu_usage_seconds_total" in query:
+            return [
+                {
+                    "metric": {"namespace": "ns-1", "pod": "pod-A", "container": "web", "node": "node-1"},
+                    "values": [[1672567200, "0.02"]],
+                },
+                {
+                    "metric": {
+                        "namespace": "ns-1",
+                        "pod": "pod-A",
+                        "container": "telemetry-sidecar",
+                        "node": "node-1",
+                    },
+                    "values": [[1672567200, "0.01"]],
+                },
+            ]
+        if query and "container_memory_working_set_bytes" in query:
+            return [
+                {
+                    "metric": {"namespace": "ns-1", "pod": "pod-A", "container": "web", "node": "node-1"},
+                    "values": [[1672567200, str(120 * 1024**2)]],
+                },
+                {
+                    "metric": {
+                        "namespace": "ns-1",
+                        "pod": "pod-A",
+                        "container": "telemetry-sidecar",
+                        "node": "node-1",
+                    },
+                    "values": [[1672567200, str(40 * 1024**2)]],
+                },
+            ]
+        return []
+
+    mock_prometheus_collector.collect_range = AsyncMock(side_effect=collect_range)
+    data_processor.estimator.calculate_node_energy.return_value = [
+        EnergyMetric(pod_name="pod-A", namespace="ns-1", joules=1_000_000, node="node-1")
+    ]
+    data_processor.estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 10, "maxWatts": 50}}
+    mock_node_repository.get_latest_snapshots_before.return_value = [SAMPLE_NODE_INFO["node-1"]]
+    mock_node_repository.get_snapshots.return_value = []
+
+    metrics = await data_processor.run_range(start, end)
+    containers = [metric for metric in metrics if metric.container_name]
+
+    assert {metric.container_name for metric in containers} == {"web", "telemetry-sidecar"}
+    assert {metric.container_name: metric.cpu_request for metric in containers} == {
+        "web": 500,
+        "telemetry-sidecar": 100,
+    }
+    assert {metric.container_name: metric.cpu_usage_millicores for metric in containers} == {
+        "web": 20,
+        "telemetry-sidecar": 10,
+    }
+
+
+@pytest.mark.asyncio
+@patch("greenkube.core.node_zone_mapper.get_emaps_zone_from_cloud_zone")
+async def test_run_range_uses_metrics_api_when_prometheus_drops_container_labels(
+    mock_translator,
+    data_processor,
+    mock_prometheus_collector,
+    mock_pod_collector,
+    mock_node_repository,
+):
+    now = datetime.now(timezone.utc)
+    aligned_end = datetime.fromtimestamp(int(now.timestamp()) // 300 * 300, tz=timezone.utc)
+    start = aligned_end - timedelta(minutes=5)
+    end = aligned_end
+    mock_translator.return_value = "FR"
+    data_processor._range_processor._config = Config(KUBERNETES_METRICS_API_ENABLED=True)
+    data_processor._range_processor.combined_metrics_repository.read_combined_metrics = AsyncMock(return_value=[])
+    data_processor._range_processor.opencost_collector.collect_range = AsyncMock(return_value=[])
+    mock_prometheus_collector.collect_pod_storage = AsyncMock(return_value={})
+    mock_node_repository.get_latest_snapshots_before.return_value = [SAMPLE_NODE_INFO["node-1"]]
+    mock_node_repository.get_snapshots.return_value = []
+    mock_pod_collector.collect = AsyncMock(
+        return_value=[
+            PodMetric(
+                pod_name="pod-A",
+                namespace="ns-1",
+                container_name="web",
+                cpu_request=500,
+                memory_request=256 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            PodMetric(
+                pod_name="pod-A",
+                namespace="ns-1",
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                memory_request=64 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+    )
+
+    async def collect_range(*, start, end, step=None, query=None, namespace=None):
+        if query and "container_cpu_usage_seconds_total" in query:
+            return [
+                {
+                    "metric": {"namespace": "ns-1", "pod": "pod-A", "node": "node-1"},
+                    "values": [[start.timestamp() + 60, "0.03"]],
+                }
+            ]
+        return []
+
+    mock_prometheus_collector.collect_range = AsyncMock(side_effect=collect_range)
+    data_processor.estimator.calculate_node_energy.return_value = [
+        EnergyMetric(pod_name="pod-A", namespace="ns-1", joules=1_000_000, node="node-1")
+    ]
+    data_processor.estimator.instance_profiles = {"m5.large": {"vcores": 2, "minWatts": 10, "maxWatts": 50}}
+
+    class FakeMetricsServerCollector(MetricsServerCollector):
+        async def collect(self):
+            return [
+                ContainerResourceUsage(
+                    namespace="ns-1",
+                    pod_name="pod-A",
+                    container_name="web",
+                    cpu_usage_millicores=20,
+                    memory_usage_bytes=120 * 1024**2,
+                    timestamp=now,
+                    duration_seconds=15,
+                ),
+                ContainerResourceUsage(
+                    namespace="ns-1",
+                    pod_name="pod-A",
+                    container_name="telemetry-sidecar",
+                    cpu_usage_millicores=10,
+                    memory_usage_bytes=40 * 1024**2,
+                    timestamp=now,
+                    duration_seconds=15,
+                ),
+            ]
+
+    data_processor._range_processor._metrics_server_collector = FakeMetricsServerCollector()
+
+    metrics = await data_processor.run_range(start, end)
+    containers = {metric.container_name: metric for metric in metrics if metric.container_name}
+
+    assert set(containers) == {"web", "telemetry-sidecar"}
+    assert containers["web"].cpu_usage_millicores == 20
+    assert containers["web"].memory_usage_bytes == 120 * 1024**2
+    assert containers["telemetry-sidecar"].cpu_usage_millicores == 10
+    assert containers["telemetry-sidecar"].memory_usage_bytes == 40 * 1024**2

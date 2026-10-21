@@ -34,12 +34,13 @@ def test_standalone_profile_keeps_one_combined_deployment():
 
 
 def test_production_profile_separates_components_and_wires_lease():
-    docs = helm_template("profile=production")
+    docs = helm_template("profile=production", "automation.enabled=true")
     deployments = manifests(docs, "Deployment")
     assert {doc["metadata"]["name"] for doc in deployments} == {
         "greenkube-api",
         "greenkube-controller",
         "greenkube-automation",
+        "greenkube-renderer",
     }
     assert len(manifests(docs, "Job")) >= 1
     assert len(manifests(docs, "Lease")) == 1

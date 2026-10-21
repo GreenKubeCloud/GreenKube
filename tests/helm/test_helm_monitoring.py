@@ -49,7 +49,7 @@ class TestDefaultValues:
     def test_networkpolicy_disabled_by_default(self):
         """NetworkPolicy for Prometheus should be disabled by default."""
         docs = helm_template()
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         assert np is None, "NetworkPolicy should NOT be created with default values"
 
     def test_prometheus_rbac_not_created_by_default(self):
@@ -210,43 +210,43 @@ class TestNetworkPolicy:
 
     def test_networkpolicy_created_when_enabled(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         assert np is not None, "NetworkPolicy should be created when enabled"
 
     def test_networkpolicy_not_created_when_disabled(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=false"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         assert np is None, "NetworkPolicy should not be created when disabled"
 
     def test_networkpolicy_in_release_namespace(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         assert np["metadata"]["namespace"] == "greenkube"  # type: ignore[index]
 
     def test_networkpolicy_selects_app_pods(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         labels = np["spec"]["podSelector"]["matchLabels"]  # type: ignore[index]
         assert labels.get("app.kubernetes.io/name") == "greenkube"
         assert labels.get("app.kubernetes.io/component") == "app"
 
     def test_networkpolicy_allows_from_monitoring_namespace(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         ns_labels = ingress_from["namespaceSelector"]["matchLabels"]
         assert ns_labels["kubernetes.io/metadata.name"] == "monitoring"
 
     def test_networkpolicy_allows_from_prometheus_pods(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         pod_labels = ingress_from["podSelector"]["matchLabels"]
         assert pod_labels["app.kubernetes.io/name"] == "prometheus"
 
     def test_networkpolicy_port_matches_api_port(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         port = np["spec"]["ingress"][0]["ports"][0]  # type: ignore[index]
         assert port["port"] == 8000
         assert port["protocol"] == "TCP"
@@ -258,15 +258,18 @@ class TestNetworkPolicy:
                 "monitoring.networkPolicy.prometheusNamespace=observability",
             ]
         )
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
         ingress_from = np["spec"]["ingress"][0]["from"][0]  # type: ignore[index]
         ns_labels = ingress_from["namespaceSelector"]["matchLabels"]
         assert ns_labels["kubernetes.io/metadata.name"] == "observability"
 
-    def test_networkpolicy_only_ingress(self):
+    def test_networkpolicy_restricts_egress_to_dns_and_postgres(self):
         docs = helm_template(["monitoring.networkPolicy.enabled=true"])
-        np = find_manifest(docs, "NetworkPolicy", "allow-prometheus")
-        assert np["spec"]["policyTypes"] == ["Ingress"]  # type: ignore[index]
+        np = find_manifest(docs, "NetworkPolicy", "app-netpol")
+        assert np["spec"]["policyTypes"] == ["Ingress", "Egress"]  # type: ignore[index]
+        egress = np["spec"]["egress"]  # type: ignore[index]
+        assert egress[0]["ports"][0]["port"] == 53
+        assert egress[1]["ports"][0]["port"] == 5432
 
 
 class TestPrometheusRBAC:

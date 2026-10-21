@@ -61,6 +61,13 @@ def _mock_health_response():
     )
 
 
+def _allow_service_hosts(monkeypatch, *hosts: str) -> None:
+    from greenkube.core.config import config
+
+    monkeypatch.setenv("SERVICE_URL_ALLOWLIST", ",".join(hosts))
+    config.reload()
+
+
 class TestGetServicesHealth:
     """Tests for GET /api/v1/health/services."""
 
@@ -155,6 +162,7 @@ class TestUpdateServiceConfig:
 
     def test_update_prometheus_url(self, client, monkeypatch):
         """Should update PROMETHEUS_URL and return fresh health check."""
+        _allow_service_hosts(monkeypatch, "new-prometheus")
 
         with (
             patch(
@@ -175,6 +183,7 @@ class TestUpdateServiceConfig:
 
     def test_update_opencost_url(self, client, monkeypatch):
         """Should update OPENCOST_API_URL and return fresh health check."""
+        _allow_service_hosts(monkeypatch, "opencost")
         with (
             patch(
                 "greenkube.api.routers.health.run_health_checks",
@@ -231,6 +240,7 @@ class TestUpdateServiceConfig:
 
     def test_update_multiple_fields(self, client, monkeypatch):
         """Should accept multiple fields in a single request."""
+        _allow_service_hosts(monkeypatch, "prom", "oc", "custom-boavizta.example.com")
         with (
             patch(
                 "greenkube.api.routers.health.run_health_checks",
@@ -310,7 +320,9 @@ class TestServiceConfigUrlValidation:
             "https://api.boavizta.org",
         ],
     )
-    def test_accepts_in_cluster_and_public_urls(self, client, good_url):
+    def test_accepts_in_cluster_and_public_urls(self, client, good_url, monkeypatch):
+        host = good_url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        _allow_service_hosts(monkeypatch, host)
         with (
             patch(
                 "greenkube.api.routers.health.run_health_checks",

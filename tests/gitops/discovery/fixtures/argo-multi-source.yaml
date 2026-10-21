@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payments-prod
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  sources:
+    - repoURL: https://github.com/acme/apps.git
+      targetRevision: main
+      path: apps/payments
+      helm:
+        releaseName: payments
+        namespace: prod
+        valueFiles:
+          - values-common.yaml
+          - $values/environments/prod/payments.yaml
+    - repoURL: https://github.com/acme/env-config.git
+      targetRevision: release
+      ref: values
+status:
+  sync:
+    revisions:
+      - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      - cccccccccccccccccccccccccccccccccccccccc
+  resources:
+    - group: apps
+      version: v1
+      kind: Deployment
+      namespace: prod
+      name: payments-api

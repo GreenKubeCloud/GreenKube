@@ -9,20 +9,32 @@ from greenkube.models.metrics import (
 )
 
 
-def test_fingerprint_v2_is_stable_and_container_aware():
+def test_fingerprint_v3_is_stable_container_aware_and_owner_scoped():
     common = {
         "pod_name": "pod-a",
         "namespace": "default",
+        "owner_kind": "Deployment",
+        "owner_name": "api",
         "type": RecommendationType.RIGHTSIZING_CPU,
         "description": "resize",
     }
     first = RecommendationRecord(container_name="web", **common)
     second = RecommendationRecord(container_name="web", **common)
     other_container = RecommendationRecord(container_name="worker", **common)
+    other_owner = RecommendationRecord(
+        pod_name="pod-a",
+        namespace="default",
+        owner_kind="StatefulSet",
+        owner_name="api",
+        container_name="web",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        description="resize",
+    )
 
     assert first.fingerprint == second.fingerprint
-    assert first.fingerprint == "v2:pod:default:pod-a:web::RIGHTSIZING_CPU"
+    assert first.fingerprint == "v3:pod:default:pod-a:web::Deployment:api:RIGHTSIZING_CPU"
     assert first.fingerprint != other_container.fingerprint
+    assert first.fingerprint != other_owner.fingerprint
 
 
 def test_recommendation_payloads_are_typed_v2_models():

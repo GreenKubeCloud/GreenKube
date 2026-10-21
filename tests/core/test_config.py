@@ -57,6 +57,72 @@ class TestElectricityProviderConfig:
         assert cfg.WATTNET_TOKEN_SERVICE_URL == "https://api.wattnet.eu/token-request"
 
 
+class TestAutomationRuntimeConfig:
+    def test_automation_defaults_to_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config()
+        assert not cfg.AUTOMATION_ENABLED
+        assert cfg.AUTOMATION_MODE == "disabled"
+
+    def test_inline_mode_is_normalized(self):
+        with patch.dict(
+            os.environ,
+            {"AUTOMATION_ENABLED": "true", "AUTOMATION_MODE": "INLINE"},
+            clear=True,
+        ):
+            cfg = Config()
+        assert cfg.AUTOMATION_ENABLED
+        assert cfg.AUTOMATION_MODE == "inline"
+
+    def test_invalid_automation_mode_is_rejected(self):
+        with patch.dict(os.environ, {"AUTOMATION_MODE": "cluster"}, clear=True):
+            with pytest.raises(ValueError, match="AUTOMATION_MODE"):
+                Config()
+
+
+class TestLeaderElectionConfig:
+    def test_leader_election_defaults_to_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(_env_file=None)
+        assert not cfg.LEADER_ELECTION_ENABLED
+        assert cfg.LEADER_ELECTION_LEASE_NAME == ""
+        assert cfg.LEADER_ELECTION_LEASE_NAMESPACE == ""
+
+    def test_reads_chart_leader_election_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LEADER_ELECTION_ENABLED": "true",
+                "LEADER_ELECTION_LEASE_NAME": "greenkube-leader",
+                "LEADER_ELECTION_LEASE_NAMESPACE": "greenkube",
+            },
+            clear=True,
+        ):
+            cfg = Config(_env_file=None)
+        assert cfg.LEADER_ELECTION_ENABLED
+        assert cfg.LEADER_ELECTION_LEASE_NAME == "greenkube-leader"
+        assert cfg.LEADER_ELECTION_LEASE_NAMESPACE == "greenkube"
+
+    def test_reads_unprefixed_lease_environment_aliases(self):
+        with patch.dict(os.environ, {"LEASE_NAME": "greenkube-leader", "LEASE_NAMESPACE": "greenkube"}, clear=True):
+            cfg = Config(_env_file=None)
+        assert cfg.LEADER_ELECTION_LEASE_NAME == "greenkube-leader"
+        assert cfg.LEADER_ELECTION_LEASE_NAMESPACE == "greenkube"
+
+
+class TestRecommendationApplyToleranceConfig:
+    @pytest.mark.parametrize("value", ["-0.1", "1.01", "nan", "inf"])
+    def test_invalid_apply_tolerance_is_rejected(self, value):
+        with patch.dict(os.environ, {"RECOMMENDATION_APPLY_TOLERANCE": value}, clear=True):
+            with pytest.raises(ValueError, match="RECOMMENDATION_APPLY_TOLERANCE"):
+                Config()
+
+    @pytest.mark.parametrize("value", ["0", "0.25", "1"])
+    def test_apply_tolerance_accepts_values_in_unit_interval(self, value):
+        with patch.dict(os.environ, {"RECOMMENDATION_APPLY_TOLERANCE": value}, clear=True):
+            assert Config().RECOMMENDATION_APPLY_TOLERANCE == float(value)
+
+
 class TestGetSecret:
     """Tests for the Config._get_secret method."""
 
@@ -167,3 +233,44 @@ class TestPrometheusStepValidation:
     def test_valid_step_is_accepted(self):
         with patch.dict(os.environ, {"PROMETHEUS_QUERY_RANGE_STEP": "5m"}, clear=True):
             assert Config().PROMETHEUS_QUERY_RANGE_STEP == "5m"
+
+
+class TestGitOpsDiscoveryConfig:
+    def test_defaults_match_the_operator_spec(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(_env_file=None)
+        assert cfg.GITOPS_DISCOVERY_INTERVAL == "5m"
+        assert cfg.GITOPS_BINDING_TTL == "30m"
+        assert cfg.gitops_discovery_interval_seconds == 300
+        assert cfg.gitops_binding_ttl.total_seconds() == 1800
+
+    def test_duration_strings_are_loaded(self):
+        with patch.dict(
+            os.environ,
+            {"GITOPS_DISCOVERY_INTERVAL": "45s", "GITOPS_BINDING_TTL": "2h"},
+            clear=True,
+        ):
+            cfg = Config(_env_file=None)
+        assert cfg.gitops_discovery_interval_seconds == 45
+        assert cfg.gitops_binding_ttl.total_seconds() == 7200
+
+    @pytest.mark.parametrize("value", ["0m", "5", "1d", "soon", "-5m"])
+    def test_invalid_discovery_interval_is_rejected(self, value):
+        with patch.dict(os.environ, {"GITOPS_DISCOVERY_INTERVAL": value}, clear=True):
+            with pytest.raises(ValueError, match="GITOPS_DISCOVERY_INTERVAL"):
+                Config(_env_file=None)
+
+    def test_blank_chart_values_fall_back_to_documented_defaults(self):
+        with patch.dict(
+            os.environ,
+            {"GITOPS_DISCOVERY_INTERVAL": "", "GITOPS_BINDING_TTL": ""},
+            clear=True,
+        ):
+            cfg = Config(_env_file=None)
+        assert cfg.GITOPS_DISCOVERY_INTERVAL == "5m"
+        assert cfg.GITOPS_BINDING_TTL == "30m"
+
+    def test_binding_ttl_range_is_enforced(self):
+        with patch.dict(os.environ, {"GITOPS_BINDING_TTL": "25h"}, clear=True):
+            with pytest.raises(ValueError, match="GITOPS_BINDING_TTL"):
+                Config(_env_file=None)

@@ -18,12 +18,19 @@ class FakeCollector:
         return list(self._recs)
 
 
-def _metric(cpu_request=1000, memory_request=1024**3, total_cost=1.0, co2e=10.0):
+def _metric(
+    cpu_request=1000,
+    memory_request=1024**3,
+    total_cost=1.0,
+    co2e=10.0,
+    container_name="api",
+):
     return CombinedMetric(
         pod_name="api-7d9f8b6c5-x2k4p",
         namespace="prod",
         owner_kind="Deployment",
         owner_name="api",
+        container_name=container_name,
         cpu_request=cpu_request,
         memory_request=memory_request,
         total_cost=total_cost,
@@ -61,6 +68,7 @@ class TestVpaSource:
         assert cpu.source_ref == "prod/api-vpa"
         assert cpu.owner_kind == "Deployment"
         assert cpu.owner_name == "api"
+        assert cpu.container_name == "api"
         assert cpu.current_cpu_request_millicores == 1000
         assert cpu.recommended_cpu_request_millicores == 300
         # 70% reduction of the annualized cost
@@ -73,7 +81,14 @@ class TestVpaSource:
         recs = await source.collect(_context([_metric()]))
         assert recs == []
 
-    async def test_aggregates_multiple_containers(self):
+    async def test_negative_cost_input_does_not_create_negative_projected_savings(self):
+        source = VpaSource(Config(), collector=FakeCollector([_vpa()]))
+        recs = await source.collect(_context([_metric(total_cost=-1.0)]))
+
+        assert recs
+        assert all(recommendation.potential_savings_cost == 0.0 for recommendation in recs)
+
+    async def test_preserves_multiple_container_recommendations(self):
         vpas = [
             _vpa(cpu_target=200, memory_target=256 * 1024**2),
             VPARecommendation(
@@ -87,12 +102,32 @@ class TestVpaSource:
             ),
         ]
         source = VpaSource(Config(), collector=FakeCollector(vpas))
-        recs = await source.collect(_context([_metric()]))
+        recs = await source.collect(
+            _context(
+                [
+                    _metric(cpu_request=1000, memory_request=1024**3, container_name="api"),
+                    _metric(cpu_request=500, memory_request=512 * 1024**2, container_name="sidecar"),
+                ]
+            )
+        )
 
-        cpu = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU)
-        mem = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
-        assert cpu.recommended_cpu_request_millicores == 300
-        assert mem.recommended_memory_request_bytes == 384 * 1024**2
+        cpu_by_container = {r.container_name: r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU}
+        memory_by_container = {r.container_name: r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY}
+        assert set(cpu_by_container) == {"api", "sidecar"}
+        assert set(memory_by_container) == {"api", "sidecar"}
+        assert cpu_by_container["api"].recommended_cpu_request_millicores == 200
+        assert cpu_by_container["sidecar"].recommended_cpu_request_millicores == 100
+        assert memory_by_container["api"].recommended_memory_request_bytes == 256 * 1024**2
+        assert memory_by_container["sidecar"].recommended_memory_request_bytes == 128 * 1024**2
+        assert cpu_by_container["api"].current_cpu_request_millicores == 1000
+        assert cpu_by_container["sidecar"].current_cpu_request_millicores == 500
+
+    async def test_skips_vpa_action_when_metrics_are_workload_aggregated(self):
+        source = VpaSource(Config(), collector=FakeCollector([_vpa()]))
+
+        recs = await source.collect(_context([_metric(container_name=None)]))
+
+        assert recs == []
 
     async def test_skips_targets_without_metrics(self):
         vpa = _vpa()

@@ -9,14 +9,17 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
+    get_authenticated_actor,
     get_carbon_repository,
     get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
     validate_service_url,
+    verify_api_key,
 )
 
 API_KEY = "test-secret-key"
@@ -66,6 +69,22 @@ class TestSecurityHeaders:
         resp = client.get("/api/v1/docs")
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 
+    def test_spa_csp_allows_the_configured_google_fonts_stylesheet(self, monkeypatch, tmp_path):
+        from greenkube.api import app as app_module
+
+        (tmp_path / "index.html").write_text("<!doctype html><html></html>", encoding="utf-8")
+        monkeypatch.setattr(app_module, "FRONTEND_DIR", tmp_path)
+
+        with _secured_app(monkeypatch) as c:
+            resp = c.get("/")
+
+        assert resp.status_code == 200
+        style_src = next(
+            directive for directive in resp.headers["Content-Security-Policy"].split(";") if "style-src" in directive
+        )
+        assert "https://fonts.googleapis.com" in style_src
+        assert "https:" not in style_src.replace("https://fonts.googleapis.com", "")
+
 
 class TestCORSPolicy:
     """Verify that CORS is not overly permissive."""
@@ -98,6 +117,16 @@ class TestCORSPolicy:
 
 class TestAPIKeyAuth:
     """Verify that API key authentication works correctly."""
+
+    def test_production_api_requires_api_key(self, monkeypatch):
+        from greenkube.api import app as app_module
+        from greenkube.core.config import Config
+
+        cfg = Config(ENVIRONMENT="production", API_AUTH_MODE="api_key", GREENKUBE_API_KEY="")
+        monkeypatch.setattr(app_module, "get_config", lambda: cfg)
+
+        with pytest.raises(ValueError, match="GREENKUBE_API_KEY must be configured in production"):
+            app_module.create_app()
 
     def test_missing_api_key_returns_401(
         self, mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
@@ -172,6 +201,84 @@ class TestAPIKeyAuth:
             assert c.get("/prometheus/metrics").status_code == 401
             assert c.get("/prometheus/metrics", headers={"Authorization": f"Bearer {API_KEY}"}).status_code == 200
 
+    @pytest.mark.parametrize(
+        ("path", "root_path"),
+        [
+            ("/greenkube/api/v1/config", "/greenkube"),
+            ("/api/v1/config", "/greenkube"),
+            ("/greenkube/prometheus/metrics", "/greenkube"),
+        ],
+    )
+    def test_root_path_never_bypasses_api_key(self, monkeypatch, path, root_path):
+        with _secured_app(monkeypatch):
+            request = Request(
+                {
+                    "type": "http",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "query_string": b"",
+                    "headers": [],
+                    "client": ("testclient", 123),
+                    "server": ("testserver", 80),
+                    "root_path": root_path,
+                    "app": None,
+                }
+            )
+            with pytest.raises(HTTPException) as error:
+                verify_api_key(request)
+
+        assert error.value.status_code == 401
+
+    def test_root_path_keeps_health_exemption_exact(self, monkeypatch):
+        with _secured_app(monkeypatch):
+            request = Request(
+                {
+                    "type": "http",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": "/greenkube/api/v1/health",
+                    "raw_path": b"/greenkube/api/v1/health",
+                    "query_string": b"",
+                    "headers": [],
+                    "client": ("testclient", 123),
+                    "server": ("testserver", 80),
+                    "root_path": "/greenkube",
+                    "app": None,
+                }
+            )
+            verify_api_key(request)
+
+    def test_authenticated_actor_is_derived_from_the_bearer_key(self, monkeypatch):
+        with _secured_app(monkeypatch):
+            request = Request(
+                {
+                    "type": "http",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": "/api/v1/version",
+                    "raw_path": b"/api/v1/version",
+                    "query_string": b"",
+                    "headers": [(b"authorization", f"Bearer {API_KEY}".encode())],
+                    "client": ("testclient", 123),
+                    "server": ("testserver", 80),
+                    "root_path": "",
+                    "app": None,
+                }
+            )
+            verify_api_key(request)
+            actor = get_authenticated_actor(request)
+
+        assert actor.startswith("api-key:")
+        assert API_KEY not in actor
+
 
 class TestInputValidation:
     """Verify that invalid inputs are rejected."""
@@ -192,6 +299,19 @@ class TestInputValidation:
     def test_metadata_service_host_rejected(self):
         with pytest.raises(HTTPException):
             validate_service_url("http://metadata.google.internal/latest/meta-data")
+
+    def test_service_url_host_must_be_configured_or_allowlisted(self):
+        from greenkube.core.config import Config
+
+        config = Config(
+            PROMETHEUS_URL="http://prometheus:9090",
+            SERVICE_URL_ALLOWLIST="api.example.test",
+        )
+        with patch("greenkube.core.config.get_config", return_value=config):
+            assert validate_service_url("http://prometheus:9090/api/v1/query") == "http://prometheus:9090/api/v1/query"
+            assert validate_service_url("https://api.example.test/v1") == "https://api.example.test/v1"
+            with pytest.raises(HTTPException):
+                validate_service_url("https://untrusted.example.test")
 
     def test_embedded_credentials_rejected(self):
         with pytest.raises(HTTPException):

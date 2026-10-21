@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-values
+  namespace: flux-system
+data:
+  values.yaml: |-
+    app:
+      resources:
+        requests:
+          cpu: 225m
+          memory: 96Mi

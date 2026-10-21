@@ -10,6 +10,7 @@ from greenkube.core.config import get_config
 from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.node import NodeInfo
+from greenkube.storage.base_repository import CombinedMetricsRepository, ContainerMetricsRepository
 
 
 def _metric(pod_name="pod", namespace="default"):
@@ -128,6 +129,46 @@ class TestBuild:
         assert context.analysis_window_seconds is not None
         assert abs(context.analysis_window_seconds - expected_seconds) < 5
 
+    async def test_loads_container_metrics_for_container_targeting(self, node_repo):
+        aggregate = _metric(pod_name="api-pod", namespace="prod").model_copy(
+            update={"owner_kind": "Deployment", "owner_name": "api"}
+        )
+        web = aggregate.model_copy(update={"container_name": "web", "cpu_request": 500, "cpu_usage_millicores": 20})
+        sidecar = aggregate.model_copy(
+            update={"container_name": "telemetry-sidecar", "cpu_request": 100, "cpu_usage_millicores": 10}
+        )
+
+        class ContainerAwareRepository(CombinedMetricsRepository, ContainerMetricsRepository):
+            async def write_combined_metrics(self, metrics):
+                return len(metrics)
+
+            async def read_combined_metrics(self, start_time, end_time):
+                return [aggregate]
+
+            async def read_hourly_metrics(self, start_time, end_time, namespace=None):
+                return []
+
+            async def write_container_metrics(self, metrics):
+                return len(metrics)
+
+            async def read_container_metrics(self, start_time, end_time, namespace=None):
+                return [web, sidecar]
+
+            async def read_hourly_container_metrics(self, start_time, end_time, namespace=None):
+                return []
+
+            async def read_container_metrics_smart(self, start_time, end_time, namespace=None):
+                return [web, sidecar]
+
+        context = await ContextBuilder(get_config()).build(ContainerAwareRepository(), node_repo)
+
+        assert context.metrics == [aggregate]
+        assert {metric.container_name for metric in context.container_metrics} == {"web", "telemetry-sidecar"}
+        assert {metric.container_name for metric in context.target_series()[("prod", "Deployment", "api")]} == {
+            "web",
+            "telemetry-sidecar",
+        }
+
     async def test_continues_when_node_repo_fails(self, combined_repo, node_repo):
         combined_repo.read_combined_metrics_smart = AsyncMock(return_value=[_metric()])
         node_repo.get_latest_snapshots_before = AsyncMock(side_effect=RuntimeError("node DB down"))
@@ -173,3 +214,51 @@ class TestBuildFromMetrics:
 
         assert context.analysis_window_seconds == 3600
         assert len(context.node_infos) == 1
+
+    async def test_build_from_metrics_separates_container_samples_for_targeted_analysis(self, node_repo):
+        aggregate = _metric(pod_name="api-pod", namespace="prod").model_copy(
+            update={"owner_kind": "Deployment", "owner_name": "api"}
+        )
+        web = aggregate.model_copy(update={"container_name": "web", "cpu_request": 500, "cpu_usage_millicores": 20})
+        sidecar = aggregate.model_copy(
+            update={"container_name": "telemetry-sidecar", "cpu_request": 100, "cpu_usage_millicores": 10}
+        )
+        builder = ContextBuilder(get_config())
+
+        context = await builder.build_from_metrics([aggregate, web, sidecar], node_repo)
+
+        assert context.metrics == [aggregate]
+        assert {metric.container_name for metric in context.container_metrics} == {"web", "telemetry-sidecar"}
+        target_metrics = context.target_series()[("prod", "Deployment", "api")]
+        assert {metric.container_name for metric in target_metrics} == {"web", "telemetry-sidecar"}
+        assert sum(metric.cpu_request for metric in target_metrics) == 600
+
+
+class _BoundedMetricsRepository:
+    def __init__(self) -> None:
+        self.windows: list[float] = []
+
+    async def count_combined_metrics_smart(self, start_time, end_time, namespace=None):
+        window = (end_time - start_time).total_seconds()
+        self.windows.append(window)
+        return 20_000 if window > 2 * 86_400 else 100
+
+    async def count_container_metrics_smart(self, start_time, end_time, namespace=None):
+        return 0
+
+    async def read_combined_metrics_smart(self, start_time, end_time, namespace=None):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_lookback_is_shortened_before_loading_too_many_rows(node_repo):
+    repository = _BoundedMetricsRepository()
+    config = get_config().model_copy(
+        update={"RECOMMENDATION_LOOKBACK_DAYS": 7, "RECOMMENDATION_MAX_METRIC_ROWS": 10_000}
+    )
+
+    context = await ContextBuilder(config).build(repository, node_repo)  # type: ignore[arg-type]
+
+    assert context.analysis_window_seconds is not None
+    assert context.analysis_window_seconds <= 2 * 86_400
+    assert len(repository.windows) >= 2

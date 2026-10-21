@@ -1,0 +1,14 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: payments
+  namespace: flux-system
+spec:
+  targetNamespace: prod
+  chart:
+    spec:
+      chart: ./charts/payments
+      sourceRef:
+        kind: GitRepository
+        name: gitops
+        namespace: flux-system

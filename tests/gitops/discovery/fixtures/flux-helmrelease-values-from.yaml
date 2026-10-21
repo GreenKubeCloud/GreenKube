@@ -1,0 +1,21 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: payments
+  namespace: flux-system
+spec:
+  targetNamespace: prod
+  chart:
+    spec:
+      chart: ./charts/payments
+      version: 1.0.0
+      sourceRef:
+        kind: GitRepository
+        name: gitops
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: payments-values
+    - kind: Secret
+      name: payments-secret-values
+      valuesKey: values.yaml

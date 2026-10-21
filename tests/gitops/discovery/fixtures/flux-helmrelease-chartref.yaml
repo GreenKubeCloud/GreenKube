@@ -1,0 +1,14 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: payments
+  namespace: flux-system
+spec:
+  targetNamespace: prod
+  chartRef:
+    kind: HelmChart
+    name: payments-chart
+    namespace: flux-system
+  values:
+    app:
+      replicas: 3

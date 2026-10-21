@@ -15,11 +15,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.core.calculator import CarbonCalculationResult, CarbonCalculator
+from greenkube.core.config import Config
 from greenkube.core.processor import DataProcessor
 from greenkube.energy.estimator import BasicEstimator
 from greenkube.models.metrics import EnergyMetric, PodMetric
 from greenkube.models.node import NodeInfo
 from greenkube.models.prometheus_metrics import (
+    ContainerResourceUsage,
     PodCPUUsage,
     PodDiskIO,
     PodMemoryUsage,
@@ -29,7 +31,7 @@ from greenkube.models.prometheus_metrics import (
 )
 
 
-def _build_processor(prom_metrics, pod_metrics, node_info_map):
+def _build_processor(prom_metrics, pod_metrics, node_info_map, metrics_server_collector=None, config=None):
     """Helper to build a DataProcessor with pre-configured mocks."""
     prom = AsyncMock()
     prom.collect = AsyncMock(return_value=prom_metrics)
@@ -90,7 +92,19 @@ def _build_processor(prom_metrics, pod_metrics, node_info_map):
         embodied_repository=embodied_repo,
         calculator=calculator,
         estimator=estimator,
+        metrics_server_collector=metrics_server_collector,
+        config=config,
     ), estimator
+
+
+class FakeMetricsServerCollector:
+    def __init__(self, metrics):
+        self.metrics = metrics
+        self.calls = 0
+
+    async def collect(self):
+        self.calls += 1
+        return self.metrics
 
 
 NODE_INFO = {
@@ -116,6 +130,146 @@ POD_METRICS = [
 
 class TestProcessorResourceWiring:
     """Tests that the processor correctly maps new resource data to CombinedMetric."""
+
+    @pytest.mark.asyncio
+    async def test_container_resource_samples_survive_the_full_collection_assembly(self):
+        prom_metrics = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="p1", container="web", node="n1", cpu_usage_cores=0.02),
+                PodCPUUsage(namespace="ns", pod="p1", container="telemetry-sidecar", node="n1", cpu_usage_cores=0.01),
+            ],
+            pod_memory_usage=[
+                PodMemoryUsage(namespace="ns", pod="p1", container="web", node="n1", memory_usage_bytes=120 * 1024**2),
+                PodMemoryUsage(
+                    namespace="ns",
+                    pod="p1",
+                    container="telemetry-sidecar",
+                    node="n1",
+                    memory_usage_bytes=40 * 1024**2,
+                ),
+            ],
+        )
+        pod_metrics = [
+            PodMetric(
+                pod_name="p1",
+                namespace="ns",
+                container_name="web",
+                cpu_request=500,
+                memory_request=256 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            PodMetric(
+                pod_name="p1",
+                namespace="ns",
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                memory_request=64 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+        processor, estimator = _build_processor(prom_metrics, pod_metrics, NODE_INFO)
+        estimator.estimate = MagicMock(
+            return_value=[
+                EnergyMetric(
+                    pod_name="p1",
+                    namespace="ns",
+                    joules=50000.0,
+                    node="n1",
+                    timestamp=datetime(2025, 2, 20, 12, 0, tzinfo=timezone.utc),
+                )
+            ]
+        )
+
+        result = await processor.run()
+        containers = [metric for metric in result if metric.container_name]
+
+        assert {metric.container_name for metric in containers} == {"web", "telemetry-sidecar"}
+        assert {metric.container_name: metric.cpu_request for metric in containers} == {
+            "web": 500,
+            "telemetry-sidecar": 100,
+        }
+        assert {metric.container_name: metric.cpu_usage_millicores for metric in containers} == {
+            "web": 20,
+            "telemetry-sidecar": 10,
+        }
+
+    @pytest.mark.asyncio
+    async def test_metrics_api_usage_populates_exact_container_metrics_when_prometheus_labels_are_missing(self):
+        prom_metrics = PrometheusMetric(
+            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="p1", container="", node="n1", cpu_usage_cores=0.03)],
+            pod_memory_usage=[
+                PodMemoryUsage(namespace="ns", pod="p1", container="", node="n1", memory_usage_bytes=160 * 1024**2)
+            ],
+        )
+        pod_metrics = [
+            PodMetric(
+                pod_name="p1",
+                namespace="ns",
+                container_name="web",
+                cpu_request=500,
+                memory_request=256 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            PodMetric(
+                pod_name="p1",
+                namespace="ns",
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                memory_request=64 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+        metrics_server = FakeMetricsServerCollector(
+            [
+                ContainerResourceUsage(
+                    namespace="ns",
+                    pod_name="p1",
+                    container_name="web",
+                    cpu_usage_millicores=20,
+                    memory_usage_bytes=120 * 1024**2,
+                ),
+                ContainerResourceUsage(
+                    namespace="ns",
+                    pod_name="p1",
+                    container_name="telemetry-sidecar",
+                    cpu_usage_millicores=10,
+                    memory_usage_bytes=40 * 1024**2,
+                ),
+            ]
+        )
+        processor, estimator = _build_processor(
+            prom_metrics,
+            pod_metrics,
+            NODE_INFO,
+            metrics_server_collector=metrics_server,
+            config=Config(KUBERNETES_METRICS_API_ENABLED=True),
+        )
+        estimator.estimate = MagicMock(
+            return_value=[
+                EnergyMetric(
+                    pod_name="p1",
+                    namespace="ns",
+                    joules=50000.0,
+                    node="n1",
+                    timestamp=datetime(2025, 2, 20, 12, 0, tzinfo=timezone.utc),
+                )
+            ]
+        )
+
+        result = await processor.run()
+        containers = {metric.container_name: metric for metric in result if metric.container_name}
+
+        assert set(containers) == {"web", "telemetry-sidecar"}
+        assert containers["web"].cpu_usage_millicores == 20
+        assert containers["web"].memory_usage_bytes == 120 * 1024**2
+        assert containers["telemetry-sidecar"].cpu_usage_millicores == 10
+        assert containers["telemetry-sidecar"].memory_usage_bytes == 40 * 1024**2
+        assert containers["web"].is_estimated is True
+        assert metrics_server.calls == 1
 
     @pytest.mark.asyncio
     async def test_network_io_populated_in_combined_metric(self):

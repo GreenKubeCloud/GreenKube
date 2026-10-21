@@ -30,3 +30,37 @@ async def test_collects_readiness_restarts_and_ooms():
     assert observation.readiness_ratio == 0.5
     assert observation.restart_count == 3
     assert observation.oom_kill_count == 1
+
+
+@pytest.mark.asyncio
+async def test_container_target_health_counts_only_the_selected_container():
+    web = SimpleNamespace(
+        name="web",
+        ready=True,
+        restart_count=1,
+        last_state=SimpleNamespace(terminated=SimpleNamespace(reason="Error")),
+    )
+    sidecar = SimpleNamespace(
+        name="telemetry-sidecar",
+        ready=True,
+        restart_count=9,
+        last_state=SimpleNamespace(terminated=SimpleNamespace(reason="OOMKilled")),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(namespace="prod", labels={"app.kubernetes.io/name": "api"}),
+        status=SimpleNamespace(container_statuses=[web, sidecar]),
+    )
+
+    class MultiContainerApi:
+        async def list_namespaced_pod(self, **kwargs):
+            return SimpleNamespace(items=[pod])
+
+    observation = await KubernetesHealthCollector(MultiContainerApi()).collect(
+        namespace="prod",
+        workload="api",
+        container_name="web",
+    )
+
+    assert observation.restart_count == 1
+    assert observation.oom_kill_count == 0
+    assert observation.readiness_ratio == 1.0
