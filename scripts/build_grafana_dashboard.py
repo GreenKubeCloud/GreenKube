@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Rebuilds dashboards/greenkube-grafana.json to match the dashboard specification
-in docs/specs/grafana-dashboard-specs.md.
+Rebuild dashboards/greenkube-grafana.json.
 
 Run: python scripts/build_grafana_dashboard.py
 """

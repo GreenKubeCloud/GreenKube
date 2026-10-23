@@ -62,12 +62,12 @@ annotations:
   artifacthub.io/screenshots: |
     - title: CO₂e & Energy Dashboard
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
-    - title: Per-Pod Metrics Table
-      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-metrics.png
-    - title: Node Inventory
-      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
     - title: Optimization Recommendations
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-recommendations.png
+    - title: Automation & GitOps
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-automation.png
+    - title: Node Inventory
+      url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
     - title: Report Builder & Export
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
     - title: Settings & Service Health

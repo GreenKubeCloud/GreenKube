@@ -1,13 +1,15 @@
 # Configuration Reference
 
-The Helm chart maps `values.yaml` settings to GreenKube's environment-based configuration. The chart's [`values.yaml`](../helm-chart/values.yaml) is the authoritative list of deployment options; this page summarizes the commonly used settings. Selected integration URLs and tokens can also be changed at runtime from the Settings page. Runtime updates affect the running process and are persisted to the Kubernetes Secret on a best-effort basis; use Helm values for durable configuration.
+The Helm chart maps `values.yaml` settings to GreenKube's environment-based configuration. The chart's [`values.yaml`](../helm-chart/values.yaml) is the authoritative list of deployment options; this page summarizes the commonly used settings. For a step-by-step installation, see the [Installation guide](installation.md). Selected integration URLs and tokens can also be changed at runtime from the Settings page. Runtime updates affect the running process and are persisted to the Kubernetes Secret on a best-effort basis; use Helm values for durable configuration.
 
 ## Helm values
 
 The chart supports two deployment profiles:
 
-- `profile: standalone` (default) deploys the collector and API together.
-- `profile: production` renders separate API, controller, and automation deployments, including the worker that executes queued pull-request operations. The standalone profile does not run that worker. The default profile is not a substitute for production authentication or network controls.
+- `profile: standalone` (default) deploys the collector and API together. When automation is enabled, the worker runs inline in the API process.
+- `profile: production` renders separate API, controller, and (when automation is enabled) automation worker deployments. The controller uses a Kubernetes Lease for leader election and the migration Job runs before the API is considered ready. The standalone profile does not run a separate worker.
+
+The default values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: api_key`, and a generated API key. The default profile is not a substitute for production authentication or network controls.
 
 ### Image
 
@@ -37,6 +39,20 @@ image:
 | `config.k8sRequestTimeout` | `30` | Timeout in seconds for Kubernetes API calls |
 | `config.kubernetesMetricsApiEnabled` | `true` (Helm) | Read per-container CPU and memory from the read-only `metrics.k8s.io` PodMetrics API. Requires an available PodMetrics APIService; if unavailable, GreenKube logs a warning and continues with other metric sources. The chart grants only `get/list` on `pods.metrics.k8s.io`; it does not grant `nodes/proxy`. |
 
+### API server (`config.api`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `config.api.enabled` | `true` | Serve the REST API and the SPA frontend. |
+| `config.api.host` | `0.0.0.0` | API bind address inside the container. |
+| `config.api.port` | `8000` | API/UI container and Service port. |
+| `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health`). |
+| `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`). |
+| `config.corsOrigins` | `*` | Allowed CORS origins. Prefer same-origin UI/API deployments. |
+| `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
+| `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
+| `config.metricsListMaxRangeDays` | `30` | Maximum raw `/metrics` listing window; wider ranges use report endpoints. |
+
 ### Data retention
 
 | Key | Default | Description |
@@ -51,6 +67,13 @@ image:
 |-----|---------|-------------|
 | `config.db.type` | `postgres` | Backend: `postgres` (recommended) or `sqlite` (dev/standalone) |
 | `config.db.path` | `/data/greenkube_data.db` | SQLite file path (only used when `db.type` is `sqlite`) |
+| `config.db.schema` | `public` | PostgreSQL schema. |
+| `config.db.sslMode` | `disable` | PostgreSQL SSL mode (`disable`, `require`, `verify-full`, ...). |
+| `config.db.poolMinSize` | `1` | PostgreSQL connection-pool minimum. |
+| `config.db.poolMaxSize` | `10` | PostgreSQL connection-pool maximum. |
+| `config.db.statementTimeoutMs` | `30000` | Per-statement PostgreSQL timeout. |
+| `config.persistence.enabled` | `false` | Persist the SQLite database on a PVC instead of an `emptyDir`. |
+| `config.persistence.size` | `10Gi` | SQLite PVC size. |
 
 ### Boavizta API (`config.boavizta`)
 
@@ -77,16 +100,36 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
-| `recommendations.vpaEnabled` | `RECOMMENDATION_VPA_ENABLED` | `true` | Read recommendation-mode VPAs (`updateMode: Off`). The source detects the CRD and skips cleanly when absent; native rightsizing for the same workload is then suppressed. |
-| `recommendations.karpenterEnabled` | `RECOMMENDATION_KARPENTER_ENABLED` | `true` | Karpenter NodePool consolidation recommendations. Auto-detects the CRDs. |
-| `recommendations.maxMetricRows` | `RECOMMENDATION_MAX_METRIC_ROWS` | `750000` | Hard bound on combined and container rows loaded by one recommendation scan. The lookback window is shortened automatically before loading above this bound. |
-| `recommendations.sourcePriority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). |
-| `recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
-| `recommendations.verification.windowHours` | `VERIFICATION_WINDOW_HOURS` | `72` | Post-apply observation window before the outcome is verified. |
-| `recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Measured savings required to pass the cost gate. |
-| `recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
-| `recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
-The GitOps plan pipeline configures each provider through the secret-safe registry:
+| `config.recommendations.vpaEnabled` | `RECOMMENDATION_VPA_ENABLED` | `true` | Read recommendation-mode VPAs (`updateMode: Off`). The source detects the CRD and skips cleanly when absent; native rightsizing for the same workload is then suppressed. |
+| `config.recommendations.karpenterEnabled` | `RECOMMENDATION_KARPENTER_ENABLED` | `true` | Karpenter NodePool consolidation recommendations. Auto-detects the CRDs. |
+| `config.recommendations.maxMetricRows` | `RECOMMENDATION_MAX_METRIC_ROWS` | `750000` | Hard bound on combined and container rows loaded by one recommendation scan. The lookback window is shortened automatically before loading above this bound. |
+| `config.recommendations.sourcePriority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). |
+| `config.recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
+| `config.recommendations.verification.windowHours` | `VERIFICATION_WINDOW_HOURS` | `72` | Post-apply observation window before the outcome is verified. |
+| `config.recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Measured savings required to pass the cost gate. |
+| `config.recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
+| `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
+
+### GitOps automation (`automation`)
+
+Automation is disabled by default. The full workflow, supported source layouts, and security model are documented in [GitOps automation](automation.md). The most important values are:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `automation.enabled` | `false` | Enable discovery, planning, PR operations, sync observation, and apply detection. |
+| `automation.mode` | profile-dependent | `inline` (standalone), `worker` (production), or `disabled`. Empty uses the profile default. |
+| `automation.discoveryInterval` | `5m` | Discovery refresh cadence (`1s`–`1h`). |
+| `automation.bindingTtl` | `30m` | Binding and manual-resolution freshness (`1s`–`24h`). |
+| `automation.prPollIntervalSeconds` | `120` | PR polling fallback interval (10–86400). |
+| `automation.syncPollIntervalSeconds` | `30` | Controller sync observation interval (10–86400). |
+| `automation.syncTimeoutSeconds` | `1800` | Time before a merged but unsynced plan becomes `sync_failed` (60–86400). |
+| `automation.workerMetricsPort` | `8001` | Authenticated metrics listener for the dedicated worker. |
+| `automation.providers` | `[]` | Git provider definitions. See below. |
+| `automation.webhooks.enabled` | `false` | Enable signed provider webhook ingestion. |
+| `automation.policy` | See below | Risk, confidence, sample, coverage, PR-budget, cooldown, and freeze gates. |
+| `automation.pullRequests` | See below | Draft, label, reviewer, and team-reviewer options. |
+
+Configure providers through Secret references:
 
 ```yaml
 automation:
@@ -96,14 +139,15 @@ automation:
     - id: github-main
       type: github
       apiBaseUrl: https://api.github.com
-      tokenSecret:
-        name: greenkube-git
-        key: github-token
+      secretName: greenkube-git
+      secretKey: github-token
       repositoryAllowlist:
         - "acme/gitops"
 ```
 
-Each provider needs a non-empty repository allowlist; an empty allowlist denies all repositories. Glob matching is segment-aware: `acme/*` matches `acme/repo`, not `acme/team/repo`. Only the provider ID, API base URL, Secret reference, and allowlist are rendered into the ConfigMap. The token stays in the referenced Kubernetes Secret and is mounted read-only at `/etc/greenkube/git-providers/<secret-name>/<secret-key>`; when `secretNamespace` is set, the mount path includes that namespace before the Secret name. The Secret must be in the Helm release namespace. Argo CD and Flux discovery selects a configured provider only when its allowlist matches the source repository. Preview and approval remain unavailable for missing credentials, unsupported renderers, or ambiguous sources.
+Each provider needs a non-empty repository allowlist; an empty allowlist denies all repositories. Glob matching is segment-aware: `acme/*` matches `acme/repo`, not `acme/team/repo`. Only the provider ID, API base URL, Secret reference, and allowlist are rendered into the ConfigMap. The token stays in the referenced Kubernetes Secret and is mounted read-only at `/etc/greenkube/git-providers/<secret-name>/<secret-key>`; when `secretNamespace` is set, the mount path includes that namespace before the Secret name. The Secret must be in the Helm release namespace. Argo CD and Flux discovery select a configured provider only when its allowlist matches the source repository. Preview and approval remain unavailable for missing credentials, unsupported renderers, or ambiguous sources.
+
+The nested `tokenSecret: {name, key, namespace}` form is also accepted for compatibility, and `repositories` is accepted as an alias for `repositoryAllowlist`. Do not mix conflicting flat and nested values.
 
 #### Upgrading from the legacy single-provider configuration
 
@@ -123,9 +167,8 @@ automation:
     - id: github-main
       type: github
       apiBaseUrl: https://api.github.com
-      tokenSecret:
-        name: greenkube-git
-        key: github-token
+      secretName: greenkube-git
+      secretKey: github-token
       repositoryAllowlist:
         - "acme/gitops"
 ```
@@ -223,17 +266,32 @@ automation:
     changeFreezeWindows: []
 ```
 
+#### Pull request options (`automation.pullRequests`)
+
+```yaml
+automation:
+  pullRequests:
+    draft: false
+    labels:
+      - greenkube
+      - sustainability
+    reviewers: []
+    teamReviewers: []
+```
+
+GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are unsupported. Gitea supports labels and reviewers; draft PRs and team reviewers are unsupported. Unsupported combinations fail before the provider creates a branch or commit.
+
 ### Secrets (`secrets`)
 
 | Key | Description |
 |-----|-------------|
-| `secrets.apiKey` | API bearer token. A random key is generated for the chart-managed Secret when omitted; an existing Secret must contain `GREENKUBE_API_KEY`. |
+| `secrets.apiKey` | API bearer token. A random key is generated for the chart-managed Secret when omitted and is preserved across upgrades. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
 | `secrets.electricityMapsToken` | Electricity Maps API token when `config.electricityProvider` is `electricity_maps`. Without it, GreenKube uses bundled zone-specific fallback data when available, then the configured global intensity. Get a token at [electricitymaps.com](https://www.electricitymaps.com/). |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
 | `secrets.boaviztaToken` | Optional Boavizta API token. |
-| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml` |
-| `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`). |
+| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml`. This skips chart Secret creation, so include every credential the installation needs (for the bundled database: `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`). |
+| `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`) with the chart-managed Secret. When `secrets.existingSecret` is set, put `DB_CONNECTION_STRING` in that Secret instead. |
 | `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
 
 ### Monitoring (`monitoring`)
@@ -289,6 +347,36 @@ postgres:
       memory: 128Mi
 ```
 
+## Production profile settings
+
+The `production` profile adds these values:
+
+```yaml
+production:
+  migration:
+    enabled: true       # Post-install/post-upgrade schema migration Job
+    backoffLimit: 6
+  leaderElection:
+    enabled: true       # Namespaced Lease held by the active controller
+    leaseName: ''       # Defaults to <release>-leader
+    leaseDurationSeconds: 30
+    renewDeadlineSeconds: 10
+    retryPeriodSeconds: 2
+  components:
+    api:
+      replicas: 2
+    controller:
+      replicas: 1
+    automation:
+      replicas: 1       # Must remain 1; the worker uses database leases
+```
+
+API, controller, and worker resources/probes keep their chart defaults unless you override them.
+
+Only the Lease holder runs controller jobs, GitOps discovery, and sync observation. The API ServiceAccount has read-only Kubernetes permissions for health and inventory endpoints. The automation worker must remain at one replica because the database queue provides the execution lease; the chart rejects other replica counts.
+
+For production, create the API key and database credentials in a Kubernetes Secret and set `secrets.existingSecret`. When the bundled PostgreSQL is enabled, that Secret must contain `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`; when it is disabled, `DB_CONNECTION_STRING` is still required. See the [Installation guide](installation.md#production-api-key-handling).
+
 ## On-premises and bare-metal clusters
 
 Cloud providers automatically expose zone labels on nodes (`topology.kubernetes.io/zone`). On-premises clusters require manual configuration:
@@ -333,4 +421,4 @@ The chart defaults to `environment: production`, disables GitOps automation unti
 
 The Settings page sends integration changes to `POST /api/v1/config/services`. The API accepts only the current configured service hosts or exact hosts listed in `config.serviceUrlAllowlist`, and does not log the submitted URLs. It updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.
 
-The API expires due unapproved GitOps plans once per minute. A daily retention sweep removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, pull-request records, and recommendation audit events. Worker heartbeat rows older than seven days are pruned when the worker starts.
+The API expires unapproved GitOps plans once per minute. A daily retention sweep removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, pull-request records, and recommendation audit events. Worker heartbeat rows older than seven days are pruned when the worker starts.

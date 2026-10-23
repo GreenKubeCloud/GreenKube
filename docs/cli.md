@@ -18,7 +18,7 @@ kubectl exec -it <pod-name> -n greenkube -- bash
 
 ### `greenkube start`
 
-Start the collector service: connects to the database, runs schema migrations, performs an initial collection, then schedules data collection, compression, dashboard summary refresh and the recommendation lifecycle job.
+Start the collector service: connects to the database, runs schema migrations, performs an initial collection, then schedules data collection, compression, dashboard summary refresh, the recommendation lifecycle job, and (when automation is enabled) the inline worker loop and discovery runtime.
 
 ```
 greenkube start [OPTIONS]
@@ -53,6 +53,16 @@ docker run --rm -p 9000:9000 greenkube/greenkube demo --no-browser --port 9000
 ### `greenkube version`
 
 Print the GreenKube version.
+
+### Automation worker (`greenkube.cli.automation_worker`)
+
+The production profile starts the plan worker as:
+
+```bash
+python -m greenkube.cli.automation_worker --queue plans
+```
+
+It should run as a single replica. The worker claims queued pull-request operations through database leases, polls linked provider pull requests, and exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Do not run it manually alongside `automation.mode=inline`; use the Helm chart so the mode and credentials are configured consistently.
 
 ## Global flags
 

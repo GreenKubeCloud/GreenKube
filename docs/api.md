@@ -4,7 +4,16 @@ The GreenKube REST API is available under `/api/v1`. Interactive documentation a
 
 ## Authentication
 
-When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The default Helm values use the `development` environment with an empty key, which leaves protected API routes open; use that default only for local or otherwise protected installations. Production configuration requires an API key. The current API middleware supports API-key authentication; selecting another authentication mode does not enable an OIDC or session implementation.
+When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The chart defaults to `config.environment: production` and generates a random `GREENKUBE_API_KEY` in its managed Secret. In production, a missing key makes protected routes fail closed with `503`; in development, an installation whose Secret has no key leaves protected routes open. The current API middleware supports API-key authentication; selecting another mode does not enable an OIDC or session implementation.
+
+The browser dashboard sends the key only after you paste it into the authentication dialog, keeps it in memory, and never persists it. Retrieve the key with:
+
+```bash
+kubectl -n <namespace> get secret <release-secret> \
+  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
+```
+
+The exact Secret name is `<release>` for a chart-managed Secret or the value of `secrets.existingSecret`. See the [Installation guide](installation.md#production-api-key-handling).
 
 ## Endpoints
 
@@ -89,7 +98,7 @@ Resource recommendations for multiple containers in one workload are composed in
 
 Rollback preview takes only the original plan ID. GreenKube snapshots the current immutable ref, retrieves updated files at the original plan's base revision through the authorized provider resolver, and rejects changed paths or any rendered effect outside the exact target. Approval uses the same exact-digest endpoint and worker queue as other plans. Recommendations remain in `rollback_review` through merge and controller sync; they become `reverted` (and their actions `reverted`) only after the rollback plan is `synced`, a post-baseline workload generation is observed, and live per-container requests match the original pre-apply baseline. RAW rollback is built in; Kustomize requires an explicitly configured exact-target rollback adapter; Argo CD `HELM_VALUES` rollback supports only the explicitly mapped local-chart subset. Flux `HELM_RELEASE` rollback restores the original Git-owned HelmRelease file and uses the same local same-revision chart, snapshot-resolvable `valuesFiles`/`valuesFrom`, and GreenKube-managed post-renderer subset as forward planning. It fails closed on stale refs, changed forward files or render output, missing baselines, unrelated rendered changes, remote/cross-revision charts, chart dependencies, runtime-only or cross-repository `valuesFrom`, unsupported `targetPath` merging, unmanaged post-renderers, or unsupported operations.
 
-`POST /recommendations/{rec_id}/apply-pr` remains as a compatibility endpoint, but it uses the same server-resolved, render-validated plan path; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest, returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. The standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].tokenSecret` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
+`POST /recommendations/{rec_id}/apply-pr` remains as a compatibility endpoint, but it uses the same server-resolved, render-validated plan path; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest, returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. When automation is enabled, the standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].secretName` / `secretKey` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
 
 ### Provider webhooks
 
@@ -118,7 +127,7 @@ With `aggregate=true`, report rows can be grouped using `granularity=hourly`, `d
 
 ### Repository bindings
 
-GitOps bindings are discovered from Argo CD and Flux controller state. Discovery is read-only except for the operator-approved, expiring resolution of an ambiguous or unresolved binding. All GitOps endpoints use the existing API-key middleware. See the [GitOps automation specification](specs/gitops-automation.md) for supported source layouts and safety rules.
+GitOps bindings are discovered from Argo CD and Flux controller state. Discovery is read-only except for the operator-approved, expiring resolution of an ambiguous or unresolved binding. All GitOps endpoints use the existing API-key middleware. See [GitOps automation](automation.md) for supported source layouts and safety rules.
 
 | Method | Path | Description |
 |---|---|---|

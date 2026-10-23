@@ -1,6 +1,6 @@
 # Recommendation Lifecycle
 
-> **Note:** The recommendation component is a multi-source optimization engine. The [Actionable optimization and GitOps specification](specs/gitops-automation.md) defines the target source-graph, Kustomize/Helm planning and PR lifecycle; this page documents current end-to-end behavior.
+> **Note:** The recommendation component is a multi-source optimization engine. The plan, pull-request, sync, and rollback workflow is documented in [GitOps automation](automation.md); this page documents recommendation generation, lifecycle, and savings.
 
 This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/optimization/`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
 
@@ -38,10 +38,10 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 | `verifying` | The observation window after apply is in progress (or was extended once because of insufficient samples). | `RecommendationVerifier` lifecycle job. |
 | `verified` | Cost, carbon and health gates passed; measured savings replace the prorated estimate in the ledger. | `RecommendationVerifier` lifecycle job. |
 | `rollback_review` | A health gate failed (restarts, OOM, usage above the proposed request × headroom): the change needs review and prior savings rows are superseded. | `RecommendationVerifier` lifecycle job. |
-| `reverted` | The change was rolled back. | Reserved for the rollback follow-up. |
+| `reverted` | The change was rolled back and the original per-container baseline was observed again. | The rollback plan reached `synced` and apply detection confirmed the original requests. |
 | `failed` | The PR was closed without merge or the savings gate failed (record stays visible with `savings_realized=false`). | PR tracking / verification. |
 
-**Apply succeeded vs recommendation succeeded.** `application_method` records how the change landed (`manual`, `detected`, `pr_merge`); `verified_at` and `verification_status` record whether the outcome matched the projection. Only verified savings count as measured.
+**Apply succeeded vs recommendation succeeded.** `application_method` records how the change landed (`manual`, `detected`, `pr_merge`, `webhook`, `polling`); `verified_at` and `verification_status` record whether the outcome matched the projection. Only verified savings count as measured. A GitOps action is not eligible for apply detection until its plan reaches `synced`; a merged-but-unsynced plan moves to `sync_failed` after the configured timeout.
 
 **Verification gates.** `VERIFICATION_WINDOW_HOURS` (default 72) and `VERIFICATION_MIN_SAMPLES` control the observation window; the cost/carbon gate requires the measured reduction to reach `VERIFICATION_MIN_SAVINGS_RATIO` (default 0.5) of the projection; the health gate requires the p95 usage to stay below the proposed request × `VERIFICATION_USAGE_HEADROOM` (default 1.1), no restart delta above `VERIFICATION_MAX_RESTART_DELTA`, and no OOM kills. Insufficient samples extend the window once, then produce `inconclusive`.
 
@@ -171,7 +171,7 @@ The `/recommendations` page currently provides:
 - Source badges (GreenKube, VPA, Karpenter), risk badges and confidence indicators.
 - An expandable evidence panel per active recommendation (window, coverage, utilization distribution, proposed change, rollback conditions, expiry).
 - A ranking profile selector (projected savings, balanced, carbon first, cost first, quick wins, low risk).
-- A **Create PR** action on eligible rightsizing cards: it previews the Git diff (dry run), lets the user adjust the base branch, and queues pull-request creation through the configured Git provider. The UI tracks the durable operation until the provider result is available.
+- A **Preview plan** action on eligible container-targeted rightsizing cards: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available.
 - Ignore with a required reason from the Active tab.
 - Restore from the Ignored tab.
 - Applied recommendation details, verification state (`applied`, `verifying`, `verified`, `rollback_review`), measured vs projected savings and an expandable lifecycle event trail.
@@ -257,7 +257,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `VERIFICATION_MIN_READINESS` | `config.recommendations.verification.minReadiness` | `0.99` |
 | `VERIFICATION_MAX_THROTTLE_RATIO` | `config.recommendations.verification.maxThrottleRatio` | `0.05` |
 | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `config.recommendations.verification.lifecycleInterval` | `5m` |
-| `RECOMMENDATION_APPLY_TOLERANCE` | Environment variable | `0.25` (must be within `0`–`1`) |
+
 `RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance. A decrease by itself, including an unrelated large decrease, is not sufficient. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
 
 The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes in the collector/scheduler container) runs apply detection, outcome verification and TTL expiry.
@@ -282,12 +282,11 @@ The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes 
 | Savings ledger attribution | `src/greenkube/core/savings_attributor.py` |
 | PR bot | `src/greenkube/automation/` |
 | Recommendation API routes | `src/greenkube/api/routers/recommendations.py` |
-| Automation API routes | `src/greenkube/api/routers/automation.py` |
+| Automation API routes | `src/greenkube/api/routers/automation.py`, `plans.py`, `gitops.py`, `webhooks.py` |
+| GitOps automation | `src/greenkube/gitops/`, `src/greenkube/automation/` |
 | Prometheus gauges | `src/greenkube/api/metrics_endpoint.py` |
 | Startup scan & lifecycle job | `src/greenkube/api/startup.py`, `src/greenkube/cli/start.py` |
-| Migrations 0012–0014 | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/` |
+| Migrations | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/` |
 | Storage adapters | `src/greenkube/storage/recommendation_mapper.py`, `src/greenkube/storage/sqlite/recommendation_repository.py`, `src/greenkube/storage/postgres/recommendation_repository.py` |
-| Migrations | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/0010_*.sql`, `0011_*.sql` |
-| CLI | `src/greenkube/cli/recommend.py` |
 | Frontend | `frontend/src/routes/recommendations/+page.svelte`, `frontend/src/lib/api.js` |
 | End-to-end tests | `tests/integration/test_recommendation_lifecycle_e2e.py` |
