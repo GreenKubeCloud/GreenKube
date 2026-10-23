@@ -45,7 +45,7 @@ from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult
 from greenkube.gitops.snapshots.models import RepositorySnapshot
 
-KUSTOMIZE_VERSION = "v5.6.0"
+KUSTOMIZE_VERSION = "v5.8.3"
 
 _KUSTOMIZATION_NAMES = ("kustomization.yaml", "kustomization.yml", "Kustomization")
 _SUPPORTED_KUSTOMIZATION_KEYS = frozenset(

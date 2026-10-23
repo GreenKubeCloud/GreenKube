@@ -70,7 +70,7 @@ from greenkube.gitops.renderers.helm import HelmError, HelmRenderer
 from greenkube.gitops.renderers.raw import RawRenderError, RawRenderResult, render_raw
 from greenkube.gitops.snapshots.models import RepositorySnapshot as ArchiveSnapshot
 
-DEFAULT_HELM_VERSION = "v3.17.3+ge4da497"
+DEFAULT_HELM_VERSION = "v3.22.1+gd6c1a0e"
 _MAX_FLUX_VALUES_FILES = 32
 _MAX_FLUX_VALUES_BYTES = 8_388_608
 _FULL_SHA = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")

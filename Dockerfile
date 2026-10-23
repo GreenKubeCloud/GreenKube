@@ -35,23 +35,23 @@ RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
       amd64) \
         helm_arch=amd64; \
-        helm_sha256=ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd; \
+        helm_sha256=896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea; \
         kustomize_arch=amd64; \
-        kustomize_sha256=54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f ;; \
+        kustomize_sha256=cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61 ;; \
       arm64) \
         helm_arch=arm64; \
-        helm_sha256=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e; \
+        helm_sha256=4c29e286b279d170fa048ddfc3e4e83dcd069ca9c52102766ba672d7149e694d; \
         kustomize_arch=arm64; \
-        kustomize_sha256=ad8ab62d4f6d59a8afda0eec4ba2e5cd2f86bf1afeea4b78d06daac945eb0660 ;; \
+        kustomize_sha256=9867b76482cfc6d25b546abc1d2b5a32bd137505aba640649b4b378f64f6d68f ;; \
       *) echo "Unsupported renderer architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /install/bin /tmp/greenkube-renderers/helm /tmp/greenkube-renderers/kustomize; \
     curl --fail --silent --show-error --location --retry 5 \
-      "https://get.helm.sh/helm-v3.17.3-linux-${helm_arch}.tar.gz" \
+      "https://get.helm.sh/helm-v3.22.1-linux-${helm_arch}.tar.gz" \
       -o /tmp/greenkube-renderers/helm.tar.gz; \
     printf '%s  %s\n' "${helm_sha256}" /tmp/greenkube-renderers/helm.tar.gz | sha256sum --check --status; \
     curl --fail --silent --show-error --location --retry 5 \
-      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.6.0/kustomize_v5.6.0_linux_${kustomize_arch}.tar.gz" \
+      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.3/kustomize_v5.8.3_linux_${kustomize_arch}.tar.gz" \
       -o /tmp/greenkube-renderers/kustomize.tar.gz; \
     printf '%s  %s\n' "${kustomize_sha256}" /tmp/greenkube-renderers/kustomize.tar.gz | sha256sum --check --status; \
     tar -xzf /tmp/greenkube-renderers/helm.tar.gz -C /tmp/greenkube-renderers/helm; \

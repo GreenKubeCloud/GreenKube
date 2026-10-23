@@ -171,7 +171,7 @@ class _FakeKustomizeRunner:
         arguments = tuple(argv)
         self.calls.append(arguments)
         if arguments[1:] == ("version",):
-            return SandboxResult(returncode=0, stdout=b"v5.6.0\n", stderr=b"")
+            return SandboxResult(returncode=0, stdout=b"v5.8.3\n", stderr=b"")
 
         overlay = workspace / arguments[2]
         resources = self._load_resources(overlay)

@@ -47,7 +47,7 @@ from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
 BASE_REVISION = "a" * 40
 PROVIDER_ID = "github-main"
 REPO_URL = "https://github.com/acme/gitops.git"
-HELM_VERSION = "v3.17.3+ge4da497"
+HELM_VERSION = "v3.22.1+gd6c1a0e"
 TARGET = ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="prod", name="payments-api")
 FIXTURES = Path(__file__).parent.parent / "discovery" / "fixtures"
 
@@ -206,7 +206,7 @@ def test_default_helm_pin_matches_the_checksum_pinned_release_build_metadata():
     snapshot = _snapshot(_CHART)
     renderer = HelmRenderer(
         expected_version=DEFAULT_HELM_VERSION,
-        runner=_ChartRunner(helm_version="v3.17.3+ge4da497"),
+        runner=_ChartRunner(helm_version="v3.22.1+gd6c1a0e"),
     )
 
     try:
@@ -214,7 +214,7 @@ def test_default_helm_pin_matches_the_checksum_pinned_release_build_metadata():
     finally:
         snapshot.close()
 
-    assert metadata.version == "v3.17.3+ge4da497"
+    assert metadata.version == "v3.22.1+gd6c1a0e"
     assert metadata.is_pinned
 
 
