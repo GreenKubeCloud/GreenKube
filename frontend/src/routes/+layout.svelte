@@ -135,7 +135,7 @@
 					type="password"
 					bind:value={authToken}
 					autocomplete="off"
-					class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-none focus:border-green-500"
+					class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
 					placeholder="Paste the GreenKube API key"
 				/>
 				{#if authError}
@@ -167,7 +167,7 @@
 	              {$sidebarCollapsed ? 'w-16' : 'w-60'}">
 		<!-- Logo -->
 		<div class="flex items-center gap-3 px-4 py-5 border-b border-dark-700/50">
-			<img src="/greenkube-logo.png" alt="GreenKube" class="w-8 h-8 rounded-lg flex-shrink-0" />
+			<img src="/greenkube-logo.png" alt="GreenKube" class="w-8 h-8 rounded-lg shrink-0" />
 			{#if !$sidebarCollapsed}
 				<div class="overflow-hidden">
 					<h1 class="text-base font-bold text-dark-100 truncate">GreenKube</h1>
@@ -201,7 +201,7 @@
 				<div class="space-y-1 mb-2">
 					{#each Object.entries(activeServices) as [name, svc]}
 						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
-							<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
+							<div class="w-1.5 h-1.5 rounded-full shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
 							            {svc.status === 'degraded' ? 'animate-pulse' : ''}"></div>
 							{#if !$sidebarCollapsed}
 								<span class="text-[10px] text-dark-500 truncate capitalize">{name.replace('_', ' ')}</span>
@@ -213,7 +213,7 @@
 
 			<!-- API health indicator -->
 			<div class="flex items-center gap-2 px-2 py-1.5">
-				<div class="w-2 h-2 rounded-full flex-shrink-0
+				<div class="w-2 h-2 rounded-full shrink-0
 				            {healthError ? 'bg-red-500' : health ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}">
 				</div>
 				{#if !$sidebarCollapsed}

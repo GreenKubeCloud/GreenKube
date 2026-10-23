@@ -1002,7 +1002,7 @@
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div
 		role="presentation"
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
 		on:click|self={closeIgnoreModal}
 	>
 		<div
@@ -1024,7 +1024,7 @@
 				</div>
 				<button
 					aria-label="Close ignore recommendation dialog"
-					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none flex-shrink-0"
+					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none shrink-0"
 					on:click={closeIgnoreModal}
 				>✕</button>
 			</div>
@@ -1039,7 +1039,7 @@
 					placeholder="e.g. Intentional burst workload, reviewed and accepted"
 					rows="3"
 					class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm text-dark-100
-					       placeholder-dark-600 focus:outline-none focus:border-green-600 resize-none"
+					       placeholder-dark-600 focus:outline-hidden focus:border-green-600 resize-none"
 				></textarea>
 			</div>
 
@@ -1067,7 +1067,7 @@
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div
 		role="presentation"
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
 		on:click|self={closePrModal}
 	>
 		<div
@@ -1090,7 +1090,7 @@
 				</div>
 				<button
 					aria-label="Close pull request dialog"
-					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none flex-shrink-0"
+					class="text-dark-500 hover:text-dark-200 transition-colors text-xl leading-none shrink-0"
 					on:click={closePrModal}
 				>✕</button>
 			</div>
@@ -1124,7 +1124,7 @@
 						<span>Git-managed values file</span>
 						<select
 							aria-label="Git-managed values file"
-							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							class="w-full rounded-sm border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
 							bind:value={chartMappingFile}
 							required
 							disabled={prLoading}
@@ -1138,7 +1138,7 @@
 						<span>Container</span>
 						<select
 							aria-label="Container"
-							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							class="w-full rounded-sm border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
 							bind:value={chartMappingContainer}
 							required
 							disabled={prLoading}
@@ -1152,7 +1152,7 @@
 						<span>Resources key path</span>
 						<input
 							aria-label="Resources key path"
-							class="w-full rounded border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
+							class="w-full rounded-sm border border-dark-700 bg-dark-900 px-2 py-1.5 text-dark-100"
 							type="text"
 							placeholder="app.resources"
 							bind:value={chartMappingPath}
@@ -1253,7 +1253,7 @@
 							{/if}
 						</dl>
 						{#if preview.revisionDrift}
-							<p role="alert" class="rounded border border-amber-700/70 bg-amber-950/40 p-2 text-xs text-amber-200">
+							<p role="alert" class="rounded-sm border border-amber-700/70 bg-amber-950/40 p-2 text-xs text-amber-200">
 								The plan targets the current repository branch head, which differs from the revision reported by the GitOps controller. Refresh discovery or sync the controller before approving if the live revision is required.
 							</p>
 						{/if}
@@ -1271,7 +1271,7 @@
 										<li class="text-xs">
 											<div class="flex flex-wrap items-center gap-2">
 												<span class="text-dark-200">{String(check.gate ?? 'policy').replaceAll('_', ' ')}</span>
-												<span class="rounded bg-dark-800 px-1.5 py-0.5 text-[10px] text-dark-400">
+												<span class="rounded-sm bg-dark-800 px-1.5 py-0.5 text-[10px] text-dark-400">
 													{String(check.state ?? 'unknown').replaceAll('_', ' ')}
 												</span>
 											</div>
@@ -1296,7 +1296,7 @@
 									<li class="flex flex-wrap items-center gap-2 text-dark-200">
 										<span class="break-all">{filePath}</span>
 										{#if fileOperation}
-											<span class="rounded bg-dark-700 px-1.5 py-0.5 text-[10px] text-dark-400">{fileOperation}</span>
+											<span class="rounded-sm bg-dark-700 px-1.5 py-0.5 text-[10px] text-dark-400">{fileOperation}</span>
 										{/if}
 									</li>
 								{/each}
@@ -1533,7 +1533,7 @@
 								>
 									<!-- Summary row (always visible) -->
 									<div class="flex items-center gap-4">
-										<div class="text-xl flex-shrink-0">{cfg.icon}</div>
+										<div class="text-xl shrink-0">{cfg.icon}</div>
 										<div class="flex-1 min-w-0">
 											<div class="flex items-center gap-2 flex-wrap">
 												<span class="text-sm font-semibold text-dark-100">
@@ -1541,16 +1541,16 @@
 												</span>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if rec.status === 'verified'}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-green-600/20 text-green-400">✓ verified</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/20 text-green-400">✓ verified</span>
 												{:else if rec.status === 'rollback_review'}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-red-600/20 text-red-400">rollback review</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-red-600/20 text-red-400">rollback review</span>
 												{:else if rec.status === 'verifying'}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/20 text-blue-400">verifying…</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/20 text-blue-400">verifying…</span>
 												{:else}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/10 text-blue-400">applied</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/10 text-blue-400">applied</span>
 												{/if}
 												{#if rec.verification_status}
-													<span class="text-[10px] px-2 py-0.5 rounded {verificationClass(rec.verification_status)}">
+													<span class="text-[10px] px-2 py-0.5 rounded-sm {verificationClass(rec.verification_status)}">
 														{rec.verification_status}
 													</span>
 												{/if}
@@ -1560,7 +1560,7 @@
 											{/if}
 										</div>
 										<!-- Savings chips -->
-										<div class="flex items-center gap-3 flex-shrink-0">
+										<div class="flex items-center gap-3 shrink-0">
 											{#if rec.carbon_saved_co2e_grams}
 												<span class="text-xs font-semibold text-green-400">-{formatCO2(rec.carbon_saved_co2e_grams)}</span>
 											{/if}
@@ -1619,7 +1619,7 @@
 													</div>
 												{/if}
 												<button
-													class="text-[10px] px-2 py-0.5 rounded border border-dark-600 text-dark-400
+													class="text-[10px] px-2 py-0.5 rounded-sm border border-dark-600 text-dark-400
 													       hover:border-blue-600/50 hover:text-blue-400 transition-colors"
 													on:click|stopPropagation={() => toggleEvents(rec)}
 												>
@@ -1717,7 +1717,7 @@
 								<div class="flex-1 min-w-0">
 									<div class="flex items-center gap-2 flex-wrap">
 										<span class="text-sm font-semibold text-dark-100">Recommendation #{pr.recommendation_id}</span>
-										<span class="text-[10px] px-2 py-0.5 rounded bg-blue-600/20 text-blue-400">{pr.status}</span>
+										<span class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/20 text-blue-400">{pr.status}</span>
 									</div>
 									<p class="text-xs text-dark-500 mt-1">
 										{pr.provider} · {pr.repo} · {pr.head_branch}
@@ -1799,7 +1799,7 @@
 						{@const cfg = getTypeConfig(rec.type)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
-								<div class="text-2xl flex-shrink-0 mt-0.5">{cfg.icon}</div>
+								<div class="text-2xl shrink-0 mt-0.5">{cfg.icon}</div>
 								<div class="flex-1 min-w-0">
 									<!-- Top row: title + actions -->
 									<div class="flex items-start justify-between gap-3 flex-wrap">
@@ -1810,30 +1810,30 @@
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if hasSafePerContainerAction(rec)}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-green-600/10 text-green-400">Container action ready</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/10 text-green-400">Container action ready</span>
 												{:else if RIGHTSIZING_TYPES.includes(rec.type)}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-500">No safe container action</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-500">No safe container action</span>
 												{:else}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-400" title="This recommendation has no GitOps action planner; apply it manually.">Manual change required</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400" title="This recommendation has no GitOps action planner; apply it manually.">Manual change required</span>
 												{/if}
-												<span class="text-[10px] px-2 py-0.5 rounded bg-dark-700 text-dark-300">
+												<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-300">
 													{getSourceConfig(rec.source).label}
 												</span>
 												{#if rec.risk_level}
-													<span class="text-[10px] px-2 py-0.5 rounded {riskClass(rec.risk_level)}"
+													<span class="text-[10px] px-2 py-0.5 rounded-sm {riskClass(rec.risk_level)}"
 														title={rec.risk_factors?.join(', ')}>
 														{rec.risk_level} risk
 													</span>
 												{/if}
 												{#if activeTab === 'ignored'}
-													<span class="text-[10px] px-2 py-0.5 rounded bg-yellow-600/10 text-yellow-500">ignored</span>
+													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-yellow-600/10 text-yellow-500">ignored</span>
 												{/if}
 											</div>
 											{#if rec.namespace}
 												<p class="text-xs text-dark-500 mt-0.5">Namespace: <span class="text-dark-400">{rec.namespace}</span></p>
 											{/if}
 										</div>
-										<div class="flex items-center gap-3 flex-shrink-0">
+										<div class="flex items-center gap-3 shrink-0">
 											{#if rec.potential_savings_co2e_grams || rec.potential_savings_cost}
 												<div class="text-right">
 													{#if rec.potential_savings_co2e_grams}
@@ -1922,7 +1922,7 @@
 									{#if rec.cron_schedule}
 										<div class="mt-2 flex items-center gap-2">
 											<span class="text-[10px] uppercase text-dark-600">Cron Schedule</span>
-											<code class="text-xs text-indigo-400 bg-dark-800 px-2 py-0.5 rounded font-mono">{rec.cron_schedule}</code>
+											<code class="text-xs text-indigo-400 bg-dark-800 px-2 py-0.5 rounded-sm font-mono">{rec.cron_schedule}</code>
 										</div>
 									{/if}
 
@@ -1937,7 +1937,7 @@
 									<!-- Footer: priority + date -->
 									<div class="mt-3 flex items-center gap-3 flex-wrap">
 										{#if rec.priority}
-											<span class="text-[10px] uppercase px-2 py-0.5 rounded
+											<span class="text-[10px] uppercase px-2 py-0.5 rounded-sm
 												{rec.priority === 'high'   ? 'bg-red-600/20 text-red-400' :
 												 rec.priority === 'medium' ? 'bg-yellow-600/20 text-yellow-400' :
 												                             'bg-dark-700 text-dark-400'}">
@@ -1956,7 +1956,7 @@
 										{/if}
 										{#if rec.evidence}
 											<button
-												class="text-[10px] px-2 py-0.5 rounded border border-dark-600 text-dark-400
+												class="text-[10px] px-2 py-0.5 rounded-sm border border-dark-600 text-dark-400
 												       hover:border-green-600/50 hover:text-green-400 transition-colors"
 												on:click={() => toggleEvidence(rec.id)}
 											>
