@@ -106,25 +106,116 @@ tests:
           path: rules[1].verbs
           content: list
 
-  - it: ClusterRole should grant read access to VPA, Karpenter and workloads
+  - it: ClusterRole should grant read access to PodDisruptionBudgets
     templates:
       - templates/clusterrole.yaml
     asserts:
       - contains:
           path: rules[2].resources
-          content: verticalpodautoscalers
+          content: poddisruptionbudgets
+      - contains:
+          path: rules[2].verbs
+          content: list
+
+  - it: ClusterRole should grant read access to VPA, Karpenter and workloads
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
       - contains:
           path: rules[3].resources
+          content: verticalpodautoscalers
+      - contains:
+          path: rules[4].resources
           content: nodepools
       - contains:
-          path: rules[4].resources
+          path: rules[5].resources
           content: deployments
       - contains:
-          path: rules[4].resources
+          path: rules[5].resources
           content: statefulsets
       - contains:
-          path: rules[4].verbs
+          path: rules[5].verbs
           content: list
+
+  - it: ClusterRole should grant read-only discovery access to Argo CD
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - equal:
+          path: rules[6].apiGroups
+          value: ["argoproj.io"]
+      - contains:
+          path: rules[6].resources
+          content: applications
+      - contains:
+          path: rules[6].resources
+          content: appprojects
+      - equal:
+          path: rules[9].verbs
+          value: ["get", "list", "watch"]
+
+  - it: ClusterRole should grant read-only discovery access to Flux
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - equal:
+          path: rules[7].apiGroups
+          value: ["source.toolkit.fluxcd.io"]
+      - contains:
+          path: rules[7].resources
+          content: gitrepositories
+      - contains:
+          path: rules[7].resources
+          content: helmrepositories
+      - contains:
+          path: rules[7].resources
+          content: ocirepositories
+      - contains:
+          path: rules[7].resources
+          content: buckets
+      - equal:
+          path: rules[9].verbs
+          value: ["get", "list", "watch"]
+      - equal:
+          path: rules[8].apiGroups
+          value: ["kustomize.toolkit.fluxcd.io"]
+      - contains:
+          path: rules[8].resources
+          content: kustomizations
+      - equal:
+          path: rules[9].verbs
+          value: ["get", "list", "watch"]
+      - equal:
+          path: rules[9].apiGroups
+          value: ["helm.toolkit.fluxcd.io"]
+      - contains:
+          path: rules[9].resources
+          content: helmreleases
+      - equal:
+          path: rules[9].verbs
+          value: ["get", "list", "watch"]
+
+  - it: ClusterRole should grant read-only access to per-container PodMetrics
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - equal:
+          path: rules[10].apiGroups
+          value: ["metrics.k8s.io"]
+      - equal:
+          path: rules[10].resources
+          value: ["pods"]
+      - equal:
+          path: rules[10].verbs
+          value: ["get", "list"]
+
+  - it: ClusterRole should never grant Secret access
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - notContains:
+          path: rules
+          content: secrets
 
   # --------------------------------------------------------------------------
   # ClusterRoleBinding

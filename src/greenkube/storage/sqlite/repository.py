@@ -2,7 +2,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 import aiosqlite
 
@@ -10,9 +10,27 @@ from greenkube.models.metrics import CombinedMetric
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
-from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository
+from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository, ContainerMetricsRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _container_metric_from_row(row: Mapping[str, Any], *, hourly: bool = False) -> CombinedMetric:
+    data = dict(row)
+    data.pop("id", None)
+    if hourly:
+        data.pop("sample_count", None)
+        data["timestamp"] = data.pop("hour_bucket", None)
+        data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
+        data["cpu_usage_max_millicores"] = data.pop("cpu_usage_max", None)
+        data["memory_usage_bytes"] = data.pop("memory_usage_avg", None)
+        data["memory_usage_max_bytes"] = data.pop("memory_usage_max", None)
+    if isinstance(data.get("estimation_reasons"), str):
+        try:
+            data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+        except json.JSONDecodeError:
+            data["estimation_reasons"] = []
+    return CombinedMetric(**data)
 
 
 class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
@@ -134,7 +152,7 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             raise QueryError(f"Unexpected error in save_history: {e}") from e
 
 
-class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
+class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetricsRepository):
     """
     SQLite implementation for combined metrics data storage.
     Handles writing and reading CombinedMetric records.
@@ -150,6 +168,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         self.db_manager = db_manager
 
     async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+        container_metrics = [metric for metric in metrics if metric.container_name]
+        metrics = [metric for metric in metrics if not metric.container_name]
+        if not metrics:
+            return await self.write_container_metrics(container_metrics) if container_metrics else 0
+
         saved_count = 0
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -260,13 +283,15 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
                         logging.error("Unexpected error processing combined metric %s: %s", metric.pod_name, e)
 
                 await conn.commit()
-                return saved_count
         except sqlite3.Error as e:
             logging.error("Failed to commit transaction for combined_metrics: %s", e)
             raise QueryError(f"Failed to commit combined_metrics: {e}") from e
         except Exception as e:
             logging.error("Unexpected error in write_combined_metrics: %s", e)
             raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
+        if container_metrics:
+            saved_count += await self.write_container_metrics(container_metrics)
+        return saved_count
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:
@@ -349,6 +374,170 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except Exception as e:
             logging.error("Unexpected error reading combined metrics: %s", e)
             raise QueryError(f"Unexpected error reading combined metrics: {e}") from e
+
+    async def count_combined_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count raw and hourly combined rows without materializing them."""
+        from datetime import timedelta, timezone
+
+        from greenkube.core.config import get_config
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = ensure_utc(start_time)
+        end_aware = ensure_utc(end_time)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                total = 0
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    query = 'SELECT COUNT(*) FROM combined_metrics WHERE "timestamp" BETWEEN ? AND ?'
+                    params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
+                    if namespace:
+                        query += " AND namespace = ?"
+                        params.append(namespace)
+                    async with conn.execute(query, params) as cursor:
+                        row = await cursor.fetchone()
+                        total += int(row[0] or 0)
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    query = "SELECT COUNT(*) FROM combined_metrics_hourly WHERE hour_bucket BETWEEN ? AND ?"
+                    params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
+                    if namespace:
+                        query += " AND namespace = ?"
+                        params.append(namespace)
+                    async with conn.execute(query, params) as cursor:
+                        row = await cursor.fetchone()
+                        total += int(row[0] or 0)
+                return total
+        except sqlite3.Error as exc:
+            logger.warning("Could not count combined metrics: %s", exc)
+            return None
+
+    async def count_container_metrics_smart(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count raw and hourly container rows without materializing them."""
+        from datetime import timedelta, timezone
+
+        from greenkube.core.config import get_config
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
+        start_aware = ensure_utc(start_time)
+        end_aware = ensure_utc(end_time)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                total = 0
+                if end_aware >= cutoff - timedelta(minutes=1):
+                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                    query = "SELECT COUNT(*) FROM container_metrics WHERE timestamp BETWEEN ? AND ?"
+                    params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
+                    if namespace:
+                        query += " AND namespace = ?"
+                        params.append(namespace)
+                    async with conn.execute(query, params) as cursor:
+                        row = await cursor.fetchone()
+                        total += int(row[0] or 0)
+                if start_aware < cutoff:
+                    hourly_end = min(end_aware, cutoff)
+                    query = "SELECT COUNT(*) FROM container_metrics_hourly WHERE hour_bucket BETWEEN ? AND ?"
+                    params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
+                    if namespace:
+                        query += " AND namespace = ?"
+                        params.append(namespace)
+                    async with conn.execute(query, params) as cursor:
+                        row = await cursor.fetchone()
+                        total += int(row[0] or 0)
+                return total
+        except sqlite3.Error as exc:
+            logger.warning("Could not count container metrics: %s", exc)
+            return None
+
+    async def read_combined_metrics_cursor(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+        cursor: Optional[dict] = None,
+        limit: int = 1000,
+    ) -> tuple[int, List[CombinedMetric], Optional[dict]]:
+        """Read a bounded, stable page ordered by timestamp and pod identity."""
+        limit = min(max(limit, 1), 1000)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                filters = ['"timestamp" >= ?', '"timestamp" <= ?']
+                params: list = [to_iso_z(start_time), to_iso_z(end_time)]
+                if namespace:
+                    filters.append("namespace = ?")
+                    params.append(namespace)
+                count_filters = list(filters)
+                count_params = list(params)
+                if cursor:
+                    filters.append(
+                        '("timestamp" > ? OR ("timestamp" = ? AND (namespace > ? OR (namespace = ? AND pod_name > ?))))'
+                    )
+                    params.extend(
+                        [
+                            cursor["timestamp"],
+                            cursor["timestamp"],
+                            cursor["namespace"],
+                            cursor["namespace"],
+                            cursor["pod_name"],
+                        ]
+                    )
+                where = " AND ".join(filters)
+                async with conn.execute(
+                    f"SELECT COUNT(*) FROM combined_metrics WHERE {' AND '.join(count_filters)}", count_params
+                ) as count_cursor:
+                    total = (await count_cursor.fetchone())[0]
+                query = f"""
+                    SELECT pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
+                           cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                           network_receive_bytes, network_transmit_bytes, disk_read_bytes, disk_write_bytes,
+                           storage_request_bytes, storage_usage_bytes, ephemeral_storage_request_bytes,
+                           ephemeral_storage_usage_bytes, gpu_usage_millicores, restart_count,
+                           owner_kind, owner_name, period, "timestamp", duration_seconds,
+                           grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
+                           is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version
+                    FROM combined_metrics WHERE {where}
+                    ORDER BY "timestamp", namespace, pod_name
+                    LIMIT ?
+                """
+                async with conn.execute(query, [*params, limit + 1]) as rows_cursor:
+                    rows = await rows_cursor.fetchall()
+                has_more = len(rows) > limit
+                metrics = []
+                for row in rows[:limit]:
+                    data = dict(row)
+                    for field in ("timestamp", "grid_intensity_timestamp"):
+                        if data[field]:
+                            data[field] = datetime.fromisoformat(data[field])
+                    if data["estimation_reasons"]:
+                        data["estimation_reasons"] = json.loads(data["estimation_reasons"])
+                    metrics.append(CombinedMetric(**data))
+                if has_more and metrics:
+                    last = metrics[-1]
+                    assert last.timestamp is not None
+                    return (
+                        total,
+                        metrics,
+                        {
+                            "timestamp": to_iso_z(last.timestamp),
+                            "namespace": last.namespace,
+                            "pod_name": last.pod_name,
+                        },
+                    )
+                return total, metrics, None
+        except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
+            logger.error("Could not read cursor-paginated combined metrics: %s", e)
+            raise QueryError(f"Could not read cursor-paginated combined metrics: {e}") from e
 
     async def aggregate_summary(
         self,
@@ -716,6 +905,139 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository):
         except sqlite3.Error as e:
             logging.error("Could not read hourly metrics: %s", e)
             raise QueryError(f"Could not read hourly metrics: {e}") from e
+
+    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+        if not metrics:
+            return 0
+
+        saved_count = 0
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                for metric in metrics:
+                    container_name = metric.container_name
+                    timestamp = metric.timestamp
+                    if not container_name or timestamp is None:
+                        raise ValueError("container metrics require a container name and timestamp")
+                    cursor = await conn.execute(
+                        """
+                        INSERT INTO container_metrics (
+                            pod_name, namespace, container_name, total_cost, co2e_grams,
+                            embodied_co2e_grams, pue, grid_intensity, joules,
+                            cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
+                            memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
+                            timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
+                            total_cost = excluded.total_cost,
+                            co2e_grams = excluded.co2e_grams,
+                            embodied_co2e_grams = excluded.embodied_co2e_grams,
+                            pue = excluded.pue,
+                            grid_intensity = excluded.grid_intensity,
+                            joules = excluded.joules,
+                            cpu_request = excluded.cpu_request,
+                            memory_request = excluded.memory_request,
+                            cpu_usage_millicores = excluded.cpu_usage_millicores,
+                            cpu_usage_max_millicores = excluded.cpu_usage_max_millicores,
+                            memory_usage_bytes = excluded.memory_usage_bytes,
+                            memory_usage_max_bytes = excluded.memory_usage_max_bytes,
+                            owner_kind = excluded.owner_kind,
+                            owner_name = excluded.owner_name,
+                            duration_seconds = excluded.duration_seconds,
+                            is_estimated = excluded.is_estimated,
+                            estimation_reasons = excluded.estimation_reasons,
+                            calculation_version = excluded.calculation_version
+                        """,
+                        (
+                            metric.pod_name,
+                            metric.namespace,
+                            container_name,
+                            metric.total_cost,
+                            metric.co2e_grams,
+                            metric.embodied_co2e_grams,
+                            metric.pue,
+                            metric.grid_intensity,
+                            metric.joules,
+                            metric.cpu_request,
+                            metric.memory_request,
+                            metric.cpu_usage_millicores,
+                            metric.cpu_usage_max_millicores,
+                            metric.memory_usage_bytes,
+                            metric.memory_usage_max_bytes,
+                            metric.owner_kind,
+                            metric.owner_name,
+                            to_iso_z(timestamp),
+                            metric.duration_seconds,
+                            metric.is_estimated,
+                            json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
+                            metric.calculation_version,
+                        ),
+                    )
+                    saved_count += cursor.rowcount
+                await conn.commit()
+            return saved_count
+        except sqlite3.Error as e:
+            logging.error("Could not write container metrics: %s", e)
+            raise QueryError(f"Could not write container metrics: {e}") from e
+
+    async def read_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = """
+                        SELECT * FROM container_metrics
+                        WHERE timestamp >= ? AND timestamp <= ? AND namespace = ?
+                        ORDER BY timestamp
+                    """
+                    params = (to_iso_z(start_time), to_iso_z(end_time), namespace)
+                else:
+                    query = """
+                        SELECT * FROM container_metrics
+                        WHERE timestamp >= ? AND timestamp <= ?
+                        ORDER BY timestamp
+                    """
+                    params = (to_iso_z(start_time), to_iso_z(end_time))
+                async with conn.execute(query, params) as cursor:
+                    return [_container_metric_from_row(row) for row in await cursor.fetchall()]
+        except sqlite3.Error as e:
+            logging.error("Could not read container metrics: %s", e)
+            raise QueryError(f"Could not read container metrics: {e}") from e
+
+    async def read_hourly_container_metrics(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> List[CombinedMetric]:
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                if namespace:
+                    query = """
+                        SELECT * FROM container_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ? AND namespace = ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (to_iso_z(start_time), to_iso_z(end_time), namespace)
+                else:
+                    query = """
+                        SELECT * FROM container_metrics_hourly
+                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        ORDER BY hour_bucket
+                    """
+                    params = (to_iso_z(start_time), to_iso_z(end_time))
+                async with conn.execute(query, params) as cursor:
+                    return [_container_metric_from_row(row, hourly=True) for row in await cursor.fetchall()]
+        except sqlite3.Error as e:
+            logging.error("Could not read hourly container metrics: %s", e)
+            raise QueryError(f"Could not read hourly container metrics: {e}") from e
 
     async def list_namespaces(self) -> List[str]:
         """Return namespaces from the cache table (fast, no table scan)."""

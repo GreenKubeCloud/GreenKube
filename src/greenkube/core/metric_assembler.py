@@ -4,7 +4,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 from .. import __version__
 from ..collectors.base_electricity_provider import BaseElectricityProvider
@@ -15,7 +15,7 @@ from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
-from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric
+from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..storage.base_repository import CarbonIntensityRepository
 from ..utils.date_utils import parse_iso_date
@@ -169,11 +169,15 @@ class MetricAssembler:
                 f"Node '{node_name}' not found in zone map. Used default zone '{self._config.DEFAULT_ZONE}'"
             )
 
+        cost_total = getattr(cost_metric, "total_cost", None) if cost_metric else None
         if not cost_metric:
             is_estimated = True
             estimation_reasons.append(
                 f"No cost data for pod '{energy_metric.pod_name}'. Used default cost {self._config.DEFAULT_COST}"
             )
+        elif isinstance(cost_total, (int, float)) and cost_total < 0:
+            is_estimated = True
+            estimation_reasons.append("OpenCost returned negative pod cost; cost-based savings are not trusted")
 
         if not provider:
             is_estimated = True
@@ -186,7 +190,7 @@ class MetricAssembler:
             is_estimated = True
             estimation_reasons.append(f"CPU usage on node '{node_name}' was below threshold; substituted pod requests")
 
-        return is_estimated, estimation_reasons
+        return is_estimated, list(dict.fromkeys(estimation_reasons))
 
     # ------------------------------------------------------------------
     # Assemble CombinedMetric list
@@ -204,6 +208,7 @@ class MetricAssembler:
         cpu_adjusted_nodes: Set[str],
         steps_per_day: float,
         resource_maps: PodResourceMaps,
+        pod_metrics: Sequence[PodMetric] = (),
     ) -> List[CombinedMetric]:
         """Build CombinedMetric objects from all collected & processed data."""
         combined_metrics: List[CombinedMetric] = []
@@ -333,4 +338,101 @@ class MetricAssembler:
                     pod_name,
                 )
 
+        combined_metrics.extend(self.assemble_container_metrics(combined_metrics, pod_metrics, resource_maps))
         return combined_metrics
+
+    @staticmethod
+    def assemble_container_metrics(
+        combined_metrics: Sequence[CombinedMetric],
+        pod_metrics: Sequence[PodMetric],
+        resource_maps: PodResourceMaps,
+    ) -> List[CombinedMetric]:
+        """Build container-scoped records while leaving pod aggregates unchanged."""
+        containers_by_pod: dict[tuple[str, str], list[PodMetric]] = {}
+        for pod_metric in pod_metrics:
+            if not pod_metric.container_name or pod_metric.container_name.strip() != pod_metric.container_name:
+                continue
+            key = (pod_metric.namespace, pod_metric.pod_name)
+            containers_by_pod.setdefault(key, []).append(pod_metric)
+
+        container_metrics: list[CombinedMetric] = []
+        for aggregate in combined_metrics:
+            if not aggregate.namespace or not aggregate.pod_name or aggregate.container_name:
+                continue
+            key = (aggregate.namespace, aggregate.pod_name)
+            containers = containers_by_pod.get(key, [])
+            if not containers:
+                continue
+
+            container_keys = [(aggregate.namespace, aggregate.pod_name, item.container_name) for item in containers]
+            has_container_usage = all(
+                container_key in resource_maps.container_cpu_usage_map
+                or container_key in resource_maps.container_memory_usage_map
+                for container_key in container_keys
+            )
+            if not has_container_usage:
+                continue
+
+            cpu_weights = (
+                [max(resource_maps.container_cpu_usage_map[key], 0) for key in container_keys]
+                if all(key in resource_maps.container_cpu_usage_map for key in container_keys)
+                else []
+            )
+            if not cpu_weights or sum(cpu_weights) == 0:
+                memory_weights = (
+                    [max(resource_maps.container_memory_usage_map[key], 0) for key in container_keys]
+                    if all(key in resource_maps.container_memory_usage_map for key in container_keys)
+                    else []
+                )
+                if memory_weights and sum(memory_weights) > 0:
+                    cpu_weights = memory_weights
+            if not cpu_weights or sum(cpu_weights) == 0:
+                cpu_weights = [max(item.cpu_request, 0) for item in containers]
+            if sum(cpu_weights) == 0:
+                cpu_weights = [max(item.memory_request, 0) for item in containers]
+            if sum(cpu_weights) == 0:
+                cpu_weights = [1] * len(containers)
+            total_weight = sum(cpu_weights)
+
+            for pod_metric, container_key, weight in zip(containers, container_keys, cpu_weights, strict=True):
+                share = weight / total_weight
+                estimation_reason = "Container cost, energy, and carbon values are allocated from pod-level aggregates."
+                estimation_reasons = list(dict.fromkeys([*aggregate.estimation_reasons, estimation_reason]))
+                container_metrics.append(
+                    aggregate.model_copy(
+                        update={
+                            "container_name": pod_metric.container_name,
+                            "total_cost": aggregate.total_cost * share,
+                            "co2e_grams": aggregate.co2e_grams * share,
+                            "embodied_co2e_grams": (aggregate.embodied_co2e_grams or 0.0) * share,
+                            "joules": aggregate.joules * share,
+                            "cpu_request": pod_metric.cpu_request,
+                            "memory_request": pod_metric.memory_request,
+                            "cpu_usage_millicores": resource_maps.container_cpu_usage_map.get(container_key),
+                            "cpu_usage_max_millicores": None,
+                            "memory_usage_bytes": resource_maps.container_memory_usage_map.get(container_key),
+                            "memory_usage_max_bytes": None,
+                            "network_receive_bytes": None,
+                            "network_transmit_bytes": None,
+                            "disk_read_bytes": None,
+                            "disk_write_bytes": None,
+                            "storage_request_bytes": None,
+                            "storage_usage_bytes": None,
+                            "ephemeral_storage_request_bytes": pod_metric.ephemeral_storage_request,
+                            "ephemeral_storage_usage_bytes": None,
+                            "restart_count": resource_maps.container_restart_map.get(container_key),
+                            "owner_kind": pod_metric.owner_kind or aggregate.owner_kind,
+                            "owner_name": pod_metric.owner_name or aggregate.owner_name,
+                            "timestamp": resource_maps.container_timestamp_map.get(container_key)
+                            or aggregate.timestamp,
+                            "duration_seconds": resource_maps.container_duration_seconds_map.get(container_key)
+                            or aggregate.duration_seconds,
+                            "sample_count": resource_maps.container_sample_count_map.get(
+                                container_key, aggregate.sample_count
+                            ),
+                            "is_estimated": True,
+                            "estimation_reasons": estimation_reasons,
+                        }
+                    )
+                )
+        return container_metrics

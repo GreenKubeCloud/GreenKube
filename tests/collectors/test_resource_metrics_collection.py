@@ -194,7 +194,12 @@ class TestPrometheusCollectIntegration:
         cpu_results = [
             {"metric": {"namespace": "ns", "pod": "p1", "container": "c1", "node": "n1"}, "value": [1700000000, "0.5"]}
         ]
-        mem_results = [{"metric": {"namespace": "ns", "pod": "p1", "node": "n1"}, "value": [1700000000, "104857600"]}]
+        mem_results = [
+            {
+                "metric": {"namespace": "ns", "pod": "p1", "container": "c1", "node": "n1"},
+                "value": [1700000000, "104857600"],
+            }
+        ]
         node_results = []
         net_rx_results = [{"metric": {"namespace": "ns", "pod": "p1", "node": "n1"}, "value": [1700000000, "1024000"]}]
         net_tx_results = [{"metric": {"namespace": "ns", "pod": "p1", "node": "n1"}, "value": [1700000000, "512000"]}]
@@ -230,6 +235,7 @@ class TestPrometheusCollectIntegration:
         assert isinstance(result, PrometheusMetric)
         assert len(result.pod_cpu_usage) >= 1
         assert len(result.pod_memory_usage) >= 1
+        assert result.pod_memory_usage[0].container == "c1"
         assert len(result.pod_network_io) >= 1
         assert len(result.pod_disk_io) >= 1
         assert len(result.pod_restart_counts) >= 1

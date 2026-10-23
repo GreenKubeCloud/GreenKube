@@ -72,3 +72,16 @@ async def test_get_core_and_autoscaling_apis_return_none_without_config(monkeypa
 
     assert await k8s_client.get_core_v1_api() is None
     assert await k8s_client.get_autoscaling_v2_api() is None
+
+
+@pytest.mark.asyncio
+async def test_get_coordination_api_uses_the_shared_kubernetes_client(monkeypatch):
+    api_client = object()
+    coordination_api = MagicMock(name="coordination-api")
+    constructor = MagicMock(return_value=coordination_api)
+    monkeypatch.setattr(k8s_client, "ensure_k8s_config", AsyncMock(return_value=True))
+    monkeypatch.setattr(k8s_client, "_get_shared_api_client", AsyncMock(return_value=api_client))
+    monkeypatch.setattr(k8s_client.client, "CoordinationV1Api", constructor)
+
+    assert await k8s_client.get_coordination_v1_api() is coordination_api
+    constructor.assert_called_once_with(api_client=api_client)

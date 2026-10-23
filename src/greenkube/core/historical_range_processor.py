@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from .. import __version__
+from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -16,10 +17,11 @@ from ..core.calculator import CarbonCalculator
 from ..core.config import Config, get_config
 from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
+from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
-from ..utils.date_utils import parse_iso_date
+from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ class HistoricalRangeProcessor:
         assembler: MetricAssembler,
         zone_mapper: NodeZoneMapper,
         config: Config | None = None,
+        metrics_server_collector: MetricsServerCollector | None = None,
     ):
         self.prometheus_collector = prometheus_collector
         self.opencost_collector = opencost_collector
@@ -57,6 +60,7 @@ class HistoricalRangeProcessor:
         self.assembler = assembler
         self.zone_mapper = zone_mapper
         self._config = config if config is not None else get_config()
+        self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -64,17 +68,7 @@ class HistoricalRangeProcessor:
 
     @staticmethod
     def _parse_duration_to_seconds(s: str) -> int:
-        s = str(s).strip()
-        try:
-            if s.endswith("s"):
-                return int(s[:-1])
-            if s.endswith("m"):
-                return int(s[:-1]) * 60
-            if s.endswith("h"):
-                return int(s[:-1]) * 3600
-            return int(s)
-        except Exception:
-            return 60
+        return parse_query_step_seconds(s)
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,15 +99,8 @@ class HistoricalRangeProcessor:
         start_dt: datetime | None = None
         end_dt: datetime | None = None
         try:
-            if isinstance(start, str):
-                start_dt = parse_iso_date(start)
-            else:
-                start_dt = start
-
-            if isinstance(end, str):
-                end_dt = parse_iso_date(end)
-            else:
-                end_dt = end
+            start_dt = ensure_utc(start) if not isinstance(start, str) else parse_iso_date(start)
+            end_dt = ensure_utc(end) if not isinstance(end, str) else parse_iso_date(end)
 
             if start_dt and end_dt:
                 stored_metrics = await self._read_stored_metrics(start_dt, end_dt, namespace)
@@ -133,12 +120,22 @@ class HistoricalRangeProcessor:
             raise ValueError(f"Could not parse start time: {start!r}")
         if end_dt is None:
             raise ValueError(f"Could not parse end time: {end!r}")
+        if end_dt <= start_dt:
+            raise ValueError("Historical range end must be after start")
 
         cfg_step_str = self._config.PROMETHEUS_QUERY_RANGE_STEP
         cfg_step_sec = self._parse_duration_to_seconds(cfg_step_str)
         chosen_step_sec = cfg_step_sec
         chosen_step = f"{chosen_step_sec}s"
         rate_window = f"{chosen_step_sec}s"
+        now = datetime.now(timezone.utc)
+        current_window = end_dt >= now - timedelta(seconds=max(chosen_step_sec * 2, 60))
+        # PodMetrics is point-in-time data; never use today's sample to backfill older ranges.
+        container_usages = (
+            await self._metrics_server_collector.collect()
+            if current_window and self._config.KUBERNETES_METRICS_API_ENABLED
+            else []
+        )
 
         estimator = self.estimator
         calculator = self.calculator
@@ -159,7 +156,7 @@ class HistoricalRangeProcessor:
             if isinstance(ts_str, str):
                 change_dt = parse_iso_date(ts_str)
             else:
-                change_dt = ts_str
+                change_dt = ensure_utc(ts_str)
             if change_dt:
                 node_timeline[node_info.name].append((change_dt, node_info))
         for node_name in node_timeline:
@@ -229,6 +226,7 @@ class HistoricalRangeProcessor:
             pod_mem_map = pod_mem_map_agg
             pod_ephemeral_storage_map = pod_ephemeral_storage_map_agg
         except Exception:
+            pod_metrics_list = []
             pod_request_map = {}
             pod_mem_map = {}
             pod_ephemeral_storage_map = {}
@@ -307,7 +305,7 @@ class HistoricalRangeProcessor:
             disk_read_query = f"sum(rate(container_fs_reads_bytes_total[{rate_window}])) by (namespace,pod,node)"
             disk_write_query = f"sum(rate(container_fs_writes_bytes_total[{rate_window}])) by (namespace,pod,node)"
             restart_query = "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
-            memory_query = "sum(container_memory_working_set_bytes) by (namespace,pod,node)"
+            memory_query = "sum(container_memory_working_set_bytes) by (namespace,pod,container,node)"
             ephemeral_usage_query = "sum(container_fs_usage_bytes) by (namespace,pod,node)"
 
             try:
@@ -362,7 +360,8 @@ class HistoricalRangeProcessor:
                     values = series.get("values", [])
                     if values:
                         try:
-                            pod_map[(ns, p)] = float(values[-1][1])
+                            key = (ns, p)
+                            pod_map[key] = pod_map.get(key, 0.0) + float(values[-1][1])
                         except (ValueError, IndexError):
                             pass
                 return pod_map
@@ -374,6 +373,22 @@ class HistoricalRangeProcessor:
             range_restart_map = _build_pod_map_from_range(restart_results)
             range_memory_map = _build_pod_map_from_range(memory_results)
             range_ephemeral_usage_map = _build_pod_map_from_range(ephemeral_usage_results)
+            container_memory_samples = defaultdict(lambda: defaultdict(float))
+            for series in memory_results:
+                metric = series.get("metric", {}) or {}
+                series_ns = metric.get("namespace") or metric.get("kubernetes_namespace") or ""
+                pod = metric.get("pod") or metric.get("pod_name") or ""
+                container = metric.get("container") or metric.get("container_name") or ""
+                if not series_ns or not pod or not container:
+                    continue
+                for ts_val, val in series.get("values", []):
+                    try:
+                        ts_f = float(ts_val)
+                        memory_bytes = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    normalized_ts = (ts_f // chosen_step_sec) * chosen_step_sec
+                    container_memory_samples[normalized_ts][(series_ns, pod, container)] += memory_bytes
 
             del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
             del memory_results
@@ -381,6 +396,7 @@ class HistoricalRangeProcessor:
 
             # Parse results into samples
             samples = defaultdict(lambda: defaultdict(float))
+            container_samples = defaultdict(lambda: defaultdict(float))
             pod_node_map_by_ts = defaultdict(dict)
             for series in results:
                 metric = series.get("metric", {}) or {}
@@ -393,6 +409,7 @@ class HistoricalRangeProcessor:
                     or metric.get("kubernetes_pod_name")
                     or metric.get("container")
                 )
+                container = metric.get("container") or metric.get("container_name") or ""
                 node = metric.get("node") or metric.get("kubernetes_node") or ""
                 if not series_ns or not pod:
                     continue
@@ -404,6 +421,8 @@ class HistoricalRangeProcessor:
                         continue
                     key = (series_ns, pod)
                     samples[ts_f][key] += usage
+                    if container:
+                        container_samples[ts_f][(series_ns, pod, container)] += usage
                     pod_node_map_by_ts[ts_f][key] = node
 
             del results
@@ -412,10 +431,15 @@ class HistoricalRangeProcessor:
             chunk_energy_metrics = []
 
             normalized_samples = defaultdict(lambda: defaultdict(float))
+            normalized_container_samples = defaultdict(lambda: defaultdict(float))
             for ts_f, pod_map in samples.items():
                 normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
                 for pod_key, cpu_usage in pod_map.items():
                     normalized_samples[normalized_ts_f][pod_key] += cpu_usage
+            for ts_f, container_map in container_samples.items():
+                normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
+                for container_key, cpu_usage in container_map.items():
+                    normalized_container_samples[normalized_ts_f][container_key] += cpu_usage
 
             # Build per-pod CPU usage map (average cores → millicores) across the chunk
             cpu_usage_sum: dict = defaultdict(float)
@@ -430,6 +454,8 @@ class HistoricalRangeProcessor:
                 if cpu_usage_count[k] > 0
             }
 
+            latest_sample_ts = max(normalized_samples) if normalized_samples else None
+            current_chunk = current_window and chunk_end == end_dt
             for ts_f, pod_map in sorted(normalized_samples.items()):
                 sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
 
@@ -515,57 +541,102 @@ class HistoricalRangeProcessor:
                 )
                 if carbon_result:
                     _ni = nodes_info.get(node_name)
-                    combined.append(
-                        CombinedMetric(
-                            pod_name=pod_name,
-                            namespace=em_namespace,
-                            period=None,
-                            total_cost=total_cost,
-                            timestamp=ts,
-                            duration_seconds=chosen_step_sec,
-                            grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
-                            co2e_grams=carbon_result.co2e_grams,
-                            pue=pue,
-                            grid_intensity=carbon_result.grid_intensity,
-                            joules=joules,
-                            cpu_request=cpu_req,
-                            memory_request=mem_req,
-                            node=node_name or None,
-                            node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
-                            node_zone=(_ni.zone if _ni else None),
-                            emaps_zone=zone,
-                            is_estimated=is_estimated,
-                            estimation_reasons=estimation_reasons,
-                            embodied_co2e_grams=embodied_emissions_grams,
-                            cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
-                            memory_usage_bytes=(
-                                int(range_memory_map[pod_key]) if pod_key in range_memory_map else None
-                            ),
-                            network_receive_bytes=range_net_rx_map.get(pod_key),
-                            network_transmit_bytes=range_net_tx_map.get(pod_key),
-                            disk_read_bytes=range_disk_read_map.get(pod_key),
-                            disk_write_bytes=range_disk_write_map.get(pod_key),
-                            storage_request_bytes=(
-                                int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
-                            ),
-                            storage_usage_bytes=(
-                                int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
-                            ),
-                            ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
-                            ephemeral_storage_usage_bytes=(
-                                int(range_ephemeral_usage_map[pod_key])
-                                if pod_key in range_ephemeral_usage_map
-                                else None
-                            ),
-                            restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
-                            calculation_version=__version__,
-                        )
+                    aggregate_metric = CombinedMetric(
+                        pod_name=pod_name,
+                        namespace=em_namespace,
+                        period=None,
+                        total_cost=total_cost,
+                        timestamp=ts,
+                        duration_seconds=chosen_step_sec,
+                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
+                        co2e_grams=carbon_result.co2e_grams,
+                        pue=pue,
+                        grid_intensity=carbon_result.grid_intensity,
+                        joules=joules,
+                        cpu_request=cpu_req,
+                        memory_request=mem_req,
+                        node=node_name or None,
+                        node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
+                        node_zone=(_ni.zone if _ni else None),
+                        emaps_zone=zone,
+                        is_estimated=is_estimated,
+                        estimation_reasons=estimation_reasons,
+                        embodied_co2e_grams=embodied_emissions_grams,
+                        cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
+                        memory_usage_bytes=(int(range_memory_map[pod_key]) if pod_key in range_memory_map else None),
+                        network_receive_bytes=range_net_rx_map.get(pod_key),
+                        network_transmit_bytes=range_net_tx_map.get(pod_key),
+                        disk_read_bytes=range_disk_read_map.get(pod_key),
+                        disk_write_bytes=range_disk_write_map.get(pod_key),
+                        storage_request_bytes=(
+                            int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
+                        ),
+                        storage_usage_bytes=(
+                            int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
+                        ),
+                        ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
+                        ephemeral_storage_usage_bytes=(
+                            int(range_ephemeral_usage_map[pod_key]) if pod_key in range_ephemeral_usage_map else None
+                        ),
+                        restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
+                        calculation_version=__version__,
                     )
+                    combined.append(aggregate_metric)
+
+                    container_cpu_usage = {
+                        key: int(round(value * 1000))
+                        for key, value in normalized_container_samples.get(ts.timestamp(), {}).items()
+                    }
+                    container_memory_usage = {
+                        key: int(round(value))
+                        for key, value in container_memory_samples.get(ts.timestamp(), {}).items()
+                    }
+                    container_timestamp_map = {}
+                    container_duration_map = {}
+                    container_sample_count_map = {}
+                    if current_chunk and ts_f == latest_sample_ts:
+                        freshness_cutoff = now - timedelta(seconds=max(chosen_step_sec * 2, 60))
+                        for usage in container_usages:
+                            if (
+                                usage.timestamp is None
+                                or usage.timestamp < freshness_cutoff
+                                or usage.timestamp > now + timedelta(seconds=chosen_step_sec)
+                            ):
+                                continue
+                            container_key = (usage.namespace, usage.pod_name, usage.container_name)
+                            usage_added = False
+                            if usage.cpu_usage_millicores is not None and container_key not in container_cpu_usage:
+                                container_cpu_usage[container_key] = usage.cpu_usage_millicores
+                                usage_added = True
+                            if usage.memory_usage_bytes is not None and container_key not in container_memory_usage:
+                                container_memory_usage[container_key] = usage.memory_usage_bytes
+                                usage_added = True
+                            if usage_added:
+                                container_timestamp_map[container_key] = usage.timestamp
+                                container_sample_count_map[container_key] = 1
+                                if usage.duration_seconds is not None:
+                                    container_duration_map[container_key] = usage.duration_seconds
+                    if container_cpu_usage or container_memory_usage:
+                        container_maps = PodResourceMaps(
+                            container_cpu_usage_map=container_cpu_usage,
+                            container_memory_usage_map=container_memory_usage,
+                            container_timestamp_map=container_timestamp_map,
+                            container_duration_seconds_map=container_duration_map,
+                            container_sample_count_map=container_sample_count_map,
+                        )
+                        combined.extend(
+                            self.assembler.assemble_container_metrics(
+                                [aggregate_metric],
+                                pod_metrics_list,
+                                container_maps,
+                            )
+                        )
 
             del chunk_energy_metrics
             del range_net_rx_map, range_net_tx_map
             del range_disk_read_map, range_disk_write_map, range_restart_map
             del range_cpu_usage_map, range_memory_map, range_ephemeral_usage_map
+            del container_memory_samples, container_samples, normalized_container_samples
 
             chunk_start = chunk_end
 

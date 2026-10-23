@@ -13,6 +13,7 @@ from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_carbon_repository,
     get_combined_metrics_repository,
+    get_gitops_binding_repository,
     get_node_repository,
     get_recommendation_repository,
 )
@@ -21,6 +22,7 @@ from greenkube.models.metrics import (
     RecommendationRecord,
     RecommendationType,
 )
+from greenkube.storage.base_gitops_repository import AutomationBacklogSummary
 
 
 @pytest.fixture
@@ -52,12 +54,20 @@ def mock_reco_repo():
 
 
 @pytest.fixture
-def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
+def mock_gitops_repo():
+    repo = AsyncMock()
+    repo.get_automation_backlog_summary = AsyncMock(return_value=AutomationBacklogSummary())
+    return repo
+
+
+@pytest.fixture
+def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_gitops_repo):
     app = create_app()
     app.dependency_overrides[get_carbon_repository] = lambda: mock_carbon_repo
     app.dependency_overrides[get_combined_metrics_repository] = lambda: mock_combined_metrics_repo
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
+    app.dependency_overrides[get_gitops_binding_repository] = lambda: mock_gitops_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -81,6 +91,16 @@ class TestMetricsEndpoint:
         response = client.get("/prometheus/metrics")
         body = response.text
         assert "greenkube_recommendations_total" in body
+
+    def test_metrics_endpoint_exposes_control_loop_gitops_telemetry(self, client):
+        from greenkube.core.observability import record_sync_outcome
+
+        record_sync_outcome("synced")
+        response = client.get("/prometheus/metrics")
+
+        assert response.status_code == 200
+        assert 'greenkube_gitops_sync_outcomes_total{outcome="synced"}' in response.text
+        assert 'greenkube_automation_backlog{queue="operations",state="queued"} 0.0' in response.text
 
 
 class TestUpdateRecommendationMetrics:

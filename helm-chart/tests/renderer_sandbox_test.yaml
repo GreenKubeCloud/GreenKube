@@ -1,0 +1,118 @@
+suite: isolated renderer
+templates:
+  - templates/renderer-sandbox.yaml
+  - templates/configmap.yaml
+  - templates/networkpolicy.yaml
+tests:
+  - it: deploys a credential-free renderer with network-deny policy when automation is enabled
+    set:
+      automation.enabled: true
+      automation.mode: inline
+      rendererSandbox.egressFirewall.enabled: true
+    templates:
+      - templates/renderer-sandbox.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 20002
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 20002
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+          value: 0
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          value:
+            - NET_ADMIN
+      - documentIndex: 0
+        matchRegex:
+          path: spec.template.spec.initContainers[0].args[0]
+          pattern: "iptables-legacy -w 10 -P OUTPUT DROP"
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 20002
+      - documentIndex: 0
+        lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+      - documentIndex: 1
+        isKind:
+          of: Service
+      - documentIndex: 2
+        equal:
+          path: spec.policyTypes
+          value:
+            - Ingress
+            - Egress
+      - documentIndex: 2
+        equal:
+          path: spec.egress
+          value: []
+
+  - it: configures policy gates and the renderer service endpoint
+    set:
+      automation.enabled: true
+      automation.mode: inline
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - matchRegex:
+          path: data.GITOPS_RENDERER_URL
+          pattern: "^http://.+-renderer:8090$"
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minSamples":36'
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minCoverage":0.5'
+
+  - it: does not require the optional NET_ADMIN firewall init container by default
+    set:
+      automation.enabled: true
+      automation.mode: inline
+    templates:
+      - templates/renderer-sandbox.yaml
+    asserts:
+      - isNull:
+          path: spec.template.spec.initContainers
+
+  - it: does not deploy the renderer when automation is disabled
+    set:
+      automation.enabled: false
+    templates:
+      - templates/renderer-sandbox.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: allows controller pods to reach the isolated renderer without opening renderer egress
+    set:
+      automation.enabled: true
+      automation.mode: inline
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.egress[2].ports[0].port
+          value: 8090

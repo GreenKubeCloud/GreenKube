@@ -32,6 +32,8 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                 r.cost_saved_dollars,
                 r.period_seconds,
                 r.timestamp,
+                r.period_start,
+                r.period_end,
                 r.measurement_method,
                 r.baseline_value,
                 r.actual_value,
@@ -48,12 +50,54 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                     (recommendation_id, cluster_name, namespace,
                      recommendation_type, co2e_saved_grams,
                      cost_saved_dollars, period_seconds, timestamp,
+                     period_start, period_end,
                      measurement_method, baseline_value, actual_value,
                      confidence, superseded)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                ON CONFLICT (recommendation_id, period_start, period_end, measurement_method)
+                DO UPDATE SET
+                    cluster_name = EXCLUDED.cluster_name,
+                    namespace = EXCLUDED.namespace,
+                    recommendation_type = EXCLUDED.recommendation_type,
+                    co2e_saved_grams = EXCLUDED.co2e_saved_grams,
+                    cost_saved_dollars = EXCLUDED.cost_saved_dollars,
+                    period_seconds = EXCLUDED.period_seconds,
+                    timestamp = EXCLUDED.timestamp,
+                    baseline_value = EXCLUDED.baseline_value,
+                    actual_value = EXCLUDED.actual_value,
+                    confidence = EXCLUDED.confidence,
+                    superseded = EXCLUDED.superseded
                 """,
                 rows,
             )
+            for record in records:
+                if record.measurement_method == "measured":
+                    await conn.execute(
+                        """
+                        UPDATE recommendation_savings_ledger
+                        SET superseded = TRUE
+                        WHERE recommendation_id = $1
+                          AND measurement_method = 'prorated'
+                          AND period_start < $2
+                          AND period_end > $3
+                        """,
+                        record.recommendation_id,
+                        record.period_end,
+                        record.period_start,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE recommendation_savings_ledger_hourly
+                        SET superseded = TRUE
+                        WHERE recommendation_id = $1
+                          AND measurement_method = 'prorated'
+                          AND period_start < $2
+                          AND period_end > $3
+                        """,
+                        record.recommendation_id,
+                        record.period_end,
+                        record.period_start,
+                    )
         logger.debug("Saved %d savings ledger records to Postgres.", len(records))
         return len(records)
 
@@ -167,7 +211,7 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                      recommendation_type, co2e_saved_grams,
                      cost_saved_dollars, sample_count, hour_bucket,
                      measurement_method, baseline_value, actual_value,
-                     confidence, superseded)
+                     confidence, superseded, period_start, period_end)
                 SELECT
                     recommendation_id,
                     cluster_name,
@@ -181,7 +225,9 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                     MAX(baseline_value),
                     MAX(actual_value),
                     MAX(confidence),
-                    BOOL_OR(COALESCE(superseded, FALSE))
+                    BOOL_OR(COALESCE(superseded, FALSE)),
+                    date_trunc('hour', timestamp),
+                    date_trunc('hour', timestamp) + INTERVAL '1 hour'
                 FROM recommendation_savings_ledger
                 WHERE timestamp < $1
                 GROUP BY recommendation_id, cluster_name, namespace,
@@ -191,19 +237,17 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                     co2e_saved_grams   = EXCLUDED.co2e_saved_grams,
                     cost_saved_dollars = EXCLUDED.cost_saved_dollars,
                     sample_count       = EXCLUDED.sample_count,
-                    superseded         = EXCLUDED.superseded
+                    superseded         = EXCLUDED.superseded,
+                    period_start       = EXCLUDED.period_start,
+                    period_end         = EXCLUDED.period_end
                 """,
                 cutoff,
             )
             count = int(result.split()[-1]) if result else 0
-
-        if count:
-            # Prune the raw rows we just compressed
-            async with self._db.connection_scope() as conn:
-                await conn.execute(
-                    "DELETE FROM recommendation_savings_ledger WHERE timestamp < $1",
-                    cutoff,
-                )
+            await conn.execute(
+                "DELETE FROM recommendation_savings_ledger WHERE timestamp < $1",
+                cutoff,
+            )
 
         logger.debug("Compressed %d savings ledger records to hourly.", count)
         return count

@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { page } from '$app/stores';
 	import { sidebarCollapsed, servicesHealth, healthPopupDismissed } from '$lib/stores.js';
-	import { getHealth, getServicesHealth } from '$lib/api.js';
+	import { ApiError, clearApiToken, getHealth, getServicesHealth, setApiToken } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import HealthBadge from '$lib/components/HealthBadge.svelte';
 	import HealthPopup from '$lib/components/HealthPopup.svelte';
@@ -10,28 +10,25 @@
 	let health = null;
 	let healthError = false;
 	let showHealthPopup = false;
+	let showAuthDialog = false;
+	let authToken = '';
+	let authError = '';
+	let authenticating = false;
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/automation', label: 'Automation' },
 		{ href: '/report', label: 'Report' },
 		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/settings', label: 'Settings' }
 	];
 
-	onMount(async () => {
-		try {
-			health = await getHealth();
-		} catch {
-			healthError = true;
-		}
-
-		// Fetch services health on first load
+	async function refreshServicesHealth() {
 		try {
 			const result = await getServicesHealth();
 			servicesHealth.set(result);
 
-			// Show popup if there are connectivity issues
 			const services = result?.services || {};
 			const hasIssues = Object.values(services).some(
 				s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
@@ -39,9 +36,50 @@
 			if (hasIssues && !$healthPopupDismissed) {
 				showHealthPopup = true;
 			}
-		} catch (e) {
-			// Silently fail — health check is non-blocking
+			return true;
+		} catch (error) {
+			if (error instanceof ApiError && error.status === 401) {
+				showAuthDialog = true;
+			}
+			return false;
 		}
+	}
+
+	async function authenticate() {
+		const token = authToken.trim();
+		if (!token) {
+			authError = 'Enter an API key.';
+			return;
+		}
+		authenticating = true;
+		authError = '';
+		setApiToken(token);
+		if (await refreshServicesHealth()) {
+			showAuthDialog = false;
+			authToken = '';
+		} else {
+			clearApiToken();
+			authError = 'The API key was rejected.';
+		}
+		authenticating = false;
+	}
+
+	function handleAuthRequired() {
+		showAuthDialog = true;
+		authError = '';
+	}
+
+	onMount(async () => {
+		window.addEventListener('greenkube-auth-required', handleAuthRequired);
+		try {
+			health = await getHealth();
+		} catch {
+			healthError = true;
+		}
+
+		await refreshServicesHealth();
+
+		return () => window.removeEventListener('greenkube-auth-required', handleAuthRequired);
 	});
 
 	function handlePopupDismiss() {
@@ -78,6 +116,43 @@
 	};
 </script>
 
+{#if showAuthDialog}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="presentation">
+		<div
+			class="w-full max-w-md rounded-2xl border border-dark-700/50 bg-dark-900 p-6 shadow-2xl"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="api-auth-title"
+		>
+			<h2 id="api-auth-title" class="text-lg font-bold text-dark-100">API authentication required</h2>
+			<p class="mt-2 text-sm text-dark-400">
+				This GreenKube instance requires an API key. The key is kept in memory only.
+			</p>
+			<form class="mt-5 space-y-4" on:submit|preventDefault={authenticate}>
+				<label for="api-token" class="block text-sm font-medium text-dark-300">API key</label>
+				<input
+					id="api-token"
+					type="password"
+					bind:value={authToken}
+					autocomplete="off"
+					class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
+					placeholder="Paste the GreenKube API key"
+				/>
+				{#if authError}
+					<p class="text-sm text-red-400" role="alert">{authError}</p>
+				{/if}
+				<button
+					type="submit"
+					disabled={authenticating}
+					class="w-full rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-green-500 disabled:cursor-wait disabled:opacity-60"
+				>
+					{authenticating ? 'Connecting…' : 'Connect'}
+				</button>
+			</form>
+		</div>
+	</div>
+{/if}
+
 <!-- Health Popup (shown once on first load if issues detected) -->
 <HealthPopup
 	services={$servicesHealth?.services}
@@ -92,7 +167,7 @@
 	              {$sidebarCollapsed ? 'w-16' : 'w-60'}">
 		<!-- Logo -->
 		<div class="flex items-center gap-3 px-4 py-5 border-b border-dark-700/50">
-			<img src="/greenkube-logo.png" alt="GreenKube" class="w-8 h-8 rounded-lg flex-shrink-0" />
+			<img src="/greenkube-logo.png" alt="GreenKube" class="w-8 h-8 rounded-lg shrink-0" />
 			{#if !$sidebarCollapsed}
 				<div class="overflow-hidden">
 					<h1 class="text-base font-bold text-dark-100 truncate">GreenKube</h1>
@@ -126,7 +201,7 @@
 				<div class="space-y-1 mb-2">
 					{#each Object.entries(activeServices) as [name, svc]}
 						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
-							<div class="w-1.5 h-1.5 rounded-full flex-shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
+							<div class="w-1.5 h-1.5 rounded-full shrink-0 {statusColors[svc.status] || 'bg-dark-500'}
 							            {svc.status === 'degraded' ? 'animate-pulse' : ''}"></div>
 							{#if !$sidebarCollapsed}
 								<span class="text-[10px] text-dark-500 truncate capitalize">{name.replace('_', ' ')}</span>
@@ -138,7 +213,7 @@
 
 			<!-- API health indicator -->
 			<div class="flex items-center gap-2 px-2 py-1.5">
-				<div class="w-2 h-2 rounded-full flex-shrink-0
+				<div class="w-2 h-2 rounded-full shrink-0
 				            {healthError ? 'bg-red-500' : health ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}">
 				</div>
 				{#if !$sidebarCollapsed}

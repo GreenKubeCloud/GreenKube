@@ -1,0 +1,174 @@
+{{- $automationMode := include "greenkube.automationMode" . -}}
+{{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
+{{- $root := . }}
+{{- $rendererName := printf "%s-renderer" (include "greenkube.fullname" $root | trunc 50 | trimSuffix "-") }}
+{{- $component := "renderer-sandbox" }}
+{{- $selectorLabels := include "greenkube.selectorLabels" $root }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $rendererName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ $root.Values.rendererSandbox.replicas }}
+  selector:
+    matchLabels:
+      {{- $selectorLabels | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  template:
+    metadata:
+      labels:
+        {{- $selectorLabels | nindent 8 }}
+        app.kubernetes.io/component: {{ $component }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 20002
+        runAsGroup: 20002
+        fsGroup: 20002
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if $root.Values.rendererSandbox.egressFirewall.enabled }}
+      initContainers:
+        - name: renderer-egress-deny
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              /usr/sbin/iptables-legacy -w 10 -F OUTPUT
+              /usr/sbin/iptables-legacy -w 10 -P OUTPUT DROP
+              /usr/sbin/iptables-legacy -w 10 -A OUTPUT -o lo -j ACCEPT
+              /usr/sbin/iptables-legacy -w 10 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+              if [ -s /proc/net/if_inet6 ]; then
+                /usr/sbin/ip6tables-legacy -w 10 -F OUTPUT
+                /usr/sbin/ip6tables-legacy -w 10 -P OUTPUT DROP
+                /usr/sbin/ip6tables-legacy -w 10 -A OUTPUT -o lo -j ACCEPT
+                /usr/sbin/ip6tables-legacy -w 10 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+              fi
+          env:
+            - name: XTABLES_LOCKFILE
+              value: /tmp/iptables.lock
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+      containers:
+        - name: renderer
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: ["python", "-m", "greenkube.gitops.renderers.service"]
+          ports:
+            - name: render-http
+              containerPort: {{ $root.Values.rendererSandbox.servicePort }}
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 20002
+            runAsGroup: 20002
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: render-http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: render-http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml $root.Values.rendererSandbox.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $root.Values.rendererSandbox.tmpSizeLimit }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $rendererName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- $selectorLabels | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+  ports:
+    - name: render-http
+      port: {{ $root.Values.rendererSandbox.servicePort }}
+      targetPort: render-http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-renderer-netpol" (include "greenkube.fullname" $root | trunc 40 | trimSuffix "-") }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- $selectorLabels | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $selectorLabels | nindent 14 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values:
+                  - {{ $component }}
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.rendererSandbox.servicePort }}
+  egress: []
+{{- end }}

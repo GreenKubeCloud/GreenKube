@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -25,6 +25,33 @@ if TYPE_CHECKING:
     from greenkube.storage.base_repository import RecommendationRepository
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_TRANSITIONS = {
+    RecommendationStatus.ACTIVE.value: {
+        RecommendationStatus.APPLIED.value,
+        RecommendationStatus.IGNORED.value,
+        RecommendationStatus.STALE.value,
+        RecommendationStatus.EXPIRED.value,
+        RecommendationStatus.PR_OPEN.value,
+        RecommendationStatus.VERIFIED.value,
+    },
+    RecommendationStatus.PR_OPEN.value: {RecommendationStatus.APPLIED.value, RecommendationStatus.FAILED.value},
+    RecommendationStatus.APPLIED.value: {
+        RecommendationStatus.VERIFYING.value,
+        RecommendationStatus.VERIFIED.value,
+        RecommendationStatus.ROLLBACK_REVIEW.value,
+        RecommendationStatus.REVERTED.value,
+        RecommendationStatus.FAILED.value,
+    },
+    RecommendationStatus.VERIFYING.value: {
+        RecommendationStatus.APPLIED.value,
+        RecommendationStatus.VERIFIED.value,
+        RecommendationStatus.ROLLBACK_REVIEW.value,
+        RecommendationStatus.FAILED.value,
+    },
+    RecommendationStatus.ROLLBACK_REVIEW.value: {RecommendationStatus.REVERTED.value},
+    RecommendationStatus.IGNORED.value: {RecommendationStatus.ACTIVE.value},
+}
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -76,7 +103,7 @@ class RecommendationLifecycle:
         actor: str = "system",
         payload: Optional[dict] = None,
     ) -> RecommendationEvent:
-        """Persists one audit event, tolerating repository failures."""
+        """Persists one audit event."""
         value = event_type.value if hasattr(event_type, "value") else str(event_type)
         event = RecommendationEvent(
             recommendation_id=rec_id,
@@ -86,9 +113,9 @@ class RecommendationLifecycle:
         )
         try:
             return await self.repo.record_event(event)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Could not record recommendation event %s for %s: %s", value, rec_id, exc)
-            return event
+        except Exception:
+            logger.exception("Could not record recommendation event %s for %s.", value, rec_id)
+            raise
 
     async def transition(
         self,
@@ -106,9 +133,24 @@ class RecommendationLifecycle:
         changes = dict(updates or {})
         changes["status"] = status_value
         changes.setdefault("updated_at", datetime.now(timezone.utc))
-        record = await self.repo.update_recommendation_fields(rec_id, changes)
-        if emit_event:
-            await self.record_event(rec_id, event_type, actor=actor, payload=payload)
+        current = await self.repo.get_recommendation_by_id(rec_id)
+        if current is None:
+            raise ValueError(f"Recommendation {rec_id} not found.")
+        current_value = current.status.value if hasattr(current.status, "value") else str(current.status)
+        if status_value != current_value and status_value not in _ALLOWED_TRANSITIONS.get(current_value, set()):
+            raise ValueError(f"Invalid recommendation transition: {current_value} -> {status_value}.")
+        if emit_event and hasattr(self.repo, "transition_and_record_event"):
+            record = await self.repo.transition_and_record_event(
+                rec_id,
+                changes,
+                event_type.value if hasattr(event_type, "value") else str(event_type),
+                actor,
+                payload or {},
+            )
+        else:
+            record = await self.repo.update_recommendation_fields(rec_id, changes)
+            if emit_event:
+                await self.record_event(rec_id, event_type, actor=actor, payload=payload)
         return record
 
     async def apply(
@@ -220,6 +262,37 @@ class RecommendationLifecycle:
             payload={"reasons": reasons},
         )
 
+    async def mark_reverted(
+        self,
+        rec_id: int,
+        *,
+        rollback_plan_id: str,
+        rollback_of_plan_id: str,
+        actual_cpu_request_millicores: Optional[int],
+        actual_memory_request_bytes: Optional[int],
+        actor: str = "system",
+    ) -> RecommendationRecord:
+        """Mark a rollback complete after its synced per-container state is verified."""
+        return await self.transition(
+            rec_id,
+            RecommendationStatus.REVERTED,
+            event_type=RecommendationEventType.REVERTED,
+            updates={
+                "verified_at": datetime.now(timezone.utc),
+                "verification_status": VerificationStatus.PASSED.value,
+                "measured_co2e_saved_grams": None,
+                "measured_cost_saved": None,
+                "savings_realized": False,
+            },
+            actor=actor,
+            payload={
+                "rollback_plan_id": rollback_plan_id,
+                "rollback_of_plan_id": rollback_of_plan_id,
+                "actual_cpu_request_millicores": actual_cpu_request_millicores,
+                "actual_memory_request_bytes": actual_memory_request_bytes,
+            },
+        )
+
     async def mark_inconclusive(
         self,
         rec_id: int,
@@ -228,16 +301,26 @@ class RecommendationLifecycle:
         verification_window_start: Optional[datetime] = None,
         verification_window_end: Optional[datetime] = None,
     ) -> RecommendationRecord:
+        record = await self.repo.get_recommendation_by_id(rec_id)
+        updates: dict[str, Any] = {
+            "verification_status": VerificationStatus.INCONCLUSIVE.value,
+            "verification_window_start": verification_window_start,
+            "verification_window_end": verification_window_end,
+            "verified_at": None,
+            "measured_co2e_saved_grams": None,
+            "measured_cost_saved": None,
+            "savings_realized": False,
+        }
+        if record is not None and record.baseline:
+            baseline = dict(record.baseline)
+            if "measured_ledger_input" in baseline:
+                baseline.pop("measured_ledger_input")
+                updates["baseline"] = baseline
         return await self.transition(
             rec_id,
             RecommendationStatus.APPLIED,
             event_type=RecommendationEventType.VERIFIED,
-            updates={
-                "verification_status": VerificationStatus.INCONCLUSIVE.value,
-                "verification_window_start": verification_window_start,
-                "verification_window_end": verification_window_end,
-                "savings_realized": False,
-            },
+            updates=updates,
             payload={"reason": reason},
         )
 

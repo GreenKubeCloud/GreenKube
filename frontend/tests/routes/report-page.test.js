@@ -18,7 +18,7 @@ vi.mock('$lib/api.js', () => ({
 		total_cost: 1,
 		total_energy_joules: 1
 	})),
-	buildReportExportUrl: vi.fn(() => 'http://localhost:3000/api/v1/report/export?format=csv')
+	downloadReport: vi.fn(() => Promise.resolve())
 }));
 
 

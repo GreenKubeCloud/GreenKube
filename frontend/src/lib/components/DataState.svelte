@@ -1,8 +1,15 @@
 <script>
+	import { createEventDispatcher } from 'svelte';
+
 	export let loading = false;
 	export let error = '';
 	export let empty = false;
 	export let emptyMessage = 'No data available';
+	export let actionHint = '';
+	export let retryLabel = 'Retry';
+	export let canRetry = false;
+
+	const dispatch = createEventDispatcher();
 </script>
 
 {#if loading}
@@ -17,6 +24,10 @@
 		<div class="flex flex-col items-center gap-3 text-center">
 			<span class="text-2xl">⚠️</span>
 			<p class="text-sm text-red-400 max-w-md">{error}</p>
+			{#if actionHint}<p class="text-xs text-dark-500 max-w-md">{actionHint}</p>{/if}
+			{#if canRetry}
+				<button class="btn-secondary text-xs" on:click={() => dispatch('retry')}>{retryLabel}</button>
+			{/if}
 		</div>
 	</div>
 {:else if empty}

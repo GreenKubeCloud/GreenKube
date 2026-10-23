@@ -1,0 +1,98 @@
+profile: production
+
+automation:
+  enabled: true
+  mode: worker
+
+config:
+  environment: production
+  apiAuthMode: api_key
+
+production:
+  migration:
+    enabled: true
+    backoffLimit: 6
+    image:
+      repository: busybox
+      tag: "1.37"
+      pullPolicy: IfNotPresent
+  leaderElection:
+    enabled: true
+    leaseName: ''
+    leaseDurationSeconds: 30
+    renewDeadlineSeconds: 10
+    retryPeriodSeconds: 2
+  components:
+    api:
+      replicas: 2
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+    controller:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+    automation:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 250m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1

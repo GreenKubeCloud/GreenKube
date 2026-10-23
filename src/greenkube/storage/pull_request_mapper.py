@@ -8,7 +8,27 @@ from greenkube.models.metrics import PullRequestRecord, PullRequestStatus
 
 #: Columns a lifecycle update may touch.
 MUTABLE_PR_COLUMNS: frozenset = frozenset(
-    {"provider", "repo", "base_branch", "head_branch", "pr_number", "pr_url", "status", "error", "updated_at"}
+    {
+        "provider",
+        "repo",
+        "base_branch",
+        "head_branch",
+        "pr_number",
+        "pr_url",
+        "status",
+        "error",
+        "updated_at",
+        "plan_id",
+        "provider_id",
+        "commit_sha",
+        "merge_commit_sha",
+        "merged_at",
+        "closed_at",
+        "sync_status",
+        "sync_revision",
+        "sync_observed_at",
+        "sync_error_code",
+    }
 )
 
 
@@ -50,4 +70,14 @@ def row_to_pull_request(row) -> PullRequestRecord:
         error=_get(row, "error"),
         created_at=_as_datetime(_get(row, "created_at")) or datetime.now(timezone.utc),
         updated_at=_as_datetime(_get(row, "updated_at")),
+        plan_id=_get(row, "plan_id"),
+        provider_id=_get(row, "provider_id"),
+        commit_sha=_get(row, "commit_sha"),
+        merge_commit_sha=_get(row, "merge_commit_sha"),
+        merged_at=_as_datetime(_get(row, "merged_at")),
+        closed_at=_as_datetime(_get(row, "closed_at")),
+        sync_status=_get(row, "sync_status"),
+        sync_revision=_get(row, "sync_revision"),
+        sync_observed_at=_as_datetime(_get(row, "sync_observed_at")),
+        sync_error_code=_get(row, "sync_error_code"),
     )

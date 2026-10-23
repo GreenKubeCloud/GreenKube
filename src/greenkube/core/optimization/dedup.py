@@ -44,13 +44,13 @@ def _source_priority_map(config: "Config") -> Dict[str, int]:
 def arbitration_key(rec: Recommendation) -> Tuple:
     """Returns the key used to detect cross-source conflicts."""
     if rec.owner_kind and rec.owner_name:
-        target: Tuple = (rec.namespace, rec.owner_kind, rec.owner_name)
+        target: Tuple = (rec.namespace, rec.owner_kind, rec.owner_name, rec.container_name or "")
     elif rec.target_node:
-        target = (None, "Node", rec.target_node)
+        target = (None, "Node", rec.target_node, rec.container_name or "")
     elif rec.pod_name:
-        target = (rec.namespace, "Pod", rec.pod_name)
+        target = (rec.namespace, "Pod", rec.pod_name, rec.container_name or "")
     else:
-        target = (rec.namespace, "Namespace", None)
+        target = (rec.namespace, "Namespace", None, rec.container_name or "")
     return (*target, _capability_value(rec), _type_value(rec))
 
 
@@ -102,7 +102,7 @@ def deduplicate(recs: List[Recommendation]) -> List[Recommendation]:
     seen = set()
     result = []
     for rec in recs:
-        key = (rec.scope, rec.namespace, rec.pod_name, rec.type, rec.target_node or "")
+        key = (rec.scope, rec.namespace, rec.pod_name, rec.container_name or "", rec.type, rec.target_node or "")
         if key not in seen:
             seen.add(key)
             result.append(rec)

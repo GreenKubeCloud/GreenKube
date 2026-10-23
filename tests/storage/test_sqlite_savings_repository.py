@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import aiosqlite
 import pytest
 
+from greenkube.models.savings import SavingsLedgerRecord
 from greenkube.storage.sqlite.savings_repository import SQLiteSavingsLedgerRepository
 from greenkube.utils.date_utils import to_iso_z
 
@@ -23,6 +24,8 @@ async def db_connection():
                 cost_saved_dollars REAL,
                 period_seconds INTEGER,
                 timestamp TEXT,
+                period_start TEXT,
+                period_end TEXT,
                 measurement_method TEXT DEFAULT 'prorated',
                 baseline_value REAL,
                 actual_value REAL,
@@ -48,6 +51,30 @@ async def db_connection():
                 confidence REAL,
                 superseded INTEGER DEFAULT 0
             )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX uq_savings_ledger_period
+            ON recommendation_savings_ledger
+            (recommendation_id, period_start, period_end, measurement_method)
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE recommendation_savings_ledger_hourly ADD COLUMN period_start TEXT
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE recommendation_savings_ledger_hourly ADD COLUMN period_end TEXT
+            """
+        )
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX uq_savings_ledger_hourly_period
+            ON recommendation_savings_ledger_hourly
+            (recommendation_id, hour_bucket, measurement_method)
             """
         )
         await conn.commit()
@@ -108,6 +135,49 @@ async def test_get_window_totals_filters_namespace_across_raw_and_hourly(sqlite_
     )
 
     assert totals == {"RIGHTSIZING_CPU": {"co2e_saved_grams": 15.0, "cost_saved_dollars": 1.5}}
+
+
+@pytest.mark.asyncio
+async def test_save_records_is_idempotent_for_explicit_period(sqlite_savings_repo, db_connection):
+    start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=5)
+    record = SavingsLedgerRecord(
+        recommendation_id=1,
+        cluster_name="minikube",
+        namespace="prod",
+        recommendation_type="RIGHTSIZING_CPU",
+        co2e_saved_grams=10.0,
+        period_seconds=300,
+        timestamp=end,
+        period_start=start,
+        period_end=end,
+    )
+
+    assert await sqlite_savings_repo.save_records([record]) == 1
+    record.co2e_saved_grams = 12.0
+    assert await sqlite_savings_repo.save_records([record]) == 1
+    cursor = await db_connection.execute("SELECT COUNT(*), MAX(co2e_saved_grams) FROM recommendation_savings_ledger")
+    assert await cursor.fetchone() == (1, 12.0)
+
+
+@pytest.mark.asyncio
+async def test_measured_record_supersedes_overlapping_prorated_record(sqlite_savings_repo, db_connection):
+    start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=5)
+    prorated = SavingsLedgerRecord(
+        recommendation_id=1,
+        cluster_name="minikube",
+        recommendation_type="RIGHTSIZING_CPU",
+        co2e_saved_grams=10.0,
+        timestamp=end,
+        period_start=start,
+        period_end=end,
+    )
+    measured = prorated.model_copy(update={"measurement_method": "measured", "co2e_saved_grams": 7.0})
+
+    await sqlite_savings_repo.save_records([prorated, measured])
+    totals = await sqlite_savings_repo.get_cumulative_totals("minikube")
+    assert totals["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(7.0)
 
 
 @pytest.mark.asyncio

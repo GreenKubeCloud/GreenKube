@@ -18,6 +18,7 @@ def _context(count=10):
             namespace="prod",
             owner_kind="Deployment",
             owner_name="api",
+            container_name="api",
             cpu_request=1000,
             memory_request=2 * 1024**3,
             cpu_usage_millicores=200,
@@ -43,6 +44,7 @@ def _context(count=10):
 def _rec():
     return Recommendation(
         pod_name="api",
+        container_name="api",
         namespace="prod",
         type=RecommendationType.RIGHTSIZING_CPU,
         scope="workload",
@@ -82,7 +84,10 @@ class TestEnrichRecommendations:
         assert rec.expires_at is not None
         assert rec.evidence.risk_level == rec.risk_level.value
         assert rec.evidence.expires_at == rec.expires_at
-        assert rec.evidence.proposed_patch == rec.patch
+        assert rec.evidence.proposed_patch is not None
+        assert rec.patch is not None
+        assert rec.evidence.proposed_patch.container_name == rec.patch.container_name
+        assert rec.evidence.proposed_patch.operations[0]["value"] == rec.patch.operations[0]["value"]
 
     def test_expiry_uses_configured_ttl(self):
         config = Config()

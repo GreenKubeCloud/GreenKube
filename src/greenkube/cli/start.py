@@ -11,8 +11,10 @@ import asyncio
 import logging
 import signal
 import traceback
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Set
+from functools import wraps
+from typing import Any, Optional, Set
 
 import typer
 from typing_extensions import Annotated
@@ -21,6 +23,7 @@ from ..collectors.node_collector import NodeCollector
 from ..core.config import get_config
 from ..core.factory import (
     get_combined_metrics_repository,
+    get_data_processor,
     get_electricity_provider,
     get_node_repository,
     get_repository,
@@ -296,6 +299,7 @@ async def run_recommendation_lifecycle() -> None:
         from ..core.factory import (
             get_combined_metrics_repository as _combined_repo,
         )
+        from ..core.factory import get_gitops_repository as _gitops_repo
         from ..core.factory import (
             get_recommendation_repository as _reco_repo,
         )
@@ -310,7 +314,7 @@ async def run_recommendation_lifecycle() -> None:
         if expired:
             logger.info("Expired %d recommendation(s) past their TTL.", len(expired))
 
-        detector = AppliedDetector(lifecycle)
+        detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo())
         applied = await detector.detect()
         if applied:
             logger.info("Detected %d newly applied recommendation(s).", len(applied))
@@ -341,6 +345,120 @@ async def run_recommendation_lifecycle() -> None:
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
+def _create_controller_leader_election(cfg):
+    """Build the optional controller Lease elector from the chart-provided settings."""
+    if not getattr(cfg, "LEADER_ELECTION_ENABLED", False):
+        return None
+
+    from ..core.k8s_client import get_coordination_v1_api
+    from ..core.leader_election import KubernetesLeaseElector, process_identity
+
+    lease_name = getattr(cfg, "LEADER_ELECTION_LEASE_NAME", "")
+    lease_namespace = getattr(cfg, "LEADER_ELECTION_LEASE_NAMESPACE", "")
+    if not lease_name or not lease_namespace:
+        raise ValueError("LEADER_ELECTION_LEASE_NAME and LEADER_ELECTION_LEASE_NAMESPACE are required when enabled.")
+
+    return KubernetesLeaseElector(
+        name=lease_name,
+        namespace=lease_namespace,
+        identity=process_identity(),
+        api_provider=get_coordination_v1_api,
+    )
+
+
+def _leader_gated_callback(
+    callback: Callable[[], Coroutine[Any, Any, None]],
+    should_run: Callable[[], bool] | None,
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    if should_run is None:
+        return callback
+
+    @wraps(callback)
+    async def guarded() -> None:
+        if should_run():
+            await callback()
+        else:
+            logger.debug("Skipping controller task %s while this process is not the Lease holder.", callback.__name__)
+
+    return guarded
+
+
+async def _run_initial_controller_task(
+    callback: Callable[..., Awaitable[None]],
+    should_run: Callable[[], bool] | None,
+    *args,
+    **kwargs,
+) -> bool:
+    if should_run is not None and not should_run():
+        logger.info("Skipping remaining initial controller work while this process is not the Lease holder.")
+        return False
+    await callback(*args, **kwargs)
+    return True
+
+
+async def _run_deferred_initial_controller_work(initial_tasks, should_run, stop_event: asyncio.Event) -> None:
+    """Run each startup task once when this controller first acquires its Lease."""
+    from ..core.leader_election import DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS
+
+    for callback, args, kwargs in initial_tasks:
+        while not stop_event.is_set():
+            if should_run():
+                try:
+                    if await _run_initial_controller_task(callback, should_run, *args, **kwargs):
+                        break
+                except Exception:
+                    logger.exception("Deferred initial controller task %s failed.", callback.__name__)
+                    return
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS,
+                )
+            except TimeoutError:
+                continue
+        else:
+            return
+    logger.info("Initial controller work complete.")
+
+
+async def _start_gitops_sync_observer(
+    db_manager,
+    *,
+    stop_event: asyncio.Event | None = None,
+    should_run: Callable[[], bool] | None = None,
+) -> asyncio.Task | None:
+    """Start bounded controller sync observation when Git providers are configured."""
+    from ..automation.plan_runtime import (
+        PlanProvidersNotConfiguredError,
+        PlanRuntimeConfigurationError,
+        create_plan_runtime,
+    )
+    from ..automation.sync_runtime import create_gitops_sync_runtime
+
+    try:
+        plan_runtime = await create_plan_runtime(db_manager=db_manager, connect_db=False)
+    except PlanProvidersNotConfiguredError as error:
+        logger.info("GitOps sync observation is idle: %s", error)
+        return None
+    except PlanRuntimeConfigurationError as error:
+        logger.warning("GitOps sync observation is unavailable: %s", error)
+        return None
+    except Exception as error:
+        logger.warning("GitOps sync observation is unavailable (%s).", type(error).__name__)
+        return None
+
+    runtime = create_gitops_sync_runtime(
+        plan_runtime.pull_requests,
+        plan_runtime.gitops_repository,
+    )
+    observer_stop_event = stop_event if stop_event is not None else asyncio.Event()
+    if should_run is None:
+        run_observer = runtime.run(observer_stop_event)
+    else:
+        run_observer = runtime.run(observer_stop_event, should_run=should_run)
+    return asyncio.create_task(run_observer, name="gitops-sync-observation")
+
+
 async def _async_start(last: Optional[str]):
     cfg = get_config()
     from ..utils.log import configure_logging
@@ -361,52 +479,143 @@ async def _async_start(last: Optional[str]):
     await get_db_manager().connect()
     logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
 
-    scheduler = Scheduler()
-    scheduler.add_job(collect_carbon_intensity_for_all_zones, interval_hours=1, skip_initial=True)
+    from ..automation.plan_runtime import initialize_gitops_provider_configs
 
-    scheduler.add_job_from_string(scheduled_write_metrics, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
-    scheduler.add_job_from_string(analyze_nodes, cfg.NODE_ANALYSIS_INTERVAL, skip_initial=True)
-    scheduler.add_job_from_string(attribute_recommendation_savings, cfg.PROMETHEUS_QUERY_RANGE_STEP, skip_initial=True)
-    # Apply detection, verification and TTL expiry
-    scheduler.add_job_from_string(
-        run_recommendation_lifecycle,
-        getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
-        skip_initial=True,
-    )
-    # Compress old raw metrics into hourly aggregates every hour.
-    # skip_initial=True because both jobs are awaited once in the startup block below.
-    scheduler.add_job(compress_metrics, interval_hours=1, skip_initial=True)
-    # Refresh pre-computed dashboard summary every hour (after compression)
-    scheduler.add_job(refresh_dashboard_summary, interval_hours=1, skip_initial=True)
+    await initialize_gitops_provider_configs(db_manager=get_db_manager())
 
-    logger.info("📈 Starting scheduler...")
-    logger.info("\nGreenKube is running. Press CTRL+C to exit.")
+    from ..gitops.discovery.runtime import create_gitops_discovery_runtime
 
-    # Initial Run
-    logger.info("Running initial data collection for all zones...")
-    await collect_carbon_intensity_for_all_zones()
-    await analyze_nodes()
-    # pass 'last' only to the initial run
-    await async_write_combined_metrics_to_database(last=last)
-    await attribute_recommendation_savings()
-    await run_recommendation_lifecycle()
-    await compress_metrics()
-    await refresh_dashboard_summary()
-    logger.info("Initial collection complete.")
+    discovery_runtime = await create_gitops_discovery_runtime(db_manager=get_db_manager())
+    controller_stop_event = asyncio.Event()
+    discovery_task = None
+    leader_election_task = None
+    initial_work_task = None
+    processor = None
+    scheduler = None
+    sync_task = None
+    try:
+        leader_election = _create_controller_leader_election(cfg)
+        if leader_election is None:
+            should_run = None
+        else:
+            await leader_election.try_acquire_or_renew()
 
-    stop_event = asyncio.Event()
+            def should_run() -> bool:
+                return leader_election.is_leader
 
-    def handle_sig():
-        logger.info("\n🛑 Received shutdown signal...")
-        stop_event.set()
+            leader_election_task = asyncio.create_task(
+                leader_election.run(controller_stop_event),
+                name="controller-leader-election",
+            )
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, handle_sig)
+        if should_run is None:
+            discovery_loop = discovery_runtime.run_periodic()
+        else:
+            discovery_loop = discovery_runtime.run_periodic(
+                stop_event=controller_stop_event,
+                should_run=should_run,
+            )
+        discovery_task = asyncio.create_task(discovery_loop, name="gitops-discovery-refresh")
+        sync_task = await _start_gitops_sync_observer(
+            get_db_manager(),
+            stop_event=controller_stop_event,
+            should_run=should_run,
+        )
 
-    await stop_event.wait()
-    await scheduler.stop()
-    logger.info("🛑 Shutting down GreenKube service gracefully.")
+        # Resolve the processor at the composition root before workers are
+        # scheduled. This makes collector/repository wiring fail fast and keeps
+        # scheduled jobs focused on vertical orchestration.
+        processor = get_data_processor()
+        scheduler = Scheduler()
+        scheduler.add_job(
+            _leader_gated_callback(collect_carbon_intensity_for_all_zones, should_run),
+            interval_hours=1,
+            skip_initial=True,
+        )
+
+        scheduler.add_job_from_string(
+            _leader_gated_callback(scheduled_write_metrics, should_run),
+            cfg.PROMETHEUS_QUERY_RANGE_STEP,
+            skip_initial=True,
+        )
+        scheduler.add_job_from_string(
+            _leader_gated_callback(analyze_nodes, should_run),
+            cfg.NODE_ANALYSIS_INTERVAL,
+            skip_initial=True,
+        )
+        scheduler.add_job_from_string(
+            _leader_gated_callback(attribute_recommendation_savings, should_run),
+            cfg.PROMETHEUS_QUERY_RANGE_STEP,
+            skip_initial=True,
+        )
+        # Apply detection, verification and TTL expiry
+        scheduler.add_job_from_string(
+            _leader_gated_callback(run_recommendation_lifecycle, should_run),
+            getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
+            skip_initial=True,
+        )
+        # Compress old raw metrics into hourly aggregates every hour.
+        # skip_initial=True because both jobs are awaited once in the startup block below.
+        scheduler.add_job(_leader_gated_callback(compress_metrics, should_run), interval_hours=1, skip_initial=True)
+        # Refresh pre-computed dashboard summary every hour (after compression)
+        scheduler.add_job(
+            _leader_gated_callback(refresh_dashboard_summary, should_run),
+            interval_hours=1,
+            skip_initial=True,
+        )
+
+        logger.info("📈 Starting scheduler...")
+        logger.info("\nGreenKube is running. Press CTRL+C to exit.")
+
+        initial_tasks = (
+            (collect_carbon_intensity_for_all_zones, (), {}),
+            (analyze_nodes, (), {}),
+            (async_write_combined_metrics_to_database, (), {"last": last}),
+            (attribute_recommendation_savings, (), {}),
+            (run_recommendation_lifecycle, (), {}),
+            (compress_metrics, (), {}),
+            (refresh_dashboard_summary, (), {}),
+        )
+        if should_run is None:
+            logger.info("Running initial controller work...")
+            for callback, args, kwargs in initial_tasks:
+                if not await _run_initial_controller_task(callback, should_run, *args, **kwargs):
+                    break
+            else:
+                logger.info("Initial collection complete.")
+        else:
+            logger.info("Initial controller work will start after Lease acquisition.")
+            initial_work_task = asyncio.create_task(
+                _run_deferred_initial_controller_work(initial_tasks, should_run, controller_stop_event),
+                name="controller-initial-work",
+            )
+
+        def handle_sig():
+            logger.info("\n🛑 Received shutdown signal...")
+            controller_stop_event.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, handle_sig)
+
+        await controller_stop_event.wait()
+    finally:
+        controller_stop_event.set()
+        try:
+            if scheduler is not None:
+                await scheduler.stop()
+        finally:
+            tasks = [
+                task
+                for task in (discovery_task, sync_task, leader_election_task, initial_work_task)
+                if task is not None
+            ]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if processor is not None:
+                await processor.close()
+            logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 
 @app.callback(invoke_without_command=True)

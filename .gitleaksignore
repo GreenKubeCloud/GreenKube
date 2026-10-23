@@ -1,1 +1,7 @@
+# Known false positives: test fixtures and assertions that use fake
+# placeholder credentials (no real secrets are stored in the repository).
 frontend/src/routes/metrics/+page.svelte:generic-api-key:87
+tests/api/test_gitops_router.py:generic-api-key:438
+tests/api/test_security.py:generic-api-key:125
+tests/gitops/discovery/fixtures/flux-values-secret.yaml:kubernetes-secret-yaml:2
+tests/storage/test_gitops_repository.py:generic-api-key:431

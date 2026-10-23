@@ -19,12 +19,13 @@ right-sizing that stays in place).
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from ..models.metrics import RecommendationRecord
 from ..models.savings import SavingsLedgerRecord
 from ..storage.base_savings_repository import SavingsLedgerRepository
+from ..utils.date_utils import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,9 @@ class SavingsAttributor:
     def _compute_period_records(
         self,
         applied_records: List[RecommendationRecord],
-        period_seconds: int,
+        period_seconds: int | None = None,
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
     ) -> List[SavingsLedgerRecord]:
         """Compute the savings records for a single collection period.
 
@@ -67,7 +70,17 @@ class SavingsAttributor:
         Returns:
             List of SavingsLedgerRecord ready for persistence.
         """
-        now = datetime.now(timezone.utc)
+        if period_start is None and period_end is None:
+            period_end = datetime.now(timezone.utc)
+            period_start = period_end - timedelta(seconds=period_seconds or 300)
+        elif period_start is None or period_end is None:
+            raise ValueError("period_start and period_end must be provided together")
+        period_start = ensure_utc(period_start)
+        period_end = ensure_utc(period_end)
+        period_seconds = int((period_end - period_start).total_seconds())
+        if period_seconds <= 0:
+            raise ValueError("period_end must be after period_start")
+        now = period_end
         records: List[SavingsLedgerRecord] = []
 
         for rec in applied_records:
@@ -110,6 +123,8 @@ class SavingsAttributor:
                     cost_saved_dollars=(annual_cost or 0.0) * factor,
                     period_seconds=period_seconds,
                     timestamp=now,
+                    period_start=period_start,
+                    period_end=period_end,
                     measurement_method=method,
                     baseline_value=rec.potential_savings_co2e_grams,
                     actual_value=annual_co2e,
@@ -122,7 +137,9 @@ class SavingsAttributor:
     async def attribute_period(
         self,
         applied_records: List[RecommendationRecord],
-        period_seconds: int,
+        period_seconds: int | None = None,
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
     ) -> int:
         """Compute and persist savings for the current collection period.
 
@@ -136,7 +153,12 @@ class SavingsAttributor:
         Returns:
             Number of records written (0 on error or nothing to write).
         """
-        records = self._compute_period_records(applied_records, period_seconds)
+        records = self._compute_period_records(
+            applied_records,
+            period_seconds=period_seconds,
+            period_start=period_start,
+            period_end=period_end,
+        )
         if not records:
             return 0
         try:

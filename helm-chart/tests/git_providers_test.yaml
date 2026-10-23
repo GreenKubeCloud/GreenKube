@@ -1,0 +1,418 @@
+suite: Git provider configuration
+templates:
+  - templates/configmap.yaml
+  - templates/deployment.yaml
+  - templates/automation-worker.yaml
+  - templates/production-deployments.yaml
+
+tests:
+  - it: serializes provider metadata and Secret references without credential data
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          apiBaseUrl: https://github.example.com/api/v3
+          secretName: git-auth
+          secretKey: pat
+          repositoryAllowlist:
+            - acme/*
+            - special/repo
+      secrets.gitToken: never-serialize-this-token
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_PROVIDERS_JSON
+          value: '{"providers":[{"apiBaseUrl":"https://github.example.com/api/v3","id":"github-primary","repositories":["acme/*","special/repo"],"tokenSecret":{"key":"pat","name":"git-auth"},"type":"github"}]}'
+      - notMatchRegex:
+          path: data.GITOPS_PROVIDERS_JSON
+          pattern: never-serialize-this-token
+      - notMatchRegex:
+          path: data.GITOPS_PROVIDERS_JSON
+          pattern: tokenFile
+      - equal:
+          path: data.GITOPS_SECRET_MOUNT
+          value: /etc/greenkube/git-providers
+
+  - it: accepts the documented nested tokenSecret and repositories shape
+    set:
+      automation.providers:
+        - id: github-documented
+          type: github
+          tokenSecret:
+            name: git-auth
+            key: pat
+          repositories:
+            - acme/platform
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_PROVIDERS_JSON
+          value: '{"providers":[{"apiBaseUrl":"","id":"github-documented","repositories":["acme/platform"],"tokenSecret":{"key":"pat","name":"git-auth"},"type":"github"}]}'
+
+  - it: renders an explicit empty provider registry by default
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_PROVIDERS_JSON
+          value: '{"providers":[]}'
+      - equal:
+          path: data.GITOPS_SECRET_MOUNT
+          value: /etc/greenkube/git-providers
+      - equal:
+          path: data.GITOPS_PR_POLL_INTERVAL
+          value: "120"
+      - equal:
+          path: data.GITOPS_SYNC_POLL_INTERVAL
+          value: "30"
+      - equal:
+          path: data.GITOPS_SYNC_TIMEOUT
+          value: "1800"
+
+  - it: configures the bounded provider pull-request polling interval
+    set:
+      automation.prPollIntervalSeconds: 300
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_PR_POLL_INTERVAL
+          value: "300"
+
+  - it: rejects polling intervals outside the supported range
+    set:
+      automation.prPollIntervalSeconds: 9
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.prPollIntervalSeconds must be an integer between 10 and 86400
+
+  - it: rejects non-integer polling intervals
+    set:
+      automation.prPollIntervalSeconds: "120s"
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.prPollIntervalSeconds must be an integer between 10 and 86400
+
+  - it: configures sync observation polling and timeout
+    set:
+      automation.syncPollIntervalSeconds: 60
+      automation.syncTimeoutSeconds: 3600
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_SYNC_POLL_INTERVAL
+          value: "60"
+      - equal:
+          path: data.GITOPS_SYNC_TIMEOUT
+          value: "3600"
+
+  - it: rejects invalid sync observation intervals and timeouts
+    set:
+      automation.syncPollIntervalSeconds: 9
+      automation.syncTimeoutSeconds: 59
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.syncPollIntervalSeconds must be an integer between 10 and 86400
+
+  - it: rejects a sync timeout below one minute
+    set:
+      automation.syncPollIntervalSeconds: 30
+      automation.syncTimeoutSeconds: 59
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.syncTimeoutSeconds must be an integer between 60 and 86400
+
+  - it: mounts only selected provider keys and deduplicates shared Secrets
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: shared-git-auth
+          secretKey: github-token
+          repositoryAllowlist:
+            - acme/*
+        - id: gitea-mirror
+          type: gitea
+          secretName: shared-git-auth
+          secretKey: gitea-token
+          repositoryAllowlist:
+            - mirror/*
+        - id: github-secondary
+          type: github
+          secretName: shared-git-auth
+          secretKey: github-token
+          repositoryAllowlist:
+            - acme/other
+        - id: gitlab-primary
+          type: gitlab
+          secretName: gitlab-auth
+          secretKey: token
+          repositoryAllowlist:
+            - platform/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-provider-secrets
+            projected:
+              sources:
+                - secret:
+                    name: gitlab-auth
+                    items:
+                      - key: token
+                        path: gitlab-auth/token
+                - secret:
+                    name: shared-git-auth
+                    items:
+                      - key: github-token
+                        path: shared-git-auth/github-token
+                      - key: gitea-token
+                        path: shared-git-auth/gitea-token
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+
+  - it: mounts provider keys in standalone dedicated worker pods
+    set:
+      automation.enabled: true
+      automation.mode: worker
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-provider-secrets
+            projected:
+              sources:
+                - secret:
+                    name: git-auth
+                    items:
+                      - key: token
+                        path: git-auth/token
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+
+  - it: mounts provider keys only into production API and plans worker
+    set:
+      profile: production
+      automation.enabled: true
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-provider-secrets
+            projected:
+              sources:
+                - secret:
+                    name: git-auth
+                    items:
+                      - key: token
+                        path: git-auth/token
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+      - documentIndex: 1
+        notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+      - documentIndex: 2
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-provider-secrets
+            mountPath: /etc/greenkube/git-providers
+            readOnly: true
+
+  - it: rejects duplicate provider IDs
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+        - id: github-primary
+          type: github
+          secretName: other-git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - other/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers IDs must be unique"
+
+  - it: rejects invalid provider IDs
+    set:
+      automation.providers:
+        - id: "invalid/id"
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers[0].id must be a valid provider ID"
+
+  - it: rejects invalid Secret names
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: "not/a/secret"
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers[0].secretName must be a valid Kubernetes Secret name"
+
+  - it: rejects invalid Secret keys
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: "not a key"
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers[0].secretKey must be a valid Kubernetes Secret key"
+
+  - it: rejects dot-path Secret keys
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: ".."
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers[0].secretKey must be a valid Kubernetes Secret key"
+
+  - it: rejects cross-namespace Secret mounts
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretNamespace: other-namespace
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: "automation.providers[0].secretNamespace must match the Helm release namespace"
+
+  - it: includes an explicitly configured namespace in runtime references
+    release:
+      namespace: greenkube
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretNamespace: greenkube
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data.GITOPS_PROVIDERS_JSON
+          pattern: '"namespace":"greenkube"'
+
+  - it: includes an explicitly configured namespace in provider mount paths
+    release:
+      namespace: greenkube
+    set:
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretNamespace: greenkube
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-provider-secrets
+            projected:
+              sources:
+                - secret:
+                    name: git-auth
+                    items:
+                      - key: token
+                        path: greenkube/git-auth/token

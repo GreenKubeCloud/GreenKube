@@ -1,0 +1,232 @@
+suite: production profile
+templates:
+  - templates/production-deployments.yaml
+  - templates/migration-job.yaml
+  - templates/leader-lease.yaml
+  - templates/serviceaccount.yaml
+  - templates/post-install-hook.yaml
+  - templates/tests/test-connection.yaml
+
+tests:
+  - it: keeps the production components separate
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-controller
+      - documentIndex: 2
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-automation
+
+  - it: gives the API an HTTP port and the worker a scrape port
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        exists:
+          path: spec.template.spec.containers[0].ports[0]
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.containers[0].ports
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command[0]
+          value: sh
+
+  - it: waits for bundled PostgreSQL before starting production components
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+
+  - it: does not add PostgreSQL wait containers for an external database
+    set:
+      profile: production
+      automation.enabled: true
+      postgres.enabled: false
+      config.db.type: postgres
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        notExists:
+          path: spec.template.spec.initContainers
+      - documentIndex: 1
+        notExists:
+          path: spec.template.spec.initContainers
+      - documentIndex: 2
+        notExists:
+          path: spec.template.spec.initContainers
+
+  - it: runs bundled-PostgreSQL migrations after chart resources are created
+    set:
+      profile: production
+    templates:
+      - templates/migration-job.yaml
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-install,post-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+
+  - it: does not wait on an in-chart PostgreSQL service when using an external database
+    set:
+      profile: production
+      postgres.enabled: false
+      config.db.type: postgres
+    templates:
+      - templates/migration-job.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: creates a leader lease in production
+    set:
+      profile: production
+    templates:
+      - templates/leader-lease.yaml
+    asserts:
+      - isKind:
+          of: Lease
+
+  - it: creates minimal component service accounts in production
+    set:
+      profile: production
+    templates:
+      - templates/serviceaccount.yaml
+    asserts:
+      - hasDocuments:
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+
+  - it: defaults bare production profile to exactly one automation worker
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 2
+        equal:
+          path: spec.replicas
+          value: 1
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].command
+          value: ["python", "-m", "greenkube.cli.automation_worker"]
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].args
+          value: ["--queue", "plans"]
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "true"
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: worker
+
+  - it: disables inline automation in the production controller
+    set:
+      profile: production
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "false"
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: disabled
+
+  - it: omits the production worker when automation is disabled
+    set:
+      profile: production
+      automation.enabled: false
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+
+  - it: preserves the secure Helm test pod defaults
+    templates:
+      - templates/tests/test-connection.yaml
+    asserts:
+      - isKind:
+          of: Pod
+      - equal:
+          path: spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.containers[0].resources.requests.cpu
+          value: 10m
+
+  - it: preserves the secure lifecycle hook defaults
+    templates:
+      - templates/post-install-hook.yaml
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 10m

@@ -14,17 +14,17 @@
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.15.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tailwindcss/postcss": "^4.3.3",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.3.1",
-    "@vitest/coverage-v8": "^4.1.2",
-    "autoprefixer": "^10.4.20",
+    "@vitest/coverage-v8": "^4.1.12",
     "jsdom": "^29.0.1",
     "postcss": "^8.4.49",
     "svelte": "^5.0.0",
     "svelte-jester": "^5.0.0",
-    "tailwindcss": "^3.4.17",
-    "vite": "^6.4.3",
-    "vitest": "^4.1.2"
+    "tailwindcss": "^4.3.3",
+    "vite": "^6.4.5",
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "echarts": "^6.1.0"
@@ -33,7 +33,8 @@
     "cookie": "0.7.2",
     "@babel/core": "^7.29.1",
     "js-yaml": "^4.1.2",
-    "undici": "^7.27.3"
+    "source-map-js": "^1.2.2",
+    "undici": "^7.30.1"
   },
   "type": "module"
 }

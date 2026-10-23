@@ -22,9 +22,15 @@ import pytest
 
 from greenkube.core.calculator import CarbonCalculationResult
 from greenkube.core.metric_assembler import MetricAssembler
-from greenkube.core.prometheus_resource_mapper import PodResourceMaps
-from greenkube.models.metrics import CostMetric, EnergyMetric
+from greenkube.core.prometheus_resource_mapper import PodResourceMaps, PrometheusResourceMapper
+from greenkube.models.metrics import CostMetric, EnergyMetric, PodMetric
 from greenkube.models.node import NodeInfo, NodeZoneContext
+from greenkube.models.prometheus_metrics import (
+    ContainerResourceUsage,
+    PodCPUUsage,
+    PodMemoryUsage,
+    PrometheusMetric,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -169,6 +175,244 @@ class TestMetricAssemblerHappyPath:
         result = await _assemble_one(assembler, _energy(), context=_context(), node_info=_node_info())
 
         assert len(result) == 1
+
+
+class TestPrometheusResourceProvenance:
+    def test_multi_container_values_keep_observed_and_estimated_cpu_separate(self):
+        observed = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.01),
+                PodCPUUsage(namespace="ns", pod="pod-a", container="c2", node="node-1", cpu_usage_cores=0.02),
+            ]
+        )
+        estimated = observed.model_copy(
+            update={
+                "pod_cpu_usage": [
+                    observed.pod_cpu_usage[0].model_copy(
+                        update={
+                            "cpu_usage_cores": 0.1,
+                            "estimated_cpu_usage_cores": 0.1,
+                            "cpu_usage_provenance": "estimated",
+                        }
+                    ),
+                    observed.pod_cpu_usage[1].model_copy(
+                        update={
+                            "cpu_usage_cores": 0.1,
+                            "estimated_cpu_usage_cores": 0.1,
+                            "cpu_usage_provenance": "estimated",
+                        }
+                    ),
+                ]
+            }
+        )
+
+        maps = PrometheusResourceMapper.build(observed, estimated)
+
+        assert maps.cpu_usage_map[("ns", "pod-a")] == 30
+        assert maps.observed_cpu_usage_map[("ns", "pod-a")] == 30
+        assert maps.estimated_cpu_usage_map[("ns", "pod-a")] == 200
+        assert [item.cpu_usage_cores for item in observed.pod_cpu_usage] == [0.01, 0.02]
+
+    def test_mapping_is_idempotent(self):
+        metrics = PrometheusMetric(
+            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="pod-a", container="c1", node="node-1", cpu_usage_cores=0.1)]
+        )
+
+        first = PrometheusResourceMapper.build(metrics)
+        second = PrometheusResourceMapper.build(metrics)
+
+        assert first == second
+        assert metrics.pod_cpu_usage[0].cpu_usage_provenance == "observed"
+
+    def test_mapping_preserves_cpu_and_memory_by_container(self):
+        metrics = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02),
+                PodCPUUsage(
+                    namespace="ns", pod="pod-a", container="telemetry-sidecar", node="node-1", cpu_usage_cores=0.01
+                ),
+            ],
+            pod_memory_usage=[
+                PodMemoryUsage(
+                    namespace="ns", pod="pod-a", container="web", node="node-1", memory_usage_bytes=120 * 1024**2
+                ),
+                PodMemoryUsage(
+                    namespace="ns",
+                    pod="pod-a",
+                    container="telemetry-sidecar",
+                    node="node-1",
+                    memory_usage_bytes=40 * 1024**2,
+                ),
+            ],
+        )
+
+        maps = PrometheusResourceMapper.build(metrics)
+
+        assert maps.container_cpu_usage_map == {
+            ("ns", "pod-a", "telemetry-sidecar"): 10,
+            ("ns", "pod-a", "web"): 20,
+        }
+        assert maps.container_memory_usage_map == {
+            ("ns", "pod-a", "telemetry-sidecar"): 40 * 1024**2,
+            ("ns", "pod-a", "web"): 120 * 1024**2,
+        }
+
+    def test_metrics_api_fills_missing_prometheus_container_labels(self):
+        metrics = PrometheusMetric(
+            pod_cpu_usage=[PodCPUUsage(namespace="ns", pod="pod-a", container="", node="node-1", cpu_usage_cores=0.03)],
+            pod_memory_usage=[
+                PodMemoryUsage(namespace="ns", pod="pod-a", container="", node="node-1", memory_usage_bytes=1000)
+            ],
+        )
+        container_usage = [
+            ContainerResourceUsage(
+                namespace="ns",
+                pod_name="pod-a",
+                container_name="web",
+                cpu_usage_millicores=20,
+                memory_usage_bytes=120 * 1024**2,
+            ),
+            ContainerResourceUsage(
+                namespace="ns",
+                pod_name="pod-a",
+                container_name="telemetry-sidecar",
+                cpu_usage_millicores=10,
+                memory_usage_bytes=40 * 1024**2,
+            ),
+        ]
+
+        maps = PrometheusResourceMapper.build(metrics, container_usages=container_usage)
+
+        assert maps.cpu_usage_map[("ns", "pod-a")] == 30
+        assert maps.memory_usage_map[("ns", "pod-a")] == 1000
+        assert maps.container_cpu_usage_map == {
+            ("ns", "pod-a", "telemetry-sidecar"): 10,
+            ("ns", "pod-a", "web"): 20,
+        }
+        assert maps.container_memory_usage_map == {
+            ("ns", "pod-a", "telemetry-sidecar"): 40 * 1024**2,
+            ("ns", "pod-a", "web"): 120 * 1024**2,
+        }
+
+    def test_prometheus_container_usage_takes_precedence_over_metrics_api_fallback(self):
+        metrics = PrometheusMetric(
+            pod_cpu_usage=[
+                PodCPUUsage(namespace="ns", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02)
+            ]
+        )
+        container_usage = [
+            ContainerResourceUsage(
+                namespace="ns",
+                pod_name="pod-a",
+                container_name="web",
+                cpu_usage_millicores=5,
+                memory_usage_bytes=None,
+            )
+        ]
+
+        maps = PrometheusResourceMapper.build(metrics, container_usages=container_usage)
+
+        assert maps.container_cpu_usage_map[("ns", "pod-a", "web")] == 20
+
+    @pytest.mark.asyncio
+    async def test_container_metrics_keep_request_identity_and_apportion_pod_savings(self, assembler):
+        pod_metrics = [
+            PodMetric(
+                pod_name="pod-a",
+                namespace="ns-1",
+                container_name="web",
+                cpu_request=500,
+                memory_request=256 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+            PodMetric(
+                pod_name="pod-a",
+                namespace="ns-1",
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                memory_request=64 * 1024**2,
+                owner_kind="Deployment",
+                owner_name="api",
+            ),
+        ]
+        resource_maps = PrometheusResourceMapper.build(
+            PrometheusMetric(
+                pod_cpu_usage=[
+                    PodCPUUsage(namespace="ns-1", pod="pod-a", container="web", node="node-1", cpu_usage_cores=0.02),
+                    PodCPUUsage(
+                        namespace="ns-1",
+                        pod="pod-a",
+                        container="telemetry-sidecar",
+                        node="node-1",
+                        cpu_usage_cores=0.01,
+                    ),
+                ],
+                pod_memory_usage=[
+                    PodMemoryUsage(
+                        namespace="ns-1",
+                        pod="pod-a",
+                        container="web",
+                        node="node-1",
+                        memory_usage_bytes=120 * 1024**2,
+                    ),
+                    PodMemoryUsage(
+                        namespace="ns-1",
+                        pod="pod-a",
+                        container="telemetry-sidecar",
+                        node="node-1",
+                        memory_usage_bytes=40 * 1024**2,
+                    ),
+                ],
+            )
+        )
+        aggregates = await assembler.assemble(
+            energy_metrics=[_energy(pod="pod-a", namespace="ns-1")],
+            cost_map={
+                "pod-a": CostMetric(
+                    pod_name="pod-a",
+                    namespace="ns-1",
+                    cpu_cost=0.1,
+                    ram_cost=0.2,
+                    total_cost=0.3,
+                )
+            },
+            pod_request_map={
+                ("ns-1", "pod-a"): {
+                    "cpu": 600,
+                    "memory": 320 * 1024**2,
+                    "owner_kind": "Deployment",
+                    "owner_name": "api",
+                }
+            },
+            node_contexts={"node-1": _context()},
+            nodes_info={"node-1": _node_info()},
+            node_instance_map={"node-1": "m5.large"},
+            boavizta_cache={},
+            cpu_adjusted_nodes=set(),
+            steps_per_day=288.0,
+            resource_maps=resource_maps,
+        )
+
+        result = assembler.assemble_container_metrics(aggregates, pod_metrics, resource_maps)
+
+        assert {metric.container_name for metric in result} == {"web", "telemetry-sidecar"}
+        assert {metric.container_name: metric.cpu_request for metric in result} == {
+            "web": 500,
+            "telemetry-sidecar": 100,
+        }
+        assert {metric.container_name: metric.cpu_usage_millicores for metric in result} == {
+            "web": 20,
+            "telemetry-sidecar": 10,
+        }
+        assert all(metric.is_estimated for metric in result)
+        assert all(
+            any("allocated from pod-level" in reason for reason in metric.estimation_reasons) for metric in result
+        )
+        assert all(metric.restart_count is None for metric in result)
+        assert all(metric.network_receive_bytes is None for metric in result)
+        assert sum(metric.total_cost for metric in result) == pytest.approx(aggregates[0].total_cost)
+        assert sum(metric.co2e_grams for metric in result) == pytest.approx(aggregates[0].co2e_grams)
 
     @pytest.mark.asyncio
     async def test_combined_metric_pod_and_namespace(self, assembler):
@@ -327,6 +571,29 @@ class TestMetricAssemblerEstimationFlags:
 
         assert len(result) == 1
         assert result[0].is_estimated is False
+
+    @pytest.mark.asyncio
+    async def test_negative_opencost_is_marked_untrusted_even_when_other_sources_are_resolved(self, assembler):
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        provider = next(
+            (p.replace("default_", "") for p in cfg.DATACENTER_PUE_PROFILES if p.startswith("default_")),
+            "aws",
+        )
+        cost = CostMetric(pod_name="pod-a", namespace="ns-1", cpu_cost=-0.1, ram_cost=0.0, total_cost=-0.1)
+        context = NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=False)
+
+        result = await _assemble_one(
+            assembler,
+            _energy(),
+            context=context,
+            node_info=_node_info(provider=provider),
+            cost_map={"pod-a": cost},
+        )
+
+        assert result[0].is_estimated is True
+        assert any("negative" in reason.lower() for reason in result[0].estimation_reasons)
 
     @pytest.mark.asyncio
     async def test_estimation_reasons_not_empty_when_estimated(self, assembler):

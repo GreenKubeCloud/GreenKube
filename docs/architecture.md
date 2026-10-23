@@ -1,6 +1,6 @@
 # GreenKube Architecture
 
-This document describes the technical architecture of GreenKube. The goal is to create a lightweight, modular, and extensible platform to measure, report, and optimize the carbon footprint and cost of Kubernetes workloads.
+This document describes the current technical architecture of GreenKube, a lightweight platform for estimating, reporting, and optimizing the carbon footprint and cost of Kubernetes workloads.
 
 ## Architecture Diagram
 
@@ -13,6 +13,11 @@ flowchart TB
         EM["Electricity Maps API"]
         WN["Wattnet API"]
         Boavizta["Boavizta API"]
+        GITOPS["Argo CD / Flux"]
+    end
+
+    subgraph External["Git providers"]
+        GIT["GitHub / GitLab / Gitea"]
     end
 
     subgraph GreenKube["GreenKube"]
@@ -45,6 +50,15 @@ flowchart TB
         subgraph Storage["Storage (Output Adapters)"]
             PG["PostgreSQL"]
             SQLite["SQLite"]
+        end
+
+        subgraph Automation["GitOps automation"]
+            Disc["Discovery<br/>Argo CD / Flux"]
+            Bind["Workload<br/>bindings"]
+            PlanSvc["Plan service<br/>snapshot + render + diff"]
+            Renderer["Isolated<br/>renderer"]
+            Worker["Plan worker<br/>PR + polling"]
+            Sync["Controller sync<br/>+ apply detection"]
         end
 
         subgraph Presentation["Presentation"]
@@ -92,12 +106,23 @@ flowchart TB
     API --> Grafana
     Storage --> Rec
     Rec --> API
-    Rec --> CLI
+    K8sAPI --> Disc
+    GITOPS --> Disc
+    Disc --> Bind
+    Bind --> PlanSvc
+    PlanSvc --> Renderer
+    PlanSvc --> Storage
+    Worker --> GIT
+    GIT --> Sync
+    GITOPS --> Sync
+    Sync --> Storage
+    Storage --> Worker
+    Rec --> PlanSvc
 ```
 
 ## Overview
 
-GreenKube operates as an **asynchronous** agent that collects, processes, analyzes, and reports data. It runs as both a scheduled service (continuous monitoring) and an on-demand CLI tool (ad-hoc reporting). 
+GreenKube runs scheduled collection and recommendation lifecycles alongside an API and dashboard for querying stored data. An optional GitOps automation path discovers workload sources, renders and validates plans, executes approved pull requests, and observes controller sync and apply state. The CLI starts the collector or a local demo; it does not provide ad-hoc report or recommendation commands.
 
 The system is designed around the principles of **Clean Architecture** and **Hexagonal Architecture**:
 - **Core Business Logic** (domain layer) is independent of infrastructure
@@ -241,7 +266,7 @@ The main orchestrator that coordinates the data pipeline from collection to metr
   - **Phase 4** — Carbon-intensity prefetch and CombinedMetric assembly
 - **Range Mode (`run_range()`):** Historical analysis with day-sized chunking for memory efficiency
 
-**Implementation Pattern:** 
+**Implementation Pattern:**
 - Follows Clean Architecture principles with dependency injection
 - Uses internal collaborators for collection orchestration, zone mapping, resource aggregation, and metric assembly
 - Maintains separation between business logic and infrastructure concerns
@@ -272,14 +297,9 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 
 #### **OptimizationEngine**
 
-Analyzes `CombinedMetric` data to identify optimization opportunities. It is the
-single orchestration path used by the API, the startup scan and the CLI
-(`src/greenkube/core/optimization/`).
+Analyzes `CombinedMetric` data to identify optimization opportunities. It is the single orchestration path used by API recommendation requests and the startup scan (`src/greenkube/core/optimization/`). The CLI does not expose a recommendation command.
 
-**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB
-inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an
-**evidence** block and a **risk/confidence/effort** assessment → compute the
-multi-criteria **ranking score** → persist and reconcile.
+**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile.
 
 **Sources:**
 
@@ -295,24 +315,15 @@ multi-criteria **ranking score** → persist and reconcile.
    - **Node optimization:** overprovisioned / underutilized nodes.
    - **Orphaned PV / LoadBalancer cleanup.**
 
-2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers
-   (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same
-   workload, avoiding duplicate advice.
+2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice.
 
-3. **Karpenter (`karpenter`, reserved)** — node pool consolidation.
+3. **Karpenter (`karpenter`, optional)** — node-pool consolidation recommendations when compatible Karpenter CRDs are available.
 
-**Evidence, risk and ranking:** every recommendation carries observation window,
-utilization distribution, current vs proposed resources, expected savings and
-method, confidence, reliability risk, rollback conditions, a machine-readable
-patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`,
-`cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort,
-actionability and source authority.
+**Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort, actionability and source authority.
 
-See [docs/specs/optimization-engine.md](specs/optimization-engine.md) for the full
-specification.
+For the user-facing automation workflow and supported source layouts, see [GitOps automation](automation.md).
 
-**Configuration:** All thresholds, source flags and ranking settings are
-configurable via `config.py` and Helm values.
+**Configuration:** All thresholds, source flags and ranking settings are configurable via `config.py` and Helm values.
 
 ### Repositories (Output Ports)
 Repositories use asynchronous drivers for high-performance database interactions. All implement abstract base classes to ensure database agnosticism.
@@ -411,6 +422,17 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `GET /api/v1/namespaces` — Active namespaces list
 - `GET /api/v1/nodes` — Node inventory
 - `GET /api/v1/recommendations` — Optimization suggestions
+- `GET /api/v1/recommendations/{id}` — Full evidence, risk, ranking, and lifecycle detail
+- `GET /api/v1/recommendations/{id}/events` — Recommendation audit trail
+- `POST /api/v1/recommendations/{id}/apply-pr` — Compatibility route through the validated GitOps plan path
+- `GET /api/v1/gitops/status` — Controller capability and discovery freshness
+- `GET /api/v1/gitops/bindings` — Workload binding pages and manual-resolution candidates
+- `POST /api/v1/gitops/refresh` — Explicit discovery refresh
+- `GET /api/v1/automation/status` — Worker heartbeat, queue, discovery, renderer, and provider readiness
+- `POST /api/v1/automation/plans` — Create a digest-addressed plan preview
+- `POST /api/v1/automation/plans/{id}/approve` — Approve the exact preview digest
+- `POST /api/v1/automation/plans/{id}/rollback-preview` — Create an inverse preview for a synced plan
+- `POST /api/v1/webhooks/{provider_id}` — Signed provider webhook ingress
 - `GET /api/v1/report/summary` — Report preview (row count, totals, unique pods/namespaces)
 - `GET /api/v1/report/export` — Stream a report file (CSV or JSON) for direct browser download
 
@@ -432,7 +454,8 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 **Pages:**
 - `/` — Dashboard (KPIs, charts, breakdown)
 - `/nodes` — Node inventory
-- `/recommendations` — Optimization recommendations
+- `/recommendations` — Optimization recommendations, evidence, plan preview, pull requests
+- `/automation` — GitOps discovery, workload binding coverage, manual resolution, automation readiness
 - `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
 - `/settings` — Configuration, service health overview with color-coded status indicators, and runtime service configuration
 
@@ -443,7 +466,9 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - Export functionality (CSV, JSON) — from the Report page
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
 - **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
-- **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps) can be updated from the Settings page without restarting the pod
+- **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps/Wattnet) can be updated from the Settings page without restarting the pod
+- **Recommendation review:** Source/risk/confidence badges, ranking profiles, evidence details, plan preview, pull-request tracking, rollback preview, and measured vs projected savings
+- **Automation console:** GitOps capability status, discovery coverage, blocked/ambiguous bindings, and audited manual resolution
 
 #### **CLI**
 - **Location:** `src/greenkube/cli/`
@@ -598,6 +623,37 @@ Used for reporting over time ranges with historical accuracy.
    Upsert active records by target identity; mark absent actives as stale
    ```
 
+### GitOps Automation Flow
+
+1. **Discovery:**
+   ```
+   Argo CD Application status + Flux inventories + live workloads
+   └─ Persist generation-bound workload bindings
+   ```
+
+2. **Plan creation:**
+   ```
+   Recommendation IDs (never repository/path/credentials)
+   └─ Resolve binding → snapshot immutable revision → render → validate → expiring digest
+   ```
+
+3. **Approval and execution:**
+   ```
+   Exact digest approval
+   └─ Durable operation queue → worker revalidation
+   └─ Atomic multi-file commit → deterministic branch → pull request
+   ```
+
+4. **Sync and verification:**
+   ```
+   Webhook/polling update → controller observes exact source revision
+   └─ actions sync_pending; plan merged → synced (or sync_failed after timeout)
+   └─ Apply detection compares per-container requests
+   └─ Normal post-apply health and savings verification
+   ```
+
+Only CPU and memory rightsizing recommendations have action planners. Unsupported sources and renderers fail closed with typed reasons. See [GitOps automation](automation.md) for the supported matrix and security model.
+
 ## Configuration & Deployment
 
 ### Environment Variables (12-Factor App)
@@ -610,8 +666,9 @@ All configuration flows through `src/greenkube/core/config.py`:
 
 **External Services:**
 - `PROMETHEUS_URL` — Override auto-discovery
-- `OPENCOST_URL` — Override auto-discovery
-- `ELECTRICITYMAPS_TOKEN` — API token (optional)
+- `OPENCOST_API_URL` — Override auto-discovery
+- `ELECTRICITY_MAPS_TOKEN` — API token (optional)
+- `WATTNET_EMAIL` / `WATTNET_PASSWORD` — Wattnet provider credentials (optional)
 - `BOAVIZTA_TOKEN` — API token (optional)
 
 **Collection:**
@@ -629,36 +686,51 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 7
 - `RIGHTSIZING_CPU_THRESHOLD` — Default: 0.3
 - `ZOMBIE_COST_THRESHOLD` — Default: 0.01
-- And ~10 more recommendation tuning parameters
+- `RECOMMENDATION_MAX_METRIC_ROWS` — Default: 750000
+- `RECOMMENDATION_TTL_DAYS` — Default: 14
+- `VERIFICATION_*` — post-apply verification gates
+
+**Automation:**
+- `AUTOMATION_ENABLED` — Default: `false`
+- `AUTOMATION_MODE` — `disabled`, `inline`, or `worker`
+- `GITOPS_DISCOVERY_INTERVAL` / `GITOPS_BINDING_TTL`
+- `GITOPS_PROVIDERS_JSON` — Secret-reference provider registry
+- `GITOPS_RENDERER_URL` — isolated renderer service
+- `GITOPS_POLICY_JSON` / `GITOPS_PULL_REQUESTS_JSON`
+- `GITOPS_WEBHOOK_SECRET_FILE`, `GITOPS_HELM_KUBE_VERSION`, `GITOPS_HELM_API_VERSIONS_JSON`
 
 ### Helm Chart Structure
 ```
 helm-chart/
-├── Chart.yaml              # Chart metadata
-├── values.yaml             # Default configuration
+├── Chart.yaml                 # Chart metadata
+├── values.yaml                # Standalone/default configuration
+├── values-production.yaml     # Production profile overlay
 └── templates/
-    ├── deployment.yaml     # GreenKube deployment
-    ├── service.yaml        # API service (LoadBalancer/ClusterIP)
-    ├── configmap.yaml      # Non-secret config
-    ├── secret.yaml         # Tokens and credentials
-    ├── postgres-*.yaml     # PostgreSQL StatefulSet (optional)
-    ├── serviceaccount.yaml # K8s RBAC
-    ├── clusterrole.yaml    # Read permissions for nodes/pods
-    └── post-install-hook.yaml  # Schema initialization
+    ├── deployment.yaml        # Standalone collector + API
+    ├── production-deployments.yaml # API, controller, automation worker
+    ├── api-service.yaml       # API/UI ClusterIP Service
+    ├── automation-worker.yaml # Standalone worker mode
+    ├── configmap.yaml         # Non-secret config
+    ├── secret.yaml            # Tokens and credentials
+    ├── migration-job.yaml     # Production schema migration hook
+    ├── leader-lease.yaml      # Production controller Lease
+    ├── renderer-sandbox.yaml  # Isolated Helm/Kustomize renderer
+    ├── postgres-*.yaml        # PostgreSQL StatefulSet (optional)
+    ├── serviceaccount.yaml    # K8s RBAC
+    └── clusterrole.yaml       # Read permissions for nodes/pods/GitOps
 ```
 
 ### Container Structure (Multi-Stage Build)
 ```
-Dockerfile (3 stages):
-1. Frontend Builder (Node 20):
+Dockerfile (multi-stage):
+1. Frontend Builder (Node 22):
    ├─ npm ci (install deps)
-   ├─ npm run build (SvelteKit SSG)
+   ├─ npm run build (SvelteKit static build)
    └─ Output: static files in build/
 
-2. Python Builder (Python 3.14):
-   ├─ pip install build
-   ├─ Build wheel from pyproject.toml
-   └─ pip install to /install prefix
+2. Python Builder:
+   ├─ uv sync / build the wheel from pyproject.toml
+   └─ Install into an isolated prefix
 
 3. Final Image (Python 3.14-slim):
    ├─ Copy Python packages from builder
@@ -725,19 +797,20 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 - **Streaming:** Database cursors for large result sets
 
 ### Scalability
-- **PostgreSQL:** Handles 100K+ metrics/day with proper indexing
+- **PostgreSQL:** Production database backend; capacity depends on workload,
+retention, and database sizing.
 - **API:** FastAPI with async workers (Uvicorn)
 
 ## Testing Strategy
 
 ### Unit Tests
-- **Coverage:** 293 tests across all components
+- **Coverage:** The suite exercises backend components; current coverage is reported by the repository's test and CI tooling.
 - **Framework:** pytest with pytest-asyncio
 - **Mocking:** unittest.mock.AsyncMock for async components
 - **Fixtures:** Shared test data in conftest.py
 
 ### Integration Tests
-- **Database:** All repositories tested against real DB instances
+- **Database:** Selected repository contracts run against real SQLite and, when configured, PostgreSQL databases.
 - **API:** Full request/response cycle tests
 - **Collectors:** Mocked HTTP responses with respx
 
@@ -793,6 +866,18 @@ Follow conventional commits:
 
 ## Future Architecture Evolution
 
+### Closed-loop reliability and recovery
+
+The recommendation-to-GitOps composition is intentionally fail-soft at external boundaries:
+
+| Boundary | Recovery contract | Verification |
+|---|---|---|
+| Startup recommendation refresh | Runs in a tracked background task; provider or database errors are logged and do not prevent liveness traffic. | `tests/integration/test_gitops_closed_loop.py::test_startup_refresh_failure_does_not_block_shutdown_or_health_state` |
+| Savings ledger write | A transient ledger failure is logged and returns zero; the collection loop continues and can retry on its next period. | `tests/integration/test_gitops_closed_loop.py::test_savings_ledger_failure_is_recoverable` |
+| Rollback transition | Recommendations in `rollback_review` or `reverted` stop producing new ledger attribution while their history remains queryable. | `tests/integration/test_gitops_closed_loop.py::test_rollback_review_stops_future_savings_attribution` |
+
+The API liveness endpoint does not probe optional providers. Readiness is marked only after the database connection succeeds and is cleared before shutdown. This keeps restarts and provider outages observable without turning a transient dependency failure into a process-wide failure.
+
 ### Planned Enhancements
 
 **Multi-Cluster Support:**
@@ -803,7 +888,6 @@ Follow conventional commits:
 **Advanced Analytics:**
 - Trend detection and forecasting
 - Anomaly detection
-- Cost optimization AI/ML
 
 **Real-Time Streaming:**
 - WebSocket-based live updates
@@ -817,7 +901,7 @@ Follow conventional commits:
 - Custom metrics via PromQL
 
 **Enhanced Reporting:**
-- CSRD/ESRS E1 compliant templates
+- Custom export templates
 - Multi-tenant isolation
 - PDF/Excel export
 
@@ -844,7 +928,7 @@ Follow conventional commits:
 ## Resources
 
 - **GitHub:** https://github.com/GreenKubeCloud/GreenKube
-- **Documentation:** https://greenkubecloud.github.io/GreenKube
+- **Documentation:** https://docs.greenkube.cloud
 - **Helm Chart:** https://greenkubecloud.github.io/GreenKube
 - **Issues:** https://github.com/GreenKubeCloud/GreenKube/issues
 - **Discussions:** https://github.com/GreenKubeCloud/GreenKube/discussions

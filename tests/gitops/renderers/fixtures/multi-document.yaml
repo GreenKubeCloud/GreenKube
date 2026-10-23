@@ -1,0 +1,39 @@
+# YAML aliases are data-only and must be expanded safely.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: payments
+  labels: &workload-labels
+    app.kubernetes.io/name: api
+    team: platform
+  annotations:
+    deployment.kubernetes.io/revision: "4"
+    example.com/note: stable
+spec:
+  selector:
+    matchLabels: *workload-labels
+  template:
+    metadata:
+      labels: *workload-labels
+    spec:
+      containers:
+        - name: api
+          image: example.invalid/api:1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo ready
+              exec app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: payments
+spec:
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - port: 8080

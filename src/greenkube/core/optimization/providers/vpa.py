@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
 from greenkube.collectors.vpa_collector import VPACollector, VPARecommendation
 from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.statistics import (
+    annualized_nonnegative_window_total,
     annualized_window_total,
     latest_request_value,
     resource_savings_ratio,
@@ -33,37 +34,41 @@ class VPACollectorLike(Protocol):
     async def collect(self) -> List[VPARecommendation]: ...
 
 
-def _aggregate_by_target(
+def _aggregate_by_container(
     vpas: List[VPARecommendation],
-) -> Dict[Tuple[str, str, str], Dict]:
-    """Aggregates per-container VPA targets into one entry per workload.
-
-    A pod's native request is the sum of its containers' requests, so summing
-    VPA per-container targets yields a directly comparable value.
-    """
-    grouped: Dict[Tuple[str, str, str], Dict] = {}
+) -> Dict[Tuple[str, str, str, str], Dict]:
+    """Combines duplicate VPA entries without merging distinct containers."""
+    grouped: Dict[Tuple[str, str, str, str], Dict] = {}
     for vpa in vpas:
-        key = (vpa.namespace, vpa.target_kind, vpa.target_name)
+        container_name = vpa.container_name
+        if not container_name or container_name.strip() != container_name:
+            continue
+        key = (vpa.namespace, vpa.target_kind, vpa.target_name, container_name)
         entry = grouped.setdefault(
             key,
             {
-                "cpu_target": 0,
-                "cpu_seen": False,
-                "memory_target": 0,
-                "memory_seen": False,
+                "cpu_target": None,
+                "cpu_ambiguous": False,
+                "memory_target": None,
+                "memory_ambiguous": False,
                 "vpa_names": [],
-                "containers": 0,
             },
         )
-        if vpa.cpu_target_millicores is not None:
-            entry["cpu_target"] += vpa.cpu_target_millicores
-            entry["cpu_seen"] = True
-        if vpa.memory_target_bytes is not None:
-            entry["memory_target"] += vpa.memory_target_bytes
-            entry["memory_seen"] = True
+        for resource, value in (
+            ("cpu", vpa.cpu_target_millicores),
+            ("memory", vpa.memory_target_bytes),
+        ):
+            if value is None:
+                continue
+            target_key = f"{resource}_target"
+            ambiguous_key = f"{resource}_ambiguous"
+            current = entry[target_key]
+            if current is not None and current != value:
+                entry[ambiguous_key] = True
+            else:
+                entry[target_key] = value
         if vpa.vpa_name and vpa.vpa_name not in entry["vpa_names"]:
             entry["vpa_names"].append(vpa.vpa_name)
-        entry["containers"] += 1
     return grouped
 
 
@@ -126,8 +131,9 @@ class VpaSource(RecommendationSource):
         target_series = context.target_series()
         recs: List[Recommendation] = []
 
-        for (ns, target_kind, target_name), agg in _aggregate_by_target(vpas).items():
-            series = target_series.get((ns, target_kind, target_name)) or []
+        for (ns, target_kind, target_name, container_name), agg in _aggregate_by_container(vpas).items():
+            workload_series = target_series.get((ns, target_kind, target_name)) or []
+            series = [metric for metric in workload_series if metric.container_name == container_name]
             if not series:
                 continue
 
@@ -135,19 +141,20 @@ class VpaSource(RecommendationSource):
             current_mem = latest_request_value(series, "memory_request")
             total_cost = sum(m.total_cost for m in series)
             total_co2 = sum(m.co2e_grams for m in series)
-            annual_cost = annualized_window_total(total_cost, context.analysis_window_seconds)
+            annual_cost = annualized_nonnegative_window_total(total_cost, context.analysis_window_seconds)
             annual_co2 = annualized_window_total(total_co2, context.analysis_window_seconds)
 
             vpa_ref = f"{ns}/{agg['vpa_names'][0]}" if agg["vpa_names"] else ns
-            label = f"{target_kind} '{target_name}'"
+            label = f"{target_kind} '{target_name}' container '{container_name}'"
 
-            if agg["cpu_seen"] and current_cpu:
+            if agg["cpu_target"] is not None and not agg["cpu_ambiguous"] and current_cpu:
                 target = int(agg["cpu_target"])
                 ratio = resource_savings_ratio(current_cpu, target)
                 if ratio is not None:
                     recs.append(
                         Recommendation(
                             pod_name=target_name,
+                            container_name=container_name,
                             namespace=ns,
                             type=RecommendationType.RIGHTSIZING_CPU,
                             scope="workload",
@@ -160,8 +167,8 @@ class VpaSource(RecommendationSource):
                                 f"({ratio:.0%} reduction). Recommend reducing to {target}m."
                             ),
                             reason=(
-                                f"VPA '{vpa_ref}' recommends {target}m CPU across "
-                                f"{agg['containers']} container(s); current request is {current_cpu}m."
+                                f"VPA '{vpa_ref}' recommends {target}m CPU for container "
+                                f"'{container_name}'; current request is {current_cpu}m."
                             ),
                             priority="medium",
                             current_cpu_request_millicores=current_cpu,
@@ -171,13 +178,14 @@ class VpaSource(RecommendationSource):
                         )
                     )
 
-            if agg["memory_seen"] and current_mem:
+            if agg["memory_target"] is not None and not agg["memory_ambiguous"] and current_mem:
                 target_mem = int(agg["memory_target"])
                 ratio = resource_savings_ratio(current_mem, target_mem)
                 if ratio is not None:
                     recs.append(
                         Recommendation(
                             pod_name=target_name,
+                            container_name=container_name,
                             namespace=ns,
                             type=RecommendationType.RIGHTSIZING_MEMORY,
                             scope="workload",
@@ -192,7 +200,7 @@ class VpaSource(RecommendationSource):
                             ),
                             reason=(
                                 f"VPA '{vpa_ref}' recommends {target_mem / (1024 * 1024):.0f}MiB memory "
-                                f"across {agg['containers']} container(s); current request is "
+                                f"for container '{container_name}'; current request is "
                                 f"{current_mem / (1024 * 1024):.0f}MiB."
                             ),
                             priority="medium",

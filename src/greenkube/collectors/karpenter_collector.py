@@ -117,7 +117,7 @@ class KarpenterCollector:
                 continue
             status = item.get("status") or {}
             node_name = status.get("nodeName") or metadata.get("name")
-            if node_name:
+            if node_name and node_name not in pools[pool_name].node_names:
                 pools[pool_name].node_names.append(node_name)
 
         result = list(pools.values())

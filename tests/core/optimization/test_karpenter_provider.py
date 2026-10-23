@@ -1,7 +1,7 @@
 # tests/core/optimization/test_karpenter_provider.py
 """Tests for the Karpenter NodePool consolidation source."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -32,14 +32,16 @@ def _context(metrics, node_infos) -> OptimizationContext:
     )
 
 
-def _metric(node: str, cpu_request: int, cost: float = 1.0) -> CombinedMetric:
+def _metric(
+    node: str, cpu_request: int, cost: float = 1.0, timestamp: datetime | None = None, pod_name: str | None = None
+) -> CombinedMetric:
     return CombinedMetric(
-        pod_name=f"pod-{node}",
+        pod_name=pod_name or f"pod-{node}",
         namespace="default",
         node=node,
         cpu_request=cpu_request,
         total_cost=cost,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(timezone.utc),
     )
 
 
@@ -100,3 +102,21 @@ class TestKarpenterSource:
         pool = NodePoolInfo(name="unknown", node_names=["n1", "n2"])
         source = KarpenterSource(Config(), collector=FakeCollector([pool]))
         assert await source.collect(_context([], [])) == []
+
+    @pytest.mark.asyncio
+    async def test_aggregates_multi_replica_points_per_timestamp(self):
+        pool = NodePoolInfo(name="temporal", node_names=["n1", "n2"])
+        source = KarpenterSource(Config(), collector=FakeCollector([pool]))
+        start = datetime.now(timezone.utc) - timedelta(hours=1)
+        metrics = [
+            _metric("n1", 200, timestamp=start, pod_name="api-a"),
+            _metric("n1", 200, timestamp=start, pod_name="api-b"),
+            _metric("n2", 200, timestamp=start, pod_name="api-c"),
+            _metric("n2", 200, timestamp=start, pod_name="api-d"),
+            _metric("n1", 800, timestamp=start + timedelta(minutes=5), pod_name="api-a"),
+            _metric("n2", 800, timestamp=start + timedelta(minutes=5), pod_name="api-c"),
+        ]
+
+        recs = await source.collect(_context(metrics, [_node("n1", 4000), _node("n2", 4000)]))
+
+        assert len(recs) == 1

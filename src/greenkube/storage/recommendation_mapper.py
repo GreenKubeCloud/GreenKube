@@ -25,6 +25,8 @@ def to_json(value: Any) -> Optional[str]:
     """Serializes a JSON-compatible value for storage, or None."""
     if value is None:
         return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
     return json.dumps(value)
 
 
@@ -109,6 +111,12 @@ def _as_effort(value: Any) -> Optional[EffortLevel]:
 def _as_bool(value: Any) -> Optional[bool]:
     if value is None:
         return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
     return bool(value)
 
 
@@ -133,6 +141,7 @@ def _get(row: Any, key: str, default: Any = None) -> Any:
 #: Canonical column order for an append-only insert.
 RECORD_COLUMNS: tuple = (
     "pod_name",
+    "container_name",
     "namespace",
     "type",
     "description",
@@ -148,6 +157,8 @@ RECORD_COLUMNS: tuple = (
     "recommended_memory_request_bytes",
     "cron_schedule",
     "target_node",
+    "identity_version",
+    "fingerprint",
     "source",
     "source_ref",
     "sources",
@@ -192,6 +203,7 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "reason",
     "priority",
     "scope",
+    "container_name",
     "potential_savings_cost",
     "potential_savings_co2e_grams",
     "current_cpu_request_millicores",
@@ -200,6 +212,8 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "recommended_memory_request_bytes",
     "cron_schedule",
     "target_node",
+    "identity_version",
+    "fingerprint",
     "source",
     "source_ref",
     "sources",
@@ -239,6 +253,7 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
 
     return {
         "pod_name": record.pod_name,
+        "container_name": record.container_name,
         "namespace": record.namespace,
         "type": _enum(record.type),
         "description": record.description,
@@ -254,6 +269,8 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "recommended_memory_request_bytes": record.recommended_memory_request_bytes,
         "cron_schedule": record.cron_schedule,
         "target_node": record.target_node,
+        "identity_version": record.identity_version,
+        "fingerprint": record.fingerprint,
         "source": _enum(record.source),
         "source_ref": record.source_ref,
         "sources": sources_to_json(record.sources),
@@ -302,6 +319,7 @@ def row_to_record(row: Any) -> RecommendationRecord:
     return RecommendationRecord(
         id=row["id"],
         pod_name=row["pod_name"],
+        container_name=_get(row, "container_name"),
         namespace=row["namespace"],
         type=RecommendationType(row["type"]),
         description=row["description"],
@@ -317,6 +335,8 @@ def row_to_record(row: Any) -> RecommendationRecord:
         recommended_memory_request_bytes=_get(row, "recommended_memory_request_bytes"),
         cron_schedule=_get(row, "cron_schedule"),
         target_node=_get(row, "target_node"),
+        identity_version=int(_get(row, "identity_version", 2) or 2),
+        fingerprint=_get(row, "fingerprint"),
         source=_as_source(_get(row, "source", "greenkube")),
         source_ref=_get(row, "source_ref"),
         sources=sources_from_json(_get(row, "sources")),

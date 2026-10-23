@@ -19,7 +19,7 @@ class SavingsLedgerRepository(ABC):
             records: Records computed by SavingsAttributor for the current period.
 
         Returns:
-            Number of rows inserted.
+            Number of rows inserted or updated.
         """
 
     @abstractmethod

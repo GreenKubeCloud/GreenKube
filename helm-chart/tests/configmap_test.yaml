@@ -36,6 +36,23 @@ tests:
           path: data.LOG_LEVEL
           value: "DEBUG"
 
+  - it: exposes the exact service host allowlist to the API
+    set:
+      config.serviceUrlAllowlist:
+        - prometheus.monitoring.svc
+        - api.example.test
+    asserts:
+      - equal:
+          path: data.SERVICE_URL_ALLOWLIST
+          value: prometheus.monitoring.svc,api.example.test
+
+  - it: passes the Helm render capabilities of the installed cluster
+    asserts:
+      - isNotEmpty:
+          path: data.GITOPS_HELM_KUBE_VERSION
+      - isNotEmpty:
+          path: data.GITOPS_HELM_API_VERSIONS_JSON
+
   - it: should set DB_TYPE
     asserts:
       - equal:
@@ -195,6 +212,9 @@ tests:
       - equal:
           path: data.RECOMMENDATION_KARPENTER_ENABLED
           value: "true"
+      - equal:
+          path: data.KUBERNETES_METRICS_API_ENABLED
+          value: "true"
 
   - it: should set verification window defaults
     asserts:
@@ -220,17 +240,32 @@ tests:
           path: data.VERIFICATION_MIN_SAVINGS_RATIO
           value: "0.75"
 
-  - it: should set git automation defaults
+  - it: should not render legacy single-provider git settings
+    asserts:
+      - isNull:
+          path: data.GIT_PROVIDER
+      - isNull:
+          path: data.GIT_TOKEN
+
+  - it: should pass the documented pull-request defaults to the runtime
     asserts:
       - equal:
-          path: data.GIT_PROVIDER
-          value: "github"
+          path: data.GITOPS_PULL_REQUESTS_JSON
+          value: '{"draft":false,"labels":["greenkube","sustainability"],"reviewers":[],"teamReviewers":[]}'
+
+  - it: should pass configured pull-request options to the runtime
+    set:
+      automation.pullRequests.draft: true
+      automation.pullRequests.labels:
+        - review-required
+      automation.pullRequests.reviewers:
+        - octocat
+      automation.pullRequests.teamReviewers:
+        - platform
+    asserts:
       - equal:
-          path: data.GIT_DEFAULT_BRANCH
-          value: "main"
-      - equal:
-          path: data.GIT_COMMIT_AUTHOR_NAME
-          value: "GreenKube Bot"
+          path: data.GITOPS_PULL_REQUESTS_JSON
+          value: '{"draft":true,"labels":["review-required"],"reviewers":["octocat"],"teamReviewers":["platform"]}'
 
   # --------------------------------------------------------------------------
   # Default zone (conditional key)
@@ -247,3 +282,40 @@ tests:
       - equal:
           path: data.DEFAULT_ZONE
           value: "FR"
+
+  - it: exposes GitOps discovery cadence and binding TTL defaults
+    asserts:
+      - equal:
+          path: data.GITOPS_DISCOVERY_INTERVAL
+          value: "5m"
+      - equal:
+          path: data.GITOPS_BINDING_TTL
+          value: "30m"
+
+  - it: falls back to documented GitOps durations when reused values are empty
+    set:
+      automation.discoveryInterval: ""
+      automation.bindingTtl: ""
+    asserts:
+      - equal:
+          path: data.GITOPS_DISCOVERY_INTERVAL
+          value: "5m"
+      - equal:
+          path: data.GITOPS_BINDING_TTL
+          value: "30m"
+
+  - it: reflects configured GitOps durations and scan row bound
+    set:
+      automation.discoveryInterval: 45s
+      automation.bindingTtl: 2h
+      config.recommendations.maxMetricRows: 1234
+    asserts:
+      - equal:
+          path: data.GITOPS_DISCOVERY_INTERVAL
+          value: "45s"
+      - equal:
+          path: data.GITOPS_BINDING_TTL
+          value: "2h"
+      - equal:
+          path: data.RECOMMENDATION_MAX_METRIC_ROWS
+          value: "1234"

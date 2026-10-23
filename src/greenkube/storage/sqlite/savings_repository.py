@@ -33,6 +33,8 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 r.cost_saved_dollars,
                 r.period_seconds,
                 to_iso_z(r.timestamp),
+                to_iso_z(r.period_start or r.timestamp),
+                to_iso_z(r.period_end or r.timestamp),
                 r.measurement_method,
                 r.baseline_value,
                 r.actual_value,
@@ -49,12 +51,52 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                     (recommendation_id, cluster_name, namespace,
                      recommendation_type, co2e_saved_grams,
                      cost_saved_dollars, period_seconds, timestamp,
+                     period_start, period_end,
                      measurement_method, baseline_value, actual_value,
                      confidence, superseded)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (recommendation_id, period_start, period_end, measurement_method)
+                DO UPDATE SET
+                     cluster_name = excluded.cluster_name,
+                     namespace = excluded.namespace,
+                     recommendation_type = excluded.recommendation_type,
+                     co2e_saved_grams = excluded.co2e_saved_grams,
+                     cost_saved_dollars = excluded.cost_saved_dollars,
+                     period_seconds = excluded.period_seconds,
+                     timestamp = excluded.timestamp,
+                     baseline_value = excluded.baseline_value,
+                     actual_value = excluded.actual_value,
+                     confidence = excluded.confidence,
+                     superseded = excluded.superseded
                 """,
                 rows,
             )
+            for record in records:
+                if record.measurement_method == "measured":
+                    period_start = record.period_start or record.timestamp
+                    period_end = record.period_end or record.timestamp
+                    await conn.execute(
+                        """
+                         UPDATE recommendation_savings_ledger
+                         SET superseded = 1
+                         WHERE recommendation_id = ?
+                           AND measurement_method = 'prorated'
+                           AND period_start < ?
+                           AND period_end > ?
+                         """,
+                        (record.recommendation_id, to_iso_z(period_end), to_iso_z(period_start)),
+                    )
+                    await conn.execute(
+                        """
+                         UPDATE recommendation_savings_ledger_hourly
+                         SET superseded = 1
+                         WHERE recommendation_id = ?
+                           AND measurement_method = 'prorated'
+                           AND period_start < ?
+                           AND period_end > ?
+                         """,
+                        (record.recommendation_id, to_iso_z(period_end), to_iso_z(period_start)),
+                    )
             await conn.commit()
         logger.debug("Saved %d savings ledger records to SQLite.", len(records))
         return len(records)
@@ -182,12 +224,12 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 """
-                INSERT OR REPLACE INTO recommendation_savings_ledger_hourly
+                INSERT INTO recommendation_savings_ledger_hourly
                     (recommendation_id, cluster_name, namespace,
                      recommendation_type, co2e_saved_grams,
                      cost_saved_dollars, sample_count, hour_bucket,
                      measurement_method, baseline_value, actual_value,
-                     confidence, superseded)
+                     confidence, superseded, period_start, period_end)
                 SELECT
                     recommendation_id,
                     cluster_name,
@@ -201,13 +243,23 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                     MAX(baseline_value),
                     MAX(actual_value),
                     MAX(confidence),
-                    MAX(COALESCE(superseded, 0))
+                    MAX(COALESCE(superseded, 0)),
+                    strftime('%Y-%m-%dT%H:00:00Z', timestamp),
+                    strftime('%Y-%m-%dT%H:00:00Z', timestamp, '+1 hour')
                 FROM recommendation_savings_ledger
                 WHERE timestamp < ?
                 GROUP BY recommendation_id, cluster_name, namespace,
                          recommendation_type,
                          COALESCE(measurement_method, 'prorated'),
                          strftime('%Y-%m-%dT%H:00:00Z', timestamp)
+                ON CONFLICT (recommendation_id, hour_bucket, measurement_method)
+                DO UPDATE SET
+                    co2e_saved_grams = excluded.co2e_saved_grams,
+                    cost_saved_dollars = excluded.cost_saved_dollars,
+                    sample_count = excluded.sample_count,
+                    superseded = excluded.superseded,
+                    period_start = excluded.period_start,
+                    period_end = excluded.period_end
                 """,
                 (cutoff,),
             )

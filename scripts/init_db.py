@@ -22,8 +22,6 @@ async def init_db():
     start_msg = f"Initializing {config.DB_TYPE} database..."
     if config.DB_TYPE == "sqlite":
         start_msg += f" (Path: {config.DB_PATH})"
-    elif config.DB_TYPE == "postgres":
-        start_msg += f" (Connection: {config.DB_CONNECTION_STRING})"
 
     logger.info(start_msg)
 

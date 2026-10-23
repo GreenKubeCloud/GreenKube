@@ -58,8 +58,16 @@ class BoaviztaCollector(BaseCollector):
         Falls back to model lookup if model is present.
         """
 
-        # 1. Cloud Instance Lookup
+        # Local/on-prem clusters do not map to Boavizta's cloud-instance catalogue.
         if provider and instance_type:
+            if provider.strip().lower() in {"unknown", "local", "minikube", "on_prem", "on-prem"}:
+                logger.debug(
+                    "Skipping Boavizta cloud lookup for non-cloud provider %r; configured fallback will be used.",
+                    provider,
+                )
+                if model:
+                    return await self._get_server_archetype_impact(model, verbose, criteria)
+                return None
             return await self._get_cloud_instance_impact(provider, instance_type, verbose, criteria)
 
         # 2. Server Model Lookup (Archetype)

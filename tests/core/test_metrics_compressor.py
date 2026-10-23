@@ -67,6 +67,14 @@ async def _insert_raw(db, metrics):
     await repo.write_combined_metrics(metrics)
 
 
+async def _insert_container_raw(db, metrics):
+    """Write container-scoped metrics directly via the SQLite repository."""
+    from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+
+    repo = SQLiteCombinedMetricsRepository(db)
+    await repo.write_container_metrics(metrics)
+
+
 async def _count_raw(db) -> int:
     async with db.connection_scope() as conn:
         async with conn.execute("SELECT COUNT(*) FROM combined_metrics") as cur:
@@ -77,6 +85,20 @@ async def _count_raw(db) -> int:
 async def _count_hourly(db) -> int:
     async with db.connection_scope() as conn:
         async with conn.execute("SELECT COUNT(*) FROM combined_metrics_hourly") as cur:
+            row = await cur.fetchone()
+            return row[0]
+
+
+async def _count_container_raw(db) -> int:
+    async with db.connection_scope() as conn:
+        async with conn.execute("SELECT COUNT(*) FROM container_metrics") as cur:
+            row = await cur.fetchone()
+            return row[0]
+
+
+async def _count_container_hourly(db) -> int:
+    async with db.connection_scope() as conn:
+        async with conn.execute("SELECT COUNT(*) FROM container_metrics_hourly") as cur:
             row = await cur.fetchone()
             return row[0]
 
@@ -206,6 +228,45 @@ class TestSQLiteCompression:
         await compressor.run()
 
         assert await _count_hourly(db) == 1  # Aggregated into a single hour bucket
+
+    @pytest.mark.asyncio
+    async def test_container_compression_preserves_sibling_identity(self, db, compressor):
+        from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+
+        timestamp = _ts(hours_ago=30).replace(minute=0, second=0, microsecond=0)
+        common = {
+            "pod_name": "multi-pod",
+            "namespace": "ns",
+            "owner_kind": "Deployment",
+            "owner_name": "multi",
+            "timestamp": timestamp,
+        }
+        await _insert_container_raw(
+            db,
+            [
+                CombinedMetric(**common, container_name="web", cpu_request=500, total_cost=0.6, co2e_grams=6.0),
+                CombinedMetric(
+                    **common,
+                    container_name="telemetry-sidecar",
+                    cpu_request=100,
+                    total_cost=0.4,
+                    co2e_grams=4.0,
+                ),
+            ],
+        )
+
+        stats = await compressor.run()
+        repo = SQLiteCombinedMetricsRepository(db)
+        hourly = await repo.read_hourly_container_metrics(timestamp, timestamp)
+
+        assert await _count_container_raw(db) == 2
+        assert await _count_container_hourly(db) == 2
+        assert stats["hours_compressed"] >= 2
+        assert {metric.container_name for metric in hourly} == {"web", "telemetry-sidecar"}
+        assert {metric.container_name: metric.cpu_request for metric in hourly} == {
+            "web": 500,
+            "telemetry-sidecar": 100,
+        }
 
     @pytest.mark.asyncio
     async def test_hourly_row_sums_joules(self, db, compressor):
@@ -407,15 +468,16 @@ class TestPostgresCompressionBranches:
     @pytest.mark.asyncio
     async def test_compress_to_hourly_uses_postgres_branch(self):
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(return_value="INSERT 0 7")
+        conn.execute = AsyncMock(side_effect=["INSERT 0 7", "INSERT 0 0"])
         compressor = MetricsCompressor(FakePostgresDb(conn))
 
         result = await compressor._compress_to_hourly()
 
         assert result == {"hours": 7, "rows": 7}
-        assert conn.execute.await_args is not None
-        assert "INSERT INTO combined_metrics_hourly" in conn.execute.await_args.args[0]
-        assert isinstance(conn.execute.await_args.args[1], datetime)
+        assert conn.execute.await_count == 2
+        assert "INSERT INTO combined_metrics_hourly" in conn.execute.await_args_list[0].args[0]
+        assert "INSERT INTO container_metrics_hourly" in conn.execute.await_args_list[1].args[0]
+        assert isinstance(conn.execute.await_args_list[0].args[1], datetime)
 
     @pytest.mark.asyncio
     async def test_postgres_pruning_parses_deleted_row_counts(self):
@@ -425,17 +487,17 @@ class TestPostgresCompressionBranches:
         cfg.METRICS_RAW_RETENTION_DAYS = 7
         cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2"])
+        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2", "DELETE 1", "DELETE 3"])
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
 
-        assert await compressor._prune_raw() == 4
-        assert await compressor._prune_hourly() == 2
-        assert conn.execute.await_count == 2
+        assert await compressor._prune_raw() == 6
+        assert await compressor._prune_hourly() == 4
+        assert conn.execute.await_count == 4
 
     @pytest.mark.asyncio
     async def test_postgres_namespace_cache_refresh_and_empty_status_counts(self):
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["INSERT 0 3", ""])
+        conn.execute = AsyncMock(side_effect=["INSERT 0 3", "", ""])
         compressor = MetricsCompressor(FakePostgresDb(conn))
 
         assert await compressor.refresh_namespace_cache() == 3

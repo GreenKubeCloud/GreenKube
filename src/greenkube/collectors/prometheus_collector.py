@@ -64,7 +64,7 @@ class PrometheusCollector(BaseCollector):
         )
 
         # Query for memory working set bytes (actual memory usage).
-        self.memory_usage_query = "sum(container_memory_working_set_bytes{container!=''}) by (namespace, pod, node)"
+        self.memory_usage_query = "sum(container_memory_working_set_bytes) by (namespace, pod, container, node)"
 
         # Query for network I/O rates (bytes/sec received and transmitted).
         self.network_receive_query = (
@@ -569,8 +569,8 @@ class PrometheusCollector(BaseCollector):
         # set to empty string.
         namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
         pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
-        node = metric.get("node") or metric.get("kubernetes_node")
         container = metric.get("container") or metric.get("container_name") or ""
+        node = metric.get("node") or metric.get("kubernetes_node")
 
         if not all((namespace, pod, node)):
             return None
@@ -603,6 +603,7 @@ class PrometheusCollector(BaseCollector):
 
         namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("k8s_namespace")
         pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name")
+        container = metric.get("container") or metric.get("container_name") or ""
         node = metric.get("node") or metric.get("kubernetes_node")
 
         if not all((namespace, pod, node)):
@@ -613,7 +614,7 @@ class PrometheusCollector(BaseCollector):
             if mem < 0 or mem != mem or mem == float("inf"):
                 logger.debug("Invalid memory value %.0f for %s/%s, skipping", mem, namespace, pod)
                 return None
-            return PodMemoryUsage(namespace=namespace, pod=pod, node=node, memory_usage_bytes=mem)
+            return PodMemoryUsage(namespace=namespace, pod=pod, container=container, node=node, memory_usage_bytes=mem)
         except (TypeError, ValueError, ValidationError):
             return None
 

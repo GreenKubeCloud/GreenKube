@@ -17,6 +17,7 @@
 	let wattnetPassword = '';
 	let saving = false;
 	let saveError = '';
+	let acknowledgement = null;
 
 	$: issues = services ? Object.values(services).filter(
 		s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
@@ -27,6 +28,7 @@
 	async function saveConfig() {
 		saving = true;
 		saveError = '';
+		acknowledgement = null;
 		try {
 			const update = {};
 			if (prometheusUrl) update.prometheus_url = prometheusUrl;
@@ -41,8 +43,8 @@
 			}
 
 			const result = await updateServiceConfig(update);
+			acknowledgement = result.configurationAcknowledgement;
 			dispatch('updated', result);
-			dispatch('dismiss');
 		} catch (e) {
 			saveError = e.message;
 		} finally {
@@ -53,18 +55,24 @@
 	function dismiss() {
 		dispatch('dismiss');
 	}
+
+	function handleEscape(event) {
+		if (event.key === 'Escape' && visible && hasIssues) dismiss();
+	}
 </script>
+
+<svelte:window on:keydown={handleEscape} />
 
 {#if visible && hasIssues}
 	<!-- Backdrop -->
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs" role="presentation">
 		<!-- Modal -->
-		<div class="bg-dark-900 border border-dark-700/50 rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+		<div class="bg-dark-900 border border-dark-700/50 rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="service-health-dialog-title">
 			<!-- Header -->
 			<div class="flex items-center gap-3 px-6 py-4 border-b border-dark-700/50">
 				<span class="text-2xl">⚠️</span>
 				<div>
-					<h2 class="text-lg font-bold text-dark-100">Service Connectivity Issues</h2>
+					<h2 id="service-health-dialog-title" class="text-lg font-bold text-dark-100">Service Connectivity Issues</h2>
 					<p class="text-xs text-dark-500">
 						{issues.length} service{issues.length > 1 ? 's' : ''} need{issues.length === 1 ? 's' : ''} attention
 					</p>
@@ -99,7 +107,7 @@
 							bind:value={prometheusUrl}
 							placeholder="http://prometheus-server:9090"
 							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 						/>
 					</div>
 				{/if}
@@ -113,7 +121,7 @@
 							bind:value={opencostUrl}
 							placeholder="http://opencost:9003"
 							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 						/>
 					</div>
 				{/if}
@@ -132,7 +140,7 @@
 							bind:value={electricityMapsToken}
 							placeholder="Your API token"
 							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 						/>
 					</div>
 				{/if}
@@ -152,7 +160,7 @@
 								bind:value={wattnetEmail}
 								placeholder="you@example.com"
 								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-								       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+								       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 							/>
 						</div>
 						<div>
@@ -163,7 +171,7 @@
 								bind:value={wattnetPassword}
 								placeholder="Wattnet account password"
 								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-								       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
+								       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
 							/>
 						</div>
 					</div>
@@ -171,6 +179,14 @@
 
 				{#if saveError}
 					<p class="text-xs text-red-400">{saveError}</p>
+				{/if}
+				{#if acknowledgement}
+					<p class="text-xs text-green-400" role="status">
+						Configuration acknowledged
+						{#if acknowledgement.version} (version {acknowledgement.version}){/if}.
+						Health checks were retried
+						{acknowledgement.persisted ? ' and persisted.' : '; save Helm values to persist it across restarts.'}
+					</p>
 				{/if}
 			</div>
 
@@ -180,7 +196,7 @@
 					on:click={dismiss}
 					class="btn-secondary text-sm"
 				>
-					Dismiss
+					{acknowledgement ? 'Close' : 'Dismiss'}
 				</button>
 				<button
 					on:click={saveConfig}

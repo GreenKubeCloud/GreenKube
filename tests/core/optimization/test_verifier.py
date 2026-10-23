@@ -8,13 +8,14 @@ import pytest
 from greenkube.core.config import Config
 from greenkube.core.db import db_manager
 from greenkube.core.optimization.lifecycle import RecommendationLifecycle
-from greenkube.core.optimization.verifier import RecommendationVerifier
+from greenkube.core.optimization.verifier import RecommendationVerifier, _series_for_record
 from greenkube.models.metrics import (
     CombinedMetric,
     RecommendationRecord,
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.storage.base_repository import ContainerMetricsRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
 
@@ -25,19 +26,36 @@ async def repo():
     await db_manager.close()
 
 
-class FakeCombinedRepo:
+class FakeCombinedRepo(ContainerMetricsRepository):
     """Returns post-apply metrics on the first call and pre-apply metrics on the second."""
 
-    def __init__(self, metrics, before_metrics=None):
+    def __init__(self, metrics, before_metrics=None, container_metrics=None):
         self.metrics = metrics
         self.before_metrics = before_metrics
+        self.container_metrics = container_metrics
         self.calls = 0
+        self.container_calls = 0
 
     async def read_combined_metrics_smart(self, start_time, end_time, namespace=None):
         self.calls += 1
         if self.before_metrics is not None and self.calls == 2:
             return list(self.before_metrics)
         return list(self.metrics)
+
+    async def read_container_metrics_smart(self, start_time, end_time, namespace=None):
+        self.container_calls += 1
+        return list(self.container_metrics or [])
+
+    async def write_container_metrics(self, metrics):
+        return len(metrics)
+
+    async def read_container_metrics(self, start_time, end_time, namespace=None):
+        self.container_calls += 1
+        return list(self.container_metrics or [])
+
+    async def read_hourly_container_metrics(self, start_time, end_time, namespace=None):
+        self.container_calls += 1
+        return list(self.container_metrics or [])
 
 
 def _config() -> Config:
@@ -80,9 +98,18 @@ def _applied_record(
     )
 
 
-def _metric(cost: float, co2: float, cpu: float, restart: int = 0) -> CombinedMetric:
+def _metric(
+    cost: float,
+    co2: float,
+    cpu: float,
+    restart: int = 0,
+    pod_name: str = "api-abc123def",
+    timestamp: datetime | None = None,
+    is_estimated: bool | None = False,
+    container_name: str | None = None,
+) -> CombinedMetric:
     return CombinedMetric(
-        pod_name="api-abc123def",
+        pod_name=pod_name,
         namespace="prod",
         owner_kind="Deployment",
         owner_name="api",
@@ -91,11 +118,50 @@ def _metric(cost: float, co2: float, cpu: float, restart: int = 0) -> CombinedMe
         cpu_usage_millicores=cpu,
         restart_count=restart,
         sample_count=1,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(timezone.utc),
+        is_estimated=is_estimated,
+        container_name=container_name,
     )
 
 
 class TestVerifierOutcomes:
+    @pytest.mark.asyncio
+    async def test_container_target_reads_container_series_instead_of_pod_aggregates(self):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        record = _applied_record(applied_at)
+        record.container_name = "web"
+        repository = FakeCombinedRepo(
+            [_metric(cost=0.03, co2=1.5, cpu=300)],
+            container_metrics=[
+                _metric(cost=0.02, co2=1.0, cpu=200, container_name="web"),
+                _metric(cost=0.01, co2=0.5, cpu=100, container_name="telemetry-sidecar"),
+            ],
+        )
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(None),  # pyrefly: ignore[bad-argument-type]
+            repository,  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        series = await verifier._read_series(record, applied_at, datetime.now(timezone.utc))
+
+        assert [metric.container_name for metric in series] == ["web"]
+        assert repository.container_calls == 1
+        assert repository.calls == 0
+
+    def test_container_target_series_excludes_pod_aggregate_and_sibling_containers(self):
+        record = _applied_record(datetime.now(timezone.utc))
+        record.container_name = "web"
+        metrics = [
+            _metric(0.03, 1.5, 300, container_name=None),
+            _metric(0.02, 1.0, 200, container_name="web"),
+            _metric(0.01, 0.5, 100, container_name="telemetry-sidecar"),
+        ]
+
+        series = _series_for_record(record, metrics)
+
+        assert [metric.container_name for metric in series] == ["web"]
+
     @pytest.mark.asyncio
     async def test_verified_when_cost_and_health_pass(self, repo):
         applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -196,6 +262,48 @@ class TestVerifierOutcomes:
         assert second[0].verification_status == "inconclusive"
 
     @pytest.mark.asyncio
+    async def test_estimated_metrics_cannot_verify_savings(self, repo):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
+                [_metric(cost=0.01, co2=0.5, cpu=200, is_estimated=True)],
+                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200, is_estimated=True)],
+            ),
+            config=_config(),
+        )
+
+        first = await verifier.verify_due()
+        assert first[0].status == RecommendationStatus.VERIFYING
+
+        second = await verifier.verify_due()
+
+        assert second[0].status == RecommendationStatus.APPLIED
+        assert second[0].verification_status == "inconclusive"
+        assert second[0].savings_realized is False
+        assert second[0].measured_cost_saved is None
+        assert second[0].measured_co2e_saved_grams is None
+
+    @pytest.mark.asyncio
+    async def test_estimated_savings_metrics_do_not_suppress_health_rollback(self, repo):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
+                [_metric(cost=0.01, co2=0.5, cpu=500, is_estimated=True)],
+                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200, is_estimated=True)],
+            ),
+            config=_config(),
+        )
+
+        updated = await verifier.verify_due()
+
+        assert updated[0].status == RecommendationStatus.ROLLBACK_REVIEW
+        assert updated[0].verification_status == "failed"
+
+    @pytest.mark.asyncio
     async def test_window_not_elapsed_is_skipped(self, repo):
         applied_at = datetime.now(timezone.utc)
         await repo.save_recommendations([_applied_record(applied_at)])
@@ -208,3 +316,28 @@ class TestVerifierOutcomes:
         )
 
         assert await verifier.verify_due() == []
+
+    @pytest.mark.asyncio
+    async def test_aggregates_replicas_at_each_timestamp(self, repo):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        first = applied_at + timedelta(minutes=10)
+        second = first + timedelta(minutes=5)
+        after = [
+            _metric(0.01, 0.5, 100, pod_name="api-a", timestamp=first),
+            _metric(0.01, 0.5, 100, pod_name="api-b", timestamp=first),
+            _metric(0.01, 0.5, 100, pod_name="api-a", timestamp=second),
+            _metric(0.01, 0.5, 100, pod_name="api-b", timestamp=second),
+        ]
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(after, before_metrics=[_metric(0.05, 2.5, 100, timestamp=first)]),  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        updated = await verifier.verify_due()
+
+        assert updated[0].status == RecommendationStatus.VERIFIED
+        # Two replicas are summed once per timestamp, not once per sample.
+        assert updated[0].measured_cost_saved is not None
+        assert updated[0].measured_cost_saved > 0

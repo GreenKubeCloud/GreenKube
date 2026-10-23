@@ -81,6 +81,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Personal specifications kept outside version control
+docs/specs/
+
 # PyBuilder
 .pybuilder/
 target/
@@ -228,5 +231,6 @@ __marimo__/
 # local work files
 .github/instructions/
 current_task.md
+docs/ga-qualification.md
 scripts/leads/
 openapi-wattnet.json

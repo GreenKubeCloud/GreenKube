@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, List, Sequence
 from greenkube.core.optimization.evidence import build_evidence, build_patch
 from greenkube.core.optimization.risks import assess
 from greenkube.core.optimization.scoring import score_recommendations
-from greenkube.models.metrics import Recommendation
+from greenkube.models.metrics import Recommendation, RecommendationPatchV2
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -22,7 +22,8 @@ def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Co
     expires_at = now + timedelta(days=getattr(config, "RECOMMENDATION_TTL_DAYS", 14))
 
     evidence = build_evidence(rec, context)
-    patch = build_patch(rec)
+    patch_payload = build_patch(rec)
+    patch = RecommendationPatchV2.model_validate(patch_payload) if patch_payload is not None else None
     assessment = assess(rec, evidence, config)
 
     if evidence is not None:
@@ -33,7 +34,6 @@ def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Co
                 "confidence": assessment.confidence,
                 "confidence_factors": dict(assessment.confidence_factors),
                 "expires_at": expires_at,
-                "proposed_patch": patch,
             }
         )
 

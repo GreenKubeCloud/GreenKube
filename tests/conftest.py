@@ -46,6 +46,7 @@ def mock_settings_env_vars(monkeypatch):
     monkeypatch.setenv("PROMETHEUS_URL", "")
     monkeypatch.setenv("OPENCOST_API_URL", "")
     monkeypatch.setenv("BOAVIZTA_API_URL", "https://api.boavizta.org")
+    monkeypatch.setenv("KUBERNETES_METRICS_API_ENABLED", "false")
     monkeypatch.setenv("API_HOST", "127.0.0.1")
     monkeypatch.setenv("API_PORT", "8000")
     monkeypatch.setenv("GREENKUBE_API_KEY", "")

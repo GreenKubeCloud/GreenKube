@@ -3,9 +3,22 @@
 Pydantic models for structured data returned from the PrometheusCollector.
 """
 
+from datetime import datetime
 from typing import List
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class ContainerResourceUsage(BaseModel):
+    """A measured CPU and memory point from a Kubernetes PodMetrics entry."""
+
+    namespace: str
+    pod_name: str
+    container_name: str
+    cpu_usage_millicores: int | None = None
+    memory_usage_bytes: int | None = None
+    timestamp: datetime | None = None
+    duration_seconds: int | None = None
 
 
 class PodCPUUsage(BaseModel):
@@ -20,6 +33,14 @@ class PodCPUUsage(BaseModel):
     container: str
     node: str = Field(..., description="The node on which the pod is running")
     cpu_usage_cores: float = Field(..., description="Average CPU usage in cores")
+    estimated_cpu_usage_cores: float | None = Field(
+        None,
+        description="CPU usage substituted from pod requests for estimation, when applicable",
+    )
+    cpu_usage_provenance: str = Field(
+        "observed",
+        description="Whether the value used for estimation was observed or estimated",
+    )
 
 
 class PodMemoryUsage(BaseModel):
@@ -31,6 +52,7 @@ class PodMemoryUsage(BaseModel):
 
     namespace: str
     pod: str
+    container: str = ""
     node: str = Field(..., description="The node on which the pod is running")
     memory_usage_bytes: float = Field(..., description="Memory working set in bytes")
 

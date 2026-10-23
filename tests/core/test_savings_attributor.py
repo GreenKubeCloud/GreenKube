@@ -2,7 +2,7 @@
 """Tests for SavingsAttributor — the service that prorates annual recommendation
 savings into per-period time-series records."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -101,6 +101,23 @@ class TestSavingsAttributorProratedCalculation:
         r_1h = attributor._compute_period_records([rec], period_seconds=3600)[0]
 
         assert r_1h.co2e_saved_grams == pytest.approx(r_5min.co2e_saved_grams * 12, rel=1e-4)
+
+    def test_explicit_period_is_used_for_identity_and_timestamp(self):
+        rec = _make_applied_rec(co2e_annual=52560.0)
+        start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
+        end = start + timedelta(minutes=5)
+        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
+
+        record = attributor._compute_period_records(
+            [rec],
+            period_start=start,
+            period_end=end,
+        )[0]
+
+        assert record.period_start == start
+        assert record.period_end == end
+        assert record.timestamp == end
+        assert record.period_seconds == 300
 
 
 class TestSavingsAttributorIntegration:

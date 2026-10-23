@@ -41,6 +41,24 @@ def group_by_recommendation_target(
     return groups
 
 
+def split_series_by_container(
+    series: List[CombinedMetric],
+) -> List[Tuple[str | None, List[CombinedMetric]]]:
+    """Split metrics by explicit container identity, falling back only to aggregate data.
+
+    If any usable container identities exist, unlabelled samples are excluded
+    rather than being mixed into a container-level analysis.
+    """
+    groups: Dict[str, List[CombinedMetric]] = defaultdict(list)
+    for metric in series:
+        name = metric.container_name
+        if name and name.strip() == name:
+            groups[name].append(metric)
+    if groups:
+        return [(name, groups[name]) for name in sorted(groups)]
+    return [(None, series)] if series else []
+
+
 def scope_for_target_kind(target_kind: str) -> str:
     """Maps a Kubernetes owner kind to the persisted recommendation scope."""
     return "pod" if target_kind == "Pod" else "workload"

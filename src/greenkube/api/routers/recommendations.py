@@ -14,11 +14,12 @@ Endpoints:
   DELETE /recommendations/{id}/ignore - Un-ignore a recommendation (restore to active)
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
@@ -29,6 +30,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import update_recommendation_metrics
 from greenkube.core.config import get_config
+from greenkube.core.optimization.context_builder import RecommendationScanLimitError
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.models.metrics import (
@@ -137,38 +139,71 @@ def _summary_from_savings_totals(
     )
 
 
+_ACTIVE_REFRESH_TASKS: dict[str, asyncio.Task[list[Recommendation]]] = {}
+
+
 async def _generate_and_persist_recommendations(
     namespace: Optional[str],
     repo: CombinedMetricsRepository,
     node_repo: NodeRepository,
     reco_repo: RecommendationRepository,
 ) -> list[Recommendation]:
-    """Run the optimization engine and reconcile persisted active recommendations."""
+    """Run one coalesced optimization scan for a namespace scope."""
+    key = namespace or "*"
+    loop = asyncio.get_running_loop()
+    active = _ACTIVE_REFRESH_TASKS.get(key)
+    if active is not None and not active.done() and active.get_loop() is loop:
+        return await asyncio.shield(active)
+
+    task = loop.create_task(_run_recommendation_refresh(namespace, repo, node_repo, reco_repo))
+    _ACTIVE_REFRESH_TASKS[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _ACTIVE_REFRESH_TASKS.get(key) is task:
+            _ACTIVE_REFRESH_TASKS.pop(key, None)
+
+
+async def _run_recommendation_refresh(
+    namespace: Optional[str],
+    repo: CombinedMetricsRepository,
+    node_repo: NodeRepository,
+    reco_repo: RecommendationRepository,
+) -> list[Recommendation]:
     engine = OptimizationEngine()
-    recommendations = await engine.refresh(repo, node_repo, reco_repo, namespace=namespace)
+    try:
+        recommendations = await engine.refresh(repo, node_repo, reco_repo, namespace=namespace)
+    except RecommendationScanLimitError as exc:
+        logger.error("Recommendation scan exceeded its configured metric-row bound: %s", exc)
+        return []
     update_recommendation_metrics(recommendations)
     return recommendations
 
 
-@router.get("/recommendations", response_model=List[Recommendation])
+@router.get("/recommendations", response_model=List[RecommendationRecord])
 async def list_recommendations(
+    background_tasks: BackgroundTasks,
     namespace: Optional[str] = Depends(validate_namespace),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    refresh: bool = Query(False, description="Refresh asynchronously before the next read."),
 ):
-    """Analyze recent metrics, upsert recommendations in DB, and return them.
-
-    Recommended CPU and memory values are guaranteed to be at least the
-    configured minimums (RECOMMENDATION_MIN_CPU_MILLICORES /
-    RECOMMENDATION_MIN_MEMORY_BYTES), so all returned recommendations are
-    actionable as-is.
-    """
-    return await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+    """Read active recommendations without running analyzers in the request."""
+    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    if refresh:
+        background_tasks.add_task(_generate_and_persist_recommendations, namespace, repo, node_repo, reco_repo)
+    elif not records:
+        # Preserve the legacy endpoint's first-read behavior while keeping
+        # populated reads read-only; callers needing explicit refresh can use
+        # the query parameter.
+        records = await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
+    return records
 
 
 @router.get("/recommendations/active", response_model=List[RecommendationRecord])
 async def list_active_recommendations(
+    background_tasks: BackgroundTasks,
     namespace: Optional[str] = Depends(validate_namespace),
     refresh: bool = Query(False, description="Refresh recommendations before returning active records."),
     source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, karpenter)."),
@@ -178,16 +213,13 @@ async def list_active_recommendations(
     node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
 ):
-    """Return currently active recommendations from the database.
+    """Return active recommendations and optionally refresh them after the response.
 
     By default this endpoint reads directly from the DB. Pass ``refresh=true``
-    to run the optimizer first and reconcile stale active records.
+    to schedule the optimizer without holding the request open.
     """
     if refresh:
-        try:
-            await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
-        except Exception as e:
-            logger.error("Failed to refresh active recommendations: %s", e)
+        background_tasks.add_task(_generate_and_persist_recommendations, namespace, repo, node_repo, reco_repo)
 
     records = await reco_repo.get_active_recommendations(namespace=namespace)
     return _filter_records(records, source, risk_level, capability)

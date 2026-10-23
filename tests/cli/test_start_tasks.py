@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -173,6 +174,30 @@ async def test_async_write_combined_metrics_to_database_delegates_last_value():
     writer.assert_awaited_once_with(last="1h")
 
 
+def test_data_processor_is_resolved_from_factory():
+    with patch("greenkube.cli.start.get_data_processor") as get_processor:
+        get_processor.return_value = MagicMock()
+        assert start_module.get_data_processor() is get_processor.return_value
+        get_processor.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_leader_gated_controller_callback_runs_only_for_the_lease_holder():
+    state = {"leader": False}
+    callback = AsyncMock()
+
+    def should_run():
+        return state["leader"]
+
+    guarded = start_module._leader_gated_callback(callback, should_run)
+    await guarded()
+    callback.assert_not_awaited()
+
+    state["leader"] = True
+    await guarded()
+    callback.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_attribute_recommendation_savings_success():
     reco_repo = MagicMock()
@@ -256,7 +281,7 @@ async def test_refresh_dashboard_summary_handles_errors():
 
 
 @pytest.mark.asyncio
-async def test_async_start_bootstraps_scheduler_and_initial_tasks():
+async def test_async_start_bootstraps_scheduler_and_initial_tasks(monkeypatch):
     db_manager = MagicMock()
     db_manager.connect = AsyncMock()
     scheduler = MagicMock()
@@ -266,6 +291,14 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks():
     stop_event = MagicMock()
     stop_event.wait = AsyncMock(return_value=None)
     loop = MagicMock()
+    monkeypatch.setattr(
+        "greenkube.automation.plan_runtime.initialize_gitops_provider_configs",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
+        AsyncMock(return_value=SimpleNamespace(run_periodic=AsyncMock())),
+    )
 
     with patch(
         "greenkube.cli.start.get_config",
@@ -314,6 +347,114 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks():
     refresh.assert_awaited_once()
     stop_event.wait.assert_awaited_once()
     scheduler.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_start_tracks_and_cancels_gitops_discovery_after_provider_seeding():
+    order: list[str] = []
+    discovery_started = asyncio.Event()
+    discovery_stopped = asyncio.Event()
+    db_manager = MagicMock()
+
+    async def connect():
+        order.append("database")
+
+    db_manager.connect = AsyncMock(side_effect=connect)
+    scheduler = MagicMock()
+    scheduler.add_job = MagicMock()
+    scheduler.add_job_from_string = MagicMock()
+    scheduler.stop = AsyncMock()
+    processor = MagicMock()
+    processor.close = AsyncMock()
+
+    class _Runtime:
+        async def run_periodic(self):
+            task = asyncio.current_task()
+            order.append("discovery")
+            discovery_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                assert task is not None
+                order.append(task.get_name())
+                discovery_stopped.set()
+
+    class _StopEvent:
+        def set(self):
+            pass
+
+        async def wait(self):
+            await discovery_started.wait()
+
+    async def seed_provider_configs(*, db_manager):
+        assert db_manager is not None
+        order.append("provider-seed")
+
+    async def build_discovery_runtime(*, db_manager):
+        assert db_manager is not None
+        order.append("runtime-build")
+        return _Runtime()
+
+    loop = MagicMock()
+    with patch(
+        "greenkube.cli.start.get_config",
+        return_value=SimpleNamespace(
+            LOG_LEVEL="INFO",
+            LOG_FORMAT="console",
+            CLUSTER_NAME="test-cluster",
+            DB_TYPE="sqlite",
+            PROMETHEUS_QUERY_RANGE_STEP="5m",
+            NODE_ANALYSIS_INTERVAL="1h",
+        ),
+    ):
+        with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
+            with patch("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", seed_provider_configs):
+                with patch(
+                    "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
+                    build_discovery_runtime,
+                ):
+                    with patch("greenkube.cli.start.Scheduler", return_value=scheduler):
+                        with patch("greenkube.cli.start.get_data_processor", return_value=processor):
+                            with patch(
+                                "greenkube.cli.start.collect_carbon_intensity_for_all_zones",
+                                new_callable=AsyncMock,
+                            ):
+                                with patch("greenkube.cli.start.analyze_nodes", new_callable=AsyncMock):
+                                    with patch(
+                                        "greenkube.cli.start.async_write_combined_metrics_to_database",
+                                        new_callable=AsyncMock,
+                                    ):
+                                        with patch(
+                                            "greenkube.cli.start.attribute_recommendation_savings",
+                                            new_callable=AsyncMock,
+                                        ):
+                                            with patch(
+                                                "greenkube.cli.start.run_recommendation_lifecycle",
+                                                new_callable=AsyncMock,
+                                            ):
+                                                with patch(
+                                                    "greenkube.cli.start.compress_metrics", new_callable=AsyncMock
+                                                ):
+                                                    with patch(
+                                                        "greenkube.cli.start.refresh_dashboard_summary",
+                                                        new_callable=AsyncMock,
+                                                    ):
+                                                        with patch(
+                                                            "greenkube.cli.start.asyncio.Event",
+                                                            return_value=_StopEvent(),
+                                                        ):
+                                                            with patch(
+                                                                "greenkube.cli.start.asyncio.get_running_loop",
+                                                                return_value=loop,
+                                                            ):
+                                                                await start_module._async_start(last=None)
+
+    assert order[:3] == ["database", "provider-seed", "runtime-build"]
+    assert "discovery" in order
+    assert "gitops-discovery-refresh" in order
+    assert discovery_stopped.is_set()
+    scheduler.stop.assert_awaited_once()
+    processor.close.assert_awaited_once()
 
 
 def test_start_returns_when_subcommand_invoked():

@@ -1,36 +1,122 @@
-{{- if .Values.monitoring.networkPolicy.enabled }}
+{{- $root := . -}}
+{{- if $root.Values.monitoring.networkPolicy.enabled -}}
+{{- $automationMode := include "greenkube.automationMode" $root -}}
+{{- $components := list -}}
+{{- if eq $root.Values.profile "production" -}}
+  {{- if $root.Values.config.api.enabled -}}
+    {{- $components = append $components "api" -}}
+  {{- end -}}
+  {{- $components = append $components "controller" -}}
+  {{- if and $root.Values.automation.enabled (eq $automationMode "worker") -}}
+    {{- $components = append $components "automation" -}}
+  {{- end -}}
+{{- else -}}
+  {{- $components = append $components "app" -}}
+  {{- if and $root.Values.automation.enabled (eq $automationMode "worker") -}}
+    {{- $components = append $components "automation-worker" -}}
+  {{- end -}}
+{{- end -}}
+{{- $additionalEgress := $root.Values.monitoring.networkPolicy.additionalEgress | default (list) -}}
+{{- if not (kindIs "slice" $additionalEgress) -}}
+  {{- fail "monitoring.networkPolicy.additionalEgress must be a list of NetworkPolicy egress rules" -}}
+{{- end -}}
+{{- range $component := $components -}}
+{{- $apiComponent := or (eq $component "app") (eq $component "api") -}}
+{{- $workerComponent := or (eq $component "automation") (eq $component "automation-worker") -}}
+{{- $apiIngress := and $apiComponent $root.Values.config.api.enabled -}}
+{{- $workerIngress := and $workerComponent $root.Values.automation.enabled (eq $automationMode "worker") -}}
+{{- $customIngress := and $apiComponent $root.Values.monitoring.networkPolicy.additionalIngress -}}
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "greenkube.fullname" . }}-allow-prometheus
-  namespace: {{ .Release.Namespace }}
+  name: {{ printf "%s-%s-netpol" (include "greenkube.fullname" $root | trunc 38 | trimSuffix "-") $component | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
-    {{- include "greenkube.labels" . | nindent 4 }}
+    {{- include "greenkube.labels" $root | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "greenkube.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: app
+      {{- include "greenkube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
   policyTypes:
     - Ingress
+    - Egress
+  {{- if or $apiIngress $workerIngress $customIngress }}
   ingress:
+    {{- if $apiIngress }}
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.monitoring.networkPolicy.prometheusNamespace | default "monitoring" }}
+              kubernetes.io/metadata.name: {{ $root.Values.monitoring.networkPolicy.prometheusNamespace | default "monitoring" }}
           podSelector:
             matchLabels:
               app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
-          port: {{ .Values.config.api.port }}
-    # Allow the post-install/post-upgrade ready-check hook to reach the API
+          port: {{ $root.Values.config.api.port }}
+    # Allow the post-install/post-upgrade ready-check hook to reach the API.
     - from:
         - podSelector:
             matchLabels:
-              {{- include "greenkube.selectorLabels" . | nindent 14 }}
+              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
               app.kubernetes.io/component: ready-check
       ports:
         - protocol: TCP
-          port: {{ .Values.config.api.port }}
-{{- end }}
+          port: {{ $root.Values.config.api.port }}
+    {{- end }}
+    {{- if $workerIngress }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.monitoring.networkPolicy.prometheusNamespace | default "monitoring" }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: {{ include "greenkube.workerMetricsPort" $root }}
+    {{- end }}
+    {{- if and $apiComponent $root.Values.monitoring.networkPolicy.additionalIngress }}
+    {{- toYaml $root.Values.monitoring.networkPolicy.additionalIngress | nindent 4 }}
+    {{- end }}
+  {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if and $root.Values.postgres.enabled (eq $root.Values.config.db.type "postgres") }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    {{- if and $root.Values.automation.enabled $root.Values.rendererSandbox.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
+              app.kubernetes.io/component: renderer-sandbox
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.rendererSandbox.servicePort }}
+    {{- end }}
+    {{- with $additionalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- printf "\n" }}
+{{- end -}}
+{{- end -}}

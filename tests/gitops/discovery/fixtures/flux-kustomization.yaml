@@ -1,0 +1,14 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: payments-prod
+  namespace: flux-system
+spec:
+  path: ./apps/payments/overlays/prod
+  sourceRef:
+    kind: GitRepository
+    name: platform
+status:
+  inventory:
+    entries:
+      - id: apps_v1_Deployment_prod_payments-api

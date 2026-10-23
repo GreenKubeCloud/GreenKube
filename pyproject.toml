@@ -27,8 +27,6 @@ keywords = [
     "cloud-cost",
     "prometheus",
     "energy",
-    "csrd",
-    "esrs",
     "k8s",
     "devops",
     "sre",
@@ -81,7 +79,7 @@ dependencies = [
 
 [project.urls]
 "Homepage" = "https://greenkube.cloud"
-"Documentation" = "https://greenkube.cloud/docs/"
+"Documentation" = "https://docs.greenkube.cloud/"
 "Repository" = "https://github.com/GreenKubeCloud/GreenKube"
 "Bug Tracker" = "https://github.com/GreenKubeCloud/GreenKube/issues"
 "Changelog" = "https://github.com/GreenKubeCloud/GreenKube/blob/main/CHANGELOG.md"

@@ -11,6 +11,14 @@ roleRef:
   name: {{ include "greenkube.fullname" . }}
 subjects:
 - kind: ServiceAccount
-  name: {{ include "greenkube.serviceAccountName" . }}
+  name: {{ if eq .Values.profile "production" }}{{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "controller") }}{{ else }}{{ include "greenkube.serviceAccountName" . }}{{ end }}
   namespace: {{ .Release.Namespace }}
+{{- if eq .Values.profile "production" }}
+- kind: ServiceAccount
+  name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}
+  namespace: {{ .Release.Namespace }}
+- kind: ServiceAccount
+  name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "automation") }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

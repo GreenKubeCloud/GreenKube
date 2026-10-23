@@ -39,7 +39,16 @@ def _encode_value(value):
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (dict, list)):
-        return json.dumps(value)
+        return json.dumps(
+            value,
+            default=lambda item: (
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump")
+                else item.isoformat()
+                if hasattr(item, "isoformat")
+                else str(item)
+            ),
+        )
     return value
 
 
@@ -69,9 +78,11 @@ def _bounded_limit(limit: int) -> int:
 def _identity_key(record: RecommendationRecord) -> tuple:
     """Returns the stable identity used to refresh recommendation lifecycle rows."""
     return (
+        record.fingerprint,
         record.scope or "pod",
         record.namespace,
         record.pod_name,
+        record.container_name,
         record.target_node,
         _type_value(record),
     )
@@ -136,9 +147,11 @@ class PostgresRecommendationRepository(RecommendationRepository):
         where_offset = len(set_columns)
         update_query = (
             "UPDATE recommendation_history SET {} "
-            "WHERE COALESCE(scope, 'pod') = ${} "
+            "WHERE fingerprint = ${} "
+            "AND COALESCE(scope, 'pod') = ${} "
             "AND namespace IS NOT DISTINCT FROM ${} "
             "AND pod_name IS NOT DISTINCT FROM ${} "
+            "AND container_name IS NOT DISTINCT FROM ${} "
             "AND target_node IS NOT DISTINCT FROM ${} "
             "AND type = ${} "
             "AND status = 'active'"
@@ -149,6 +162,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
             where_offset + 3,
             where_offset + 4,
             where_offset + 5,
+            where_offset + 6,
+            where_offset + 7,
         )
         insert_query = ("INSERT INTO recommendation_history ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
             ", ".join(RECORD_COLUMNS),
@@ -160,8 +175,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 WHERE COALESCE(scope, 'pod') = $1
                   AND namespace IS NOT DISTINCT FROM $2
                   AND pod_name IS NOT DISTINCT FROM $3
-                  AND target_node IS NOT DISTINCT FROM $4
-                  AND type = $5
+                  AND container_name IS NOT DISTINCT FROM $4
+                  AND target_node IS NOT DISTINCT FROM $5
+                  AND type = $6
                   AND status = 'applied'
                 ORDER BY applied_at DESC
                 LIMIT 1
@@ -183,9 +199,11 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 values = record_values(r)
                 update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
                     now,
+                    r.fingerprint,
                     r.scope or "pod",
                     r.namespace,
                     r.pod_name,
+                    r.container_name,
                     r.target_node,
                     type_val,
                 ]
@@ -199,6 +217,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.scope or "pod",
                     r.namespace,
                     r.pod_name,
+                    r.container_name,
                     r.target_node,
                     type_val,
                 )
@@ -240,7 +259,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             params: list = []
             query = (
-                "SELECT id, pod_name, namespace, type, scope, target_node "
+                "SELECT id, pod_name, container_name, namespace, type, scope, target_node, fingerprint "
                 "FROM recommendation_history WHERE status = 'active'"
             )
             if namespace:
@@ -254,10 +273,12 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 row_record = RecommendationRecord(
                     id=data["id"],
                     pod_name=data["pod_name"],
+                    container_name=data["container_name"],
                     namespace=data["namespace"],
                     type=RecommendationType(data["type"]),
                     scope=data.get("scope") or "pod",
                     target_node=data.get("target_node"),
+                    fingerprint=data.get("fingerprint"),
                     description="placeholder",
                 )
                 if _identity_key(row_record) not in current_keys:
@@ -536,7 +557,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 carbon_saved,
                 cost_saved,
                 method,
-                json.dumps(baseline) if baseline is not None else None,
+                json.dumps(baseline.model_dump(mode="json") if hasattr(baseline, "model_dump") else baseline)
+                if baseline is not None
+                else None,
             )
             logger.info("Recommendation %d marked as applied (%s).", rec_id, method)
             return row_to_record(updated)
@@ -574,10 +597,43 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 event.recommendation_id,
                 event.event_type,
                 event.actor,
-                json.dumps(event.payload or {}),
+                json.dumps(
+                    event.payload.model_dump(mode="json")
+                    if hasattr(event.payload, "model_dump")
+                    else event.payload or {}
+                ),
                 created_at,
             )
             return event.model_copy(update={"id": row["id"], "created_at": row["created_at"]})
+
+    async def transition_and_record_event(self, rec_id: int, updates: dict, event_type: str, actor: str, payload: dict):
+        """Atomically update a recommendation and append its lifecycle event."""
+        filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
+        if not filtered:
+            raise ValueError("No mutable recommendation columns supplied.")
+        now = datetime.now(timezone.utc)
+        filtered.setdefault("updated_at", now)
+        columns = list(filtered)
+        assignments = ", ".join(f"{column} = ${index}" for index, column in enumerate(columns, 1))
+        async with self.db_manager.connection_scope() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE recommendation_history SET {assignments} WHERE id = ${len(columns) + 1} RETURNING *",
+                *[_encode_value(filtered[column]) for column in columns],
+                rec_id,
+            )
+            if row is None:
+                raise ValueError(f"Recommendation {rec_id} not found.")
+            await conn.execute(
+                """INSERT INTO recommendation_events
+                (recommendation_id, event_type, actor, payload, created_at)
+                VALUES ($1, $2, $3, $4, $5)""",
+                rec_id,
+                event_type,
+                actor,
+                json.dumps(payload),
+                now,
+            )
+            return row_to_record(row)
 
     async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
         """Returns the audit trail for a recommendation, oldest first."""

@@ -1,67 +1,90 @@
 #!/usr/bin/env bash
-# pg_upgrade_17_to_18.sh
+# Upgrade a GreenKube PostgreSQL 17 PVC to PostgreSQL 18.
 #
-# Upgrades the GreenKube PostgreSQL data directory from version 17 to 18
-# in-place on a Kubernetes cluster using a temporary Job.
+# The operation is deliberately non-interactive.  A backup command and a
+# separate verification command must be supplied by the operator:
+#   BACKUP_COMMAND='pg_dump ... > /secure/location/greenkube.sql'
+#   BACKUP_VERIFY_COMMAND='test -s /secure/location/greenkube.sql'
 #
 # Usage:
-#   ./scripts/pg_upgrade_17_to_18.sh [NAMESPACE]
+#   BACKUP_COMMAND=... BACKUP_VERIFY_COMMAND=... ./scripts/pg_upgrade_17_to_18.sh [NAMESPACE]
+#   ACTION=rollback ./scripts/pg_upgrade_17_to_18.sh [NAMESPACE]
 #
-# Environment overrides:
-#   PVC_NAME              PostgreSQL data PVC (default: data-greenkube-postgres-0)
-#   SECRET_NAME           Secret holding POSTGRES_PASSWORD (default: greenkube)
-#
-# Prerequisites:
-#   - kubectl configured against the target cluster
-#   - The greenkube Helm release must be uninstalled (postgres pod stopped)
-#     so the PVC is free
-#   - The PVC "data-greenkube-postgres-0" must exist in the namespace
-#
-# The script:
-#   1. Launches a Job that mounts the existing PVC
-#   2. Installs pg17 server binaries via apk (runs as root)
-#   3. Initialises a fresh PG18 cluster in pgdata_new
-#   4. Runs pg_upgrade --link (instant, no data copy)
-#   5. Swaps directories so the PVC holds PG18 data
-#   6. Old data is backed up as pgdata_pg17_bak
-#
-# After this script succeeds, re-install the Helm chart normally.
+# Environment:
+#   PVC_NAME (data-greenkube-postgres-0), SECRET_NAME (greenkube),
+#   SECRET_KEY (POSTGRES_PASSWORD), POSTGRES_ROLE (greenkube),
+#   JOB_NAME (postgres-upgrade-17-18), KUBECTL_BIN (kubectl),
+#   ACTION (upgrade), BACKUP_COMMAND, BACKUP_VERIFY_COMMAND.
 
 set -euo pipefail
 
-NAMESPACE="${1:-greenkube}"
-JOB_NAME="postgres-upgrade-17-18"
+NAMESPACE="${1:-${NAMESPACE:-greenkube}}"
 PVC_NAME="${PVC_NAME:-data-greenkube-postgres-0}"
 SECRET_NAME="${SECRET_NAME:-greenkube}"
+SECRET_KEY="${SECRET_KEY:-POSTGRES_PASSWORD}"
+POSTGRES_ROLE="${POSTGRES_ROLE:-greenkube}"
+JOB_NAME="${JOB_NAME:-postgres-upgrade-17-18}"
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
+ACTION="${ACTION:-upgrade}"
 
-echo "==> Checking prerequisites..."
-kubectl get pvc "${PVC_NAME}" -n "${NAMESPACE}" > /dev/null
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '==> %s\n' "$*"; }
+valid_name() { [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; }
 
-# Make sure no postgres pod is running (PVC must be free)
-if kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=postgres 2>/dev/null | grep -q Running; then
-    echo "ERROR: A postgres pod is still running. Stop the Helm release first:"
-    echo "  helm uninstall greenkube -n ${NAMESPACE}"
-    exit 1
+command -v "$KUBECTL_BIN" >/dev/null 2>&1 || die "kubectl was not found (set KUBECTL_BIN to a testable command)."
+[[ "$ACTION" == upgrade || "$ACTION" == rollback ]] || die "ACTION must be upgrade or rollback."
+valid_name "$NAMESPACE" || die "Invalid namespace."
+valid_name "$PVC_NAME" || die "Invalid PVC name."
+valid_name "$SECRET_NAME" || die "Invalid Secret name."
+valid_name "$POSTGRES_ROLE" || die "Invalid PostgreSQL role."
+valid_name "$JOB_NAME" || die "Invalid Job name."
+
+log "Checking cluster and PostgreSQL Secret prerequisites..."
+"$KUBECTL_BIN" get namespace "$NAMESPACE" >/dev/null
+"$KUBECTL_BIN" get pvc "$PVC_NAME" -n "$NAMESPACE" >/dev/null
+SECRET_VALUE="$("$KUBECTL_BIN" get secret "$SECRET_NAME" -n "$NAMESPACE" \
+  -o "jsonpath={.data.${SECRET_KEY}}" 2>/dev/null)" || die "Secret ${SECRET_NAME} or key ${SECRET_KEY} is unavailable."
+[[ -n "$SECRET_VALUE" ]] || die "Secret ${SECRET_NAME} key ${SECRET_KEY} is empty."
+if ! printf '%s' "$SECRET_VALUE" | (base64 -D >/dev/null 2>/dev/null || base64 -d >/dev/null 2>/dev/null); then
+  die "Secret ${SECRET_NAME} key ${SECRET_KEY} is not valid base64."
 fi
 
-echo "==> Deleting any previous upgrade job..."
-kubectl delete job "${JOB_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
-kubectl wait --for=delete job/"${JOB_NAME}" -n "${NAMESPACE}" --timeout=60s 2>/dev/null || true
+if [[ "$ACTION" == upgrade ]]; then
+  [[ -n "${BACKUP_COMMAND:-}" ]] || die "BACKUP_COMMAND is required; no external backup was supplied."
+  [[ -n "${BACKUP_VERIFY_COMMAND:-}" ]] || die "BACKUP_VERIFY_COMMAND is required."
+  log "Creating external backup (output is not echoed)..."
+  /bin/sh -c "$BACKUP_COMMAND" || die "External backup command failed."
+  log "Verifying external backup..."
+  /bin/sh -c "$BACKUP_VERIFY_COMMAND" || die "External backup verification failed."
+fi
 
-echo "==> Creating pg_upgrade Job..."
-cat <<'JOBEOF' | sed "s/@@PVC_NAME@@/${PVC_NAME}/g; s/@@SECRET_NAME@@/${SECRET_NAME}/g" | kubectl apply -n "${NAMESPACE}" -f -
+if "$KUBECTL_BIN" get pod -n "$NAMESPACE" -l app.kubernetes.io/component=postgres \
+  -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -qx Running; then
+  die "A PostgreSQL pod is still running; stop the Helm release before proceeding."
+fi
+
+log "Replacing any previous upgrade Job..."
+"$KUBECTL_BIN" delete job "$JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true >/dev/null
+"$KUBECTL_BIN" wait --for=delete "job/${JOB_NAME}" -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1 || true
+
+log "Creating ${ACTION} Job..."
+cat <<'JOBEOF' | sed \
+  -e "s/@@PVC_NAME@@/${PVC_NAME}/g" \
+  -e "s/@@SECRET_NAME@@/${SECRET_NAME}/g" \
+  -e "s/@@SECRET_KEY@@/${SECRET_KEY}/g" \
+  -e "s/@@POSTGRES_ROLE@@/${POSTGRES_ROLE}/g" \
+  -e "s/@@ACTION@@/${ACTION}/g" \
+  -e "s/@@JOB_NAME@@/${JOB_NAME}/g" | "$KUBECTL_BIN" apply -n "$NAMESPACE" -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: postgres-upgrade-17-18
+  name: @@JOB_NAME@@
 spec:
   ttlSecondsAfterFinished: 3600
   backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
-      # Run as root so we can install pg17 binaries and chmod.
-      # pg_upgrade itself is invoked via `su postgres`.
       securityContext:
         fsGroup: 70
       volumes:
@@ -79,85 +102,60 @@ spec:
           image: postgres:18-alpine
           imagePullPolicy: IfNotPresent
           env:
-            # The upgrade job must use the same password as the Helm Secret,
-            # otherwise the re-installed application cannot authenticate.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: @@SECRET_NAME@@
-                  key: POSTGRES_PASSWORD
+                  key: @@SECRET_KEY@@
           securityContext:
             runAsUser: 0
-          command:
-            - /bin/sh
-            - -c
+          command: ["/bin/sh", "-c"]
+          args:
             - |
-              set -ex
-
+              set -eu
               OLD_DATA=/var/lib/postgresql/data/pgdata
               NEW_DATA=/var/lib/postgresql/data/pgdata_new
-
-              # Verify the old data directory is PG17
-              OLD_VERSION=$(cat "${OLD_DATA}/PG_VERSION" 2>/dev/null || echo "unknown")
-              echo "Old cluster version: ${OLD_VERSION}"
-              if [ "${OLD_VERSION}" != "17" ]; then
-                echo "ERROR: Expected PG17, found '${OLD_VERSION}'. Aborting."
-                exit 1
+              BACKUP_DATA=/var/lib/postgresql/data/pgdata_pg17_bak
+              if [ "@@ACTION@@" = rollback ]; then
+                test -f "$OLD_DATA/PG_VERSION" && test -f "$BACKUP_DATA/PG_VERSION"
+                test "$(cat "$OLD_DATA/PG_VERSION")" = 18
+                test "$(cat "$BACKUP_DATA/PG_VERSION")" = 17
+                mv "$OLD_DATA" "${OLD_DATA}.rollback"
+                mv "$BACKUP_DATA" "$OLD_DATA"
+                mv "${OLD_DATA}.rollback" "$BACKUP_DATA"
+                test "$(cat "$OLD_DATA/PG_VERSION")" = 17
+                echo "ROLLBACK COMPLETE"
+                exit 0
               fi
-
-              # Install pg17 server binaries (needed by pg_upgrade to read old format)
+              test -f "$OLD_DATA/PG_VERSION"
+              test "$(cat "$OLD_DATA/PG_VERSION")" = 17
+              test -n "${POSTGRES_PASSWORD:-}"
               apk add --no-cache postgresql17 postgresql17-contrib
-
-              # Alpine puts pg binaries under /usr/libexec/postgresql{17,}
               OLD_BIN=/usr/libexec/postgresql17
               NEW_BIN=/usr/libexec/postgresql
-
-              # Create a temp password file for initdb from the injected env var.
               PWFILE=/var/lib/postgresql/data/.pgpassword
-              printf '%s' "${POSTGRES_PASSWORD:-}" > "${PWFILE}"
-              if [ ! -s "${PWFILE}" ]; then
-                echo "ERROR: POSTGRES_PASSWORD is empty (check Secret ${SECRET_NAME:-}). Aborting."
-                exit 1
-              fi
-              chown 70:70 "${PWFILE}"
-              chmod 600 "${PWFILE}"
-
-              # Initialize a fresh PG18 cluster and run pg_upgrade as postgres (UID 70)
-              mkdir -p "${NEW_DATA}"
-              chown -R 70:70 "${NEW_DATA}"
-
+              trap 'rm -f "$PWFILE"' EXIT
+              printf '%s' "$POSTGRES_PASSWORD" > "$PWFILE"
+              chown 70:70 "$PWFILE"
+              chmod 600 "$PWFILE"
+              rm -rf "$NEW_DATA"
+              mkdir -p "$NEW_DATA"
+              chown -R 70:70 "$NEW_DATA"
               su postgres -s /bin/sh -c "
-                set -ex
-                ${NEW_BIN}/initdb \
-                  --auth-host=scram-sha-256 \
-                  --auth-local=trust \
-                  --pwfile=${PWFILE} \
-                  -D ${NEW_DATA} \
-                  --username=greenkube
-
+                set -eu
+                ${NEW_BIN}/initdb --auth-host=scram-sha-256 --auth-local=trust \
+                  --pwfile=${PWFILE} -D ${NEW_DATA} --username=@@POSTGRES_ROLE@@
                 cd /tmp
-                ${NEW_BIN}/pg_upgrade \
-                  --old-datadir=${OLD_DATA} \
-                  --new-datadir=${NEW_DATA} \
-                  --old-bindir=${OLD_BIN} \
-                  --new-bindir=${NEW_BIN} \
-                  --username=greenkube \
-                  --link
+                ${NEW_BIN}/pg_upgrade --old-datadir=${OLD_DATA} --new-datadir=${NEW_DATA} \
+                  --old-bindir=${OLD_BIN} --new-bindir=${NEW_BIN} \
+                  --username=@@POSTGRES_ROLE@@ --link
               "
-
-              # Clean up temp password file
-              rm -f "${PWFILE}"
-
-              # Atomic swap: old → backup, new → active
-              if [ -e /var/lib/postgresql/data/pgdata_pg17_bak ]; then
-                echo "ERROR: /var/lib/postgresql/data/pgdata_pg17_bak already exists. Remove it before re-running."
-                exit 1
-              fi
-              mv "${OLD_DATA}" /var/lib/postgresql/data/pgdata_pg17_bak
-              mv "${NEW_DATA}" "${OLD_DATA}"
-
-              echo "=== UPGRADE COMPLETE ==="
-              echo "PG_VERSION: $(cat ${OLD_DATA}/PG_VERSION)"
+              test ! -e "$BACKUP_DATA"
+              mv "$OLD_DATA" "$BACKUP_DATA"
+              mv "$NEW_DATA" "$OLD_DATA"
+              test "$(cat "$OLD_DATA/PG_VERSION")" = 18
+              test "$(cat "$BACKUP_DATA/PG_VERSION")" = 17
+              echo "UPGRADE COMPLETE"
           volumeMounts:
             - name: pgdata
               mountPath: /var/lib/postgresql/data
@@ -165,28 +163,10 @@ spec:
               mountPath: /var/run/postgresql
             - name: tmp
               mountPath: /tmp
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "256Mi"
-            limits:
-              cpu: "1"
-              memory: "1Gi"
 JOBEOF
 
-echo "==> Waiting for pg_upgrade Job to complete (timeout: 10m)..."
-kubectl wait --for=condition=complete job/"${JOB_NAME}" -n "${NAMESPACE}" --timeout=600s
-
-echo ""
-echo "==> pg_upgrade Job logs:"
-kubectl logs -n "${NAMESPACE}" -l job-name="${JOB_NAME}" --tail=20
-
-echo ""
-echo "✅ PostgreSQL data successfully upgraded from 17 → 18."
-echo "   Old data backed up inside the PVC at: pgdata_pg17_bak/"
-echo ""
-echo "Next steps:"
-echo "  1. Re-install the Helm chart:"
-echo "     helm install greenkube ./helm-chart -n ${NAMESPACE} --set postgres.image.tag=18-alpine ..."
-echo "  2. Once verified, delete the backup:"
-echo "     kubectl exec -n ${NAMESPACE} greenkube-postgres-0 -- rm -rf /var/lib/postgresql/data/pgdata_pg17_bak"
+log "Waiting for ${ACTION} Job (timeout: 10m)..."
+"$KUBECTL_BIN" wait --for=condition=complete "job/${JOB_NAME}" -n "$NAMESPACE" --timeout=600s
+"$KUBECTL_BIN" logs -n "$NAMESPACE" "job/${JOB_NAME}" --tail=20 | sed -E \
+  "s/(POSTGRES_PASSWORD|password|postgresql:\/\/[^ ]+)/[REDACTED]/gI"
+log "Job completed successfully (${ACTION})."

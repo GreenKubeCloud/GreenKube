@@ -15,6 +15,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.storage.recommendation_mapper import _as_bool
 
 
 def _make_record(
@@ -115,6 +116,31 @@ class TestRecommendationRecordModel:
         record = RecommendationRecord.from_recommendation(rec)
         assert record.created_at is not None
         assert record.created_at.tzinfo is not None
+
+    def test_container_name_is_part_of_record_identity(self):
+        first = RecommendationRecord(
+            pod_name="test-pod",
+            namespace="default",
+            container_name="web",
+            type=RecommendationType.ZOMBIE_POD,
+            description="test",
+        )
+        second = RecommendationRecord(
+            pod_name="test-pod",
+            namespace="default",
+            container_name="worker",
+            type=RecommendationType.ZOMBIE_POD,
+            description="test",
+        )
+
+        assert first.fingerprint != second.fingerprint
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("false", False), ("0", False), ("true", True), ("1", True), ("off", False), ("on", True)],
+    )
+    def test_persisted_boolean_values_are_decoded_correctly(self, value, expected):
+        assert _as_bool(value) is expected
 
 
 class TestSQLiteRecommendationRepository:

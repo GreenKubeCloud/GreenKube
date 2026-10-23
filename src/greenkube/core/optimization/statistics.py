@@ -5,11 +5,10 @@ import math
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from greenkube.models.metrics import CombinedMetric
+from greenkube.utils.time import SECONDS_PER_YEAR
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
-
-SECONDS_PER_YEAR = 365 * 24 * 60 * 60
 
 
 def percentile(values: List[float], p: float) -> float:
@@ -78,6 +77,11 @@ def annualized_window_total(total_value: float, analysis_window_seconds: Optiona
     if analysis_window_seconds is None or analysis_window_seconds <= 0:
         return total_value
     return total_value * (SECONDS_PER_YEAR / analysis_window_seconds)
+
+
+def annualized_nonnegative_window_total(total_value: float, analysis_window_seconds: Optional[float]) -> float:
+    """Project a window value to annual savings without reporting negative savings."""
+    return max(annualized_window_total(total_value, analysis_window_seconds), 0.0)
 
 
 def resource_savings_ratio(current_value: int, recommended_value: int) -> float | None:

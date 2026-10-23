@@ -1,0 +1,16 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: payments-chart
+  namespace: flux-system
+  uid: helmchart-uid
+  generation: 3
+spec:
+  chart: ./charts/payments
+  version: 1.0.0
+  sourceRef:
+    kind: GitRepository
+    name: gitops
+    namespace: flux-system
+  valuesFiles:
+    - charts/payments/values-prod.yaml

@@ -32,3 +32,14 @@ def test_rate_limit_response_has_detail(monkeypatch):
 
     assert response.status_code == 429
     assert "Rate limit exceeded" in response.json()["detail"]
+
+
+def test_dynamic_path_parameters_share_a_route_rate_limit(monkeypatch):
+    app = _create_app_with_limit(monkeypatch, "1/minute")
+    client = TestClient(app)
+
+    first = client.get("/api/v1/health/services/prometheus")
+    second = client.get("/api/v1/health/services/opencost")
+
+    assert first.status_code != 429
+    assert second.status_code == 429

@@ -95,6 +95,25 @@ async def get_apps_v1_api() -> typing.Optional[client.AppsV1Api]:
     return None
 
 
+async def get_policy_v1_api() -> typing.Optional[client.PolicyV1Api]:
+    """
+    Returns a configured PolicyV1Api instance for PodDisruptionBudget reads.
+    Safe to call concurrently.
+    """
+    if await ensure_k8s_config():
+        api_client = await _get_shared_api_client()
+        return client.PolicyV1Api(api_client=api_client)
+    return None
+
+
+async def get_coordination_v1_api() -> typing.Optional[client.CoordinationV1Api]:
+    """Return a configured CoordinationV1Api for namespaced Lease operations."""
+    if await ensure_k8s_config():
+        api_client = await _get_shared_api_client()
+        return client.CoordinationV1Api(api_client=api_client)
+    return None
+
+
 async def get_custom_objects_api() -> typing.Optional[client.CustomObjectsApi]:
     """
     Returns a configured CustomObjectsApi instance for CRD access (VPA, Karpenter).

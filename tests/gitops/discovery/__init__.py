@@ -1,0 +1,1 @@
+"""GitOps discovery tests."""

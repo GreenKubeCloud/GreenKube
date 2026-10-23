@@ -68,8 +68,25 @@ class PrometheusDiscovery(BaseDiscovery):
             try:
                 # Use shared async http client
                 async with get_async_http_client(verify=verify_certs) as client:
+                    headers = (
+                        {"Authorization": f"Bearer {config.PROMETHEUS_BEARER_TOKEN}"}
+                        if config.PROMETHEUS_BEARER_TOKEN
+                        else None
+                    )
+                    auth = (
+                        httpx.BasicAuth(config.PROMETHEUS_USERNAME, config.PROMETHEUS_PASSWORD)
+                        if config.PROMETHEUS_USERNAME and config.PROMETHEUS_PASSWORD
+                        else None
+                    )
                     # Use a simple 'up' query which is lightweight and universal
-                    resp = await client.get(url, params={"query": "up"})
+                    if headers is not None and auth is not None:
+                        resp = await client.get(url, params={"query": "up"}, headers=headers, auth=auth)
+                    elif headers is not None:
+                        resp = await client.get(url, params={"query": "up"}, headers=headers)
+                    elif auth is not None:
+                        resp = await client.get(url, params={"query": "up"}, auth=auth)
+                    else:
+                        resp = await client.get(url, params={"query": "up"})
                     status = resp.status_code
 
                     try:

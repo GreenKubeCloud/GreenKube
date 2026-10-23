@@ -2,8 +2,8 @@
 # be fixed by GreenKube. Each entry is reviewed and justified below.
 # Remove entries as soon as upstream patches land.
 #
-# Review date: 2026-04-10
-# Next review: 2026-07-10 (quarterly)
+# Review date: 2026-10-23
+# Next review: 2027-01-23 (quarterly)
 
 # ─── postgres:18-alpine / gosu binary (Go stdlib CVEs) ───────────────────────
 # gosu is a helper binary shipped inside the official postgres image.
@@ -34,6 +34,22 @@ CVE-2026-28390  # HIGH — openssl: NULL pointer dereference in CMS (not used by
 # Fix: will auto-resolve on next `docker pull postgres:18-alpine` once Alpine
 #      promotes zlib 1.3.2-r0.
 CVE-2026-22184  # HIGH — zlib: buffer overflow in untgz utility (not used at runtime)
+
+# ─── GreenKube image — pinned Helm / Kustomize renderer binaries ──────────────
+# Helm v3.22.1 and Kustomize v5.8.3 are the latest upstream releases, but they
+# are compiled with Go 1.26.9 / 1.27.1, before the standard-library fixes for
+# the CVEs below landed (Go 1.26.10 / 1.27.2+). They will clear automatically
+# on the next upstream release built with a patched toolchain.
+# Impact: these binaries only run inside the renderer sandbox
+# (bwrap --unshare-net with CPU, memory, and timeout limits) against local
+# chart/overlay files. The TLS/x509 issues require an outbound TLS connection,
+# and the DoS issues are bounded by the sandbox resource limits.
+# Fix: bump the Helm/Kustomize versions and checksums in the Dockerfile once
+# upstream rebuilds land.
+CVE-2026-111943  # HIGH — crypto/x509 MITM (no outbound TLS in renderer sandbox)
+CVE-2026-78667   # HIGH — net/http Range DoS (sandboxed renderer)
+CVE-2026-78669   # HIGH — HTTP/2 SETTINGS DoS (sandboxed renderer)
+CVE-2026-97031   # HIGH — crypto/tls ECH DoS (sandboxed renderer)
 
 # ─── Helm chart misconfigurations ─────────────────────────────────────────────
 # KSV-0109: ConfigMap stores secrets in key GREENKUBE_SECRET_NAME

@@ -321,9 +321,11 @@ async def test_migration_versions_are_recorded(tmp_path):
     rows = cur.fetchall()
     conn.close()
 
-    assert len(rows) >= 1
-    assert rows[0][0] == 1
-    assert "baseline" in rows[0][1]
+    assert len(rows) >= 2
+    assert rows[0][0] == 0
+    assert rows[0][1] == "initial_schema"
+    assert rows[1][0] == 1
+    assert "baseline" in rows[1][1]
 
 
 @pytest.mark.asyncio
@@ -345,3 +347,32 @@ async def test_fresh_db_records_no_duplicate_errors(tmp_path):
     conn.close()
 
     assert 1 in versions
+
+
+@pytest.mark.asyncio
+async def test_fresh_db_bootstraps_legacy_schema_before_baseline(tmp_path):
+    """A new database must apply the initial schema before migration 0001."""
+    db_file = str(tmp_path / "initial-schema.db")
+
+    manager = DatabaseManager()
+    await manager.setup_sqlite(db_path=db_file)
+    await manager.close()
+
+    connection = sqlite3.connect(db_file)
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'schema_migrations'"
+        )
+    }
+    versions = dict(connection.execute("SELECT version, name FROM schema_migrations"))
+    indexes = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
+    }
+    connection.close()
+
+    assert {"combined_metrics", "node_snapshots", "recommendation_history"} <= tables
+    assert versions[0] == "initial_schema"
+    assert versions[1] == "baseline_migrations"
+    assert "idx_combined_metrics_timestamp" in indexes

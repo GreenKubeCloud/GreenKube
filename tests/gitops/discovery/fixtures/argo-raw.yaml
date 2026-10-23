@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payments-prod
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  source:
+    repoURL: https://github.com/acme/gitops.git
+    targetRevision: main
+    path: apps/payments
+status:
+  sync:
+    revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  resources:
+    - group: apps
+      version: v1
+      kind: Deployment
+      namespace: prod
+      name: payments-api
+    - group: ""
+      version: v1
+      kind: Service
+      namespace: prod
+      name: payments-api

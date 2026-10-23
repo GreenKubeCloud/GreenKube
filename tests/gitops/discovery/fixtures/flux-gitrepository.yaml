@@ -1,0 +1,12 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: platform
+  namespace: flux-system
+spec:
+  url: https://github.com/acme/platform.git
+  ref:
+    branch: main
+status:
+  artifact:
+    revision: main@sha1:dddddddddddddddddddddddddddddddddddddddd

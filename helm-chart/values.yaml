@@ -4,6 +4,169 @@
 
 replicaCount: 1
 
+# Scratch space for archive snapshots and renderer request streaming.
+tmp:
+  sizeLimit: 768Mi
+
+# Deployment profile. "standalone" preserves the single-pod collector/API
+# deployment; "production" renders independent API, controller, and
+# automation-worker Deployments.
+profile: standalone
+
+automation:
+  enabled: false
+  mode: "" # Empty defaults to inline for standalone and worker for production.
+  # Port for the dedicated worker's authenticated control-loop metrics listener.
+  workerMetricsPort: 8001
+  prPollIntervalSeconds: 120
+  syncPollIntervalSeconds: 30
+  # GitOps discovery refresh cadence and workload-binding freshness window.
+  # Format: integer followed by ms, s, m, or h.
+  discoveryInterval: 5m
+  bindingTtl: 30m
+  syncTimeoutSeconds: 1800
+  # Signed Git provider webhook credentials. The referenced Secret must be in
+  # the Helm release namespace; only the selected key is projected into API pods.
+  # secretNamespace is an optional assertion and, if set, must match the release namespace.
+  webhooks:
+    enabled: false
+    secretNamespace: ''
+    secretName: ''
+    secretKey: ''
+  # Git provider credentials are supplied only by Kubernetes Secret references.
+  # Each provider's Secret must be in the Helm release namespace.
+  providers: []
+  policy:
+    maxRiskLevel: medium
+    minConfidence: 0.6
+    minSamples: 36
+    minCoverage: 0.5
+    maxOpenPullRequestsPerWorkload: 1
+    cooldownMinutes: 60
+    changeFreezeLabels: []
+    changeFreezeWindows: []
+  pullRequests:
+    draft: false
+    labels:
+      - greenkube
+      - sustainability
+    reviewers: []
+    teamReviewers: []
+  # Example:
+  # providers:
+  #   - id: github-main
+  #     type: github
+  #     apiBaseUrl: https://api.github.com
+  #     # secretNamespace is optional and, if set, must match the release namespace.
+  #     secretName: github-token
+  #     secretKey: token
+  #     repositoryAllowlist:
+  #       - "acme/*"
+
+rendererSandbox:
+  enabled: true
+  egressFirewall:
+    enabled: false
+  replicas: 1
+  servicePort: 8090
+  tmpSizeLimit: 768Mi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+production:
+  migration:
+    enabled: true
+    backoffLimit: 6
+    image:
+      repository: busybox
+      tag: "1.37"
+      pullPolicy: IfNotPresent
+  leaderElection:
+    enabled: true
+    leaseName: ''
+    leaseDurationSeconds: 30
+    renewDeadlineSeconds: 10
+    retryPeriodSeconds: 2
+  components:
+    api:
+      replicas: 2
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        path: /api/v1/health
+        port: http-api
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+    controller:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+    automation:
+      replicas: 1
+      resources:
+        limits:
+          cpu: 250m
+          memory: 256Mi
+        requests:
+          cpu: 50m
+          memory: 64Mi
+      livenessProbe:
+        enabled: true
+        initialDelaySeconds: 15
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+      readinessProbe:
+        enabled: true
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+        successThreshold: 1
+
 image:
   repository: greenkube/greenkube
   pullPolicy: IfNotPresent
@@ -17,6 +180,24 @@ initContainer:
     repository: busybox
     tag: "1.37"
     pullPolicy: IfNotPresent
+
+# Probes for the collector process. The collector has no HTTP listener, so
+# these process-heartbeat probes verify that its PID is still alive.
+collector:
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
 
 serviceAccount:
   # Specifies whether a service account should be created
@@ -35,6 +216,13 @@ config:
   logLevel: INFO
   # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
   logFormat: json
+  # Runtime environment and API authentication mode.
+  # Development permits an empty API key for local demonstrations; production does not.
+  environment: production
+  apiAuthMode: api_key
+  # Exact hostnames allowed for runtime service URL overrides. Existing
+  # Prometheus/OpenCost/Boavizta hosts remain accepted without this list.
+  serviceUrlAllowlist: []
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
@@ -43,9 +231,9 @@ config:
   #   3. Falls back to "default" when nothing is detectable.
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
-                  # Leave empty to let GreenKube auto-discover the zone from node labels.
-                  # Falls back to DEFAULT_INTENSITY (gCO2/kWh) if zone cannot be determined.
-  defaultIntensity: 500.0 # gCO2e/kWh, used when Electricity Maps fails
+                  # Used when an individual node's zone and region cannot be mapped.
+                  # Leave empty to rely on mapped node zones.
+  defaultIntensity: 500.0 # gCO2e/kWh, global fallback when no zone-specific intensity is available
   # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
   # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
   # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
@@ -68,14 +256,15 @@ config:
   # Older raw rows are deleted after compression. Set -1 to disable deletion.
   metricsRawRetentionDays: 7
   # Maximum number of days to retain hourly aggregated metrics.
-  # Set -1 (default) to keep data indefinitely — required for multi-year
-  # comparison and CSRD/ESRS E1 yearly reporting.
+  # Set -1 (default) to keep data indefinitely for multi-year analysis.
   metricsAggregatedRetentionDays: -1
 
   # Timeout in seconds for Kubernetes API calls (list_node, list_pod, etc.).
   # Prevents greenkube start from hanging indefinitely if the API server is slow.
   # Set to 0 to disable the timeout.
   k8sRequestTimeout: 30
+  # Use the standard read-only metrics.k8s.io API for per-container CPU and memory.
+  kubernetesMetricsApiEnabled: true
 
   # Boavizta configuration
   boavizta:
@@ -187,6 +376,9 @@ config:
   # Recommendation engine configuration
   recommendations:
     lookbackDays: 7
+    # Hard bound on combined + container rows loaded into one recommendation scan.
+    # The lookback window is shortened automatically before loading above this bound.
+    maxMetricRows: 750000
     rightsizingCpuThreshold: 0.3
     rightsizingMemoryThreshold: 0.3
     rightsizingHeadroom: 1.2
@@ -249,17 +441,6 @@ config:
       maxThrottleRatio: 0.05
       # Interval between lifecycle jobs (apply detection, verification, expiry).
       lifecycleInterval: 5m
-    # --- Git automation (PR bot) ---
-    git:
-      # Provider: github | gitlab | gitea
-      provider: github
-      # API base URL override for self-hosted instances (e.g. https://gitea.example.com).
-      apiBaseUrl: ''
-      # Fallback base branch when the workload annotation omits one.
-      defaultBranch: main
-      commitAuthorName: GreenKube Bot
-      commitAuthorEmail: bot@greenkube.cloud
-
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
@@ -286,8 +467,8 @@ secrets:
   # Name of a pre-existing Secret to use (Option B). Skips chart Secret creation.
   existingSecret: ''
 
-  # Electricity Maps API Token — get yours at https://www.electricitymaps.com/
-  # Without it, GreenKube uses the default carbon intensity (config.defaultIntensity).
+  # Electricity Maps API token — used when config.electricityProvider is "electricity_maps".
+  # Without it, GreenKube uses the configured default grid intensity.
   electricityMapsToken: ''
 
   # Wattnet account credentials — used when config.electricityProvider is "wattnet".
@@ -299,12 +480,9 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API Key for GreenKube API authentication (optional — no auth if empty)
+  # API key for GreenKube API authentication. An empty key leaves development
+  # API routes open; production configuration requires a non-empty key.
   apiKey: ''
-
-  # Git personal access token used by the recommendation PR bot to create
-  # branches and open pull requests. Leave empty to disable PR automation.
-  gitToken: ''
 
   # PostgreSQL connection string (only used when db.type is "postgres" and
   # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)
@@ -330,17 +508,67 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# Security and resource settings for Helm lifecycle hook Jobs.
+hooks:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    capabilities:
+      drop:
+        - ALL
+
+# Security and resource settings for the Helm test Pod.
+tests:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    capabilities:
+      drop:
+        - ALL
+
 # -- API container resources
 # This container serves the FastAPI REST API and the SPA frontend.
-# Memory usage is dominated by query result sets; the hourly aggregation
-# table keeps this bounded. For clusters with >500 pods, increase memory.
+# The API also materializes container-aware recommendation inputs during
+# refreshes; give the default lookback enough headroom for normal clusters.
 apiResources:
   limits:
     cpu: 250m
-    memory: 256Mi
+    memory: 1Gi
   requests:
     cpu: 50m
-    memory: 64Mi
+    memory: 128Mi
 
 # PostgreSQL configuration (custom statefulset)
 postgres:
@@ -384,9 +612,17 @@ postgres:
 # (e.g. via kube-prometheus-stack). If you don't have Prometheus Operator,
 # leave serviceMonitor.enabled=false to avoid installation errors.
 monitoring:
+  prometheusRule:
+    # Create automation health alerts for Prometheus Operator.
+    # Requires the monitoring.coreos.com/v1 PrometheusRule CRD.
+    enabled: false
+    namespace: monitoring
+    additionalLabels: {}
+
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
     # Requires Prometheus Operator CRDs (monitoring.coreos.com/v1).
+    # Production worker mode also creates a dedicated worker ServiceMonitor.
     # Set to true only if kube-prometheus-stack (or similar) is installed.
     enabled: false
     # Namespace where the ServiceMonitor will be created (must match Prometheus serviceMonitorNamespaceSelector).
@@ -405,3 +641,7 @@ monitoring:
     enabled: false
     # Namespace where Prometheus is deployed.
     prometheusNamespace: monitoring
+    # Additional ingress rules, for example an ingress controller or a
+    # namespace-specific client. Entries use the Kubernetes NetworkPolicy
+    # ingress schema and are appended to the Prometheus rule.
+    additionalIngress: []

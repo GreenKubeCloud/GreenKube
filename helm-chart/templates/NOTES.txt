@@ -12,6 +12,22 @@ Welcome to
   → http://localhost:{{ .Values.config.api.port }}
 {{- end }}
 
+* API authentication:
+  Protected API routes require a bearer key. The chart-managed Secret
+  {{ include "greenkube.secretName" . }} stores it in GREENKUBE_API_KEY.
+  The key is generated unless secrets.apiKey is explicitly supplied.
+
+{{- if eq .Values.profile "production" }}
+* Production profile:
+  API, controller, and automation worker run as separate Deployments.
+  Database migrations run as a post-install/post-upgrade Job before the API
+  readiness check; bundled PostgreSQL is awaited before migration starts. The
+  controller uses the {{ include "greenkube.leaseName" . }} Lease for active/standby coordination.
+{{- else }}
+* Standalone profile:
+  Collector and API run together in one replica for simple installations.
+{{- end }}
+
 * Logs:
   kubectl logs -l app.kubernetes.io/name={{ include "greenkube.name" . }} -n {{ .Release.Namespace }} -f
 

@@ -18,6 +18,7 @@ from typing import Dict, List, Set
 
 from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..collectors.boavizta_collector import BoaviztaCollector
+from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
@@ -59,6 +60,7 @@ class DataProcessor:
         calculator: CarbonCalculator,
         estimator: BasicEstimator,
         config: Config | None = None,
+        metrics_server_collector: MetricsServerCollector | None = None,
     ):
         self._config = config if config is not None else get_config()
         self.calculator = calculator
@@ -68,6 +70,7 @@ class DataProcessor:
         self.boavizta_collector = boavizta_collector
         self.repository = repository
         self.embodied_repository = embodied_repository
+        self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
 
         # --- Internal collaborators ---
         self._orchestrator = CollectionOrchestrator(
@@ -106,6 +109,7 @@ class DataProcessor:
             assembler=self._assembler,
             zone_mapper=self._zone_mapper,
             config=self._config,
+            metrics_server_collector=self._metrics_server_collector,
         )
 
     # ------------------------------------------------------------------
@@ -163,9 +167,16 @@ class DataProcessor:
         #          but use Phase-1/2 data for enrichment)
         # ------------------------------------------------------------------
         logger.debug("Phase 3: Collecting Prometheus/OpenCost/Pod metrics and Boavizta profiles in parallel...")
-        cr, boavizta_cache = await asyncio.gather(
+
+        async def collect_container_usage():
+            if not self._config.KUBERNETES_METRICS_API_ENABLED:
+                return []
+            return await self._metrics_server_collector.collect()
+
+        cr, boavizta_cache, container_usages = await asyncio.gather(
             self._orchestrator.collect_all(nodes_info=nodes_info),
             self._embodied_service.prepare_embodied_data(nodes_info),
+            collect_container_usage(),
         )
 
         prom_metrics = cr.prom_metrics
@@ -184,8 +195,13 @@ class DataProcessor:
         # Step: Adjust low-CPU nodes with pod requests
         # ------------------------------------------------------------------
         cpu_adjusted_nodes: Set[str] = set()
+        estimation_prom_metrics = prom_metrics
         if prom_metrics:
             try:
+                adjusted_cpu_items = {
+                    (item.namespace, item.pod, item.container): item.model_copy(deep=True)
+                    for item in prom_metrics.pod_cpu_usage
+                }
                 node_totals: Dict[str, float] = {}
                 for item in prom_metrics.pod_cpu_usage:
                     node_totals.setdefault(item.node, 0.0)
@@ -214,7 +230,23 @@ class DataProcessor:
                                 for itm in node_to_items.get(node, []):
                                     req = pod_request_map_simple.get((itm.namespace, itm.pod), 0.0)
                                     if req:
-                                        itm.cpu_usage_cores = req
+                                        pod_items = [
+                                            candidate
+                                            for candidate in node_to_items.get(node, [])
+                                            if (candidate.namespace, candidate.pod) == (itm.namespace, itm.pod)
+                                        ]
+                                        req_per_container = req / len(pod_items)
+                                        adjusted_cpu_items[(itm.namespace, itm.pod, itm.container)] = itm.model_copy(
+                                            update={
+                                                "cpu_usage_cores": req_per_container,
+                                                "estimated_cpu_usage_cores": req_per_container,
+                                                "cpu_usage_provenance": "estimated",
+                                            }
+                                        )
+                if cpu_adjusted_nodes:
+                    estimation_prom_metrics = prom_metrics.model_copy(
+                        update={"pod_cpu_usage": list(adjusted_cpu_items.values())}
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to adjust node utilization based on pod requests: %s",
@@ -224,7 +256,23 @@ class DataProcessor:
 
             # Estimate energy
             try:
-                energy_metrics = self.estimator.estimate(prom_metrics)
+                assert estimation_prom_metrics is not None
+                energy_metrics = self.estimator.estimate(estimation_prom_metrics)
+                if cpu_adjusted_nodes:
+                    adjustment_reason = (
+                        "CPU usage on node was below threshold; substituted pod requests for energy estimation"
+                    )
+                    energy_metrics = [
+                        metric.model_copy(
+                            update={
+                                "is_estimated": metric.is_estimated or metric.node in cpu_adjusted_nodes,
+                                "estimation_reasons": list(
+                                    dict.fromkeys([*metric.estimation_reasons, adjustment_reason])
+                                ),
+                            }
+                        )
+                        for metric in energy_metrics
+                    ]
                 logger.info(
                     "Successfully estimated %d energy metrics from Prometheus.",
                     len(energy_metrics),
@@ -236,7 +284,11 @@ class DataProcessor:
             energy_metrics = []
 
         # Build per-pod resource maps from Prometheus data
-        resource_maps = PrometheusResourceMapper.build(prom_metrics)
+        resource_maps = PrometheusResourceMapper.build(
+            prom_metrics,
+            estimation_prom_metrics,
+            container_usages=container_usages,
+        )
 
         # ------------------------------------------------------------------
         # Phase 4: Prefetch carbon intensities and assemble CombinedMetrics
@@ -257,6 +309,7 @@ class DataProcessor:
             cpu_adjusted_nodes=cpu_adjusted_nodes,
             steps_per_day=steps_per_day,
             resource_maps=resource_maps,
+            pod_metrics=cr.pod_metrics_list,
         )
 
         logger.info(

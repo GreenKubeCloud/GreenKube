@@ -163,9 +163,65 @@ class MetricsCompressor:
                 """,
                 cutoff,
             )
-            # asyncpg returns status string like "INSERT 0 42"
             count = int(result.split()[-1]) if result else 0
-            return {"hours": count, "rows": count}
+            container_result = await conn.execute(
+                """
+                INSERT INTO container_metrics_hourly (
+                    pod_name, namespace, container_name, hour_bucket, sample_count,
+                    total_cost, co2e_grams, embodied_co2e_grams, pue, grid_intensity,
+                    joules, cpu_request, memory_request,
+                    cpu_usage_avg, cpu_usage_max, memory_usage_avg, memory_usage_max,
+                    owner_kind, owner_name, duration_seconds, is_estimated,
+                    estimation_reasons, calculation_version
+                )
+                SELECT
+                    pod_name,
+                    namespace,
+                    container_name,
+                    date_trunc('hour', timestamp) AS hour_bucket,
+                    COUNT(*) AS sample_count,
+                    SUM(total_cost) AS total_cost,
+                    SUM(co2e_grams) AS co2e_grams,
+                    SUM(COALESCE(embodied_co2e_grams, 0)) AS embodied_co2e_grams,
+                    AVG(pue) AS pue,
+                    AVG(grid_intensity) AS grid_intensity,
+                    SUM(joules) AS joules,
+                    MAX(cpu_request) AS cpu_request,
+                    MAX(memory_request) AS memory_request,
+                    AVG(cpu_usage_millicores)::INTEGER AS cpu_usage_avg,
+                    MAX(cpu_usage_millicores) AS cpu_usage_max,
+                    AVG(memory_usage_bytes)::BIGINT AS memory_usage_avg,
+                    MAX(memory_usage_bytes) AS memory_usage_max,
+                    MODE() WITHIN GROUP (ORDER BY owner_kind) AS owner_kind,
+                    MODE() WITHIN GROUP (ORDER BY owner_name) AS owner_name,
+                    SUM(COALESCE(duration_seconds, 0)) AS duration_seconds,
+                    BOOL_OR(COALESCE(is_estimated, FALSE)) AS is_estimated,
+                    '[]' AS estimation_reasons,
+                    MAX(calculation_version) AS calculation_version
+                FROM container_metrics
+                WHERE timestamp < $1
+                GROUP BY pod_name, namespace, container_name, date_trunc('hour', timestamp)
+                ON CONFLICT (namespace, pod_name, container_name, hour_bucket) DO UPDATE SET
+                    sample_count = EXCLUDED.sample_count,
+                    total_cost = EXCLUDED.total_cost,
+                    co2e_grams = EXCLUDED.co2e_grams,
+                    embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
+                    pue = EXCLUDED.pue,
+                    grid_intensity = EXCLUDED.grid_intensity,
+                    joules = EXCLUDED.joules,
+                    cpu_request = EXCLUDED.cpu_request,
+                    memory_request = EXCLUDED.memory_request,
+                    cpu_usage_avg = EXCLUDED.cpu_usage_avg,
+                    cpu_usage_max = EXCLUDED.cpu_usage_max,
+                    memory_usage_avg = EXCLUDED.memory_usage_avg,
+                    memory_usage_max = EXCLUDED.memory_usage_max,
+                    duration_seconds = EXCLUDED.duration_seconds
+                """,
+                cutoff,
+            )
+            container_count = int(container_result.split()[-1]) if container_result else 0
+            total = count + container_count
+            return {"hours": total, "rows": total}
 
     async def _compress_sqlite(self, cutoff: datetime) -> dict:
         """SQLite compression using INSERT OR REPLACE with aggregation."""
@@ -231,8 +287,50 @@ class MetricsCompressor:
                 (cutoff_iso,),
             )
             count = cursor.rowcount
+            container_cursor = await conn.execute(
+                """
+                INSERT OR REPLACE INTO container_metrics_hourly (
+                    pod_name, namespace, container_name, hour_bucket, sample_count,
+                    total_cost, co2e_grams, embodied_co2e_grams, pue, grid_intensity,
+                    joules, cpu_request, memory_request,
+                    cpu_usage_avg, cpu_usage_max, memory_usage_avg, memory_usage_max,
+                    owner_kind, owner_name, duration_seconds, is_estimated,
+                    estimation_reasons, calculation_version
+                )
+                SELECT
+                    pod_name,
+                    namespace,
+                    container_name,
+                    strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour_bucket,
+                    COUNT(*) AS sample_count,
+                    SUM(total_cost) AS total_cost,
+                    SUM(co2e_grams) AS co2e_grams,
+                    SUM(COALESCE(embodied_co2e_grams, 0)) AS embodied_co2e_grams,
+                    AVG(pue) AS pue,
+                    AVG(grid_intensity) AS grid_intensity,
+                    SUM(joules) AS joules,
+                    MAX(cpu_request) AS cpu_request,
+                    MAX(memory_request) AS memory_request,
+                    CAST(AVG(cpu_usage_millicores) AS INTEGER) AS cpu_usage_avg,
+                    MAX(cpu_usage_millicores) AS cpu_usage_max,
+                    CAST(AVG(memory_usage_bytes) AS INTEGER) AS memory_usage_avg,
+                    MAX(memory_usage_bytes) AS memory_usage_max,
+                    owner_kind,
+                    owner_name,
+                    SUM(COALESCE(duration_seconds, 0)) AS duration_seconds,
+                    MAX(COALESCE(is_estimated, 0)) AS is_estimated,
+                    '[]' AS estimation_reasons,
+                    MAX(calculation_version) AS calculation_version
+                FROM container_metrics
+                WHERE timestamp < ?
+                GROUP BY pod_name, namespace, container_name, strftime('%Y-%m-%dT%H:00:00Z', timestamp)
+                """,
+                (cutoff_iso,),
+            )
+            container_count = container_cursor.rowcount
             await conn.commit()
-            return {"hours": count, "rows": count}
+            total = count + container_count
+            return {"hours": total, "rows": total}
 
     # ------------------------------------------------------------------
     # Retention: prune old raw rows
@@ -251,20 +349,30 @@ class MetricsCompressor:
 
         if self._db.db_type == "postgres":
             async with self._db.connection_scope() as conn:
-                result = await conn.execute(
+                aggregate_result = await conn.execute(
                     "DELETE FROM combined_metrics WHERE timestamp < $1",
                     cutoff,
                 )
-                count = int(result.split()[-1]) if result else 0
+                container_result = await conn.execute(
+                    "DELETE FROM container_metrics WHERE timestamp < $1",
+                    cutoff,
+                )
+                count = (int(aggregate_result.split()[-1]) if aggregate_result else 0) + (
+                    int(container_result.split()[-1]) if container_result else 0
+                )
                 logger.info("Pruned %d raw metrics older than %d days", count, retention_days)
                 return count
         else:
             async with self._db.connection_scope() as conn:
-                cursor = await conn.execute(
+                aggregate_cursor = await conn.execute(
                     'DELETE FROM combined_metrics WHERE "timestamp" < ?',
                     (to_iso_z(cutoff),),
                 )
-                count = cursor.rowcount
+                container_cursor = await conn.execute(
+                    "DELETE FROM container_metrics WHERE timestamp < ?",
+                    (to_iso_z(cutoff),),
+                )
+                count = aggregate_cursor.rowcount + container_cursor.rowcount
                 await conn.commit()
                 logger.info("Pruned %d raw metrics older than %d days", count, retention_days)
                 return count
@@ -282,20 +390,30 @@ class MetricsCompressor:
 
         if self._db.db_type == "postgres":
             async with self._db.connection_scope() as conn:
-                result = await conn.execute(
+                aggregate_result = await conn.execute(
                     "DELETE FROM combined_metrics_hourly WHERE hour_bucket < $1",
                     cutoff,
                 )
-                count = int(result.split()[-1]) if result else 0
+                container_result = await conn.execute(
+                    "DELETE FROM container_metrics_hourly WHERE hour_bucket < $1",
+                    cutoff,
+                )
+                count = (int(aggregate_result.split()[-1]) if aggregate_result else 0) + (
+                    int(container_result.split()[-1]) if container_result else 0
+                )
                 logger.info("Pruned %d hourly metrics older than %d days", count, retention_days)
                 return count
         else:
             async with self._db.connection_scope() as conn:
-                cursor = await conn.execute(
+                aggregate_cursor = await conn.execute(
                     "DELETE FROM combined_metrics_hourly WHERE hour_bucket < ?",
                     (to_iso_z(cutoff),),
                 )
-                count = cursor.rowcount
+                container_cursor = await conn.execute(
+                    "DELETE FROM container_metrics_hourly WHERE hour_bucket < ?",
+                    (to_iso_z(cutoff),),
+                )
+                count = aggregate_cursor.rowcount + container_cursor.rowcount
                 await conn.commit()
                 logger.info("Pruned %d hourly metrics older than %d days", count, retention_days)
                 return count
@@ -355,6 +473,8 @@ class MetricsCompressor:
             for table in (
                 "combined_metrics",
                 "combined_metrics_hourly",
+                "container_metrics",
+                "container_metrics_hourly",
                 "carbon_intensity_history",
                 "node_snapshots",
                 "node_snapshots_scd",

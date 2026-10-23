@@ -1,16 +1,37 @@
 # src/greenkube/core/config.py
 
 import logging
+import math
 import os
 import re
 from datetime import timedelta
 from typing import Any, ClassVar, Optional
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Import datacenter PUE profiles
 from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
+from greenkube.models.configuration import (
+    ConfigurationPersistenceAcknowledgement,
+    ConfigurationSnapshot,
+)
+
+_GITOPS_DURATION_PATTERN = re.compile(r"^(\d+)(ms|s|m|h)$")
+
+
+def parse_gitops_duration_seconds(value: str) -> float:
+    """Parse a short GitOps duration such as ``5m``, ``30s`` or ``2h``."""
+    if not isinstance(value, str):
+        raise ValueError("GitOps durations must be strings")
+    match = _GITOPS_DURATION_PATTERN.fullmatch(value.strip().lower())
+    if match is None:
+        raise ValueError("GitOps durations must use a number followed by ms, s, m, or h")
+    amount = int(match.group(1))
+    seconds = amount * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("GitOps durations must be greater than zero")
+    return seconds
 
 
 def _read_secret(key: str, default: str | None = None) -> str | None:
@@ -97,6 +118,9 @@ class Config(BaseSettings):
     PROMETHEUS_BEARER_TOKEN: Optional[str] = None
     PROMETHEUS_USERNAME: Optional[str] = None
     PROMETHEUS_PASSWORD: Optional[str] = None
+    OPENCOST_BEARER_TOKEN: Optional[str] = None
+    OPENCOST_USERNAME: Optional[str] = None
+    OPENCOST_PASSWORD: Optional[str] = None
     WATTNET_EMAIL: Optional[str] = None
     WATTNET_PASSWORD: Optional[str] = None
 
@@ -179,12 +203,32 @@ class Config(BaseSettings):
     # --- Kubernetes client variables ---
     # Timeout (seconds) for individual Kubernetes API calls. 0 = no timeout.
     K8S_REQUEST_TIMEOUT: int = 30
+    # Read per-container CPU/memory from the read-only metrics.k8s.io API.
+    KUBERNETES_METRICS_API_ENABLED: bool = True
+    LEADER_ELECTION_ENABLED: bool = False
+    LEADER_ELECTION_LEASE_NAME: str = Field(
+        default="",
+        validation_alias=AliasChoices("LEADER_ELECTION_LEASE_NAME", "LEASE_NAME"),
+    )
+    LEADER_ELECTION_LEASE_NAMESPACE: str = Field(
+        default="",
+        validation_alias=AliasChoices("LEADER_ELECTION_LEASE_NAMESPACE", "LEASE_NAMESPACE"),
+    )
 
     # --- API variables ---
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
-    CORS_ORIGINS: str = "*"
+    CORS_ORIGINS: str = ""
+    TRUSTED_HOSTS: str = "*"
+    TRUSTED_PROXY_IPS: str = ""
+    ENVIRONMENT: str = "development"
+    SERVICE_URL_ALLOWLIST: str = ""
     API_KEY: str = Field(default="", validation_alias="GREENKUBE_API_KEY")
+    API_AUTH_MODE: str = "api_key"
+    OIDC_ISSUER: Optional[str] = None
+    OIDC_AUDIENCE: Optional[str] = None
+    SESSION_COOKIE_NAME: str = "greenkube_session"
+    SESSION_COOKIE_SECURE: bool = True
     API_RATE_LIMIT: str = "60/minute"
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
@@ -192,6 +236,10 @@ class Config(BaseSettings):
     # --- Recommendation Engine variables ---
     RECOMMEND_SYSTEM_NAMESPACES: bool = False
     RECOMMENDATION_LOOKBACK_DAYS: int = 7
+    # Hard bound on combined + container metric rows loaded into memory for one
+    # recommendation scan. The lookback window is shortened before materializing
+    # a larger result set.
+    RECOMMENDATION_MAX_METRIC_ROWS: int = 750_000
     RIGHTSIZING_CPU_THRESHOLD: float = 0.3
     RIGHTSIZING_MEMORY_THRESHOLD: float = 0.3
     RIGHTSIZING_HEADROOM: float = 1.2
@@ -256,18 +304,16 @@ class Config(BaseSettings):
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
 
-    # --- Git automation (PR bot, Phase 4) ---
-    # Personal access token used to push branches and open pull requests.
-    GIT_TOKEN: Optional[str] = None
-    # Git provider selection: github, gitlab or gitea.
-    GIT_PROVIDER: str = "github"
-    # API base URL override for self-hosted instances / local testing.
-    GIT_API_BASE_URL: Optional[str] = None
-    # Fallback base branch when the workload annotation omits one.
-    GIT_DEFAULT_BRANCH: str = "main"
-    # Bot commit identity.
-    GIT_COMMIT_AUTHOR_NAME: str = "GreenKube Bot"
-    GIT_COMMIT_AUTHOR_EMAIL: str = "bot@greenkube.cloud"
+    # Plan queue execution mode. Inline starts the worker in the API lifespan;
+    # worker mode uses the separate automation-worker process.
+    AUTOMATION_ENABLED: bool = False
+    AUTOMATION_MODE: str = "disabled"
+
+    # --- GitOps discovery ---
+    # Duration strings (ms, s, m, h). Discovery defaults to five minutes and
+    # bindings remain fresh for thirty minutes, matching the operator spec.
+    GITOPS_DISCOVERY_INTERVAL: str = "5m"
+    GITOPS_BINDING_TTL: str = "30m"
 
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
@@ -310,6 +356,54 @@ class Config(BaseSettings):
             raise ValueError("DB_TYPE must be 'sqlite' or 'postgres'")
         return v
 
+    @field_validator("AUTOMATION_MODE", mode="after")
+    @classmethod
+    def _validate_automation_mode(cls, value: str) -> str:
+        mode = value.lower()
+        if mode not in {"disabled", "inline", "worker"}:
+            raise ValueError("AUTOMATION_MODE must be 'disabled', 'inline', or 'worker'.")
+        return mode
+
+    @field_validator("GITOPS_DISCOVERY_INTERVAL", mode="before")
+    @classmethod
+    def _default_blank_discovery_interval(cls, value: Any) -> Any:
+        return "5m" if value == "" else value
+
+    @field_validator("GITOPS_BINDING_TTL", mode="before")
+    @classmethod
+    def _default_blank_binding_ttl(cls, value: Any) -> Any:
+        return "30m" if value == "" else value
+
+    @field_validator("GITOPS_DISCOVERY_INTERVAL", mode="after")
+    @classmethod
+    def _validate_gitops_discovery_interval(cls, value: str) -> str:
+        seconds = parse_gitops_duration_seconds(value)
+        if not 1 <= seconds <= 3600:
+            raise ValueError("GITOPS_DISCOVERY_INTERVAL must be between 1 second and 1 hour")
+        return value
+
+    @field_validator("GITOPS_BINDING_TTL", mode="after")
+    @classmethod
+    def _validate_gitops_binding_ttl(cls, value: str) -> str:
+        seconds = parse_gitops_duration_seconds(value)
+        if not 1 <= seconds <= 86_400:
+            raise ValueError("GITOPS_BINDING_TTL must be between 1 second and 24 hours")
+        return value
+
+    @field_validator("RECOMMENDATION_MAX_METRIC_ROWS", mode="after")
+    @classmethod
+    def _validate_recommendation_max_metric_rows(cls, value: int) -> int:
+        if value < 10_000:
+            raise ValueError("RECOMMENDATION_MAX_METRIC_ROWS must be at least 10000")
+        return value
+
+    @field_validator("RECOMMENDATION_APPLY_TOLERANCE", mode="after")
+    @classmethod
+    def _validate_recommendation_apply_tolerance(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("RECOMMENDATION_APPLY_TOLERANCE must be between 0 and 1.")
+        return value
+
     @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")
     @classmethod
     def _validate_prometheus_step(cls, v: str) -> str:
@@ -333,6 +427,16 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def _compute_and_validate(self) -> "Config":
+        self.ENVIRONMENT = self.ENVIRONMENT.lower()
+        self.API_AUTH_MODE = self.API_AUTH_MODE.lower()
+        if self.ENVIRONMENT not in ("development", "test", "production"):
+            raise ValueError("ENVIRONMENT must be 'development', 'test', or 'production'.")
+        if self.API_AUTH_MODE not in ("api_key", "oidc", "session"):
+            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', or 'session'.")
+        if self.API_AUTH_MODE == "oidc" and (not self.OIDC_ISSUER or not self.OIDC_AUDIENCE):
+            raise ValueError("OIDC_ISSUER and OIDC_AUDIENCE are required when API_AUTH_MODE is 'oidc'.")
+        if self.API_AUTH_MODE == "session" and not self.SESSION_COOKIE_NAME:
+            raise ValueError("SESSION_COOKIE_NAME must not be empty when API_AUTH_MODE is 'session'.")
         # Auto-detect cluster name when not explicitly configured
         if not self.CLUSTER_NAME:
             self.CLUSTER_NAME = self._auto_detect_cluster_name()
@@ -478,6 +582,14 @@ class Config(BaseSettings):
     # Public API                                                          #
     # ------------------------------------------------------------------ #
 
+    @property
+    def gitops_discovery_interval_seconds(self) -> float:
+        return parse_gitops_duration_seconds(self.GITOPS_DISCOVERY_INTERVAL)
+
+    @property
+    def gitops_binding_ttl(self) -> timedelta:
+        return timedelta(seconds=parse_gitops_duration_seconds(self.GITOPS_BINDING_TTL))
+
     def get_pue_for_provider(self, provider: str | None) -> float:
         """Retrieve the PUE for a specific cloud provider.
 
@@ -521,9 +633,161 @@ class Config(BaseSettings):
             object.__setattr__(self, attr_name, getattr(fresh, attr_name))
 
 
+class ConfigService:
+    """Coordinate layered configuration and versioned runtime overrides.
+
+    Bootstrap values and externally mounted secrets are read through ``Config``.
+    Only the explicitly listed runtime keys can be changed or persisted by this
+    service; this prevents an API update from accidentally replacing security
+    fields or discovery defaults.
+    """
+
+    RUNTIME_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "PROMETHEUS_URL",
+            "OPENCOST_API_URL",
+            "ELECTRICITY_MAPS_TOKEN",
+            "BOAVIZTA_API_URL",
+            "WATTNET_EMAIL",
+            "WATTNET_PASSWORD",
+        }
+    )
+    SECRET_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "ELECTRICITY_MAPS_TOKEN",
+            "BOAVIZTA_TOKEN",
+            "PROMETHEUS_BEARER_TOKEN",
+            "PROMETHEUS_USERNAME",
+            "PROMETHEUS_PASSWORD",
+            "WATTNET_EMAIL",
+            "WATTNET_PASSWORD",
+            "API_KEY",
+        }
+    )
+    DISCOVERY_KEYS: ClassVar[frozenset[str]] = frozenset({"CLUSTER_NAME"})
+
+    def __init__(self, settings: Config | None = None, repository=None):
+        self.settings = settings or get_config()
+        self.repository = repository
+        self.version = 0
+        self._runtime_overrides: dict[str, str] = {}
+        self._previous_environment: dict[str, str | None] = {}
+
+    def snapshot(self) -> ConfigurationSnapshot:
+        """Return a frozen, redaction-safe view of effective configuration."""
+        values = self.settings.model_dump()
+        secrets = {key: "***" for key in self.SECRET_KEYS if values.get(key)}
+        discovery = {key: values[key] for key in self.DISCOVERY_KEYS if key in values}
+        runtime = {key: values[key] for key in self.RUNTIME_KEYS - self.SECRET_KEYS if key in values}
+        bootstrap = {
+            key: value
+            for key, value in values.items()
+            if key not in self.RUNTIME_KEYS and key not in self.SECRET_KEYS and key not in self.DISCOVERY_KEYS
+        }
+        return ConfigurationSnapshot(
+            version=self.version,
+            bootstrap=bootstrap,
+            secrets=secrets,
+            runtime_policy=runtime,
+            discovery=discovery,
+        )
+
+    def reload(self) -> ConfigurationSnapshot:
+        """Reload environment-backed settings while preserving singleton identity."""
+        self.settings.reload()
+        self.version += 1
+        return self.snapshot()
+
+    def clear(self) -> ConfigurationSnapshot:
+        """Clear in-process runtime overrides and reload the base layers."""
+        for key, previous in self._previous_environment.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+        self._runtime_overrides.clear()
+        self._previous_environment.clear()
+        return self.reload()
+
+    async def load(self) -> ConfigurationSnapshot:
+        """Load persisted runtime overrides before reloading the base layers."""
+        if self.repository is not None:
+            version, values = await self.repository.load()
+            for key, value in values.items():
+                if key in self.RUNTIME_KEYS:
+                    self._previous_environment.setdefault(key, os.environ.get(key))
+                    self._runtime_overrides[key] = value
+                    os.environ[key] = value
+            self.version = version
+        return self.reload()
+
+    async def apply(self, updates: dict[str, str], persist: bool = True) -> ConfigurationPersistenceAcknowledgement:
+        """Apply allowed runtime updates and acknowledge durable persistence."""
+        invalid = set(updates) - self.RUNTIME_KEYS
+        if invalid:
+            raise ValueError(f"Unsupported runtime configuration keys: {sorted(invalid)}")
+        for key, value in updates.items():
+            self._previous_environment.setdefault(key, os.environ.get(key))
+            self._runtime_overrides[key] = value
+            os.environ[key] = value
+        self.reload()
+
+        if not persist or self.repository is None:
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                keys=tuple(sorted(updates)),
+                message="Runtime configuration applied in memory only.",
+            )
+        try:
+            await self.repository.save(self._runtime_overrides, self.version)
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.warning("Runtime configuration was not persisted: %s", exc)
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                keys=tuple(sorted(updates)),
+                backend=self.repository.__class__.__name__,
+                message="Runtime configuration applied in memory; persistence failed.",
+            )
+        return ConfigurationPersistenceAcknowledgement(
+            version=self.version,
+            persisted=True,
+            keys=tuple(sorted(updates)),
+            backend=self.repository.__class__.__name__,
+            message="Runtime configuration persisted.",
+        )
+
+    async def clear_persisted(self) -> ConfigurationPersistenceAcknowledgement:
+        """Clear runtime overrides in memory and in the configured repository."""
+        self.clear()
+        if self.repository is None:
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version, persisted=False, message="Runtime configuration cleared in memory."
+            )
+        try:
+            await self.repository.clear(self.version)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Runtime configuration clear was not persisted: %s", exc)
+            return ConfigurationPersistenceAcknowledgement(
+                version=self.version,
+                persisted=False,
+                backend=self.repository.__class__.__name__,
+                message="Runtime configuration cleared in memory; persistence failed.",
+            )
+        return ConfigurationPersistenceAcknowledgement(
+            version=self.version,
+            persisted=True,
+            backend=self.repository.__class__.__name__,
+            message="Runtime configuration cleared and persisted.",
+        )
+
+
 # Module-level singleton – kept for backward compatibility.
 # Prefer :func:`get_config` for explicit dependency injection.
 config = Config()
+config_service = ConfigService(config)
 
 
 def get_config() -> Config:
@@ -534,3 +798,8 @@ def get_config() -> Config:
     dependency injection throughout the application.
     """
     return config
+
+
+def get_config_service() -> ConfigService:
+    """Return the process-wide layered configuration service."""
+    return config_service

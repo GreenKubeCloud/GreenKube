@@ -11,6 +11,7 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
+from greenkube.core.metrics_compressor import MetricsCompressor
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
@@ -18,6 +19,8 @@ from greenkube.models.metrics import (
     EffortLevel,
     IgnoreRecommendationRequest,
     MetricsSummaryRow,
+    PullRequestRecord,
+    PullRequestStatus,
     RecommendationCapability,
     RecommendationRecord,
     RecommendationSource,
@@ -30,12 +33,14 @@ from greenkube.models.node import NodeInfo
 from greenkube.models.savings import SavingsLedgerRecord
 from greenkube.storage.embodied_repository import PostgresEmbodiedRepository, SQLiteEmbodiedRepository
 from greenkube.storage.postgres.node_repository import PostgresNodeRepository
+from greenkube.storage.postgres.pull_request_repository import PostgresPullRequestRepository
 from greenkube.storage.postgres.recommendation_repository import PostgresRecommendationRepository
 from greenkube.storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 from greenkube.storage.postgres.savings_repository import PostgresSavingsLedgerRepository
 from greenkube.storage.postgres.summary_repository import PostgresSummaryRepository
 from greenkube.storage.postgres.timeseries_cache_repository import PostgresTimeseriesCacheRepository
 from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
+from greenkube.storage.sqlite.pull_request_repository import SQLitePullRequestRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 from greenkube.storage.sqlite.savings_repository import SQLiteSavingsLedgerRepository
@@ -478,6 +483,65 @@ async def test_combined_metrics_repository_round_trips_and_aggregates(real_datab
 
 @pytest.mark.asyncio
 @pytest.mark.database
+async def test_container_metrics_repository_round_trips_and_upserts_by_container(real_database: RealDatabase):
+    repo = real_database.combined_repository()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start = now - timedelta(minutes=30)
+    aggregate = _metric("api-pod", "prod", now - timedelta(minutes=10), 10.0, 1.0, 1000.0)
+    web = _metric("api-pod", "prod", now - timedelta(minutes=10), 6.0, 0.6, 600.0).model_copy(
+        update={"container_name": "web"}
+    )
+    sidecar = _metric("api-pod", "prod", now - timedelta(minutes=10), 4.0, 0.4, 400.0).model_copy(
+        update={"container_name": "telemetry-sidecar"}
+    )
+
+    assert await repo.write_combined_metrics([aggregate, web, sidecar]) == 3
+    assert await repo.write_combined_metrics([web.model_copy(update={"cpu_request": 100})]) == 1
+
+    rows = await repo.read_container_metrics(start, now, namespace="prod")
+    aggregate_rows = await repo.read_combined_metrics(start, now)
+
+    assert {row.container_name for row in rows} == {"web", "telemetry-sidecar"}
+    assert {row.container_name: row.cpu_request for row in rows} == {"web": 100, "telemetry-sidecar": 250}
+    assert len(aggregate_rows) == 1
+    assert aggregate_rows[0].container_name is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_container_metrics_compression_keeps_sibling_containers_separate(real_database: RealDatabase):
+    repo = real_database.combined_repository()
+    timestamp = (datetime.now(timezone.utc) - timedelta(hours=30)).replace(minute=0, second=0, microsecond=0)
+    common = {
+        "pod_name": "api-pod",
+        "namespace": "prod",
+        "timestamp": timestamp,
+        "owner_kind": "Deployment",
+        "owner_name": "api",
+    }
+    await repo.write_container_metrics(
+        [
+            CombinedMetric(**common, container_name="web", cpu_request=500, total_cost=0.6, co2e_grams=6.0),
+            CombinedMetric(
+                **common,
+                container_name="telemetry-sidecar",
+                cpu_request=100,
+                total_cost=0.4,
+                co2e_grams=4.0,
+            ),
+        ]
+    )
+
+    await MetricsCompressor(real_database.manager)._compress_to_hourly()
+    hourly = await repo.read_container_metrics_smart(timestamp, timestamp, namespace="prod")
+
+    assert {metric.container_name for metric in hourly} == {"web", "telemetry-sidecar"}
+    assert {metric.container_name: metric.cpu_request for metric in hourly} == {"web": 500, "telemetry-sidecar": 100}
+    assert sum(metric.total_cost for metric in hourly) == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
 async def test_combined_metrics_repository_weekly_buckets_floor_to_monday(real_database: RealDatabase):
     """Weekly buckets must start on Monday in every backend (ISO week)."""
     repo = real_database.combined_repository()
@@ -908,3 +972,110 @@ async def test_embodied_repository_round_trips_and_upserts(real_database: RealDa
     assert updated["gwp_manufacture"] == pytest.approx(1000.0)
     assert updated["lifespan_hours"] == 40_000
     assert updated["source"] == "contract-update"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_pull_request_metadata_round_trips_and_lookups(real_database: RealDatabase):
+    if real_database.backend == "postgres":
+        repository = PostgresPullRequestRepository(real_database.manager)
+    else:
+        repository = SQLitePullRequestRepository(real_database.manager)
+
+    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    metadata = {
+        "plan_id": "plan-target",
+        "provider_id": "provider-target",
+        "commit_sha": "head-sha-1",
+        "merge_commit_sha": "merge-sha-1",
+        "merged_at": created_at + timedelta(hours=1),
+        "closed_at": created_at + timedelta(hours=2),
+        "sync_status": "synced",
+        "sync_revision": "revision-1",
+        "sync_observed_at": created_at + timedelta(hours=3),
+        "sync_error_code": "sync-warning",
+    }
+
+    await repository.save_pull_request(
+        PullRequestRecord(
+            recommendation_id=9001,
+            provider="github",
+            repo="acme/api",
+            pr_number=42,
+            plan_id="plan-other-provider",
+            provider_id="provider-other",
+            created_at=created_at,
+        )
+    )
+    await repository.save_pull_request(
+        PullRequestRecord(
+            recommendation_id=9002,
+            provider="github",
+            repo="acme/other",
+            pr_number=42,
+            plan_id="plan-other-repo",
+            provider_id="provider-target",
+            created_at=created_at,
+        )
+    )
+    saved = await repository.save_pull_request(
+        PullRequestRecord(
+            recommendation_id=9003,
+            provider="github",
+            repo="acme/api",
+            base_branch="main",
+            head_branch="greenkube/plan-target",
+            pr_number=42,
+            pr_url="https://example.test/acme/api/pull/42",
+            status=PullRequestStatus.MERGED,
+            created_at=created_at,
+            updated_at=created_at,
+            **metadata,
+        )
+    )
+    grouped_records = [
+        await repository.save_pull_request(
+            PullRequestRecord(
+                recommendation_id=recommendation_id,
+                provider="github",
+                repo="acme/api",
+                pr_number=43,
+                plan_id="plan-group",
+                provider_id="provider-target",
+                created_at=created_at,
+            )
+        )
+        for recommendation_id in (9004, 9005)
+    ]
+
+    assert saved.id is not None
+    for field, expected in metadata.items():
+        assert getattr(saved, field) == expected
+    assert await repository.get_pull_request_by_provider_reference("provider-target", "acme/api", 42) == saved
+    assert await repository.get_pull_request_by_plan_id("plan-target") == saved
+    assert await repository.list_pull_requests_by_provider_reference("provider-target", "acme/api", 43) == list(
+        reversed(grouped_records)
+    )
+    assert await repository.get_pull_request_by_provider_reference("provider-target", "acme/missing", 42) is None
+    assert await repository.get_pull_request_by_plan_id("missing-plan") is None
+
+    updates = {
+        "plan_id": "plan-updated",
+        "provider_id": "provider-updated",
+        "commit_sha": "head-sha-2",
+        "merge_commit_sha": "merge-sha-2",
+        "merged_at": created_at + timedelta(days=1),
+        "closed_at": created_at + timedelta(days=1, hours=1),
+        "sync_status": "drifted",
+        "sync_revision": "revision-2",
+        "sync_observed_at": created_at + timedelta(days=1, hours=2),
+        "sync_error_code": "revision-mismatch",
+    }
+    updated = await repository.update_pull_request(saved.id, updates)
+
+    for field, expected in updates.items():
+        assert getattr(updated, field) == expected
+    assert await repository.get_pull_request_by_plan_id("plan-target") is None
+    assert await repository.get_pull_request_by_plan_id("plan-updated") == updated
+    assert await repository.get_pull_request_by_provider_reference("provider-target", "acme/api", 42) is None
+    assert await repository.get_pull_request_by_provider_reference("provider-updated", "acme/api", 42) == updated

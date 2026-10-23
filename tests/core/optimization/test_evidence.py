@@ -20,6 +20,7 @@ def _series(count=10, cpu_request=1000, memory_request=2 * 1024**3, restart_coun
                 namespace="prod",
                 owner_kind="Deployment",
                 owner_name="api",
+                container_name="api",
                 cpu_request=cpu_request,
                 memory_request=memory_request,
                 cpu_usage_millicores=200 + i * 10,
@@ -49,6 +50,7 @@ def _context(metrics):
 def _cpu_rec():
     return Recommendation(
         pod_name="api",
+        container_name="api",
         namespace="prod",
         type=RecommendationType.RIGHTSIZING_CPU,
         scope="workload",
@@ -86,6 +88,14 @@ class TestBuildEvidence:
         assert "cpu_p95_usage" in metrics
         assert "restart_rate" in metrics
 
+    def test_negative_cost_baseline_is_not_exposed_as_a_negative_cost_rate(self):
+        metrics = [metric.model_copy(update={"total_cost": -0.01}) for metric in _series()]
+
+        evidence = build_evidence(_cpu_rec(), _context(metrics))
+
+        assert evidence is not None
+        assert evidence.cost_per_hour_before == 0.0
+
     def test_builds_patch_plan(self):
         evidence = build_evidence(_cpu_rec(), _context(_series()))
         assert evidence is not None
@@ -102,6 +112,7 @@ class TestBuildPatch:
     def test_memory_value_is_humanized(self):
         rec = Recommendation(
             pod_name="api",
+            container_name="api",
             namespace="prod",
             type=RecommendationType.RIGHTSIZING_MEMORY,
             scope="workload",
@@ -127,4 +138,8 @@ class TestBuildPatch:
     def test_no_patch_without_owner(self):
         rec = _cpu_rec()
         rec = rec.model_copy(update={"owner_kind": None, "owner_name": None})
+        assert build_patch(rec) is None
+
+    def test_no_patch_without_container_identity(self):
+        rec = _cpu_rec().model_copy(update={"container_name": None})
         assert build_patch(rec) is None

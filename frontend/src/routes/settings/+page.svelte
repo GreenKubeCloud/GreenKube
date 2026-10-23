@@ -24,6 +24,7 @@
 	let saving = false;
 	let saveMessage = '';
 	let saveError = '';
+	let configAcknowledgement = null;
 
 	onMount(async () => {
 		try {
@@ -61,6 +62,7 @@
 		saving = true;
 		saveMessage = '';
 		saveError = '';
+		configAcknowledgement = null;
 		try {
 			const update = {};
 			if (editPrometheusUrl) update.prometheus_url = editPrometheusUrl;
@@ -77,6 +79,7 @@
 			}
 
 			svcHealth = await updateServiceConfig(update);
+			configAcknowledgement = svcHealth.configurationAcknowledgement;
 			servicesHealth.set(svcHealth);
 
 			// Clear inputs after successful save
@@ -230,7 +233,7 @@
 						bind:value={editPrometheusUrl}
 						placeholder={services.prometheus?.url || 'http://prometheus-server:9090'}
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 				<div>
@@ -241,7 +244,7 @@
 						bind:value={editOpencostUrl}
 						placeholder={services.opencost?.url || 'http://opencost:9003'}
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 				<div>
@@ -252,11 +255,11 @@
 					</label>
 					<input
 						id="edit-emaps"
-						type="text"
+						type="password"
 						bind:value={editEmapsToken}
 						placeholder="Your API token"
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 				<div>
@@ -267,7 +270,7 @@
 						bind:value={editBoaviztaUrl}
 						placeholder={services.boavizta?.url || 'https://api.boavizta.org'}
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 				<div>
@@ -282,7 +285,7 @@
 						bind:value={editWattnetEmail}
 						placeholder="you@example.com"
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 				<div>
@@ -295,7 +298,7 @@
 						bind:value={editWattnetPassword}
 						placeholder="Wattnet account password"
 						class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-						       placeholder-dark-600 focus:outline-none focus:ring-2 focus:ring-green-500/50"
+						       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50"
 					/>
 				</div>
 			</div>
@@ -313,6 +316,15 @@
 				{/if}
 				{#if saveError}
 					<span class="text-xs text-red-400">{saveError}</span>
+				{/if}
+				{#if configAcknowledgement}
+					<span class="text-xs text-green-400" role="status">
+						Configuration acknowledged
+						{#if configAcknowledgement.version} (version {configAcknowledgement.version}){/if}.
+						{configAcknowledgement.persisted
+							? ' The override was persisted.'
+							: ' Active for this session; save Helm values to persist it across restarts.'}
+					</span>
 				{/if}
 			</div>
 		</Card>
@@ -364,7 +376,7 @@
 			<div class="space-y-3">
 				<div class="flex items-center justify-between py-2 border-b border-dark-800">
 					<span class="text-sm text-dark-400">API Base URL</span>
-					<code class="text-xs text-dark-300 bg-dark-800 px-2 py-1 rounded">/api/v1</code>
+					<code class="text-xs text-dark-300 bg-dark-800 px-2 py-1 rounded-sm">/api/v1</code>
 				</div>
 				<div class="flex items-center justify-between py-2 border-b border-dark-800">
 					<span class="text-sm text-dark-400">Documentation</span>

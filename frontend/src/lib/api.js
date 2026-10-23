@@ -7,6 +7,34 @@
  */
 
 const BASE = '/api/v1';
+let apiToken = '';
+
+/** Set a request-scoped bearer token without persisting it in browser storage. */
+export function setApiToken(token) {
+	apiToken = typeof token === 'string' ? token : '';
+}
+
+export function clearApiToken() {
+	apiToken = '';
+}
+
+export class ApiError extends Error {
+	constructor(
+		message,
+		{ status, detail, code, action, policyResult, mappingOptions, retryable = false, retryAfter } = {}
+	) {
+		super(message);
+		this.name = 'ApiError';
+		this.status = status;
+		this.detail = detail;
+		this.code = code;
+		this.action = action;
+		this.policyResult = policyResult;
+		this.mappingOptions = mappingOptions;
+		this.retryable = retryable;
+		this.retryAfter = retryAfter;
+	}
+}
 
 function addSearchParam(url, key, value) {
 	if (Array.isArray(value)) {
@@ -20,16 +48,42 @@ function addSearchParam(url, key, value) {
 	}
 }
 
-async function request(path, params = {}) {
+function requestOptions(options = {}) {
+	const headers = { ...(options.headers || {}) };
+	if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+	return { ...options, headers, credentials: 'include' };
+}
+
+function errorDetails(body, status) {
+	const detail = typeof body?.detail === 'string'
+		? body.detail
+		: body?.detail?.message || body?.message;
+	return {
+		message: detail || `API error ${status}`,
+		detail,
+		code: body?.code || body?.error_code || body?.detail?.code || body?.detail?.error_code,
+		policyResult: body?.policy_result || body?.policyResult || body?.detail?.policy_result,
+		mappingOptions: body?.mapping_options || body?.mappingOptions || body?.detail?.mapping_options,
+		action: body?.action || body?.detail?.action,
+		retryable: body?.retryable === true || status === 408 || status === 429 || status >= 500,
+		retryAfter: body?.retry_after || body?.detail?.retry_after
+	};
+}
+
+async function request(path, params = {}, options = {}) {
 	const url = new URL(path, window.location.origin);
 	Object.entries(params).forEach(([k, v]) => {
 		addSearchParam(url, k, v);
 	});
 
-	const res = await fetch(url.toString());
+	const res = await fetch(url.toString(), requestOptions(options));
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
-		throw new Error(body.detail || `API error ${res.status}`);
+		const details = errorDetails(body, res.status);
+		if (res.status === 401 && typeof window !== 'undefined') {
+			window.dispatchEvent(new CustomEvent('greenkube-auth-required'));
+		}
+		throw new ApiError(details.message, { status: res.status, ...details });
 	}
 	return res.json();
 }
@@ -66,16 +120,25 @@ export function getServiceHealth(serviceName, force = false) {
  */
 export async function updateServiceConfig(config) {
 	const url = new URL(`${BASE}/config/services`, window.location.origin);
-	const res = await fetch(url.toString(), {
+	const res = await fetch(url.toString(), requestOptions({
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(config)
-	});
+	}));
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
-		throw new Error(body.detail || `API error ${res.status}`);
+		const details = errorDetails(body, res.status);
+		throw new ApiError(details.message, { status: res.status, ...details });
 	}
-	return res.json();
+	const data = await res.json();
+	Object.defineProperty(data, 'configurationAcknowledgement', {
+		value: {
+			version: res.headers?.get?.('X-Configuration-Version') || data.configuration_version || null,
+			persisted: res.headers?.get?.('X-Configuration-Persisted') === 'true' || data.configuration_persisted === true
+		},
+		enumerable: false
+	});
+	return data;
 }
 
 /** @returns {Promise<{version: string}>} */
@@ -104,14 +167,19 @@ export async function getMetrics({ namespace, last } = {}) {
 	return data.items ?? data;
 }
 
+/** Fetch one cursor-paginated metrics page without hiding its envelope. */
+export function getMetricsPage({ namespace, start, end, limit, cursor } = {}) {
+	return request(`${BASE}/metrics`, { namespace, start, end, limit, cursor });
+}
+
 /**
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]
  * @returns {Promise<Object>}
  */
-export function getMetricsSummary({ namespace, last } = {}) {
-	return request(`${BASE}/metrics/summary`, { namespace, last });
+export function getMetricsSummary({ namespace, last, signal } = {}) {
+	return request(`${BASE}/metrics/summary`, { namespace, last }, { signal });
 }
 
 /**
@@ -121,8 +189,8 @@ export function getMetricsSummary({ namespace, last } = {}) {
  * @param {string} [opts.granularity]
  * @returns {Promise<Object[]>}
  */
-export function getTimeseries({ namespace, last, granularity } = {}) {
-	return request(`${BASE}/metrics/timeseries`, { namespace, last, granularity });
+export function getTimeseries({ namespace, last, granularity, signal } = {}) {
+	return request(`${BASE}/metrics/timeseries`, { namespace, last, granularity }, { signal });
 }
 
 /**
@@ -132,8 +200,8 @@ export function getTimeseries({ namespace, last, granularity } = {}) {
  * @param {string} [opts.last]
  * @returns {Promise<Object[]>}
  */
-export function getMetricsByNamespace({ namespace, last } = {}) {
-	return request(`${BASE}/metrics/by-namespace`, { namespace, last });
+export function getMetricsByNamespace({ namespace, last, signal } = {}) {
+	return request(`${BASE}/metrics/by-namespace`, { namespace, last }, { signal });
 }
 
 /**
@@ -144,13 +212,22 @@ export function getMetricsByNamespace({ namespace, last } = {}) {
  * @param {number} [opts.limit]
  * @returns {Promise<Object[]>}
  */
-export function getTopPods({ namespace, last, limit } = {}) {
-	return request(`${BASE}/metrics/top-pods`, { namespace, last, limit });
+export function getTopPods({ namespace, last, limit, signal } = {}) {
+	return request(`${BASE}/metrics/top-pods`, { namespace, last, limit }, { signal });
 }
 
 /** @returns {Promise<Object[]>} */
-export function getNodes() {
+export function getNodes(options = {}) {
+	const { include_inactive, limit, cursor } = options;
+	if (limit !== undefined || cursor !== undefined || include_inactive !== undefined) {
+		return request(`${BASE}/nodes`, { include_inactive, limit, cursor });
+	}
 	return request(`${BASE}/nodes`);
+}
+
+/** Fetch one cursor-paginated node page. */
+export function getNodesPage({ include_inactive, limit = 50, cursor } = {}) {
+	return request(`${BASE}/nodes`, { include_inactive, limit, cursor });
 }
 
 /**
@@ -216,14 +293,15 @@ export function getRecommendationSavings({ namespace, last } = {}) {
  */
 export async function applyRecommendation(id, body = {}) {
 	const url = new URL(`${BASE}/recommendations/${id}/apply`, window.location.origin);
-	const res = await fetch(url.toString(), {
+	const res = await fetch(url.toString(), requestOptions({
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
-	});
+	}));
 	if (!res.ok) {
 		const b = await res.json().catch(() => ({}));
-		throw new Error(b.detail || `API error ${res.status}`);
+		const details = errorDetails(b, res.status);
+		throw new ApiError(details.message, { status: res.status, ...details });
 	}
 	return res.json();
 }
@@ -235,14 +313,15 @@ export async function applyRecommendation(id, body = {}) {
  */
 export async function ignoreRecommendation(id, body) {
 	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), {
+	const res = await fetch(url.toString(), requestOptions({
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
-	});
+	}));
 	if (!res.ok) {
 		const b = await res.json().catch(() => ({}));
-		throw new Error(b.detail || `API error ${res.status}`);
+		const details = errorDetails(b, res.status);
+		throw new ApiError(details.message, { status: res.status, ...details });
 	}
 	return res.json();
 }
@@ -253,32 +332,84 @@ export async function ignoreRecommendation(id, body) {
  */
 export async function unignoreRecommendation(id) {
 	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), { method: 'DELETE' });
+	const res = await fetch(url.toString(), requestOptions({ method: 'DELETE' }));
 	if (!res.ok) {
 		const b = await res.json().catch(() => ({}));
-		throw new Error(b.detail || `API error ${res.status}`);
+		const details = errorDetails(b, res.status);
+		throw new ApiError(details.message, { status: res.status, ...details });
 	}
 	return res.json();
 }
 
 /**
- * Preview or open a pull request that applies a rightsizing recommendation.
- * @param {number} id
- * @param {{ dry_run?: boolean, base_branch?: string }} [body]
+ * Create a server-resolved, digest-addressed GitOps plan.
+ * The optional values mapping contains only a Git-managed file, container, and key path.
+ * @param {number[]} recommendationIds
+ * @param {{file_path: string, container: string, path: string[]}} [valuesMapping]
  * @returns {Promise<Object>}
  */
-export async function applyRecommendationPr(id, body = {}) {
-	const url = new URL(`${BASE}/recommendations/${id}/apply-pr`, window.location.origin);
-	const res = await fetch(url.toString(), {
+export function createAutomationPlan(recommendationIds, valuesMapping = null) {
+	const body = { recommendation_ids: recommendationIds };
+	if (valuesMapping) body.values_mapping = valuesMapping;
+	return request(`${BASE}/automation/plans`, {}, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
 	});
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		throw new Error(b.detail || `API error ${res.status}`);
-	}
-	return res.json();
+}
+
+/**
+ * Read the current lifecycle state of a plan.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function getAutomationPlan(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}`);
+}
+
+/**
+ * Read the execution state of one plan operation.
+ * @param {string} operationId
+ * @returns {Promise<Object>}
+ */
+export function getAutomationOperation(operationId) {
+	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`);
+}
+
+/**
+ * Approve a previously previewed plan using the digest returned by the API.
+ * @param {string} planId
+ * @param {string} digest
+ * @returns {Promise<Object>}
+ */
+export function approveAutomationPlan(planId, digest) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/approve`, {}, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ digest })
+	});
+}
+
+/**
+ * Cancel a plan before it starts applying.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function cancelAutomationPlan(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/cancel`, {}, {
+		method: 'POST'
+	});
+}
+
+/**
+ * Create or retrieve the persisted rollback preview for a synced plan.
+ * @param {string} planId
+ * @returns {Promise<Object>}
+ */
+export function previewAutomationPlanRollback(planId) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/rollback-preview`, {}, {
+		method: 'POST'
+	});
 }
 
 /**
@@ -287,6 +418,10 @@ export async function applyRecommendationPr(id, body = {}) {
  */
 export function getRecommendationPullRequests(id) {
 	return request(`${BASE}/recommendations/${id}/pull-requests`);
+}
+
+export function getOpenPullRequests() {
+	return request(`${BASE}/automation/pull-requests`);
 }
 
 /**
@@ -302,6 +437,61 @@ export function getAutomationStatus() {
 	return request(`${BASE}/automation/status`);
 }
 
+/** @returns {Promise<Object>} */
+export function getGitOpsStatus() {
+	return request(`${BASE}/gitops/status`);
+}
+
+/** @param {{cluster?: string}} [params] */
+export function refreshGitOpsDiscovery({ cluster } = {}) {
+	return request(
+		`${BASE}/gitops/refresh`,
+		{ cluster },
+		{ method: 'POST' }
+	);
+}
+
+/** @returns {Promise<Object>} */
+export function getGitOpsCoverage() {
+	return request(`${BASE}/gitops/coverage`);
+}
+
+/** @param {{cluster?: string, status?: string[], limit?: number}} [params] */
+export function getGitOpsBindings({
+	cluster,
+	status = ['ambiguous', 'unresolved', 'blocked', 'stale'],
+	limit = 100
+} = {}) {
+	return request(`${BASE}/gitops/bindings`, { cluster, status, limit });
+}
+
+/**
+ * Resolve a workload using only a candidate and generation returned by GitOps discovery.
+ * @param {{cluster?: string, namespace: string, workload_kind: string, workload_name: string,
+ *   candidate_id: string, generation_token: string, confirmed: boolean}} resolution
+ */
+export function resolveGitOpsBinding(resolution) {
+	const {
+		cluster,
+		namespace,
+		workload_kind,
+		workload_name,
+		candidate_id,
+		generation_token,
+		confirmed
+	} = resolution;
+	const path = `${BASE}/gitops/bindings/${encodeURIComponent(namespace)}/${encodeURIComponent(workload_kind)}/${encodeURIComponent(workload_name)}/resolve`;
+	return request(
+		path,
+		{ cluster },
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ candidate_id, generation_token, confirmed })
+		}
+	);
+}
+
 /**
  * @param {Object} opts
  * @param {string} [opts.namespace]
@@ -314,7 +504,7 @@ export function getAutomationStatus() {
  * @param {string} [opts.group_by]
  * @returns {Promise<Object>}
  */
-export function getReportSummary({ namespace, last, start, end, years, aggregate, granularity, group_by } = {}) {
+export function getReportSummary({ namespace, last, start, end, years, aggregate, granularity, group_by, signal } = {}) {
 	return request(`${BASE}/report/summary`, {
 		namespace,
 		last,
@@ -324,7 +514,7 @@ export function getReportSummary({ namespace, last, start, end, years, aggregate
 		aggregate: aggregate || undefined,
 		granularity,
 		group_by
-	});
+	}, { signal });
 }
 
 /**
@@ -373,8 +563,8 @@ export function buildReportExportUrl({ namespace, last, start, end, years, aggre
  * @param {string} [opts.namespace]
  * @returns {Promise<{windows: Object, namespace: string|null}>}
  */
-export function getDashboardSummary({ namespace } = {}) {
-	return request(`${BASE}/metrics/dashboard-summary`, { namespace });
+export function getDashboardSummary({ namespace, signal } = {}) {
+	return request(`${BASE}/metrics/dashboard-summary`, { namespace }, { signal });
 }
 
 /**
@@ -386,8 +576,8 @@ export function getDashboardSummary({ namespace } = {}) {
  * @param {string} [opts.namespace]
  * @returns {Promise<{window_slug: string, namespace: string|null, points: Object[]}>}
  */
-export function getDashboardTimeseries({ windowSlug, namespace } = {}) {
-	return request(`${BASE}/metrics/dashboard-timeseries/${windowSlug}`, { namespace });
+export function getDashboardTimeseries({ windowSlug, namespace, signal } = {}) {
+	return request(`${BASE}/metrics/dashboard-timeseries/${windowSlug}`, { namespace }, { signal });
 }
 
 /**
@@ -402,10 +592,37 @@ export function getDashboardTimeseries({ windowSlug, namespace } = {}) {
 export async function refreshDashboardSummary({ namespace } = {}) {
 	const url = new URL(`${BASE}/metrics/dashboard-summary/refresh`, window.location.origin);
 	if (namespace) url.searchParams.set('namespace', namespace);
-	const res = await fetch(url.toString(), { method: 'POST' });
+	const res = await fetch(url.toString(), requestOptions({ method: 'POST' }));
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		const details = errorDetails(body, res.status);
+		throw new ApiError(details.message, { status: res.status, ...details });
+	}
+	return res.json();
+}
+
+/** Download a report with credentials/headers that anchor navigation cannot send. */
+export async function downloadReport(params = {}) {
+	const url = new URL(`${BASE}/report/export`, window.location.origin);
+	Object.entries(params).forEach(([key, value]) => addSearchParam(url, key, value));
+	const res = await fetch(url.toString(), requestOptions());
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		throw new Error(body.detail || `API error ${res.status}`);
 	}
-	return res.json();
+	const blob = await res.blob();
+	const disposition = res.headers.get('Content-Disposition') || '';
+	const filename = disposition.match(/filename="?([^"]+)"?/)?.[1]
+		|| `greenkube-report.${params.format || 'csv'}`;
+	const objectUrl = URL.createObjectURL(blob);
+	try {
+		const anchor = document.createElement('a');
+		anchor.href = objectUrl;
+		anchor.download = filename;
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+	} finally {
+		URL.revokeObjectURL(objectUrl);
+	}
 }

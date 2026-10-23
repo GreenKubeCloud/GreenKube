@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+  namespace: payments
+data:
+  version: first
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+  namespace: payments
+data:
+  version: second

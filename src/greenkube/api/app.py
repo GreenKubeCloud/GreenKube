@@ -9,13 +9,19 @@ directory is present in the image.
 """
 
 import asyncio
+import ipaddress
 import logging
+import os
+import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -23,10 +29,13 @@ from limits import parse as parse_rate_limit
 from limits.storage import MemoryStorage
 from limits.strategies import MovingWindowRateLimiter
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.routing import Match
 
 from greenkube import __version__
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
+    get_gitops_binding_repository,
     get_node_repository,
     get_recommendation_repository,
     verify_api_key,
@@ -35,15 +44,43 @@ from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_f
 from greenkube.api.routers import automation as automation_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
+from greenkube.api.routers import gitops as gitops_router
 from greenkube.api.routers import health as health_router
-from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report
-from greenkube.api.startup import run_startup_recommendation_scan
+from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
+from greenkube.api.routers import plans as plans_router
+from greenkube.api.routers import webhooks as webhooks_router
+from greenkube.api.startup import run_plan_expiry_loop, run_startup_recommendation_scan
+from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
+from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
+from greenkube.automation.webhook_runtime import create_webhook_processing_service
 from greenkube.core.config import get_config
 from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
 
 logger = logging.getLogger(__name__)
+_MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
 
 FRONTEND_DIR = Path("/app/frontend")
+
+
+def _parse_networks(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy network: %s", item)
+    return tuple(networks)
+
+
+def _is_trusted_ip(value: str, networks) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -77,7 +114,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline'; "
-                "style-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                 "img-src 'self' data:; "
                 "font-src 'self' https://fonts.gstatic.com; "
                 "connect-src 'self'; "
@@ -113,11 +150,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     _LIMITED_PREFIXES = ("/api/",)
     _LIMITED_EXACT = ("/prometheus/metrics",)
 
-    def __init__(self, app, rate_limit: str, storage: MemoryStorage):
+    def __init__(self, app, rate_limit: str, storage: MemoryStorage | None = None, limiter=None):
         super().__init__(app)
         self._limits = [parse_rate_limit(part.strip()) for part in rate_limit.split(";") if part.strip()]
-        self._storage = storage
-        self._limiter = MovingWindowRateLimiter(storage)
+        self._storage = storage or MemoryStorage()
+        self._limiter = limiter or MovingWindowRateLimiter(self._storage)
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -125,7 +162,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         client = request.client.host if request.client else "unknown"
-        identifiers = (client, path)
+        trusted_proxies = _parse_networks(getattr(get_config(), "TRUSTED_PROXY_IPS", ""))
+        if _is_trusted_ip(client, trusted_proxies):
+            forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+            if forwarded:
+                client = forwarded
+        identifiers = (client, self._route_key(request))
         for limit in self._limits:
             if not self._limiter.hit(limit, *identifiers):
                 stats = self._limiter.get_window_stats(limit, *identifiers)
@@ -137,6 +179,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
         return await call_next(request)
 
+    @staticmethod
+    def _route_key(request: Request) -> str:
+        """Use the registered route template instead of untrusted path parameters."""
+        router = getattr(request.app, "router", None)
+        for route in getattr(router, "routes", ()):
+            match, _ = route.matches(request.scope)
+            if match is Match.FULL:
+                return getattr(route, "path", "<matched-route>")
+        return "<unmatched-route>"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -147,13 +199,63 @@ async def lifespan(app: FastAPI):
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
 
+    app.state.automation_plan_service = None
+    app.state._plan_worker_task = None
+    app.state.webhook_processing_service = None
+    app.state.pull_request_lifecycle_reconciler = None
+    webhook_secret_dir = os.getenv("GITOPS_WEBHOOK_SECRET_DIR") or os.getenv("GITOPS_WEBHOOK_SECRET_FILE")
+    if webhook_secret_dir:
+        try:
+            gitops_repository = await get_gitops_binding_repository()
+            app.state.webhook_processing_service = create_webhook_processing_service(
+                gitops_repository,
+                secret_dir=webhook_secret_dir,
+            )
+        except Exception as error:
+            logger.warning("Webhook processor is unavailable (%s).", type(error).__name__)
+
+    try:
+        plan_service = await build_plan_api_service(connect_db=False)
+    except PlanRuntimeConfigurationError as exc:
+        logger.warning("Automation plan API is unavailable: %s", exc)
+    except Exception:
+        logger.warning("Automation plan API is unavailable; verify GITOPS_PROVIDERS_JSON and read-only Secret mounts.")
+    else:
+        app.state.automation_plan_service = plan_service
+        if webhook_secret_dir and plan_service.worker is not None:
+            app.state.pull_request_lifecycle_reconciler = create_pull_request_lifecycle_reconciler(plan_service.worker)
+        config = get_config()
+        if getattr(config, "AUTOMATION_ENABLED", False) and getattr(config, "AUTOMATION_MODE", "disabled") == "inline":
+            worker = plan_service.worker
+            if worker is not None:
+                from greenkube.cli.automation_worker import run_worker
+
+                app.state._plan_worker_task = asyncio.create_task(run_worker(queue="plans", plan_worker=worker))
+
     # Start tracked background startup tasks so we can cancel them on shutdown.
     app.state._startup_tasks = []
-    task = asyncio.create_task(run_startup_recommendation_scan())
-    app.state._startup_tasks.append(task)
+    app.state._startup_tasks.append(asyncio.create_task(run_startup_recommendation_scan()))
+    plan_api_service = getattr(app.state, "automation_plan_service", None)
+    if plan_api_service is not None:
+        if callable(getattr(plan_api_service, "expire_due_plans", None)) and callable(
+            getattr(plan_api_service, "prune_retained_history", None)
+        ):
+            app.state._startup_tasks.append(
+                asyncio.create_task(
+                    run_plan_expiry_loop(plan_api_service),
+                    name="gitops-plan-expiry",
+                )
+            )
+        else:
+            logger.warning("Automation plan expiry and retention maintenance are unavailable.")
+    plan_worker_task = getattr(app.state, "_plan_worker_task", None)
+    if plan_worker_task is not None:
+        app.state._startup_tasks.append(plan_worker_task)
+    app.state.ready = True
 
     yield
     logger.info("🛑 Shutting down GreenKube API...")
+    app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
         for t in getattr(app.state, "_startup_tasks", []) or []:
@@ -165,6 +267,9 @@ async def lifespan(app: FastAPI):
         logger.exception("Error while cancelling startup tasks")
 
     await get_db_manager().close()
+    app.state.automation_plan_service = None
+    app.state.webhook_processing_service = None
+    app.state.pull_request_lifecycle_reconciler = None
     logger.info("Database connection closed.")
     # Close shared Kubernetes ApiClient (if created during runtime)
     try:
@@ -187,6 +292,12 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         A configured FastAPI application instance.
     """
     cfg = get_config()
+    if (
+        getattr(cfg, "ENVIRONMENT", "development") == "production"
+        and getattr(cfg, "API_AUTH_MODE", "api_key") == "api_key"
+        and not getattr(cfg, "API_KEY", "")
+    ):
+        raise ValueError("GREENKUBE_API_KEY must be configured in production.")
     root_path = getattr(cfg, "ROOT_PATH", "") or ""
 
     app = FastAPI(
@@ -200,30 +311,33 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         root_path=root_path,
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation_error(request: Request, error: RequestValidationError):
+        if _MANUAL_BINDING_RESOLUTION_PATH.fullmatch(request.url.path):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "Invalid manual binding resolution request."},
+            )
+        return await request_validation_exception_handler(request, error)
+
     # --- Rate limiting ---
     # Configurable via API_RATE_LIMIT env var (default "60/minute").
     # Multiple limits can be combined with ';' (e.g. "60/minute;1000/hour").
     rate_limit = getattr(cfg, "API_RATE_LIMIT", "60/minute") or "60/minute"
     app.add_middleware(RateLimitMiddleware, rate_limit=rate_limit, storage=MemoryStorage())
 
-    # CORS — configurable via CORS_ORIGINS env var (comma-separated).
-    # Defaults to ["*"] for in-cluster use where the SPA is served from
-    # the same origin. Override when the API is exposed via an ingress.
-    #
-    # IMPORTANT: when the API is served behind a reverse-proxy that injects
-    # cookies (e.g. Authentik forward-auth with a session cookie), the
-    # browser may send credentials even on same-origin requests.
-    # allow_credentials=True paired with allow_origins=["*"] violates the
-    # CORS specification and causes intermittent failures.
-    cors_origins_str = cfg.CORS_ORIGINS if hasattr(cfg, "CORS_ORIGINS") else "*"
-    cors_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()] or ["*"]
+    # CORS is closed by default. Explicit origins are required for cross-origin
+    # browser clients; same-origin SPA requests do not need CORS headers.
+    cors_origins = [o.strip() for o in (getattr(cfg, "CORS_ORIGINS", "") or "").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=False if "*" in cors_origins else True,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
+    trusted_hosts = [h.strip() for h in getattr(cfg, "TRUSTED_HOSTS", "*").split(",") if h.strip()]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts or ["*"])
 
     # Security headers (OWASP recommended)
     app.add_middleware(SecurityHeadersMiddleware)
@@ -235,9 +349,22 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
     app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
+    app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])
     app.include_router(report.router, prefix="/api/v1", tags=["Report"])
+    app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
+    app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])
+    app.include_router(webhooks_router.router, prefix="/api/v1", tags=["Webhooks"])
+
+    @app.get("/api/v1/health/heartbeat", include_in_schema=False)
+    async def heartbeat():
+        """Return a lightweight liveness response without probing dependencies."""
+        return {
+            "status": "ok",
+            "ready": bool(getattr(app.state, "ready", True)),
+            "timestamp": datetime.now(timezone.utc),
+        }
 
     # Prometheus metrics endpoint for Grafana dashboards
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
@@ -247,6 +374,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         node_repo=Depends(get_node_repository),
         reco_repo=Depends(get_recommendation_repository),
         summary_repo=Depends(get_summary_repository),
+        gitops_repository=Depends(get_gitops_binding_repository),
     ):
         """Expose Prometheus-compatible metrics for scraping."""
         # The scheduler writes data to the DB in a separate container/process,
@@ -256,6 +384,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
             reco_repo,
             savings_repo=get_savings_ledger_repository(),
             summary_repo=summary_repo,
+            gitops_repository=gitops_repository,
         )
         return Response(
             content=get_metrics_output(),
@@ -341,5 +470,10 @@ def main():
     configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
     uvicorn.run(
-        app, host=cfg.API_HOST, port=cfg.API_PORT, proxy_headers=True, forwarded_allow_ips="*", timeout_keep_alive=65
+        app,
+        host=cfg.API_HOST,
+        port=cfg.API_PORT,
+        proxy_headers=bool(cfg.TRUSTED_PROXY_IPS),
+        forwarded_allow_ips=cfg.TRUSTED_PROXY_IPS,
+        timeout_keep_alive=65,
     )

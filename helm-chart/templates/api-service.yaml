@@ -15,5 +15,5 @@ spec:
       name: http
   selector:
     {{- include "greenkube.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: app
+    app.kubernetes.io/component: {{ if eq .Values.profile "production" }}api{{ else }}app{{ end }}
 {{- end }}

@@ -3,6 +3,9 @@
 API routes for carbon/cost/energy metrics.
 """
 
+import base64
+import binascii
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -34,12 +37,31 @@ def _get_time_range(last: Optional[str]) -> tuple[datetime, datetime]:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _decode_cursor(value: Optional[str]) -> Optional[dict]:
+    if not value:
+        return None
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(value.encode()).decode())
+        if not isinstance(decoded, dict) or set(decoded) != {"timestamp", "namespace", "pod_name"}:
+            raise ValueError
+        return decoded
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error) as e:
+        raise HTTPException(status_code=400, detail="Invalid pagination cursor.") from e
+
+
+def _encode_cursor(value: Optional[dict]) -> Optional[str]:
+    if value is None:
+        return None
+    return base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode()
+
+
 @router.get("/metrics", response_model=PaginatedMetricsResponse)
 async def list_metrics(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '10min', '2h', '7d', 'ytd')."),
     offset: int = Query(0, ge=0, description="Number of records to skip."),
     limit: int = Query(1000, ge=1, le=10000, description="Maximum number of records to return."),
+    cursor: Optional[str] = Query(None, description="Opaque cursor from a previous page."),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """List combined metrics for the given time range and optional namespace filter.
@@ -56,6 +78,40 @@ async def list_metrics(
             status_code=400,
             detail=f"Requested range exceeds the {max_days}-day maximum for raw metric listing. "
             "Use the /report/export endpoint for bulk data export.",
+        )
+    decoded_cursor = _decode_cursor(cursor)
+    if decoded_cursor is not None:
+        cursor_reader = getattr(repo, "read_combined_metrics_cursor", None)
+        if cursor_reader is not None:
+            total, page, next_cursor = await cursor_reader(
+                start_time=start, end_time=end, namespace=namespace, cursor=decoded_cursor, limit=min(limit, 1000)
+            )
+            return PaginatedMetricsResponse(
+                total=total, offset=0, limit=min(limit, 1000), items=page, next_cursor=_encode_cursor(next_cursor)
+            )
+        # Compatibility fallback for repositories that predate cursor support.
+        rows = await repo.read_combined_metrics_smart(start_time=start, end_time=end, namespace=namespace)
+        total = len(rows)
+        rows.sort(key=lambda item: (item.timestamp, item.namespace, item.pod_name))
+        rows = [
+            item
+            for item in rows
+            if item.timestamp is not None
+            and (item.timestamp.isoformat(), item.namespace, item.pod_name)
+            > (decoded_cursor["timestamp"], decoded_cursor["namespace"], decoded_cursor["pod_name"])
+        ]
+        page = rows[: min(limit, 1000)]
+        next_value = None
+        if len(rows) > len(page):
+            last_metric = page[-1]
+            assert last_metric.timestamp is not None
+            next_value = {
+                "timestamp": last_metric.timestamp.isoformat(),
+                "namespace": last_metric.namespace,
+                "pod_name": last_metric.pod_name,
+            }
+        return PaginatedMetricsResponse(
+            total=total, offset=0, limit=min(limit, 1000), items=page, next_cursor=_encode_cursor(next_value)
         )
     total, page = await repo.read_combined_metrics_page(
         start_time=start, end_time=end, namespace=namespace, offset=offset, limit=limit

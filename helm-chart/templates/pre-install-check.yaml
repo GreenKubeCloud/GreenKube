@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- if and .Values.monitoring.serviceMonitor.enabled .Values.config.api.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -19,9 +19,16 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "greenkube.fullname" . }}-crd-check
+      securityContext:
+        {{- toYaml .Values.hooks.podSecurityContext | nindent 8 }}
       containers:
         - name: crd-check
-          image: "bitnami/kubectl:latest"
+          image: "bitnami/kubectl:1.33.4"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- toYaml .Values.hooks.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.hooks.resources | nindent 12 }}
           command:
             - /bin/sh
             - -c
