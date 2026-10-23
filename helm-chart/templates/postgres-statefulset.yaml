@@ -1,4 +1,12 @@
 {{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+{{- if and .Release.IsInstall (not .Values.secrets.existingSecret) (not .Values.postgres.auth.password) }}
+{{- $pvcName := printf "data-%s-postgres-0" (include "greenkube.fullname" .) }}
+{{- $existingPvc := lookup "v1" "PersistentVolumeClaim" .Release.Namespace $pvcName }}
+{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace (include "greenkube.secretName" .) }}
+{{- if and $existingPvc (not $existingSecret) }}
+{{- fail (printf "A PostgreSQL volume (%s) already exists in namespace %s but the chart-managed Secret no longer exists. A newly generated password cannot authenticate against the existing database. Delete the volume for a clean install (kubectl -n %s delete pvc %s), or provide the original password with postgres.auth.password or secrets.existingSecret." $pvcName .Release.Namespace .Release.Namespace $pvcName) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

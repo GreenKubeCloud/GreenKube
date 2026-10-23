@@ -144,6 +144,28 @@ helm upgrade --install greenkube greenkube/greenkube \
   -f my-values.yaml
 ```
 
+### Pin the image by tag or digest
+
+By default the chart uses the image tag matching its app version. To pin a specific release, use `image.tag`:
+
+```bash
+helm upgrade --install greenkube greenkube/greenkube \
+  --namespace greenkube \
+  --set image.tag=0.3.0
+```
+
+To pin the exact image bytes, use `image.digest`. Do **not** put `sha256:` in `image.tag`; that renders an invalid Kubernetes image reference (`greenkube/greenkube:sha256:...`) and the pod stays in `InvalidImageName`.
+
+```bash
+helm upgrade --install greenkube greenkube/greenkube \
+  --namespace greenkube \
+  --create-namespace \
+  --set image.digest="sha256:<64-hex-digest>" \
+  --wait --timeout 5m
+```
+
+Replace `<64-hex-digest>` with the digest reported by your registry or CI. The rendered reference is `greenkube/greenkube@sha256:<digest>`. `image.digest` takes precedence over `image.tag`. You can also pin a custom registry or mirror with `image.repository`.
+
 ### Variables you are most likely to change
 
 #### Deployment and image
@@ -153,7 +175,8 @@ helm upgrade --install greenkube greenkube/greenkube \
 | `profile` | `standalone` | `standalone` or `production`. See [Deployment profiles](#deployment-profiles). |
 | `replicaCount` | `1` | Replicas for the standalone collector/API pod. |
 | `image.repository` | `greenkube/greenkube` | Image repository. |
-| `image.tag` | chart app version | Image tag. |
+| `image.tag` | chart app version | Image tag. Must be a tag, not a `sha256:` digest. |
+| `image.digest` | `""` | Pin the exact image with `sha256:<64 hex>`; takes precedence over `image.tag`. |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
 | `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API builds recommendation inputs during refresh, so keep memory headroom. |
 | `resources` | 100m/128Mi requests, 500m/512Mi limits | Collector/worker resources. Memory grows with the number of pods. |
@@ -469,11 +492,28 @@ Uninstall:
 helm uninstall greenkube --namespace greenkube
 ```
 
-The bundled PostgreSQL PVC is not deleted automatically. Delete it explicitly if you no longer need the data:
+The bundled PostgreSQL PVC survives uninstallation. If the chart-managed Secret is missing as well (for example because it was created by an older chart version that tracked it as a regular resource, or because it was deleted manually), a reinstall generates a new password that cannot authenticate against the existing database. The pod then crash-loops with `password authentication failed for user "greenkube"`.
+
+Either delete the volume for a clean install, or provide the existing database password before reinstalling:
 
 ```bash
+# Clean install (destroys the old data)
 kubectl -n greenkube delete pvc data-greenkube-postgres-0
 ```
+
+```bash
+# Keep the data: reuse the old password through an explicit Secret
+kubectl -n greenkube create secret generic greenkube-secrets \
+  --from-literal=GREENKUBE_API_KEY="$(openssl rand -hex 32)" \
+  --from-literal=POSTGRES_PASSWORD="<the-password-used-by-the-existing-database>" \
+  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<the-password-used-by-the-existing-database>@greenkube-postgres:5432/greenkube"
+
+helm upgrade --install greenkube greenkube/greenkube \
+  --namespace greenkube \
+  --set secrets.existingSecret=greenkube-secrets
+```
+
+The chart rejects a fresh install when a retained PostgreSQL PVC exists without its Secret, instead of starting a database that cannot authenticate.
 
 ## Troubleshooting
 
@@ -483,6 +523,9 @@ kubectl -n greenkube delete pvc data-greenkube-postgres-0
 | API returns `401` | Missing or wrong bearer token. | Send `Authorization: Bearer <key>`; re-enter the key in the UI. |
 | API returns `503` with "API authentication is not configured" | `config.environment=production` but the Secret has no key. | Create/reference a Secret containing `GREENKUBE_API_KEY`. |
 | Dashboard shows no data | Prometheus is unreachable or not discovered. | Open **Settings**, check service health, and set `config.prometheus.url` explicitly. |
+| Pod stays in `InvalidImageName` or events show `couldn't parse image name "...:sha256:..."` | A digest was passed through `image.tag`. | Use `--set image.digest=sha256:<64 hex>` instead. `image.repository` must stay a repository name. |
+| Collector/API crash-loop with `password authentication failed for user "greenkube"` | A PostgreSQL PVC from an earlier installation was reused with a newly generated password. | Delete `data-greenkube-postgres-0` for a clean install, or set `secrets.existingSecret` (or `postgres.auth.password`) to the password used by the existing database. |
+| `helm upgrade` fails with a pre-upgrade hook error for `<release>-db-credential-check` | The chart Secret no longer matches the existing PostgreSQL volume. | Run `kubectl -n greenkube logs job/<release>-db-credential-check`; it prints the recovery steps. Delete the PVC or provide the original password. |
 | Pod stays in `Init` waiting for PostgreSQL | The bundled database is not ready. | `kubectl -n greenkube logs <pod> -c wait-for-postgres`; check the PostgreSQL pod and PVC. |
 | Migration Job fails | Database credentials or connectivity are wrong. | Read the Job logs; verify `DB_CONNECTION_STRING`, `POSTGRES_PASSWORD`, and the Service name. |
 | Automation page reports discovery unavailable | GreenKube cannot read Kubernetes/GitOps APIs or no controllers are installed. | Check RBAC and controller CRDs; run `POST /api/v1/gitops/refresh`. |

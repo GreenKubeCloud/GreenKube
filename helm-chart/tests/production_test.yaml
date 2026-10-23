@@ -230,3 +230,36 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].resources.requests.cpu
           value: 10m
+
+  - it: applies the image digest to production components
+    set:
+      profile: production
+      automation.enabled: true
+      image.digest: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+      - documentIndex: 2
+        equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: applies the image digest to the migration job
+    set:
+      profile: production
+      automation.enabled: true
+      image.digest: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/migration-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"

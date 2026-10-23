@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Risk, confidence and effort assessment:** New heuristics derive `risk_level` (low/medium/high) with explainable `risk_factors`, a 0–1 `confidence` based on samples/coverage/source authority, and `effort`. Dashboard cards show source, risk and confidence badges plus an expandable evidence panel.
 - **Migrations `0010` (sources/provenance/owner) and `0011` (evidence/risk/ranking/patch/expiry)** for both SQLite and PostgreSQL. A shared row mapper (`storage/recommendation_mapper.py`) and shared column/value builders now back both repository implementations.
 - **Helm:** new `config.recommendations` values (`vpaEnabled`, `karpenterEnabled`, `sourcePriority`, `ttlDays`, `rankingProfile`, `rankingWeights`, `minSamples`) and read-only RBAC for `verticalpodautoscalers` and Karpenter `nodepools`/`nodeclaims`.
+- **Helm image digest pinning:** new `image.digest` value renders `repository@sha256:<digest>` and takes precedence over `image.tag`, so releases can be pinned to exact image bytes without splitting the digest across `image.repository` and `image.tag`.
 
 ### Changed
 - **Documentation:** Added a complete installation guide and a user-facing GitOps automation guide, updated the configuration/API/architecture/recommendation references, refreshed the README and frontend screenshots, and removed the personal `docs/specs` material from version control.
@@ -55,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Verified cost-only savings are attributed:** a verified recommendation with zero measured CO2e but positive measured cost now writes a `measured` ledger row instead of being skipped.
 - **Negligible carbon projections do not block verification:** carbon projections below 1 gCO2e/year are treated as noise and skip the carbon gate.
 - **Helm: the collector waits for PostgreSQL** with an init container (`wait-for-postgres`) when the bundled database is enabled, instead of crash-looping on the first connection attempt during a fresh install.
+- **Helm image references fail fast:** a `sha256:` digest passed through `image.tag` (which Kubernetes reports as `InvalidImageName`) is rejected at render time with a pointer to `image.digest`; malformed digests and digest/repository conflicts are rejected too.
+- **Helm database credential safety:** a pre-upgrade hook verifies `DB_CONNECTION_STRING` against the bundled PostgreSQL before rolling Pods, and a fresh install fails early when a retained PostgreSQL PVC exists without its Secret. Both guards print the exact recovery command instead of leaving GreenKube in `CrashLoopBackOff` with `password authentication failed for user "greenkube"`.
 
 ## [0.3.0] — 2026-08-30
 

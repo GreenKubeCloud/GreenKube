@@ -17,8 +17,12 @@ The default values use `profile: standalone`, `config.environment: production`, 
 image:
   repository: greenkube/greenkube
   tag: 0.3.0
+  # Optional: pin the exact image instead of using a tag.
+  # digest: sha256:<64 hexadecimal characters>
   pullPolicy: IfNotPresent
 ```
+
+`image.digest` renders `repository@digest` and takes precedence over `image.tag`. Do not put a `sha256:` digest in `image.tag`; the chart rejects that with an actionable error because Kubernetes would otherwise report `InvalidImageName`.
 
 ### General configuration (`config`)
 

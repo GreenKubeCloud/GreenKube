@@ -87,6 +87,59 @@ tests:
           path: spec.template.spec.containers[0].image
           value: "greenkube/greenkube:1.2.3"
 
+  - it: should pin the image by digest
+    set:
+      image.digest: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: digest should take precedence over tag
+    set:
+      image.tag: "1.2.3"
+      image.digest: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: should keep supporting a digest split across repository and tag
+    set:
+      image.repository: "greenkube/greenkube@sha256"
+      image.tag: "31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: should fail when a digest is put in image.tag
+    set:
+      image.tag: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.tag must be a tag, not a digest"
+
+  - it: should fail when image.digest is malformed
+    set:
+      image.digest: "sha256:not-a-digest"
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.digest must use the form sha256:<64 hexadecimal characters>"
+
   # --------------------------------------------------------------------------
   # Collector container (first container)
   # --------------------------------------------------------------------------

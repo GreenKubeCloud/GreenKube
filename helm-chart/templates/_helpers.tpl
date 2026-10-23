@@ -62,6 +62,40 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Return the application image reference.
+
+Digest pinning uses image.digest (repo@sha256:...). Setting a digest in
+image.tag is a common mistake that renders an invalid Kubernetes image
+reference, so reject it with an actionable message.
+*/}}
+{{- define "greenkube.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion | toString -}}
+{{- $digest := .Values.image.digest | default "" | toString -}}
+{{- if $digest -}}
+  {{- if contains "@" $repository -}}
+    {{- fail "image.repository must not contain a digest when image.digest is set; use image.repository=<repo> and image.digest=sha256:<digest>" -}}
+  {{- end -}}
+  {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) -}}
+    {{- fail "image.digest must use the form sha256:<64 hexadecimal characters>" -}}
+  {{- end -}}
+  {{- printf "%s@%s" $repository $digest -}}
+{{- else if hasPrefix "sha256:" $tag -}}
+  {{- fail "image.tag must be a tag, not a digest; pin the image with image.digest=sha256:<64 hexadecimal characters>" -}}
+{{- else if contains "@" $repository -}}
+  {{- if and (hasSuffix "@sha256" $repository) (regexMatch "^[0-9a-fA-F]{64}$" $tag) -}}
+    {{- printf "%s:%s" $repository $tag -}}
+  {{- else if regexMatch "@sha256:[0-9a-fA-F]{64}$" $repository -}}
+    {{- $repository -}}
+  {{- else -}}
+    {{- fail "image.repository contains an invalid digest reference; use image.repository=<repo> with image.digest" -}}
+  {{- end -}}
+{{- else -}}
+  {{- printf "%s:%s" $repository $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Return the name of the Secret to use.
 If secrets.existingSecret is set, use that; otherwise use the chart-managed name.
 */}}
