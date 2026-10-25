@@ -176,13 +176,12 @@ Discovery also supplies live workload labels, rollout state, controller suspend/
 automation:
   pullRequests:
     draft: false
-    labels:
-      - greenkube
-      - sustainability
+    labels: []
     reviewers: []
     teamReviewers: []
 ```
 
+- Labels default to none. Configure only labels that already exist in every target repository.
 - GitHub supports draft PRs, labels, reviewers, and team reviewers.
 - GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are not supported.
 - Gitea supports labels and reviewers; draft PRs and team reviewers are not supported.

@@ -92,7 +92,7 @@ class PullRequestOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     draft: StrictBool = False
-    labels: tuple[str, ...] = ("greenkube", "sustainability")
+    labels: tuple[str, ...] = ()
     reviewers: tuple[str, ...] = ()
     team_reviewers: tuple[str, ...] = Field(
         default=(),

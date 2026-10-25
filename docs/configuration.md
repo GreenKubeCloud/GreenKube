@@ -276,12 +276,12 @@ automation:
 automation:
   pullRequests:
     draft: false
-    labels:
-      - greenkube
-      - sustainability
+    labels: []
     reviewers: []
     teamReviewers: []
 ```
+
+Labels default to none. Configure only labels that already exist in every target repository.
 
 GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are unsupported. Gitea supports labels and reviewers; draft PRs and team reviewers are unsupported. Unsupported combinations fail before the provider creates a branch or commit.
 

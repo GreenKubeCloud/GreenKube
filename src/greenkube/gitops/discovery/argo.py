@@ -480,14 +480,17 @@ def _candidate_for_workload(
         kustomization_paths=kustomization_paths,
         application_source_type=application_source_type,
     )
-    source_revision = revisions[owner.index] if 0 <= owner.index < len(revisions) else None
-    repo_url = owner.repo_url or "unresolved"
+    binding_source = _git_values_binding_source(owner, sources, renderer_config)
+    source_revision = revisions[binding_source.index] if 0 <= binding_source.index < len(revisions) else None
+    repo_url = binding_source.repo_url or "unresolved"
     provider = text(provider_id) or "unresolved"
-    ref = owner.ref
-    path = owner.path
+    ref = binding_source.ref
+    path = binding_source.path
     status = BindingStatus.RESOLVED
     reason: str | None = None
-    resolved_revision = immutable_revision(source_revision) if owner.chart is None or owner.has_path else None
+    resolved_revision = (
+        immutable_revision(source_revision) if binding_source.chart is None or binding_source.has_path else None
+    )
 
     if forced_status is not None:
         status = forced_status
@@ -542,8 +545,9 @@ def _candidate_for_workload(
             "namespace": resource.namespace,
             "name": resource.name,
         },
-        "source_index": owner.index,
-        "source_ref": owner.ref_name,
+        "source_index": binding_source.index,
+        "source_ref": binding_source.ref_name,
+        "chart_source_index": owner.index,
         "deployed_revisions": [
             {
                 "repo_url": source.repo_url,
@@ -583,6 +587,34 @@ def _candidate_for_workload(
     )
 
 
+def _git_values_binding_source(
+    owner: _ArgoSource,
+    sources: list[_ArgoSource],
+    renderer_config: Mapping[str, Any],
+) -> _ArgoSource:
+    """Use the unique Git-backed values source as the editable Helm binding."""
+    if owner.chart is None:
+        return owner
+
+    source_indexes: set[int] = set()
+    for entry in renderer_config.get("values_sources", []):
+        if not isinstance(entry, Mapping) or entry.get("source_ref") is None:
+            continue
+        index = entry.get("source_index")
+        if isinstance(index, int) and not isinstance(index, bool):
+            source_indexes.add(index)
+    if len(source_indexes) != 1:
+        return owner
+
+    source_index = next(iter(source_indexes))
+    if source_index < 0 or source_index >= len(sources):
+        return owner
+    values_source = sources[source_index]
+    if values_source.chart is not None or values_source.repo_url is None:
+        return owner
+    return values_source
+
+
 def _renderer_configuration(
     *,
     owner: _ArgoSource,
@@ -597,7 +629,7 @@ def _renderer_configuration(
 ) -> tuple[RendererKind, dict[str, Any], str | None, bool]:
     if owner.raw.get("plugin") is not None:
         return RendererKind.RAW, {}, "unsupported-config-management-plugin", False
-    if owner.directory is not None and owner.directory.get("jsonnet") is not None:
+    if owner.directory is not None and owner.directory.get("jsonnet"):
         return RendererKind.RAW, {}, "unsupported-directory-renderer", False
     if owner.helm_present or owner.chart is not None:
         if owner.helm_present and owner.helm is None:

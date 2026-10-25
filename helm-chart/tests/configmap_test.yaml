@@ -247,11 +247,11 @@ tests:
       - isNull:
           path: data.GIT_TOKEN
 
-  - it: should pass the documented pull-request defaults to the runtime
+  - it: should default to repository-agnostic pull-request options
     asserts:
       - equal:
           path: data.GITOPS_PULL_REQUESTS_JSON
-          value: '{"draft":false,"labels":["greenkube","sustainability"],"reviewers":[],"teamReviewers":[]}'
+          value: '{"draft":false,"labels":[],"reviewers":[],"teamReviewers":[]}'
 
   - it: should pass configured pull-request options to the runtime
     set:

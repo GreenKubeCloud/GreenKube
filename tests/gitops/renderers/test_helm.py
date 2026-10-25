@@ -696,7 +696,7 @@ data:
             [binary, "version", "--short"],
             workspace=snapshot.workspace,
             cwd=snapshot.workspace,
-            timeout_seconds=5,
+            timeout_seconds=30,
             max_stdout_bytes=1_024,
             max_stderr_bytes=1_024,
         )

@@ -453,9 +453,7 @@ automation:
     minCoverage: 0.5
   pullRequests:
     draft: false
-    labels:
-      - greenkube
-      - sustainability
+    labels: []
 rendererSandbox:
   enabled: true
 ```
