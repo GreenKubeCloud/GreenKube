@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "greenkube"
-version = "0.3.0"
+version = "0.3.1"
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]

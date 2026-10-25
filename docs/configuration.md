@@ -16,7 +16,7 @@ The default values use `profile: standalone`, `config.environment: production`, 
 ```yaml
 image:
   repository: greenkube/greenkube
-  tag: 0.3.0
+  tag: 0.3.1
   # Optional: pin the exact image instead of using a tag.
   # digest: sha256:<64 hexadecimal characters>
   pullPolicy: IfNotPresent

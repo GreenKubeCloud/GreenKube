@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-10-25
+
 ### Added
 - **GitOps plan workflow:** Persisted recommendation IDs now resolve to server-side GitOps bindings and render-validated raw-manifest, Kustomize, and a fail-closed subset of Helm plans. Users approve an exact preview digest; a lease-protected worker revalidates the source and opens or adopts an atomic multi-file PR using allowlisted, Secret-backed GitHub/GitLab/Gitea providers.
 - **Immutable provider archive snapshots:** GitHub, GitLab, and Gitea source snapshots are fetched at a full resolved commit SHA through authorized provider calls, streamed under the compressed-size cap, and passed through the existing traversal/symlink/decompression limits. Cross-origin redirects never receive provider authorization headers; unsupported archive access fails closed without switching to a mutable ref.

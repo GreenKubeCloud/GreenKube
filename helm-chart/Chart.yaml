@@ -9,8 +9,8 @@ description: >-
 type: application
 icon: 
   https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.3.0
-appVersion: 0.3.0
+version: 0.3.1
+appVersion: 0.3.1
 keywords:
 - greenkube
 - finops
@@ -55,7 +55,7 @@ annotations:
       email: hugo.lelievre@greenkube.cloud
   artifacthub.io/images: |
     - name: greenkube
-      image: greenkube/greenkube:0.3.0
+      image: greenkube/greenkube:0.3.1
       platforms:
         - linux/amd64
         - linux/arm64

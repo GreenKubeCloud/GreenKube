@@ -15,7 +15,7 @@ profile: standalone
 
 automation:
   enabled: false
-  mode: "" # Empty defaults to inline for standalone and worker for production.
+  mode: '' # Empty defaults to inline for standalone and worker for production.
   # Port for the dedicated worker's authenticated control-loop metrics listener.
   workerMetricsPort: 8001
   prPollIntervalSeconds: 120
@@ -48,8 +48,8 @@ automation:
   pullRequests:
     draft: false
     labels:
-      - greenkube
-      - sustainability
+    - greenkube
+    - sustainability
     reviewers: []
     teamReviewers: []
   # Example:
@@ -84,7 +84,7 @@ production:
     backoffLimit: 6
     image:
       repository: busybox
-      tag: "1.37"
+      tag: '1.37'
       pullPolicy: IfNotPresent
   leaderElection:
     enabled: true
@@ -172,7 +172,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.3.0
+  tag: 0.3.1
 
   # Pin the image by digest instead of tag, for example:
   #   digest: sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb
@@ -184,7 +184,7 @@ image:
 initContainer:
   image:
     repository: busybox
-    tag: "1.37"
+    tag: '1.37'
     pullPolicy: IfNotPresent
 
 # Probes for the collector process. The collector has no HTTP listener, so
@@ -537,7 +537,7 @@ hooks:
     runAsGroup: 10001
     capabilities:
       drop:
-        - ALL
+      - ALL
 
 # Security and resource settings for the Helm test Pod.
 tests:
@@ -562,7 +562,7 @@ tests:
     runAsGroup: 10001
     capabilities:
       drop:
-        - ALL
+      - ALL
 
 # -- API container resources
 # This container serves the FastAPI REST API and the SPA frontend.
