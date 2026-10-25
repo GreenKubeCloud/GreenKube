@@ -36,8 +36,7 @@ The weights reflect the relative impact each dimension has on real-world sustain
 - `cpu_request` and `cpu_usage_millicores` per pod
 - `memory_request` and `memory_usage_bytes` per pod
 
-**Calculation:**
-For each pod with non-zero requests and usage data:
+**Calculation:** For each pod with non-zero requests and usage data:
 - `cpu_ratio = min(avg_cpu_usage / cpu_request, 1.0)` — capped at 1.0 (over-usage is not penalized here)
 - `memory_ratio = min(avg_memory_usage / memory_request, 1.0)` — same logic
 - `pod_efficiency = (cpu_ratio + memory_ratio) / 2`
@@ -120,24 +119,21 @@ The zombie ratio is weighted more heavily (70%) because zombie pods are a more a
 
 ### 4. Node Efficiency (15%)
 
-**Goal:** Nodes should be well-utilized. Overprovisioned and underutilized nodes waste energy.
+**Goal:** Estimate node efficiency from observed CPU utilization relative to node CPU capacity.
 
 **Inputs:**
-- Per-node CPU utilization from pod-level metrics aggregated by node
-- Pod count per node
+- Per-node CPU usage from pod-level metrics, aggregated by timestamp
+- Node CPU capacity
 
-**Calculation:**
-For each node:
-- `node_util = total_cpu_usage_on_node / node_cpu_capacity`
-- Score the node based on utilization:
-  - Below `NODE_UTILIZATION_THRESHOLD` (default 20%): heavily penalized
-  - Between 20% and 70%: linearly scaled (optimal zone)
-  - Above 70%: full marks (high utilization is good for sustainability)
+**Calculation:** For each node:
+- `node_util = average_cpu_usage_on_node / node_cpu_capacity`
 
 ```
 node_score_i = min(node_util / 0.7, 1.0) × 100
 node_efficiency_score = avg(node_score_i for all nodes)
 ```
+
+The score rises linearly from 0 at zero CPU utilization to 100 at 70% utilization, and remains at 100 above that. It does not use pod count or memory utilization. `NODE_UTILIZATION_THRESHOLD` configures node recommendation analysis; it is not applied by this score calculation.
 
 **Edge cases:**
 - If no node info is available, the dimension scores a neutral **50**.

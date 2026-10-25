@@ -13,14 +13,14 @@ without touching the pipelines.
 
 ## Why Wattnet?
 
-- **Free** for all EU countries — you only need to create an account and
+- **Free** for all EU countries. You only need to create an account and
   authenticate.
 - **Financed by the EU** (Horizon Europe, GreenDIGIT project), developed by
-  researchers — no commercial constraints.
+  researchers with no commercial constraints.
 - **15-minute granularity** (finer than Electricity Maps' hourly data).
 - Covers European zone granularity (ENTSO-E bidding zones, e.g. `IT_NORTH`,
   `SE3`, `NO1`).
-- **Carbon and water footprint** in one API — water footprint integration is
+- **Carbon and water footprint** in one API. Water footprint integration is
   planned for GreenKube (see roadmap).
 
 ## How it works
@@ -99,6 +99,8 @@ Turkey, and Kosovo.
 2. Keep the **email/password** — they are used to obtain API tokens, not the
    documentation site login (which currently only supports GitHub/Google
    social login).
+
+> Note: The Wattnet API is currently still under development, and authorization is required to create an account. To do so, please contact iglesias@ifca.es.
 
 ## Configuration
 
@@ -189,7 +191,7 @@ The provider abstraction was designed with this in mind: a future
 `BaseWaterProvider` (and a Wattnet implementation) can be added alongside the
 existing electricity providers without affecting the carbon pipelines. Because
 Electricity Maps does not provide water data, water and electricity will stay
-as separate provider abstractions — a combined `ElectricityWaterProvider`
+as separate provider abstractions; a combined `ElectricityWaterProvider`
 would force pairing Wattnet with another source for no benefit.
 
 ## References

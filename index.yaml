@@ -21,6 +21,107 @@ entries:
         - kind: added
           description: "PostgreSQL: configurable connection pool size (DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE) and statement timeout (DB_STATEMENT_TIMEOUT_MS)"
         - kind: fixed
+          description: "aggregate_summary and aggregate_timeseries query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for multi-year analysis"
+        - kind: fixed
+          description: "Trivy KSV-0014: added readOnlyRootFilesystem to PostgreSQL init container"
+        - kind: fixed
+          description: "Frontend npm audit: updated svelte, vite, rollup, picomatch, devalue to fix HIGH-severity advisories"
+        - kind: changed
+          description: "Storage implementations organized into PostgreSQL and SQLite subpackages"
+      artifacthub.io/images: |
+        - name: greenkube
+          image: greenkube/greenkube:0.3.1
+          platforms:
+            - linux/amd64
+            - linux/arm64
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://docs.greenkube.cloud/
+        - name: GitHub
+          url: https://github.com/GreenKubeCloud/GreenKube
+        - name: Docker Hub
+          url: https://hub.docker.com/r/greenkube/greenkube
+        - name: support
+          url: https://github.com/GreenKubeCloud/GreenKube/issues
+      artifacthub.io/maintainers: |
+        - name: Hugo Lelievre
+          email: hugo.lelievre@greenkube.cloud
+      artifacthub.io/prerelease: "false"
+      artifacthub.io/recommendations: |
+        - url: https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack
+        - url: https://artifacthub.io/packages/helm/opencost/opencost
+      artifacthub.io/screenshots: |
+        - title: CO₂e & Energy Dashboard
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-dashboard.png
+        - title: Optimization Recommendations
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-recommendations.png
+        - title: Automation & GitOps
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-automation.png
+        - title: Node Inventory
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-nodes.png
+        - title: Report Builder & Export
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
+        - title: Settings & Service Health
+          url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
+    apiVersion: v2
+    appVersion: 0.3.1
+    created: "2026-10-25T08:54:14.213430841Z"
+    description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
+      Measure, analyze, and optimize the estimated carbon footprint and cloud costs
+      of your workloads. Provides estimated CO₂e metrics, energy estimation, cost
+      optimization recommendations, Grafana dashboard, and a REST API — deployable
+      in minutes with a single Helm install.
+    digest: 466d73cc46618eb57193e064de167d1aad1382acab096be74bd9a8cb3e3de6f1
+    home: https://greenkube.cloud
+    icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
+    keywords:
+    - greenkube
+    - finops
+    - greenops
+    - fingreenops
+    - carbon
+    - co2
+    - sustainability
+    - kubernetes
+    - monitoring
+    - energy
+    - carbon-footprint
+    - cloud-cost
+    - prometheus
+    - grafana
+    - opencost
+    maintainers:
+    - email: hugo.lelievre@greenkube.cloud
+      name: Hugo Lelievre
+      url: https://github.com/GreenKubeCloud
+    name: greenkube
+    sources:
+    - https://github.com/GreenKubeCloud/GreenKube
+    type: application
+    urls:
+    - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.3.1.tgz
+    version: 0.3.1
+  - annotations:
+      artifacthub.io/category: monitoring-logging
+      artifacthub.io/changes: |
+        - kind: security
+          description: "Dockerfile: upgrade base images to node:22-alpine and run apt-get upgrade to patch OS CVEs (libssl3, zlib1g, ncurses)"
+        - kind: security
+          description: "Helm: full pod/container securityContext on all workloads (runAsNonRoot, readOnlyRootFilesystem, capabilities.drop ALL, seccompProfile RuntimeDefault)"
+        - kind: security
+          description: "Helm: remove secrets resource from ClusterRole (fixes critical RBAC over-permission)"
+        - kind: security
+          description: "Helm: PostgreSQL upgraded to postgres:18-alpine with scram-sha-256 authentication and liveness/readiness probes"
+        - kind: security
+          description: "API: OWASP security headers middleware (CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy) and restricted CORS"
+        - kind: security
+          description: "CI: automated Trivy vulnerability scanning workflow for images and Helm IaC with SARIF upload"
+        - kind: added
+          description: "SQLite: SCD2 node snapshots for deduplication and recommendation scope column"
+        - kind: added
+          description: "PostgreSQL: configurable connection pool size (DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE) and statement timeout (DB_STATEMENT_TIMEOUT_MS)"
+        - kind: fixed
           description: "aggregate_summary and aggregate_timeseries now query both raw and hourly tables; METRICS_AGGREGATED_RETENTION_DAYS defaults to -1 (infinite) for CSRD compliance"
         - kind: fixed
           description: "Trivy KSV-0014: added readOnlyRootFilesystem to PostgreSQL init container"
@@ -66,7 +167,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-08-29T22:47:41.253101146Z"
+    created: "2026-10-25T08:54:14.211527885Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -238,7 +339,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.12
-    created: "2026-08-29T22:47:41.245964317Z"
+    created: "2026-10-25T08:54:14.206519691Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -410,7 +511,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.11
-    created: "2026-08-29T22:47:41.244443787Z"
+    created: "2026-10-25T08:54:14.20534683Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -582,7 +683,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.10
-    created: "2026-08-29T22:47:41.242868495Z"
+    created: "2026-10-25T08:54:14.203779361Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1013,7 +1114,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.9
-    created: "2026-08-29T22:47:41.251706862Z"
+    created: "2026-10-25T08:54:14.210107103Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1438,7 +1539,7 @@ entries:
           url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-settings.png
     apiVersion: v2
     appVersion: 0.2.8
-    created: "2026-08-29T22:47:41.248136373Z"
+    created: "2026-10-25T08:54:14.208066558Z"
     description: GreenKube is an open-source FinGreenOps platform for Kubernetes.
       Measure, report (CSRD/ESRS E1), and optimize the carbon footprint and cloud
       costs of your workloads. Provides real-time CO₂e metrics, energy estimation,
@@ -1476,4 +1577,4 @@ entries:
     urls:
     - https://GreenKubeCloud.github.io/GreenKube/greenkube-0.2.8.tgz
     version: 0.2.8
-generated: "2026-08-29T22:47:41.23998541Z"
+generated: "2026-10-25T08:54:14.201594233Z"
