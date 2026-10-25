@@ -56,7 +56,8 @@ if count != 1:
 path.write_text(updated)
 PY
 
-# 2. Run sync_version.py to propagate to all files
+# 2. Refresh the lockfile, then run sync_version.py to propagate to all files
+uv lock
 uv run --locked python scripts/sync_version.py
 
 # 3. Update CHANGELOG.md — move [Unreleased] to [VERSION] — DATE
