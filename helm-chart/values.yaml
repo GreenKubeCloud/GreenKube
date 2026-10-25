@@ -47,9 +47,7 @@ automation:
     changeFreezeWindows: []
   pullRequests:
     draft: false
-    labels:
-    - greenkube
-    - sustainability
+    labels: [] # Optional; each configured label must already exist in the target repository.
     reviewers: []
     teamReviewers: []
   # Example:

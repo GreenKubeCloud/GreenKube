@@ -199,6 +199,45 @@ def test_argo_multi_source_resolves_ordered_local_and_ref_values_files():
     assert source.renderer_config["release_namespace"] == "prod"
 
 
+def test_argo_remote_helm_chart_binds_to_git_managed_values_source():
+    application = _fixture("argo-multi-source.yaml")
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": json.dumps(
+            {
+                "file_path": "environments/prod/payments.yaml",
+                "container": "api",
+                "path": ["controller", "container", "resources"],
+                "source_index": 1,
+            }
+        )
+    }
+    application["spec"]["sources"][0] = {
+        "repoURL": "https://charts.fairwinds.com/stable",
+        "chart": "vpa",
+        "targetRevision": "5.1.0",
+        "helm": {
+            "releaseName": "vpa",
+            "namespace": "prod",
+            "valueFiles": ["$values/environments/prod/payments.yaml"],
+        },
+    }
+    application["spec"]["sources"][1] = {
+        "repoURL": "https://github.com/acme/env-config.git",
+        "targetRevision": "release",
+        "ref": "values",
+    }
+    application["status"]["sync"]["revisions"] = ["5.1.0", "c" * 40]
+
+    source = _argo(application)[0]
+
+    assert source.status is BindingStatus.RESOLVED
+    assert source.repo_url == "https://github.com/acme/env-config.git"
+    assert source.ref == "release"
+    assert source.revision == "c" * 40
+    assert source.renderer_config["chart"]["repo"] == "https://charts.fairwinds.com/stable"
+    assert source.renderer_config["values_mapping"]["source_index"] == 1
+
+
 def test_argo_local_helm_chart_without_value_files_keeps_chart_defaults_actionable():
     application = _application({"kind": "Deployment", "namespace": "prod", "name": "payments-api"})
     application["spec"]["source"]["helm"] = {}
@@ -410,6 +449,17 @@ def test_argo_blocks_unsupported_jsonnet_directory_rendering():
 
     assert source.status is BindingStatus.BLOCKED
     assert source.reason == "unsupported-directory-renderer"
+
+
+def test_argo_accepts_empty_jsonnet_defaults_on_directory_source():
+    application = _application({"kind": "Deployment", "namespace": "prod", "name": "payments-api"})
+    application["spec"]["source"]["directory"] = {"jsonnet": {}, "recurse": True}
+
+    source = _argo(application)[0]
+
+    assert source.status is BindingStatus.RESOLVED
+    assert source.reason is None
+    assert source.renderer is RendererKind.RAW
 
 
 def test_argo_blocks_unresolved_values_source_references():

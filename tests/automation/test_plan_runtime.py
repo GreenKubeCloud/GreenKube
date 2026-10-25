@@ -150,9 +150,10 @@ def test_unresolved_discovery_provider_id_is_reserved():
         parse_gitops_providers_json(json.dumps(value))
 
 
-def test_pull_request_options_use_documented_defaults_and_validate_the_schema():
+def test_pull_request_options_use_repository_agnostic_defaults_and_validate_the_schema():
     defaults = parse_pull_request_options_json(None)
     assert defaults == PullRequestOptions()
+    assert defaults.labels == ()
 
     configured = parse_pull_request_options_json(
         json.dumps(
