@@ -73,6 +73,13 @@ Validate configured Git providers and keep Secret references within the release 
   {{- if and (hasKey $provider "apiBaseUrl") (not (kindIs "string" (get $provider "apiBaseUrl"))) -}}
     {{- fail (printf "automation.providers[%d].apiBaseUrl must be a string" $index) -}}
   {{- end -}}
+  {{- if and (hasKey $provider "webBaseUrl") (not (kindIs "string" (get $provider "webBaseUrl"))) -}}
+    {{- fail (printf "automation.providers[%d].webBaseUrl must be a string" $index) -}}
+  {{- end -}}
+  {{- $webBaseUrl := get $provider "webBaseUrl" | default "" -}}
+  {{- if and $webBaseUrl (not (regexMatch "^https?://[^/?#@]+/?$" $webBaseUrl)) -}}
+    {{- fail (printf "automation.providers[%d].webBaseUrl must be an HTTP(S) origin URL without a path" $index) -}}
+  {{- end -}}
 
   {{- $secretName := get $provider "secretName" -}}
   {{- if or (not (kindIs "string" $secretName)) (gt (len $secretName) 253) (not (regexMatch $secretNamePattern $secretName)) -}}
@@ -145,17 +152,22 @@ Serialize the runtime parser's provider schema with Secret references only.
   {{- $secretKey := get $provider "secretKey" -}}
   {{- $secretNamespace := get $provider "secretNamespace" | default "" -}}
   {{- $apiBaseUrl := get $provider "apiBaseUrl" | default "" -}}
+  {{- $webBaseUrl := get $provider "webBaseUrl" | default "" -}}
   {{- $tokenSecret := dict "name" $secretName "key" $secretKey -}}
   {{- if $secretNamespace -}}
     {{- $_ := set $tokenSecret "namespace" $secretNamespace -}}
   {{- end -}}
-  {{- $result = append $result (dict
+  {{- $config := dict
       "id" (get $provider "id")
       "type" (get $provider "type")
       "apiBaseUrl" $apiBaseUrl
       "tokenSecret" $tokenSecret
       "repositories" (get $provider "repositoryAllowlist")
-    ) -}}
+  -}}
+  {{- if $webBaseUrl -}}
+    {{- $_ := set $config "webBaseUrl" $webBaseUrl -}}
+  {{- end -}}
+  {{- $result = append $result $config -}}
 {{- end -}}
 {{- toJson (dict "providers" $result) -}}
 {{- end -}}

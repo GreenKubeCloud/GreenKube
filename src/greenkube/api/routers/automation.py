@@ -1,9 +1,10 @@
 """Compatibility routes backed by the server-resolved GitOps plan workflow."""
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, List
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -114,7 +115,7 @@ async def list_recommendation_pull_requests(
     record = await reco_repo.get_recommendation_by_id(rec_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
-    return await pr_repo.get_pull_requests_for_recommendation(rec_id)
+    return _externalize_pull_request_urls(await pr_repo.get_pull_requests_for_recommendation(rec_id))
 
 
 @router.get("/recommendations/{rec_id}/apply-pr/eligibility")
@@ -152,7 +153,7 @@ async def list_open_pull_requests(
     pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
 ):
     """Return pull requests that are still pending or open."""
-    return await pr_repo.get_open_pull_requests()
+    return _externalize_pull_request_urls(await pr_repo.get_open_pull_requests())
 
 
 @router.get("/automation/status")
@@ -293,6 +294,80 @@ def _env_truthy(value: str | None) -> bool:
     return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _configured_gitea_web_base_urls() -> dict[str, str]:
+    serialized = os.getenv("GITOPS_PROVIDERS_JSON", "").strip()
+    if not serialized:
+        return {}
+    payload = json.loads(serialized)
+    providers = payload.get("providers") if isinstance(payload, dict) else payload
+    if not isinstance(providers, list):
+        raise ValueError("GITOPS_PROVIDERS_JSON must contain a providers list.")
+
+    web_base_urls: dict[str, str] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise ValueError("GITOPS_PROVIDERS_JSON provider entries must be objects.")
+        if str(provider.get("type", "")).lower() != "gitea":
+            continue
+        web_base_url = provider.get("webBaseUrl")
+        if web_base_url is None or web_base_url == "":
+            continue
+        provider_id = provider.get("id")
+        if not isinstance(provider_id, str) or not provider_id:
+            raise ValueError("Gitea webBaseUrl requires a provider ID.")
+        if not isinstance(web_base_url, str):
+            raise ValueError("Gitea webBaseUrl must be a string.")
+        parsed_url = urlsplit(web_base_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.path not in {"", "/"}
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("Gitea webBaseUrl must be an HTTP(S) origin.")
+        web_base_urls[provider_id] = urlunsplit((parsed_url.scheme, parsed_url.netloc, "", "", ""))
+    return web_base_urls
+
+
+def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[PullRequestRecord]:
+    web_base_urls = _configured_gitea_web_base_urls()
+    externalized: list[PullRequestRecord] = []
+    for record in records:
+        web_base_url = web_base_urls.get(record.provider_id or "")
+        if not record.pr_url or not web_base_url:
+            externalized.append(record)
+            continue
+        parsed_url = urlsplit(record.pr_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("Stored pull-request URL is invalid.")
+        externalized.append(
+            record.model_copy(
+                update={
+                    "pr_url": urlunsplit(
+                        (
+                            urlsplit(web_base_url).scheme,
+                            urlsplit(web_base_url).netloc,
+                            parsed_url.path,
+                            "",
+                            "",
+                        )
+                    )
+                }
+            )
+        )
+    return externalized
+
+
 @router.get("/automation/operations/{operation_id}")
 async def get_automation_operation(
     operation_id: str,
@@ -332,6 +407,7 @@ def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
 
 
 def _compatibility_pull_request(plan: Plan, pull_request: PullRequestRecord) -> ApplyPrResponse:
+    pull_request = _externalize_pull_request_urls([pull_request])[0]
     return _compatibility_preview(plan).model_copy(
         update={
             "status": "pr_open",
@@ -366,6 +442,8 @@ def _operation_response(
     plan: Plan,
     pull_request: PullRequestRecord | None,
 ) -> dict[str, object]:
+    if pull_request is not None:
+        pull_request = _externalize_pull_request_urls([pull_request])[0]
     return {
         "id": operation.operation_id,
         "operation_id": operation.operation_id,

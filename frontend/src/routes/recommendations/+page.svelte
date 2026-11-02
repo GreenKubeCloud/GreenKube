@@ -7,6 +7,7 @@
 		getAppliedRecommendations,
 		getRecommendationSavings,
 		getOpenPullRequests,
+		getAutomationStatus,
 		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation,
@@ -28,6 +29,8 @@
 	let appliedRecs = [];
 	let openPullRequests = [];
 	let openPullRequestKeys = new Set();
+	let automationStatus = null;
+	let automationStatusError = '';
 	let savings = null;
 	let loading = true;
 	let error = null;
@@ -100,6 +103,8 @@
 		requestController = new AbortController();
 		loading = true;
 		error = null;
+		automationStatus = null;
+		automationStatusError = '';
 		try {
 			const [active, ignored, applied, sav, openPrs] = await Promise.all([
 				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
@@ -109,21 +114,41 @@
 				getOpenPullRequests()
 			]);
 			if (seq !== loadSeq) return;
+			try {
+				automationStatus = await getAutomationStatus();
+			} catch (statusError) {
+				if (statusError.name !== 'AbortError') {
+					automationStatusError = statusError.message || 'Automation readiness could not be checked.';
+				}
+			}
+			if (seq !== loadSeq) return;
 			activeRecs = active;
 			ignoredRecs = ignored;
 			appliedRecs = applied;
 			savings = sav;
-			openPullRequests = openPrs;
-			const openPrIds = new Set(openPrs.map((pr) => pr.recommendation_id));
-			openPullRequestKeys = new Set(
-				active.filter((rec) => openPrIds.has(rec.id)).map((rec) => recommendationKey(rec))
-			);
+			updateOpenPullRequests(openPrs, active);
 		} catch (e) {
 			if (seq === loadSeq && e.name !== 'AbortError') error = e.message;
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
 
+	}
+
+	function updateOpenPullRequests(openPrs, recommendations = activeRecs) {
+		openPullRequests = openPrs;
+		const openPrIds = new Set(openPrs.map((pr) => pr.recommendation_id));
+		openPullRequestKeys = new Set(
+			recommendations.filter((rec) => openPrIds.has(rec.id)).map((rec) => recommendationKey(rec))
+		);
+	}
+
+	async function refreshOpenPullRequests() {
+		try {
+			updateOpenPullRequests(await getOpenPullRequests());
+		} catch (e) {
+			if (e.name !== 'AbortError') error = e.message;
+		}
 	}
 
 	// --- Type filter ---
@@ -279,7 +304,12 @@
 	}
 
 	function canPreviewRecommendation(rec) {
-		return Boolean(safeActionFor(rec)) && !hasOpenPr(rec);
+		return Boolean(
+			automationStatus?.enabled === true &&
+				automationStatus?.ready === true &&
+				safeActionFor(rec) &&
+				!hasOpenPr(rec)
+		);
 	}
 
 	const PLAN_ERROR_MESSAGES = {
@@ -570,6 +600,9 @@
 						}
 					: response?.plan ?? response;
 				planPollingError = '';
+				if (String(response?.result?.plan_status ?? '').toLowerCase() === 'pr_open') {
+					await refreshOpenPullRequests();
+				}
 			} catch {
 				if (generation === planPollGeneration && prModal === modal) {
 					planPollingError = 'Operation status could not be refreshed; automatic polling will retry.';
@@ -817,6 +850,9 @@
 			const result = await getAutomationPlan(preview.planId);
 			if (prModal !== modal) return;
 			prPlan = result?.plan ?? result;
+			if (String(prPlan?.status ?? '').toLowerCase() === 'pr_open') {
+				await refreshOpenPullRequests();
+			}
 		} catch (e) {
 			if (prModal === modal) prError = planErrorMessage(e);
 		} finally {
@@ -1440,6 +1476,24 @@
 		</div>
 	</div>
 
+	{#if automationStatusError || (automationStatus === null && !loading)}
+		<div class="card text-sm text-amber-300" role="alert">
+			GitOps automation status is unavailable. Pull-request previews are disabled; check the Automation page and API health.
+		</div>
+	{:else if automationStatus === null}
+		<div class="card text-sm text-dark-400" role="status">
+			Checking GitOps automation readiness…
+		</div>
+	{:else if automationStatus.enabled !== true}
+		<div class="card text-sm text-dark-400" role="status">
+			GitOps automation is disabled. Recommendations remain visible, but pull-request previews are unavailable; apply changes manually.
+		</div>
+	{:else if automationStatus.ready !== true}
+		<div class="card text-sm text-amber-300" role="status">
+			GitOps automation is enabled but not ready. Pull-request previews are disabled until its worker is healthy.
+		</div>
+	{/if}
+
 	<!-- Tabs -->
 	<div class="flex gap-1 bg-dark-900 rounded-xl p-1 w-fit border border-dark-700">
 		<button
@@ -1809,8 +1863,17 @@
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
-												{#if hasSafePerContainerAction(rec)}
+												{#if hasSafePerContainerAction(rec) && automationStatus?.enabled === true && automationStatus?.ready === true}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/10 text-green-400">Container action ready</span>
+												{:else if hasSafePerContainerAction(rec)}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400"
+														title={automationStatusError
+															? 'Automation readiness could not be checked; pull-request preview is disabled.'
+															: automationStatus?.enabled
+																? 'The automation worker is not ready; apply this recommendation manually.'
+																: 'GitOps automation is disabled; apply this recommendation manually.'}
+													>Manual change required</span>
 												{:else if RIGHTSIZING_TYPES.includes(rec.type)}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-500">No safe container action</span>
 												{:else}

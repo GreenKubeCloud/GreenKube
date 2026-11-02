@@ -127,6 +127,7 @@ class ConfiguredGitProvider:
     config: GitOpsProviderConfig
     repositories: tuple[str, ...]
     token_file: str
+    web_base_url: str | None = None
 
 
 class GitRefRevisionReader(Protocol):
@@ -1207,6 +1208,8 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
         "provider_type",
         "apiBaseUrl",
         "api_base_url",
+        "webBaseUrl",
+        "web_base_url",
         "tokenSecret",
         "token_secret",
         "secretRef",
@@ -1254,6 +1257,27 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
                 raise PlanRuntimeConfigurationError(
                     "Provider API base URL must use HTTP(S) and must not contain credentials."
                 )
+
+    web_base_url = _aliased_value(raw, ("webBaseUrl", "web_base_url"), "web base URL", required=False)
+    if web_base_url is not None:
+        if not isinstance(web_base_url, str):
+            raise PlanRuntimeConfigurationError("Provider web base URL must be a URL string.")
+        web_base_url = web_base_url.strip() or None
+        if web_base_url is not None:
+            parsed_url = urlsplit(web_base_url)
+            if (
+                parsed_url.scheme not in {"http", "https"}
+                or not parsed_url.hostname
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or parsed_url.path not in {"", "/"}
+                or parsed_url.query
+                or parsed_url.fragment
+            ):
+                raise PlanRuntimeConfigurationError(
+                    "Provider web base URL must be an HTTP(S) origin without credentials, path, query, or fragment."
+                )
+            web_base_url = web_base_url.rstrip("/")
 
     secret_namespace, secret_name, secret_key = _parse_secret_reference(raw)
     token_file = raw.get("tokenFile")
@@ -1310,6 +1334,7 @@ def _parse_provider(raw: Mapping[str, Any]) -> ConfiguredGitProvider:
         config=config,
         repositories=repositories,
         token_file=expected_token_file,
+        web_base_url=web_base_url,
     )
 
 

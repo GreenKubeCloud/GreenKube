@@ -51,6 +51,24 @@ tests:
           path: data.GITOPS_PROVIDERS_JSON
           value: '{"providers":[{"apiBaseUrl":"","id":"github-documented","repositories":["acme/platform"],"tokenSecret":{"key":"pat","name":"git-auth"},"type":"github"}]}'
 
+  - it: serializes a browser-facing Gitea URL separately from its API URL
+    set:
+      automation.providers:
+        - id: gitea-main
+          type: gitea
+          apiBaseUrl: http://gitea.git.svc.cluster.local:3000/api/v1
+          webBaseUrl: https://gitea.example.com
+          secretName: gitea-token
+          secretKey: token
+          repositoryAllowlist:
+            - acme/platform
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_PROVIDERS_JSON
+          value: '{"providers":[{"apiBaseUrl":"http://gitea.git.svc.cluster.local:3000/api/v1","id":"gitea-main","repositories":["acme/platform"],"tokenSecret":{"key":"token","name":"gitea-token"},"type":"gitea","webBaseUrl":"https://gitea.example.com"}]}'
+
   - it: renders an explicit empty provider registry by default
     templates:
       - templates/configmap.yaml

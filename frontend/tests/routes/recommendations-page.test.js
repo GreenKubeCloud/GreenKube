@@ -9,6 +9,7 @@ import * as api from '$lib/api.js';
 vi.mock('$lib/api.js', () => ({
 	getActiveRecommendations: vi.fn(),
 	getAppliedRecommendations: vi.fn(),
+	getAutomationStatus: vi.fn(),
 	getIgnoredRecommendations: vi.fn(),
 	getOpenPullRequests: vi.fn(),
 	getRecommendation: vi.fn(),
@@ -105,6 +106,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		vi.clearAllMocks();
 		api.getActiveRecommendations.mockResolvedValue([recommendation]);
 		api.getAppliedRecommendations.mockResolvedValue([]);
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, mode: 'inline' });
 		api.getIgnoredRecommendations.mockResolvedValue([]);
 		api.getOpenPullRequests.mockResolvedValue([]);
 		api.getRecommendationSavings.mockResolvedValue({});
@@ -122,6 +124,64 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			plan_id: 'pln-rollback',
 			rollback_of_plan_id: 'pln-101'
 		});
+	});
+
+	it('keeps recommendations visible but disables PR previews when automation is off', async () => {
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation()]);
+		api.getAutomationStatus.mockResolvedValue({ enabled: false, ready: false, mode: 'disabled' });
+
+		render(RecommendationsPage);
+
+		expect(
+			await screen.findByText(
+				'GitOps automation is disabled. Recommendations remain visible, but pull-request previews are unavailable; apply changes manually.'
+			)
+		).toBeInTheDocument();
+		expect(await screen.findByText('CPU usage is consistently low')).toBeInTheDocument();
+		expect(screen.getByText('Manual change required')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
+	});
+
+	it('shows readiness as pending instead of disabled while the status request is unresolved', async () => {
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation()]);
+		let resolveStatus;
+		api.getAutomationStatus.mockReturnValue(
+			new Promise((resolve) => {
+				resolveStatus = resolve;
+			})
+		);
+
+		render(RecommendationsPage);
+
+		expect(await screen.findByText('Checking GitOps automation readiness…')).toBeInTheDocument();
+		expect(
+			screen.queryByText(
+				'GitOps automation is disabled. Recommendations remain visible, but pull-request previews are unavailable; apply changes manually.'
+			)
+		).not.toBeInTheDocument();
+
+		await act(async () => {
+			resolveStatus({ enabled: false, ready: false, mode: 'disabled' });
+		});
+
+		expect(
+			await screen.findByText(
+				'GitOps automation is disabled. Recommendations remain visible, but pull-request previews are unavailable; apply changes manually.'
+			)
+		).toBeInTheDocument();
+	});
+
+	it('disables PR previews and reports an automation status failure without hiding recommendations', async () => {
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation()]);
+		api.getAutomationStatus.mockRejectedValue(new Error('status endpoint unavailable'));
+
+		render(RecommendationsPage);
+
+		expect(
+			await screen.findByText(/GitOps automation status is unavailable\. Pull-request previews are disabled/)
+		).toBeInTheDocument();
+		expect(await screen.findByText('CPU usage is consistently low')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
 	});
 
 	it('previews and approves a typed action using the server plan digest', async () => {
@@ -403,6 +463,44 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			expect(api.getAutomationOperation).toHaveBeenCalledWith('operation-1');
 			expect(screen.getByText(/Operation status: Running/)).toBeInTheDocument();
 			expect(screen.getByText('Plan lifecycle: Creating the pull request')).toBeInTheDocument();
+		} finally {
+			await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+			vi.clearAllTimers();
+			vi.useRealTimers();
+		}
+	});
+
+	it('refreshes the pull-request list when an operation opens a PR', async () => {
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation()]);
+		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
+		api.approveAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			status: 'approved',
+			operation_id: 'operation-1',
+			operation_status: 'queued'
+		});
+		api.getAutomationOperation.mockResolvedValueOnce({
+			operation_id: 'operation-1',
+			status: 'succeeded',
+			result: { plan_status: 'pr_open' }
+		});
+		api.getOpenPullRequests
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([{ recommendation_id: 101, status: 'open' }]);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		const approveButton = await screen.findByRole('button', { name: 'Approve plan' });
+
+		vi.useFakeTimers();
+		try {
+			await fireEvent.click(approveButton);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(3000);
+			});
+
+			expect(api.getOpenPullRequests).toHaveBeenCalledTimes(2);
+			expect(screen.getByRole('button', { name: 'Pull requests 1' })).toBeInTheDocument();
 		} finally {
 			await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 			vi.clearAllTimers();

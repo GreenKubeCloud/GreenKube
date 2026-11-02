@@ -44,6 +44,7 @@ Components:
   - keep automation disabled, or
   - set `rendererSandbox.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN` and validate the resulting boundary, or
   - leave rendering disabled and validate plans only through the API without applying them.
+- `rendererSandbox.egressFirewall.privilegedInitContainer` grants `NET_ADMIN` to a short-lived init container. Leave it disabled in production and enable it only after reviewing the cluster security model and validating the resulting egress boundary.
 - Metrics Server or another source of per-container CPU/memory for evidence, apply detection, and verification.
 - A GitHub, GitLab, or Gitea repository containing the workload manifests, plus a token with read/write repository and pull-request permissions.
 - A repository allowlist. An empty allowlist denies every repository.
@@ -89,9 +90,40 @@ Rules:
 - The Secret must be in the release namespace. Only the selected key is projected read-only into API/worker pods.
 - Provider credentials are never rendered into a ConfigMap and are never returned by the API.
 - For GitLab, `apiBaseUrl` can point at a self-managed instance. For Gitea, point it at the Gitea API root (for example `https://gitea.example.com/api/v1`).
+- Set `webBaseUrl` when GreenKube must reach Gitea through an in-cluster API URL but users open pull requests through a different browser-reachable URL. It must be an HTTP(S) origin (no repository path or `/api/v1`); it is used only for pull-request links.
 - `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped.
 
-### Signed webhooks (optional)
+## Create and validate a pull request
+
+After configuring a Git provider, repository allowlist, and secure renderer boundary:
+
+1. Check `GET /api/v1/automation/status`. Automation must be enabled and ready, the provider token must be configured, and the worker must be healthy.
+2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
+3. In **Recommendations**, choose a CPU or memory rightsizing recommendation marked **Container action ready**. Review its **Evidence** and check `GET /api/v1/recommendations/{id}/apply-pr/eligibility` before previewing.
+4. Select **Preview plan**. Review every policy check, source and rendered diff, validation result, and digest. Approve only the exact plan you intend to propose.
+5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
+
+### Pull-request eligibility and observability coverage
+
+Automation does not create a PR for every visible recommendation. By default, each recommendation in a plan must have at least **36 samples**, **50% evidence coverage** (`automation.policy.minCoverage: 0.5`), **60% confidence** (`automation.policy.minConfidence: 0.6`), and risk at or below `automation.policy.maxRiskLevel: medium`. A plan that groups multiple recommendations must satisfy the configured gates for the affected recommendations. Other checks include a resolved GitOps binding, a supported CPU/memory rightsizing action, no conflicting workload evidence, and the per-workload open-PR and cooldown limits.
+
+Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
+
+Inspect the recommendation's **Evidence** panel or read the recommendation and eligibility result through the API. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
+
+```bash
+REC_ID=123 # replace with the recommendation ID shown in GreenKube
+curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
+  "http://localhost:8000/api/v1/recommendations/${REC_ID}" |
+  jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}}'
+curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
+  "http://localhost:8000/api/v1/recommendations/${REC_ID}/apply-pr/eligibility" |
+  jq '{eligible, reason, code, policy_result}'
+```
+
+If a gate rejects the plan, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+
+## Signed webhooks (optional)
 
 Polling works without webhooks. Webhooks reduce latency for merge/close events:
 
@@ -252,6 +284,6 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
 - Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options.
-- Minikube does not enforce NetworkPolicy. Do not enable in-cluster rendering there unless you have validated an equivalent boundary.
+- If the CNI does not enforce NetworkPolicy, keep the renderer disabled unless you have independently validated an equivalent egress boundary.
 
 See the [API reference](api.md) for plan, GitOps, and webhook endpoints.

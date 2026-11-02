@@ -1,6 +1,7 @@
 # tests/api/test_automation_api.py
 """API tests for lifecycle events and the apply-pr automation endpoints."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -316,6 +317,45 @@ class TestApplyPrEndpoint:
         client, reco_repo, _, _ = automation_client
         response = client.get("/api/v1/recommendations/9999/pull-requests")
         assert response.status_code == 404
+
+    async def test_gitea_pull_request_urls_use_configured_web_base_url(self, automation_client, monkeypatch):
+        client, reco_repo, pr_repo, _ = automation_client
+        await reco_repo.save_recommendations([_record()])
+        rec_id = (await reco_repo.get_active_recommendations())[0].id
+        await pr_repo.save_pull_request(
+            PullRequestRecord(
+                recommendation_id=rec_id,
+                provider="gitea",
+                provider_id="minikube-gitea",
+                repo="greenkube/local-k8s",
+                pr_number=42,
+                pr_url="http://gitea-http.gitea.svc.cluster.local:3000/greenkube/local-k8s/pulls/42",
+                status=PullRequestStatus.OPEN,
+            )
+        )
+        monkeypatch.setenv(
+            "GITOPS_PROVIDERS_JSON",
+            json.dumps(
+                {
+                    "providers": [
+                        {
+                            "id": "minikube-gitea",
+                            "type": "gitea",
+                            "webBaseUrl": "http://127.0.0.1:18086",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        open_response = client.get("/api/v1/automation/pull-requests")
+        recommendation_response = client.get(f"/api/v1/recommendations/{rec_id}/pull-requests")
+
+        expected_url = "http://127.0.0.1:18086/greenkube/local-k8s/pulls/42"
+        assert open_response.status_code == 200
+        assert open_response.json()[0]["pr_url"] == expected_url
+        assert recommendation_response.status_code == 200
+        assert recommendation_response.json()[0]["pr_url"] == expected_url
 
     async def test_non_dry_run_approves_plan_and_returns_its_operation(self, automation_client):
         client, reco_repo, _, app = automation_client

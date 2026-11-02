@@ -107,6 +107,14 @@ If secrets.existingSecret is set, use that; otherwise use the chart-managed name
 {{- end -}}
 {{- end -}}
 
+{{- define "greenkube.configChecksum" -}}
+{{- $safeConfig := deepCopy .Values.config -}}
+{{- $_ := set $safeConfig "prometheus" (omit .Values.config.prometheus "url") -}}
+{{- $_ := set $safeConfig "opencost" (omit .Values.config.opencost "url") -}}
+{{- $config := dict "releaseName" .Release.Name "releaseNamespace" .Release.Namespace "profile" .Values.profile "config" $safeConfig "automation" .Values.automation "rendererSandbox" .Values.rendererSandbox "secretName" (include "greenkube.secretName" .) "kubeVersion" .Capabilities.KubeVersion.Version "apiVersions" .Capabilities.APIVersions -}}
+{{- toJson $config | sha256sum -}}
+{{- end -}}
+
 {{/*
 Project only the application Secret keys required by one component.
 */}}

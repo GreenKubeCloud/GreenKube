@@ -57,15 +57,19 @@ spec:
             - name: XTABLES_LOCKFILE
               value: /tmp/iptables.lock
           securityContext:
-            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
+            {{- if $root.Values.rendererSandbox.egressFirewall.privilegedInitContainer }}
+            privileged: true
+            {{- else }}
+            allowPrivilegeEscalation: false
             capabilities:
               drop:
                 - ALL
               add:
                 - NET_ADMIN
+            {{- end }}
             seccompProfile:
               type: RuntimeDefault
           resources:

@@ -21,6 +21,8 @@ spec:
       labels:
         {{- include "greenkube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: app
+      annotations:
+        checksum/config: {{ include "greenkube.configChecksum" . | quote }}
     spec:
       # Always wire the ServiceAccount the bindings refer to, even when the
       # chart does not create it (serviceAccount.create=false + name).

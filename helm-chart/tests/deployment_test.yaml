@@ -47,6 +47,27 @@ tests:
       - equal:
           path: apiVersion
           value: apps/v1
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: "^[0-9a-f]{64}$"
+
+  - it: restarts standalone automation workers when ConfigMap configuration changes
+    set:
+      automation.enabled: true
+      automation.mode: worker
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/automation-worker.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: "^[0-9a-f]{64}$"
 
   - it: should default to 1 replica
     templates:
