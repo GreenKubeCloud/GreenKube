@@ -17,6 +17,8 @@ spec:
       labels:
         {{- include "greenkube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: automation-worker
+      annotations:
+        checksum/config: {{ include "greenkube.configChecksum" . | quote }}
     spec:
       serviceAccountName: {{ include "greenkube.serviceAccountName" . }}
       automountServiceAccountToken: true

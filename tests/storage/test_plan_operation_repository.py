@@ -258,6 +258,30 @@ async def test_claim_is_exclusive_and_updates_worker_heartbeat(plan_operation_st
 
 
 @pytest.mark.asyncio
+async def test_idle_worker_claim_polls_refresh_its_heartbeat(plan_operation_store, monkeypatch):
+    repository, gitops_repository, _, _ = plan_operation_store
+    first_at = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(repository, "_now", lambda: first_at)
+
+    assert await repository.claim_next("idle-worker") is None
+    first_heartbeat = await gitops_repository.get_worker_heartbeat("idle-worker")
+    assert first_heartbeat is not None
+    assert first_heartbeat.status == "idle"
+
+    second_at = first_at + timedelta(seconds=5)
+    monkeypatch.setattr(repository, "_now", lambda: second_at)
+
+    assert await repository.claim_next("idle-worker") is None
+    refreshed_heartbeat = await gitops_repository.get_worker_heartbeat("idle-worker")
+
+    assert refreshed_heartbeat is not None
+    assert refreshed_heartbeat.status == "idle"
+    assert refreshed_heartbeat.heartbeat_at > first_heartbeat.heartbeat_at
+    assert refreshed_heartbeat.lease_id is None
+    assert refreshed_heartbeat.lease_expires_at is None
+
+
+@pytest.mark.asyncio
 async def test_stale_lease_is_reclaimed_and_old_owner_cannot_finish(plan_operation_store):
     repository, _, manager, backend = plan_operation_store
     plan = _plan()

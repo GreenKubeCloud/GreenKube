@@ -94,6 +94,33 @@ tests:
       - isNull:
           path: spec.template.spec.initContainers
 
+  - it: allows a privileged firewall init container for Minikube runtimes that deny NET_ADMIN
+    set:
+      automation.enabled: true
+      rendererSandbox.egressFirewall.enabled: true
+      rendererSandbox.egressFirewall.privilegedInitContainer: true
+      automation.providers:
+        - id: github-primary
+          type: github
+          secretName: git-auth
+          secretKey: token
+          repositoryAllowlist:
+            - acme/*
+    templates:
+      - templates/renderer-sandbox.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.initContainers[0].securityContext.privileged
+          value: true
+      - documentIndex: 0
+        notExists:
+          path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
+      - documentIndex: 0
+        matchRegex:
+          path: spec.template.spec.initContainers[0].args[0]
+          pattern: "iptables-legacy -w 10 -P OUTPUT DROP"
+
   - it: does not deploy the renderer when automation is disabled
     set:
       automation.enabled: false

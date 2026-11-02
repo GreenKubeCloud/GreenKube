@@ -142,6 +142,37 @@ def test_chart_provider_json_accepts_only_the_derived_token_file_path():
         parse_gitops_providers_json(json.dumps([provider]))
 
 
+def test_provider_json_accepts_a_public_gitea_web_base_url():
+    value = json.loads(_provider_json())
+    value["providers"][0].update(
+        {
+            "type": "gitea",
+            "webBaseUrl": "https://gitea.example.test",
+        }
+    )
+
+    parsed = parse_gitops_providers_json(json.dumps(value))
+
+    assert parsed[0].web_base_url == "https://gitea.example.test"
+
+
+@pytest.mark.parametrize(
+    "web_base_url",
+    [
+        "ftp://gitea.example.test",
+        "https://user:password@gitea.example.test",
+        "https://gitea.example.test/greenkube",
+        "https://gitea.example.test?token=secret",
+    ],
+)
+def test_provider_json_rejects_invalid_gitea_web_base_urls(web_base_url):
+    value = json.loads(_provider_json())
+    value["providers"][0].update({"type": "gitea", "webBaseUrl": web_base_url})
+
+    with pytest.raises(PlanRuntimeConfigurationError, match="web base URL"):
+        parse_gitops_providers_json(json.dumps(value))
+
+
 def test_unresolved_discovery_provider_id_is_reserved():
     value = json.loads(_provider_json())
     value["providers"][0]["id"] = "unresolved"

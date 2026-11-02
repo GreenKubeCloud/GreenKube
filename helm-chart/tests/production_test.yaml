@@ -29,6 +29,39 @@ tests:
         equal:
           path: metadata.name
           value: RELEASE-NAME-greenkube-automation
+      - documentIndex: 0
+        matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: "^[0-9a-f]{64}$"
+      - documentIndex: 1
+        matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: "^[0-9a-f]{64}$"
+      - documentIndex: 2
+        matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: "^[0-9a-f]{64}$"
+
+  - it: exposes worker-mode automation readiness to the production API
+    set:
+      profile: production
+      automation.enabled: true
+      automation.mode: worker
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "true"
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: worker
 
   - it: gives the API an HTTP port and the worker a scrape port
     set:

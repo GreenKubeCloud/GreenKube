@@ -11,7 +11,7 @@ For the full values reference, see the [Configuration reference](configuration.m
 | Requirement | Details |
 |---|---|
 | Kubernetes cluster | A cluster you can administer. The chart creates a `ClusterRole`/`ClusterRoleBinding` so GreenKube can read nodes, pods, workloads, and supported GitOps resources. |
-| Helm | Helm 3. |
+| Helm | Helm 3.10 or later (the upgrade examples use `--set-json`). |
 | kubectl | A version compatible with your cluster. |
 | Prometheus | Strongly recommended. GreenKube reads CPU, memory, network, disk, and restart metrics from Prometheus. Auto-discovery is attempted when `config.prometheus.url` is empty. |
 | Metrics Server | Optional but recommended. When `metrics.k8s.io` is available, GreenKube reads per-container CPU and memory for recommendation evidence and verification. |
@@ -72,8 +72,12 @@ This creates:
 ```bash
 kubectl -n greenkube get pods
 kubectl -n greenkube get jobs
-kubectl -n greenkube logs deploy/greenkube -c greenkube --tail=100
-kubectl -n greenkube logs deploy/greenkube -c greenkube-api --tail=100
+kubectl -n greenkube logs \
+  -l app.kubernetes.io/instance=greenkube,app.kubernetes.io/component=app \
+  -c greenkube --tail=100
+kubectl -n greenkube logs \
+  -l app.kubernetes.io/instance=greenkube,app.kubernetes.io/component=app \
+  -c greenkube-api --tail=100
 ```
 
 With the `production` profile, the component pods are named `<release>-api`, `<release>-controller`, and, when automation is enabled, `<release>-automation`. The migration Job must complete before the API is ready.
@@ -252,7 +256,7 @@ helm upgrade --install greenkube-dev greenkube/greenkube \
   --create-namespace \
   --set profile=standalone \
   --set config.environment=development \
-  --set config.clusterName=minikube \
+  --set config.clusterName=my-cluster \
   --set config.defaultZone=FR
 ```
 
@@ -303,6 +307,10 @@ config:
   apiAuthMode: api_key
   clusterName: prod-eu-west
   cloudProvider: aws
+
+automation:
+  enabled: false
+  mode: disabled
 
 production:
   migration:
@@ -427,11 +435,18 @@ Automation is disabled by default. To enable it you need:
 3. A Git provider token in a Kubernetes Secret.
 4. A repository allowlist for that provider.
 
+For provider configuration, Secret handling, PR eligibility, and supported source layouts, see [GitOps automation](automation.md). For production, use `profile: production` and `automation.mode: worker`; keep API/database credentials in a Kubernetes Secret or an external secret manager.
+
 Minimal provider setup:
 
 ```bash
+printf 'Git provider token: ' >&2
+IFS= read -r -s GIT_TOKEN
+printf '\n' >&2
 kubectl -n greenkube create secret generic greenkube-git \
-  --from-file=github-token=./github-token
+  --from-literal=token="${GIT_TOKEN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset GIT_TOKEN
 ```
 
 ```yaml
@@ -443,7 +458,7 @@ automation:
       type: github
       apiBaseUrl: https://api.github.com
       secretName: greenkube-git
-      secretKey: github-token
+      secretKey: token
       repositoryAllowlist:
         - "acme/gitops"
   policy:
@@ -474,15 +489,74 @@ The **Automation & GitOps** page in the dashboard shows controller capabilities,
 
 ## Upgrades and uninstallation
 
-Upgrade with the same values file:
+`helm upgrade` changes the existing release in place. Keep the release name, namespace, PostgreSQL PVC, and chart-managed Secret; do not uninstall between a source profile and its target. Create the Git provider Secret before changing automation from disabled to enabled. Use `--reuse-values` for the incremental transitions below so unrelated existing overrides are retained.
+
+The following matrix covers standalone/production and automation off/on. For targets with automation enabled, keep your provider configuration and Secret references in a complete values file and change only the target profile and mode.
+
+| Starting configuration | Target configuration | Target values |
+|---|---|---|
+| Standalone, automation off | Production, automation off | `profile=production`, `automation.enabled=false`, `automation.mode=disabled`, and an empty provider list |
+| Standalone, automation off | Standalone, automation on | Provider configuration and Secret references; `automation.enabled=true`, `profile=standalone`, `automation.mode=inline` |
+| Standalone, automation off | Production, automation on | The same provider configuration, with `profile=production`, `automation.mode=worker` |
+| Standalone, automation on | Production, automation off | `profile=production`, `automation.enabled=false`, `automation.mode=disabled`, and an empty provider list |
+| Standalone, automation on | Standalone, automation on | Reapply the same provider values; this is an idempotent upgrade |
+| Standalone, automation on | Production, automation on | Keep the provider configuration; set `profile=production`, `automation.mode=worker` |
+| Production, automation off | Production, automation off | Reapply the same production values; this is an idempotent upgrade |
+| Production, automation off | Standalone, automation on | Add provider configuration and Secret references; set `profile=standalone`, `automation.mode=inline` |
+| Production, automation off | Production, automation on | Add provider configuration and Secret references; set `automation.mode=worker` |
+
+Example: disable automation and switch to the production profile:
 
 ```bash
 helm upgrade greenkube greenkube/greenkube \
   --namespace greenkube \
-  -f production-values.yaml
+  --reuse-values \
+  --set profile=production \
+  --set automation.enabled=false \
+  --set automation.mode=disabled \
+  --set-json automation.providers=[] \
+  --wait \
+  --timeout 10m
+```
+
+Example: enable standalone automation with your provider values:
+
+```bash
+helm upgrade greenkube greenkube/greenkube \
+  --namespace greenkube \
+  --reuse-values \
+  -f automation-values.yaml \
+  --set profile=standalone \
+  --set automation.enabled=true \
+  --set automation.mode=inline \
+  --wait \
+  --timeout 10m
+```
+
+For production automation, use the same provider values file with `--set profile=production --set automation.mode=worker`. Keep existing custom settings in that file when upgrading.
+
+Before relying on an automation upgrade, verify the rollout and runtime readiness:
+
+```bash
+kubectl -n greenkube get pods,jobs
+```
+
+For the standalone profile, check `deployment/greenkube`. For production, check `deployment/greenkube-api` and `deployment/greenkube-controller`; also check `deployment/greenkube-automation` only when automation is enabled. The API health and automation status endpoints must be healthy before using the UI.
+
+```bash
+# Standalone
+kubectl -n greenkube rollout status deployment/greenkube --timeout=10m
+
+# Production
+kubectl -n greenkube rollout status deployment/greenkube-api --timeout=10m
+kubectl -n greenkube rollout status deployment/greenkube-controller --timeout=10m
+# Run only when automation.enabled=true:
+kubectl -n greenkube rollout status deployment/greenkube-automation --timeout=10m
 ```
 
 The chart preserves generated API keys, PostgreSQL passwords, and runtime service overrides that were written to the Secret.
+
+Changes to Helm-managed runtime configuration roll the standalone or production component Pods through a ConfigMap checksum. If you update an existing provider Secret or an API key outside Helm, restart the affected API/worker Pods so they reload the changed Secret values.
 
 Uninstall:
 
@@ -490,7 +564,15 @@ Uninstall:
 helm uninstall greenkube --namespace greenkube
 ```
 
-The bundled PostgreSQL PVC survives uninstallation. If the chart-managed Secret is missing as well (for example because it was created by an older chart version that tracked it as a regular resource, or because it was deleted manually), a reinstall generates a new password that cannot authenticate against the existing database. The pod then crash-loops with `password authentication failed for user "greenkube"`.
+The bundled PostgreSQL PVC survives uninstallation. For a clean reinstall, delete the release's PVC as well, then verify whether the storage class removed its PV:
+
+```bash
+kubectl -n greenkube delete pvc data-greenkube-postgres-0 --ignore-not-found --wait=true
+kubectl -n greenkube get pvc
+kubectl get pv
+```
+
+Only delete a remaining PV after checking its claim reference and reclaim policy. A storage class with reclaim policy `Delete` removes its PV after the claim is released; a class with `Retain` requires the storage administrator's cleanup procedure. If the chart-managed Secret is missing but the PostgreSQL PVC is kept, a reinstall may generate a new password that cannot authenticate against the existing database. The pod then crash-loops with `password authentication failed for user "greenkube"`.
 
 Either delete the volume for a clean install, or provide the existing database password before reinstalling:
 

@@ -360,7 +360,16 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             """
             INSERT INTO automation_worker_heartbeats (worker_id, status, heartbeat_at, updated_at)
             VALUES (?, 'idle', ?, ?)
-            ON CONFLICT (worker_id) DO NOTHING
+            ON CONFLICT (worker_id) DO UPDATE SET
+                status = 'idle',
+                heartbeat_at = excluded.heartbeat_at,
+                lease_id = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                lease_plan_operation_id = NULL,
+                updated_at = excluded.updated_at
+            WHERE automation_worker_heartbeats.lease_expires_at IS NULL
+               OR automation_worker_heartbeats.lease_expires_at <= excluded.heartbeat_at
             """,
             (worker_id, self._db_datetime(now), self._db_datetime(now)),
         )

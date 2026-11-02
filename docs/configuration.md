@@ -144,12 +144,16 @@ automation:
       type: github
       apiBaseUrl: https://api.github.com
       secretName: greenkube-git
-      secretKey: github-token
+      secretKey: token
       repositoryAllowlist:
         - "acme/gitops"
 ```
 
-Each provider needs a non-empty repository allowlist; an empty allowlist denies all repositories. Glob matching is segment-aware: `acme/*` matches `acme/repo`, not `acme/team/repo`. Only the provider ID, API base URL, Secret reference, and allowlist are rendered into the ConfigMap. The token stays in the referenced Kubernetes Secret and is mounted read-only at `/etc/greenkube/git-providers/<secret-name>/<secret-key>`; when `secretNamespace` is set, the mount path includes that namespace before the Secret name. The Secret must be in the Helm release namespace. Argo CD and Flux discovery select a configured provider only when its allowlist matches the source repository. Preview and approval remain unavailable for missing credentials, unsupported renderers, or ambiguous sources.
+Each provider needs a non-empty repository allowlist; an empty allowlist denies all repositories. Glob matching is segment-aware: `acme/*` matches `acme/repo`, not `acme/team/repo`. Only the provider ID, API/web base URLs, Secret reference, and allowlist are rendered into the ConfigMap. The token stays in the referenced Kubernetes Secret and is mounted read-only at `/etc/greenkube/git-providers/<secret-name>/<secret-key>`; when `secretNamespace` is set, the mount path includes that namespace before the Secret name. The Secret must be in the Helm release namespace. Argo CD and Flux discovery select a configured provider only when its allowlist matches the source repository. Preview and approval remain unavailable for missing credentials, unsupported renderers, or ambiguous sources.
+
+For Gitea, `webBaseUrl` is optional and must be an HTTP(S) origin, such as `https://gitea.example.com` (no repository path or `/api/v1`). Use it when `apiBaseUrl` addresses Gitea through an in-cluster Service but the frontend must link users to the browser-facing Gitea hostname.
+
+The chart adds a checksum of non-secret ConfigMap inputs to each application Pod template. Helm upgrades that change runtime configuration therefore roll the affected Pods; changes to externally managed Secret data still require an explicit restart when the application reads that value at startup.
 
 The nested `tokenSecret: {name, key, namespace}` form is also accepted for compatibility, and `repositories` is accepted as an alias for `repositoryAllowlist`. Do not mix conflicting flat and nested values.
 
@@ -228,7 +232,7 @@ Flux HelmRelease planning supports Git-owned release manifests and local charts 
 
 #### Isolated renderer (`rendererSandbox`)
 
-When automation is enabled, the chart runs Helm/Kustomize rendering in a separate `renderer-sandbox` Pod. It receives only a bounded repository snapshot; it does not mount provider or database Secrets and does not receive a Kubernetes service-account token. Its root filesystem is read-only and its process/resource/output limits are bounded. The renderer NetworkPolicy denies egress and allows requests only from GreenKube Pods; the cluster CNI must enforce NetworkPolicies before rendering is enabled. For clusters that permit `NET_ADMIN` but do not enforce NetworkPolicy, `rendererSandbox.egressFirewall.enabled` can install IPv4/IPv6 output-deny rules with a one-shot init container; the renderer process itself remains non-root with all capabilities dropped. If the configured boundary cannot be enforced, disable automation-backed rendering; the API/controller fails closed when no isolated renderer is available.
+When automation is enabled, the chart runs Helm/Kustomize rendering in a separate `renderer-sandbox` Pod. It receives only a bounded repository snapshot; it does not mount provider or database Secrets and does not receive a Kubernetes service-account token. Its root filesystem is read-only and its process/resource/output limits are bounded. The renderer NetworkPolicy denies egress and allows requests only from GreenKube Pods; the cluster CNI must enforce NetworkPolicies before rendering is enabled. For clusters that permit `NET_ADMIN` but do not enforce NetworkPolicy, `rendererSandbox.egressFirewall.enabled` can install IPv4/IPv6 output-deny rules with a one-shot init container; the renderer process itself remains non-root with all capabilities dropped. `rendererSandbox.egressFirewall.privilegedInitContainer` is an opt-in local-cluster workaround for runtimes that deny `NET_ADMIN` unless the init container is privileged. Do not enable it in production; use a NetworkPolicy-enforcing CNI instead. If the configured boundary cannot be enforced, disable automation-backed rendering; the API/controller fails closed when no isolated renderer is available.
 
 The default snapshot limits are 100 MiB compressed, 500 MiB extracted, 20,000 files, and 2 MiB per file. `rendererSandbox.tmpSizeLimit` bounds the renderer's temporary workspace. The service accepts only the pinned `helm` and `kustomize` commands. Kustomize `helmCharts` remain unsupported because their embedded Helm execution does not yet apply the direct Helm renderer's full safety checks.
 
@@ -242,6 +246,9 @@ rendererSandbox:
   replicas: 1
   servicePort: 8090
   tmpSizeLimit: 768Mi
+  egressFirewall:
+    enabled: false
+    privilegedInitContainer: false
   resources:
     requests:
       cpu: 100m
@@ -256,6 +263,8 @@ The local Bubblewrap backend is used only when no remote renderer URL is configu
 #### Automation policy (`automation.policy`)
 
 Policy is evaluated on preview/plan creation and revalidated on approval. Risk, confidence, sample/coverage, open-PR budget, cooldown, change-freeze labels, and absolute freeze windows are configurable. Discovery also supplies live workload labels, rollout-in-progress state, controller health/suspend state, and HPA/PDB interaction evidence. A configured freeze label blocks only matching workloads; rollout, controller-health, and HPA/PDB gates reject a plan when their evidence reports a conflict and report `not_available` when discovery cannot collect it. The defaults align with the recommendation sample threshold and require medium-or-lower risk, at least 0.6 confidence, 36 samples, and 50% coverage.
+
+`minCoverage` applies to the evidence attached to each recommendation: the observed CPU or memory samples divided by the expected observation points in that recommendation's window. `minSamples` is the minimum sample count for the recommendation. This is separate from GitOps discovery coverage (`GET /api/v1/gitops/status`), which measures resolved workload bindings. Lowering coverage or sample thresholds can make more PRs eligible but reduces the amount of observability backing each change.
 
 ```yaml
 automation:

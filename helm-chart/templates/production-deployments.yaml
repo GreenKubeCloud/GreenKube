@@ -28,6 +28,8 @@ spec:
       labels:
         {{- include "greenkube.selectorLabels" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $component }}
+      annotations:
+        checksum/config: {{ include "greenkube.configChecksum" $root | quote }}
     spec:
       serviceAccountName: {{ include "greenkube.componentServiceAccountName" (dict "context" $root "component" $component) }}
       # The API exposes Kubernetes-backed health and inventory endpoints, so it
@@ -97,7 +99,12 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" $root }}
           env:
-            {{- if eq $component "automation" }}
+            {{- if and (eq $component "api") $root.Values.automation.enabled (eq $automationMode "worker") }}
+            - name: AUTOMATION_ENABLED
+              value: "true"
+            - name: AUTOMATION_MODE
+              value: worker
+            {{- else if eq $component "automation" }}
             - name: AUTOMATION_ENABLED
               value: "true"
             - name: AUTOMATION_MODE

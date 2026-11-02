@@ -65,6 +65,7 @@ rendererSandbox:
   enabled: true
   egressFirewall:
     enabled: false
+    privilegedInitContainer: false
   replicas: 1
   servicePort: 8090
   tmpSizeLimit: 768Mi
