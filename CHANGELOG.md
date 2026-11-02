@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **GitOps recommendation readiness:** The recommendations page checks automation readiness before enabling PR previews, explains when manual application is needed, and refreshes PR status when an operation opens a pull request.
+- **Gitea web URL support:** `automation.providers[].webBaseUrl` supports a browser-facing Gitea origin distinct from its API URL, so returned PR links point to the configured web host.
+- **Renderer firewall option:** `rendererSandbox.egressFirewall.privilegedInitContainer` supports clusters that require a privileged init container to configure the sandbox egress firewall.
+- **Helm configuration rollouts:** API and automation Deployments now restart when the generated ConfigMap changes; in worker mode, the production API receives the automation settings needed to report readiness.
+
+### Fixed
+- **Automation worker heartbeat recovery:** Idle workers refresh their heartbeat and clear expired lease state without overwriting an active lease.
+
 ## [0.3.1] — 2026-10-25
 
 ### Added
