@@ -2,9 +2,9 @@
 
 # GreenKube
 
-**Measure, understand, and reduce the carbon footprint of your Kubernetes infrastructure.**
+**Optimize Kubernetes with risk-ranked recommendations and verified savings.**
 
-GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps, SRE, and FinOps teams workload-level carbon visibility and cost control — without complex setup or expensive SaaS tooling.
+GreenKube is an open-source Kubernetes optimization platform. It combines cluster data with recommendations from sources such as VPA, quantifies expected impact and operational risk, and ranks opportunities. Eligible recommendations become reviewable GitOps pull requests; once a PR is applied, GreenKube compares measured cost and CO₂e savings with estimates and maintains a complete, auditable ledger of outcomes. FinGreenOps is at GreenKube's core, balancing cost savings and carbon reduction.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Docker Pulls](https://img.shields.io/docker/pulls/greenkube/greenkube)](https://hub.docker.com/r/greenkube/greenkube) [![Build in Public](https://img.shields.io/badge/Build%20in%20Public-blueviolet)](CHANGELOG.md)
 
@@ -14,12 +14,11 @@ GreenKube is an open-source FinGreenOps platform for Kubernetes. It gives DevOps
 
 ## What it does
 
-- **Estimates** the energy consumption and CO₂e emissions of each Kubernetes workload, using CPU metrics from Prometheus and cloud instance power profiles.
-- **Visualises** those metrics in a web dashboard with per-pod data, node inventory, namespace breakdowns, and historical reports.
-- **Recommends** concrete optimizations to reduce cloud spend and carbon footprint — rightsizing, zombie pod cleanup, autoscaling candidates, orphaned PVs/LoadBalancers, and more.
-- **Verifies** recommendations after they land with post-apply health and savings checks, measured against the projected impact.
-- **Automates** eligible rightsizing changes through GitOps: GreenKube discovers Argo CD/Flux sources, renders and validates raw, Kustomize, or supported Helm changes, opens one atomic pull request, and tracks the merge through controller sync and apply detection.
-- **Integrates** with Prometheus and Grafana to expose GreenKube metrics alongside the rest of your cluster observability stack.
+- **Measures** the cost, energy consumption and CO₂e emissions of each Kubernetes workload.
+- **Ranks optimization opportunities** by expected cost, energy, carbon, and workload-health impact, with quantified operational risk.
+- **Makes recommendations actionable** through reviewable GitOps pull requests, tracked through merge, controller sync, and apply.
+- **Verifies outcomes** by comparing actual savings and workload health with initial estimates in an auditable recommendation ledger.
+- **Provides visibility** through workload, node, namespace, and historical views, plus Prometheus and Grafana integration.
 
 ---
 
