@@ -1719,7 +1719,7 @@
 					class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
 					value={sortMode}
 					on:change={(e) => changeSort(e.currentTarget.value)}
-					title="Ranking score is the server order. Profiles re-rank the top {PROFILE_RANK_LIMIT} recommendations."
+					title="Ranking score is the server order. Profiles re-rank the top {PROFILE_RANK_LIMIT} recommendations of the selected namespace; source, risk and capability filters do not narrow that top list, so other matches keep the server order below it."
 				>
 					{#each SORT_OPTIONS as option}
 						<option value={option.value}>{option.label}</option>
