@@ -26,6 +26,7 @@
 {{- $apiIngress := and $apiComponent $root.Values.config.api.enabled -}}
 {{- $workerIngress := and $workerComponent $root.Values.automation.enabled (eq $automationMode "worker") -}}
 {{- $customIngress := and $apiComponent $root.Values.monitoring.networkPolicy.additionalIngress -}}
+{{- $controllerIngress := or (eq $component "app") (eq $component "controller") -}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -42,7 +43,7 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  {{- if or $apiIngress $workerIngress $customIngress }}
+  {{- if or $apiIngress $workerIngress $customIngress $controllerIngress }}
   ingress:
     {{- if $apiIngress }}
     - from:
@@ -79,6 +80,19 @@ spec:
     {{- end }}
     {{- if and $apiComponent $root.Values.monitoring.networkPolicy.additionalIngress }}
     {{- toYaml $root.Values.monitoring.networkPolicy.additionalIngress | nindent 4 }}
+    {{- end }}
+    {{- if $controllerIngress }}
+    # Prometheus scrapes the controller's own control-loop metrics listener.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.monitoring.networkPolicy.prometheusNamespace | default "monitoring" }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: {{ include "greenkube.controllerMetricsPort" $root }}
     {{- end }}
   {{- end }}
   egress:

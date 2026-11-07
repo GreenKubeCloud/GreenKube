@@ -646,6 +646,15 @@ monitoring:
     # Name of the Prometheus ServiceAccount (for RBAC). Defaults to "prometheus-k8s".
     prometheusServiceAccount: prometheus-k8s
 
+  controllerMetrics:
+    # Port of the controller's authenticated /prometheus/metrics listener.
+    # The controller runs the scheduled recommendation scans, verification and
+    # collection, so their control-loop metrics (greenkube_optimization_runs_total,
+    # greenkube_last_successful_optimization_run_timestamp_seconds, ...) are
+    # served here, not by the API. A ClusterIP Service always exposes it; a
+    # dedicated ServiceMonitor is added when serviceMonitor.enabled is true.
+    port: 9102
+
   networkPolicy:
     # Create a NetworkPolicy allowing Prometheus to scrape GreenKube on the API port.
     enabled: false

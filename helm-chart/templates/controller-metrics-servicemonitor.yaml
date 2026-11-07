@@ -1,0 +1,32 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-controller" (include "greenkube.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: kube-prometheus
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller-metrics
+  endpoints:
+    - port: controller-metrics
+      path: /prometheus/metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
+      # The controller metrics endpoint uses the same bearer key as the API metrics endpoint.
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "greenkube.secretName" . }}
+          key: GREENKUBE_API_KEY
+{{- end }}

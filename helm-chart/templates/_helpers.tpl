@@ -144,7 +144,8 @@ Project only the application Secret keys required by one component.
     {{- $keys = append $keys $key -}}
   {{- end -}}
 {{- end -}}
-{{- if or (eq $component "api") (eq $component "automation") (eq $component "automation-worker") -}}
+{{- /* The controller authenticates scrapes of its own metrics listener. */ -}}
+{{- if or (eq $component "api") (eq $component "controller") (eq $component "automation") (eq $component "automation-worker") -}}
   {{- $keys = append $keys "GREENKUBE_API_KEY" -}}
 {{- end -}}
 {{- range $key := $keys }}
@@ -213,6 +214,25 @@ Validate and return the dedicated worker metrics port.
 {{- $port := int $rawPort -}}
 {{- if or (lt $port 1) (gt $port 65535) -}}
 {{- fail "automation.workerMetricsPort must be an integer between 1 and 65535" -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{/*
+Validate and return the controller metrics port. The standalone pod shares one
+network namespace between the controller and the API, so the ports must differ.
+*/}}
+{{- define "greenkube.controllerMetricsPort" -}}
+{{- $rawPort := .Values.monitoring.controllerMetrics.port | toString -}}
+{{- if not (regexMatch "^[0-9]+$" $rawPort) -}}
+{{- fail "monitoring.controllerMetrics.port must be an integer between 1 and 65535" -}}
+{{- end -}}
+{{- $port := int $rawPort -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail "monitoring.controllerMetrics.port must be an integer between 1 and 65535" -}}
+{{- end -}}
+{{- if and (ne .Values.profile "production") .Values.config.api.enabled (eq $port (int .Values.config.api.port)) -}}
+{{- fail "monitoring.controllerMetrics.port must differ from config.api.port" -}}
 {{- end -}}
 {{- $port -}}
 {{- end -}}

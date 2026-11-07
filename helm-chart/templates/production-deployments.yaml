@@ -148,6 +148,10 @@ spec:
             - name: LEADER_ELECTION_LEASE_NAMESPACE
               value: {{ $root.Release.Namespace | quote }}
             {{- end }}
+            {{- if eq $component "controller" }}
+            - name: GREENKUBE_CONTROLLER_METRICS_PORT
+              value: {{ include "greenkube.controllerMetricsPort" $root | quote }}
+            {{- end }}
           {{- if eq $component "api" }}
           ports:
             - name: http-api
@@ -157,6 +161,11 @@ spec:
           ports:
             - name: worker-metrics
               containerPort: {{ include "greenkube.workerMetricsPort" $root }}
+              protocol: TCP
+          {{- else if eq $component "controller" }}
+          ports:
+            - name: controller-metrics
+              containerPort: {{ include "greenkube.controllerMetricsPort" $root }}
               protocol: TCP
           {{- end }}
           {{- if eq $component "api" }}

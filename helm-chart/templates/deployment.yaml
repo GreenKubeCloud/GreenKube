@@ -113,7 +113,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-                
+            # Scans, verification and collection run here: serve their metrics.
+            - name: GREENKUBE_CONTROLLER_METRICS_PORT
+              value: {{ include "greenkube.controllerMetricsPort" . | quote }}
+          ports:
+            - name: controller-metrics
+              containerPort: {{ include "greenkube.controllerMetricsPort" . }}
+              protocol: TCP
+
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if .Values.collector.livenessProbe.enabled }}

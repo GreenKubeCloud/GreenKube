@@ -1,0 +1,235 @@
+suite: controller control-loop metrics
+templates:
+  - templates/deployment.yaml
+  - templates/production-deployments.yaml
+  - templates/controller-metrics-service.yaml
+  - templates/controller-metrics-servicemonitor.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: serves controller metrics from the standalone controller container
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: controller-metrics
+              containerPort: 9102
+              protocol: TCP
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_CONTROLLER_METRICS_PORT
+            value: "9102"
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: GREENKUBE_CONTROLLER_METRICS_PORT
+            value: "9102"
+
+  - it: serves controller metrics from the production controller deployment
+    set:
+      profile: production
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: controller
+      - documentIndex: 1
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_CONTROLLER_METRICS_PORT
+            value: "9102"
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].name
+          value: controller-metrics
+      - documentIndex: 0
+        notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_CONTROLLER_METRICS_PORT
+            value: "9102"
+
+  - it: uses a custom controller metrics port everywhere
+    set:
+      profile: production
+      monitoring.controllerMetrics.port: 9200
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+      - templates/controller-metrics-service.yaml
+      - templates/networkpolicy.yaml
+    asserts:
+      - template: templates/production-deployments.yaml
+        documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9200
+      - template: templates/controller-metrics-service.yaml
+        equal:
+          path: spec.ports[0].port
+          value: 9200
+      - template: templates/networkpolicy.yaml
+        documentIndex: 1
+        equal:
+          path: spec.ingress[0].ports[0].port
+          value: 9200
+
+  - it: renders an internal controller metrics Service for the standalone pod
+    templates:
+      - templates/controller-metrics-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: controller-metrics
+      - equal:
+          path: spec.ports[0].targetPort
+          value: controller-metrics
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: app
+
+  - it: selects the production controller pods
+    set:
+      profile: production
+    templates:
+      - templates/controller-metrics-service.yaml
+    asserts:
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: controller
+
+  - it: keeps the controller metrics Service when the API is disabled
+    set:
+      config.api.enabled: false
+    templates:
+      - templates/controller-metrics-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: does not render the controller ServiceMonitor when monitoring is disabled
+    templates:
+      - templates/controller-metrics-servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: scrapes the controller with the API bearer key when monitoring is enabled
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: observability
+      secrets.existingSecret: shared-greenkube-secrets
+    templates:
+      - templates/controller-metrics-servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.namespace
+          value: observability
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: controller-metrics
+      - equal:
+          path: spec.endpoints[0].port
+          value: controller-metrics
+      - equal:
+          path: spec.endpoints[0].path
+          value: /prometheus/metrics
+      - equal:
+          path: spec.endpoints[0].authorization.type
+          value: Bearer
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: shared-greenkube-secrets
+            key: GREENKUBE_API_KEY
+
+  - it: scrapes the controller even when the API is disabled
+    set:
+      monitoring.serviceMonitor.enabled: true
+      config.api.enabled: false
+    templates:
+      - templates/controller-metrics-servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+
+  - it: lets Prometheus reach the standalone controller listener
+    set:
+      monitoring.networkPolicy.enabled: true
+      monitoring.networkPolicy.prometheusNamespace: observability
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: app
+      - contains:
+          path: spec.ingress
+          content:
+            from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: observability
+                podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: prometheus
+            ports:
+              - protocol: TCP
+                port: 9102
+
+  - it: lets Prometheus reach only the controller metrics port on production controllers
+    set:
+      profile: production
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: controller
+      - documentIndex: 1
+        equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: monitoring
+                  podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: prometheus
+              ports:
+                - protocol: TCP
+                  port: 9102
+
+  - it: validates the controller metrics port
+    set:
+      monitoring.controllerMetrics.port: 65536
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: monitoring.controllerMetrics.port must be an integer between 1 and 65535
+
+  - it: rejects a controller metrics port that collides with the API in the standalone pod
+    set:
+      monitoring.controllerMetrics.port: 8000
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: monitoring.controllerMetrics.port must differ from config.api.port
