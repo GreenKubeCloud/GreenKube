@@ -171,7 +171,7 @@ All node metrics share labels `node`, `instance_type`, `zone`, `region`, `cloud_
 | `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations. `sort_metric` is `co2` or `cost`; `value_metric` is `co2e_grams` or `cost_dollars` so Grafana can display both projected annual savings values for each ranked action |
 | `greenkube_co2e_savings_attributed_grams_total` | `cluster`, `recommendation_type`, `method` | **Counter.** CO₂e accrued in the savings ledger since installation (g). `method` is `projected`, `measured` or `user_declared`; only `measured` is realized savings |
 | `greenkube_cost_savings_attributed_dollars_total` | `cluster`, `recommendation_type`, `method` | **Counter.** Cost accrued in the savings ledger since installation ($) |
-| `greenkube_co2e_savings_reversed_grams_total` | `cluster`, `recommendation_type`, `method` | **Counter.** CO₂e reversed: accruals superseded by a rollback review and negative declared savings (g). Net savings = attributed − reversed |
+| `greenkube_co2e_savings_reversed_grams_total` | `cluster`, `recommendation_type`, `method` | **Counter.** CO₂e reversed (g): every superseded accrual (for example after a rollback review) plus negative accruals such as negative declared savings. Net savings = attributed − reversed |
 | `greenkube_cost_savings_reversed_dollars_total` | `cluster`, `recommendation_type`, `method` | **Counter.** Cost reversed ($) |
 | `greenkube_savings_run_rate_annual_co2e_grams` | `cluster`, `method` | Current annual CO₂e savings rate of applied recommendations, by method (g/year) |
 | `greenkube_savings_run_rate_annual_cost_dollars` | `cluster`, `method` | Current annual cost savings rate of applied recommendations, by method ($/year) |
@@ -201,6 +201,8 @@ These gauges are refreshed on every Prometheus scrape and serve the `$dashboard_
 > `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` are monotonic counters computed from the append-only ledger; `increase()` and `rate()` work on them. Subtract the `*_reversed_*_total` counters for net savings, and always filter on `method`.
 >
 > The `greenkube_cluster_co2e_saved_grams_total` / `greenkube_cluster_cost_saved_dollars_total` cluster metrics are *annual projections* only.
+>
+> Savings accrue on one-hour slots, so the savings gauges and counters (ledger counters, run rates and dashboard savings windows) are reloaded from the database at most once every 60 seconds per API process; scrapes in between reuse the previous values.
 
 ### Optimization control-loop metrics
 

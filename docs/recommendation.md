@@ -194,7 +194,7 @@ Key recommendation metrics:
 | `greenkube_recommendations_implemented_total` | Applied recommendation count by namespace and type. |
 | `greenkube_co2e_savings_attributed_grams_total` | Counter: CO2e accrued in the ledger, by recommendation type and `method` (`projected`, `measured`, `user_declared`). Never decreases. |
 | `greenkube_cost_savings_attributed_dollars_total` | Counter: cost accrued in the ledger, by recommendation type and `method`. Never decreases. |
-| `greenkube_co2e_savings_reversed_grams_total` / `greenkube_cost_savings_reversed_dollars_total` | Counters of reversals (accruals superseded by a rollback review, negative declarations). Net = attributed − reversed. |
+| `greenkube_co2e_savings_reversed_grams_total` / `greenkube_cost_savings_reversed_dollars_total` | Counters of reversals: every superseded accrual (for example after a rollback review) plus negative accruals such as negative declared savings. Net = attributed − reversed. |
 | `greenkube_savings_run_rate_annual_co2e_grams` / `..._cost_dollars` | Current annual savings rate of applied recommendations, by `method`. |
 | `greenkube_dashboard_savings_co2e_grams_total` | Realized (measured) CO2e savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
 | `greenkube_dashboard_savings_cost_dollars_total` | Realized (measured) cost savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
@@ -204,7 +204,7 @@ The Grafana dashboard uses `greenkube_top_recommendations` in the Actionable Rec
 
 ## Realized Savings
 
-Applying a recommendation records its annual savings estimate on the recommendation row. If the apply request includes explicit `carbon_saved_co2e_grams` or `cost_saved`, they are validated as user-declared savings (finite, at most 10× the projection, negative values flagged) and stored under `baseline.user_declared_savings`.
+Applying a recommendation records its annual savings estimate on the recommendation row. If the apply request includes explicit `carbon_saved_co2e_grams` or `cost_saved`, they are validated as user-declared savings (finite, at most 10× the projection, negative values flagged) and stored under `baseline.user_declared_savings`. Declared values never replace the projection stored on the recommendation row, which is always computed server-side as described below. If the declaration cannot be stored after the recommendation was applied, the API answers `503` and the recommendation keeps accruing its projection only.
 
 When explicit savings are omitted:
 
@@ -218,10 +218,10 @@ Applied recommendations can later be refreshed when the same issue is observed a
 
 ### Savings ledger
 
-The `SavingsAttributor` turns annual savings rates into *accruals* on a fixed UTC grid of one-hour slots: `accrual = annual rate × seconds of the slot after apply ÷ seconds per year`. The slot in which a change was applied is accrued pro rata.
+The `SavingsAttributor` turns annual savings rates into *accruals* on a fixed UTC grid of one-hour slots: `accrual = annual rate × seconds of the slot after apply ÷ seconds per year`. The slot in which a change was applied is accrued pro rata, and so is the slot in which it was verified: the projection accrues until `verified_at` and the measured savings after it.
 
-- **Idempotent.** Rows are keyed by `(recommendation_id, measurement_method, slot_start)`. The `accrual_watermarks` table stores the end of the last accrued slot; each run accrues every complete slot after it and advances it with a compare-and-swap in the same transaction as the inserts. Restarts, retries and a second controller cannot double count, and slots missed during downtime are backfilled (up to 7 days on the first run after an upgrade, at most 168 slots per run).
-- **Append-only.** Ledger rows are never compressed, overwritten or deleted. Hourly rollups are read-side views (`savings_ledger_entries`, `savings_ledger_hourly_rollup`). Hourly rows written by the compression job of earlier releases are kept and flagged `legacy_compressed`; the savings API adds a `legacy_compressed` diagnostic when a window includes them, because part of their value was lost (BUG-32).
+- **Idempotent.** Rows are keyed by `(recommendation_id, measurement_method, slot_start)`. The `accrual_watermarks` table stores the end of the last accrued slot; each run accrues every complete slot after it and advances it with a compare-and-swap in the same transaction as the inserts. Restarts, retries and a second controller cannot double count, and slots missed during downtime are backfilled (up to 7 days on the first run after an upgrade, at most 168 slots per run). A recommendation that has never accrued, for example a change detected after its `applied_at`, is also caught up for the slots since `applied_at` that are already behind the watermark (up to 7 days).
+- **Append-only.** Ledger rows are never compressed, overwritten or deleted. Hourly rollups are read-side views (`savings_accruals_v1`, `savings_accruals_v1_hourly_rollup`). Hourly rows written by the compression job of earlier releases are kept and flagged `legacy_compressed`; the savings API adds a `legacy_compressed` diagnostic when a window includes them, because part of their value was lost (BUG-32).
 - **Methods are never mixed.** `applied`/`verifying` records whose verification is pending accrue `projected` savings (or `user_declared` for declared quantities); `verified` records accrue `measured` savings. Records that are not realized, inconclusive, failed, in rollback review or reverted accrue nothing. When a recommendation enters `rollback_review`, its prior rows are flagged `superseded=true` (never deleted).
 - **Isolated failures.** Each recommendation is processed on its own; an invalid one (non-finite values, missing `applied_at`) increments `greenkube_attribution_errors_total{reason}` and never blocks the others.
 
