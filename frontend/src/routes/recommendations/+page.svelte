@@ -965,6 +965,12 @@
 
 	const DISCARDABLE_PLAN_STATUSES = ['draft', 'validated'];
 
+	// Plans whose approval was requested from this page. They are never
+	// discarded: the approval may still be in flight (the dialog can close or
+	// the page unmount meanwhile), and its outcome is ambiguous after a network
+	// or gateway error. An unapproved leftover expires or is superseded (D6).
+	const approvalRequestedPlanIds = new Set();
+
 	/**
 	 * Discard an unapproved preview when its dialog closes, so previewing the
 	 * same workload again is not blocked by WORKLOAD_PLAN_ALREADY_EXISTS (D6).
@@ -973,7 +979,8 @@
 	function discardPreviewPlan(plan = prPlan, approval = planApproval) {
 		if (!plan || approval) return;
 		const preview = planPresentation(plan);
-		if (!preview.planId || !DISCARDABLE_PLAN_STATUSES.includes(preview.status)) return;
+		if (!preview.planId || approvalRequestedPlanIds.has(preview.planId)) return;
+		if (!DISCARDABLE_PLAN_STATUSES.includes(preview.status)) return;
 		Promise.resolve()
 			.then(() => discardAutomationPlan(preview.planId))
 			.catch(() => {});
@@ -1007,6 +1014,7 @@
 		planFeedback = '';
 		planPollingError = '';
 		planApproval = null;
+		if (preview.planId) approvalRequestedPlanIds.add(preview.planId);
 		try {
 			const result = await approveAutomationPlan(preview.planId, preview.digest);
 			if (prModal !== modal) return;

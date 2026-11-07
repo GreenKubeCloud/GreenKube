@@ -428,6 +428,63 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 		expect(api.discardAutomationPlan).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		['the Close button', () => fireEvent.click(screen.getByRole('button', { name: 'Close' }))],
+		['Escape', () => fireEvent.keyDown(window, { key: 'Escape' })]
+	])('never discards a plan whose approval is in flight when closed with %s', async (_label, close) => {
+		let resolveApproval;
+		api.approveAutomationPlan.mockReturnValue(
+			new Promise((resolve) => {
+				resolveApproval = resolve;
+			})
+		);
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await vi.waitFor(() => expect(api.approveAutomationPlan).toHaveBeenCalledWith('pln-1', 'sha256:digest'));
+
+		await close();
+		resolveApproval({ ...validatedPlan, status: 'approved' });
+		await vi.waitFor(() => expect(screen.queryByText('Review automation plan')).not.toBeInTheDocument());
+		await act(async () => {
+			await Promise.resolve();
+		});
+
+		expect(api.discardAutomationPlan).not.toHaveBeenCalled();
+	});
+
+	it('never discards a plan whose approval is in flight when the page is left', async () => {
+		api.approveAutomationPlan.mockReturnValue(new Promise(() => {}));
+		const { unmount } = render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await vi.waitFor(() => expect(api.approveAutomationPlan).toHaveBeenCalled());
+
+		unmount();
+		await act(async () => {
+			await Promise.resolve();
+		});
+
+		expect(api.discardAutomationPlan).not.toHaveBeenCalled();
+	});
+
+	it('never discards a plan once its approval was requested, even if the approval failed', async () => {
+		api.approveAutomationPlan.mockRejectedValue(
+			Object.assign(new Error('Approval could not be confirmed.'), { status: 503 })
+		);
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await screen.findByText(/Approval could not be confirmed/);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+		await act(async () => {
+			await Promise.resolve();
+		});
+
+		expect(api.discardAutomationPlan).not.toHaveBeenCalled();
+	});
+
 	it('closes the dialog even when the preview cannot be discarded', async () => {
 		api.discardAutomationPlan.mockRejectedValue(Object.assign(new Error('Conflict'), { status: 409 }));
 		render(RecommendationsPage);
