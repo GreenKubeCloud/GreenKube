@@ -10,16 +10,22 @@ from typing import List, Optional
 from .. import __version__
 from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
-from ..collectors.opencost_collector import OpenCostCollector
+from ..collectors.opencost_collector import OpenCostCollector, opencost_step_share
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..core.calculator import CarbonCalculator
 from ..core.config import Config, get_config
-from ..core.metric_assembler import MetricAssembler
+from ..core.metric_assembler import (
+    MetricAssembler,
+    cost_fields,
+    power_source_for_profile,
+    provenance_estimation_reasons,
+)
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
+from ..models.provenance import UsageSource
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
@@ -252,10 +258,10 @@ class HistoricalRangeProcessor:
 
         # Cost data
         range_seconds = (end_dt - start_dt).total_seconds()
-        steps_in_range = max(range_seconds / chosen_step_sec, 1)
         try:
-            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
-            cost_map = {c.pod_name: c for c in cost_metrics}
+            # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
+            cost_metrics = await self.opencost_collector.collect_range(start=start_dt, end=end_dt)
+            cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}
         except Exception:
             cost_map = {}
 
@@ -515,8 +521,12 @@ class HistoricalRangeProcessor:
                 if carbon_result is None:
                     skipped_carbon += 1
 
-                cost_metric = cost_map.get(pod_name)
-                total_cost = cost_metric.total_cost / steps_in_range if cost_metric else self._config.DEFAULT_COST
+                cost_metric = cost_map.get((em_namespace, pod_name))
+                costs = cost_fields(
+                    cost_metric,
+                    opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
+                    self._config.DEFAULT_COST,
+                )
 
                 # Reuse the shared estimation-flags builder
                 is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
@@ -541,11 +551,24 @@ class HistoricalRangeProcessor:
                 )
                 if carbon_result:
                     _ni = nodes_info.get(node_name)
+                    power_source = getattr(em, "power_source", None)
+                    if not isinstance(power_source, str):
+                        power_source = power_source_for_profile(estimator, profile_for_node(node_name, ts))
+                    intensity_source = getattr(carbon_result, "intensity_source", None)
+                    if not isinstance(intensity_source, str):
+                        intensity_source = None
+                    fallback_reasons = provenance_estimation_reasons(intensity_source, power_source)
+                    if fallback_reasons:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
                     aggregate_metric = CombinedMetric(
                         pod_name=pod_name,
                         namespace=em_namespace,
                         period=None,
-                        total_cost=total_cost,
+                        **costs,
+                        usage_source=UsageSource.PROMETHEUS.value,
+                        power_source=power_source,
+                        intensity_source=intensity_source,
                         timestamp=ts,
                         duration_seconds=chosen_step_sec,
                         grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,

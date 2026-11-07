@@ -4,23 +4,97 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from .. import __version__
 from ..collectors.base_electricity_provider import BaseElectricityProvider
 from ..core.calculator import CarbonCalculator
 from ..core.config import Config, get_config
-from ..core.cost_normalizer import CostNormalizer
 from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
+from ..models.provenance import IntensitySource, PowerSource, UsageSource, cost_source_for
 from ..storage.base_repository import CarbonIntensityRepository
 from ..utils.date_utils import parse_iso_date
 
 logger = logging.getLogger(__name__)
+
+
+#: Intensity provenance values that mean the figure is not a fresh provider value.
+_DEFAULTED_INTENSITY = {
+    IntensitySource.ZONE_DEFAULT.value: "zone default",
+    IntensitySource.GLOBAL_DEFAULT.value: "global default (DEFAULT_INTENSITY)",
+    IntensitySource.STALE.value: "stale stored value (older than INTENSITY_MAX_AGE)",
+}
+
+
+def lookup_cost(cost_map: Mapping[Any, CostMetric], namespace: str, pod_name: str) -> Optional[CostMetric]:
+    """Return the cost of ``(namespace, pod_name)``.
+
+    Maps are keyed by ``(namespace, pod)`` (A4, BUG-04). A legacy map keyed by
+    pod name alone is only honoured when the entry belongs to the same
+    namespace, so same-named pods never borrow each other's cost.
+    """
+    cost = cost_map.get((namespace, pod_name))
+    if cost is not None:
+        return cost
+    legacy = cost_map.get(pod_name)
+    if legacy is not None and getattr(legacy, "namespace", namespace) == namespace:
+        return legacy
+    return None
+
+
+def cost_fields(cost: Optional[CostMetric], share: float, default_cost: float) -> Dict[str, Any]:
+    """Return the cost columns of a row from an allocation and the share of it the row covers."""
+    if cost is None:
+        return {
+            "total_cost": default_cost,
+            "cost_cpu": None,
+            "cost_ram": None,
+            "cost_storage": None,
+            "cost_network": None,
+            "cost_lb": None,
+            "cost_source": cost_source_for(False, default_cost).value,
+        }
+    return {
+        "total_cost": cost.total_cost * share,
+        "cost_cpu": cost.cpu_cost * share,
+        "cost_ram": cost.ram_cost * share,
+        "cost_storage": cost.storage_cost * share,
+        "cost_network": cost.network_cost * share,
+        "cost_lb": cost.lb_cost * share,
+        "cost_source": cost.source or cost_source_for(True, default_cost).value,
+    }
+
+
+def power_source_for_profile(estimator: Any, profile: Any) -> str:
+    """Classify the power profile an energy estimate used (``power_source``)."""
+    if profile is None or profile is getattr(estimator, "DEFAULT_INSTANCE_PROFILE", None):
+        return PowerSource.DEFAULT_PROFILE.value
+    profiles = getattr(estimator, "instance_profiles", None) or {}
+    if any(profile is candidate for candidate in profiles.values()):
+        return PowerSource.INSTANCE_PROFILE.value
+    return PowerSource.NODE_CAPACITY_DERIVED.value
+
+
+def provenance_estimation_reasons(intensity_source: Optional[str], power_source: Optional[str]) -> List[str]:
+    """Explain intensity and power fallbacks in the legacy ``estimation_reasons`` list."""
+    reasons: List[str] = []
+    if intensity_source in _DEFAULTED_INTENSITY:
+        reasons.append(f"Carbon intensity uses the {_DEFAULTED_INTENSITY[intensity_source]}")
+    if power_source == PowerSource.DEFAULT_PROFILE.value:
+        reasons.append("Node power profile unknown; used the default instance profile")
+    return reasons
+
+
+def _weights(values: Sequence[Optional[float]]) -> Optional[List[float]]:
+    if any(value is None for value in values):
+        return None
+    weights = [max(float(value or 0), 0.0) for value in values]
+    return weights if sum(weights) > 0 else None
 
 
 class MetricAssembler:
@@ -199,7 +273,7 @@ class MetricAssembler:
     async def assemble(
         self,
         energy_metrics: List[EnergyMetric],
-        cost_map: Dict[str, CostMetric],
+        cost_map: Mapping[Any, CostMetric],
         pod_request_map: dict,
         node_contexts: Dict[str, NodeZoneContext],
         nodes_info: Dict[str, NodeInfo],
@@ -218,9 +292,13 @@ class MetricAssembler:
             namespace = energy_metric.namespace
             pod_key = (namespace, pod_name)
 
-            # Cost
-            cost_metric = cost_map.get(pod_name)
-            total_cost = CostNormalizer.per_step_cost(cost_map, pod_name, steps_per_day)
+            # Cost — keyed by (namespace, pod) so same-named pods never collide (BUG-04).
+            cost_metric = lookup_cost(cost_map, namespace, pod_name)
+            costs = cost_fields(
+                cost_metric,
+                1.0 / steps_per_day if steps_per_day else 1.0,
+                self._config.DEFAULT_COST,
+            )
 
             # Pod requests
             pod_requests = pod_request_map.get(pod_key, {"cpu": 0, "memory": 0})
@@ -299,18 +377,35 @@ class MetricAssembler:
                         final_co2,
                     )
 
+                intensity_source = getattr(carbon_result, "intensity_source", None)
+                if not isinstance(intensity_source, str):
+                    intensity_source = None
+                power_source = energy_metric.power_source
+                fallback_reasons = provenance_estimation_reasons(intensity_source, power_source)
+                if fallback_reasons:
+                    is_estimated = True
+                    estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
+                cpu_usage = resource_maps.cpu_usage_map.get(pod_key)
+                memory_usage = resource_maps.memory_usage_map.get(pod_key)
                 combined = CombinedMetric(
                     pod_name=pod_name,
                     namespace=namespace,
-                    total_cost=total_cost,
+                    **costs,
+                    usage_source=(
+                        UsageSource.PROMETHEUS.value
+                        if cpu_usage is not None or memory_usage is not None
+                        else UsageSource.NONE.value
+                    ),
+                    power_source=power_source,
+                    intensity_source=intensity_source,
                     co2e_grams=final_co2,
                     pue=pue,
                     grid_intensity=carbon_result.grid_intensity,
                     joules=final_joules,
                     cpu_request=pod_requests["cpu"],
                     memory_request=pod_requests["memory"],
-                    cpu_usage_millicores=resource_maps.cpu_usage_map.get(pod_key),
-                    memory_usage_bytes=resource_maps.memory_usage_map.get(pod_key),
+                    cpu_usage_millicores=cpu_usage,
+                    memory_usage_bytes=memory_usage,
                     network_receive_bytes=resource_maps.network_rx_map.get(pod_key),
                     network_transmit_bytes=resource_maps.network_tx_map.get(pod_key),
                     disk_read_bytes=resource_maps.disk_read_map.get(pod_key),
@@ -347,10 +442,18 @@ class MetricAssembler:
         pod_metrics: Sequence[PodMetric],
         resource_maps: PodResourceMaps,
     ) -> List[CombinedMetric]:
-        """Build container-scoped records while leaving pod aggregates unchanged."""
+        """Build container-scoped records while leaving pod aggregates unchanged.
+
+        Container rows inherit the provenance of their pod aggregate (A11): an
+        OpenCost-priced, Prometheus-measured pod yields trusted container rows,
+        not blanket "estimated" ones (BUG-29). CPU cost follows the CPU share,
+        RAM cost follows the memory share; classic init containers get no row.
+        """
         containers_by_pod: dict[tuple[str, str], list[PodMetric]] = {}
         for pod_metric in pod_metrics:
             if not pod_metric.container_name or pod_metric.container_name.strip() != pod_metric.container_name:
+                continue
+            if pod_metric.kind == "init":
                 continue
             key = (pod_metric.namespace, pod_metric.pod_name)
             containers_by_pod.setdefault(key, []).append(pod_metric)
@@ -393,16 +496,44 @@ class MetricAssembler:
             if sum(cpu_weights) == 0:
                 cpu_weights = [1] * len(containers)
             total_weight = sum(cpu_weights)
+            memory_weights = (
+                _weights([resource_maps.container_memory_usage_map.get(key) for key in container_keys])
+                or _weights([item.memory_request for item in containers])
+                or cpu_weights
+            )
+            total_memory_weight = sum(memory_weights)
+            has_components = aggregate.cost_cpu is not None or aggregate.cost_ram is not None
 
-            for pod_metric, container_key, weight in zip(containers, container_keys, cpu_weights, strict=True):
+            for pod_metric, container_key, weight, memory_weight in zip(
+                containers, container_keys, cpu_weights, memory_weights, strict=True
+            ):
                 share = weight / total_weight
-                estimation_reason = "Container cost, energy, and carbon values are allocated from pod-level aggregates."
-                estimation_reasons = list(dict.fromkeys([*aggregate.estimation_reasons, estimation_reason]))
+                memory_share = memory_weight / total_memory_weight
+                if has_components:
+                    cost_cpu = (aggregate.cost_cpu or 0.0) * share
+                    cost_ram = (aggregate.cost_ram or 0.0) * memory_share
+                    other_cost = aggregate.total_cost - (aggregate.cost_cpu or 0.0) - (aggregate.cost_ram or 0.0)
+                    total_cost = cost_cpu + cost_ram + other_cost * share
+                else:
+                    cost_cpu = cost_ram = None
+                    total_cost = aggregate.total_cost * share
                 container_metrics.append(
                     aggregate.model_copy(
                         update={
                             "container_name": pod_metric.container_name,
-                            "total_cost": aggregate.total_cost * share,
+                            "total_cost": total_cost,
+                            "cost_cpu": cost_cpu,
+                            "cost_ram": cost_ram,
+                            "cost_storage": None if aggregate.cost_storage is None else aggregate.cost_storage * share,
+                            "cost_network": None if aggregate.cost_network is None else aggregate.cost_network * share,
+                            "cost_lb": None if aggregate.cost_lb is None else aggregate.cost_lb * share,
+                            "usage_source": (
+                                UsageSource.METRICS_SERVER.value
+                                if container_key in resource_maps.container_timestamp_map
+                                else (aggregate.usage_source or UsageSource.PROMETHEUS.value)
+                            ),
+                            "cpu_limit": pod_metric.cpu_limit,
+                            "memory_limit": pod_metric.memory_limit,
                             "co2e_grams": aggregate.co2e_grams * share,
                             "embodied_co2e_grams": (aggregate.embodied_co2e_grams or 0.0) * share,
                             "joules": aggregate.joules * share,
@@ -430,8 +561,8 @@ class MetricAssembler:
                             "sample_count": resource_maps.container_sample_count_map.get(
                                 container_key, aggregate.sample_count
                             ),
-                            "is_estimated": True,
-                            "estimation_reasons": estimation_reasons,
+                            "is_estimated": aggregate.is_estimated,
+                            "estimation_reasons": list(aggregate.estimation_reasons),
                         }
                     )
                 )
