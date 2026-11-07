@@ -5,6 +5,7 @@ processes sharing the database file (API replicas and the controller).
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
@@ -19,6 +20,8 @@ from greenkube.models.optimization_run import (
     SourceRunOutcome,
 )
 from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository, bounded_run_limit
+
+logger = logging.getLogger(__name__)
 
 _INSERT_COLUMNS = (
     "status, namespace, trigger_type, requested_by, requested_at, started_at, completed_at, claimed_by, "
@@ -136,10 +139,11 @@ class SQLiteOptimizationRunRepository(OptimizationRunRepository):
 
     async def finish(self, run_id: int, completion: OptimizationRunCompletion) -> OptimizationRun:
         async with self.db_manager.connection_scope() as conn:
-            await conn.execute(
+            cursor = await conn.execute(
                 """UPDATE optimization_runs SET status=?, completed_at=?, recommendation_count=?,
                 analyzer_count=?, failed_analyzer_count=?, new_count=?, changed_count=?, resolved_count=?,
-                unchanged_count=?, source_outcomes=?, diff=?, error=? WHERE id=?""",
+                unchanged_count=?, source_outcomes=?, diff=?, error=?
+                WHERE id=? AND status IN ('queued', 'running')""",
                 (
                     completion.status.value,
                     _ts(completion.completed_at),
@@ -156,10 +160,15 @@ class SQLiteOptimizationRunRepository(OptimizationRunRepository):
                     run_id,
                 ),
             )
+            updated = cursor.rowcount
             await conn.commit()
         result = await self.get(run_id)
         if result is None:
             raise ValueError(f"Optimization run {run_id} not found.")
+        if not updated:
+            logger.warning(
+                "Optimization run %s was already %s; its outcome was not overwritten.", run_id, result.status.value
+            )
         return result
 
     async def get(self, run_id: int) -> Optional[OptimizationRun]:
@@ -275,6 +284,31 @@ class SQLiteOptimizationRunRepository(OptimizationRunRepository):
                 """UPDATE optimization_runs SET status = ?, completed_at = ?, error = COALESCE(error, ?)
                 WHERE status = 'running' AND (started_at IS NULL OR started_at < ?)""",
                 (OptimizationRunStatus.FAILED.value, _ts(completed_at), error, _ts(started_before)),
+            )
+            count = cursor.rowcount
+            await conn.commit()
+        return max(int(count or 0), 0)
+
+    async def find_recent_covering(
+        self,
+        *,
+        namespace: Optional[str],
+        completed_after: datetime,
+    ) -> Optional[OptimizationRun]:
+        return await self._fetch_one(
+            """SELECT * FROM optimization_runs
+            WHERE (namespace IS NULL OR namespace IS ?)
+              AND (status IN ('queued', 'running') OR (completed_at IS NOT NULL AND completed_at >= ?))
+            ORDER BY requested_at DESC, id DESC LIMIT 1""",
+            (namespace, _ts(completed_after)),
+        )
+
+    async def prune_finished(self, *, completed_before: datetime) -> int:
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute(
+                """DELETE FROM optimization_runs
+                WHERE status IN ('succeeded', 'failed') AND completed_at IS NOT NULL AND completed_at < ?""",
+                (_ts(completed_before),),
             )
             count = cursor.rowcount
             await conn.commit()

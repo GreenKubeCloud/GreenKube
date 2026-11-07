@@ -2,10 +2,13 @@
 
 Every queue transition is a single SQL statement: the pending-scope unique
 index deduplicates concurrent requests and ``FOR UPDATE SKIP LOCKED`` hands a
-queued run to exactly one claimer.
+queued run to exactly one claimer. Scheduling (``enqueue_if_due``) also holds a
+transaction-scoped advisory lock, so a run claimed between two controllers'
+checks cannot let both of them schedule the same interval.
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
@@ -18,6 +21,11 @@ from greenkube.models.optimization_run import (
     SourceRunOutcome,
 )
 from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository, bounded_run_limit
+
+logger = logging.getLogger(__name__)
+
+#: Advisory lock serializing scheduled-run creation ("GKSCAN" in ASCII).
+_SCHEDULE_LOCK_KEY = 0x474B5343414E
 
 _INSERT_COLUMNS = (
     "status, namespace, trigger_type, requested_by, requested_at, started_at, completed_at, claimed_by, "
@@ -101,7 +109,7 @@ class PostgresOptimizationRunRepository(OptimizationRunRepository):
                 """UPDATE optimization_runs SET status=$1, completed_at=$2, recommendation_count=$3,
                 analyzer_count=$4, failed_analyzer_count=$5, new_count=$6, changed_count=$7, resolved_count=$8,
                 unchanged_count=$9, source_outcomes=$10::jsonb, diff=$11::jsonb, error=$12
-                WHERE id=$13 RETURNING *""",
+                WHERE id=$13 AND status IN ('queued', 'running') RETURNING *""",
                 completion.status.value,
                 completion.completed_at,
                 completion.recommendation_count,
@@ -116,9 +124,15 @@ class PostgresOptimizationRunRepository(OptimizationRunRepository):
                 completion.error,
                 run_id,
             )
-        if row is None:
+        if row is not None:
+            return _run(row)
+        stored = await self.get(run_id)
+        if stored is None:
             raise ValueError(f"Optimization run {run_id} not found.")
-        return _run(row)
+        logger.warning(
+            "Optimization run %s was already %s; its outcome was not overwritten.", run_id, stored.status.value
+        )
+        return stored
 
     async def get(self, run_id: int) -> Optional[OptimizationRun]:
         async with self.db_manager.connection_scope() as conn:
@@ -189,7 +203,10 @@ class PostgresOptimizationRunRepository(OptimizationRunRepository):
         due_before: datetime,
         requested_by: Optional[str] = None,
     ) -> Optional[OptimizationRun]:
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.connection_scope() as conn, conn.transaction():
+            # Taken before the INSERT so its snapshot sees any run another
+            # controller scheduled (and possibly already claimed) meanwhile.
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEDULE_LOCK_KEY)
             row = await conn.fetchrow(
                 f"""INSERT INTO optimization_runs ({_INSERT_COLUMNS})
                 SELECT 'queued', NULL::text, $1::text, $2::text, $3::timestamptz,
@@ -232,6 +249,35 @@ class PostgresOptimizationRunRepository(OptimizationRunRepository):
                 completed_at,
                 error,
                 started_before,
+            )
+        try:
+            return int(str(result).rsplit(" ", 1)[-1])
+        except (TypeError, ValueError):
+            return 0
+
+    async def find_recent_covering(
+        self,
+        *,
+        namespace: Optional[str],
+        completed_after: datetime,
+    ) -> Optional[OptimizationRun]:
+        async with self.db_manager.connection_scope() as conn:
+            row = await conn.fetchrow(
+                """SELECT * FROM optimization_runs
+                WHERE (namespace IS NULL OR namespace IS NOT DISTINCT FROM $1::text)
+                  AND (status IN ('queued', 'running') OR completed_at >= $2::timestamptz)
+                ORDER BY requested_at DESC, id DESC LIMIT 1""",
+                namespace,
+                completed_after,
+            )
+        return _run(row) if row else None
+
+    async def prune_finished(self, *, completed_before: datetime) -> int:
+        async with self.db_manager.connection_scope() as conn:
+            result = await conn.execute(
+                """DELETE FROM optimization_runs
+                WHERE status IN ('succeeded', 'failed') AND completed_at < $1::timestamptz""",
+                completed_before,
             )
         try:
             return int(str(result).rsplit(" ", 1)[-1])

@@ -26,7 +26,9 @@ class OptimizationRunRepository(ABC):
       a pending cluster-wide run also satisfies namespaced requests;
     * ``claim_next`` hands each queued run to exactly one caller, even across
       processes, because the claim is a single conditional UPDATE;
-    * ``enqueue_if_due`` creates at most one cluster-wide run per interval.
+    * ``enqueue_if_due`` creates at most one cluster-wide run per interval;
+    * ``finish`` only updates a run that is still pending: a run already failed
+      by ``fail_abandoned`` keeps its terminal state.
     """
 
     @abstractmethod
@@ -35,7 +37,10 @@ class OptimizationRunRepository(ABC):
 
     @abstractmethod
     async def finish(self, run_id: int, completion: OptimizationRunCompletion) -> OptimizationRun:
-        """Write the terminal state of a run and return the stored row."""
+        """Write the terminal state of a pending run and return the stored row.
+
+        A run that is already terminal is left unchanged and returned as stored.
+        """
 
     async def complete(
         self,
@@ -122,6 +127,24 @@ class OptimizationRunRepository(ABC):
     @abstractmethod
     async def fail_abandoned(self, *, started_before: datetime, completed_at: datetime, error: str) -> int:
         """Fail ``running`` runs started before ``started_before`` (crashed or fenced-out claimers)."""
+
+    async def find_recent_covering(
+        self,
+        *,
+        namespace: Optional[str],
+        completed_after: datetime,
+    ) -> Optional[OptimizationRun]:
+        """Newest run whose scope covers ``namespace`` and that is pending or recently finished.
+
+        Matches runs that are ``queued`` or ``running``, or that completed at or
+        after ``completed_after``. A cluster-wide run covers every namespace.
+        Backends without support return ``None`` (no reuse).
+        """
+        return None
+
+    async def prune_finished(self, *, completed_before: datetime) -> int:
+        """Delete succeeded and failed runs completed before ``completed_before``; returns the count."""
+        return 0
 
 
 def bounded_run_limit(limit: int) -> int:

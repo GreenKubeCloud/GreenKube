@@ -232,6 +232,102 @@ async def test_fail_abandoned_only_fails_old_running_runs(backend):
     assert (await repo.get(queued.id)).status == OptimizationRunStatus.QUEUED
 
 
+async def test_finish_does_not_overwrite_a_reaped_run(backend):
+    repo = backend.runs()
+    await _enqueue(repo)
+    run = await repo.claim_next(claimed_by="slow", started_at=T0)
+    await backend.runs(1).fail_abandoned(
+        started_before=T0 + timedelta(minutes=30), completed_at=T0 + timedelta(minutes=31), error="abandoned"
+    )
+
+    late = await repo.finish(
+        run.id,
+        OptimizationRunCompletion(
+            status=OptimizationRunStatus.SUCCEEDED, completed_at=T0 + timedelta(minutes=40), recommendation_count=7
+        ),
+    )
+
+    assert late.status == OptimizationRunStatus.FAILED
+    assert late.error == "abandoned"
+    assert late.recommendation_count == 0
+    assert late == await repo.get(run.id)
+
+
+async def test_finish_unknown_run_raises(backend):
+    with pytest.raises(ValueError):
+        await backend.runs().finish(
+            999_999, OptimizationRunCompletion(status=OptimizationRunStatus.SUCCEEDED, completed_at=T0)
+        )
+
+
+async def test_enqueue_if_due_schedules_once_while_runs_are_claimed_concurrently(backend):
+    interval = timedelta(hours=1)
+    controllers = [backend.runs(0), backend.runs(1)]
+
+    for _ in range(10):
+        await asyncio.gather(
+            *(repo.enqueue_if_due(requested_at=T0, due_before=T0 - interval, requested_by="c") for repo in controllers),
+            controllers[0].claim_next(claimed_by="c0", started_at=T0),
+            controllers[1].claim_next(claimed_by="c1", started_at=T0),
+        )
+
+    assert len(await controllers[0].list_runs(limit=50)) == 1
+
+
+async def test_find_recent_covering_matches_pending_and_recently_finished_runs(backend):
+    repo = backend.runs()
+    window_start = T0 + timedelta(minutes=10)
+    assert await repo.find_recent_covering(namespace="prod", completed_after=window_start) is None
+
+    staging, _ = await _enqueue(repo, namespace="staging", at=T0)
+    assert await repo.find_recent_covering(namespace="prod", completed_after=window_start) is None
+    assert (await repo.find_recent_covering(namespace="staging", completed_after=window_start)).id == staging.id
+    assert await repo.find_recent_covering(namespace=None, completed_after=window_start) is None
+
+    cluster, _ = await _enqueue(repo, at=T0 + timedelta(minutes=1))
+    claimed = await repo.claim_next(claimed_by="c", started_at=T0 + timedelta(minutes=2))
+    assert claimed is not None and claimed.id == staging.id
+    claimed = await repo.claim_next(claimed_by="c", started_at=T0 + timedelta(minutes=2))
+    assert claimed is not None and claimed.id == cluster.id
+    # A running cluster-wide run covers every namespace.
+    assert (await repo.find_recent_covering(namespace="prod", completed_after=window_start)).id == cluster.id
+    assert (await repo.find_recent_covering(namespace=None, completed_after=window_start)).id == cluster.id
+
+    await repo.finish(
+        cluster.id,
+        OptimizationRunCompletion(status=OptimizationRunStatus.SUCCEEDED, completed_at=T0 + timedelta(minutes=12)),
+    )
+    assert (await repo.find_recent_covering(namespace="prod", completed_after=window_start)).id == cluster.id
+    later = T0 + timedelta(minutes=13)
+    assert await repo.find_recent_covering(namespace=None, completed_after=later) is None
+    # The namespaced run is still running.
+    assert (await repo.find_recent_covering(namespace="staging", completed_after=later)).id == staging.id
+
+
+async def test_prune_finished_deletes_only_old_terminal_runs(backend):
+    repo = backend.runs()
+    await _enqueue(repo, namespace="old", at=T0)
+    await _enqueue(repo, namespace="recent", at=T0)
+    await _enqueue(repo, namespace="running", at=T0)
+    old = await repo.claim_next(claimed_by="c", started_at=T0)
+    recent = await repo.claim_next(claimed_by="c", started_at=T0)
+    running = await repo.claim_next(claimed_by="c", started_at=T0)
+    queued, _ = await _enqueue(repo, namespace="queued", at=T0)
+    await repo.finish(
+        old.id, OptimizationRunCompletion(status=OptimizationRunStatus.FAILED, completed_at=T0 + timedelta(days=1))
+    )
+    await repo.finish(
+        recent.id,
+        OptimizationRunCompletion(status=OptimizationRunStatus.SUCCEEDED, completed_at=T0 + timedelta(days=20)),
+    )
+
+    pruned = await repo.prune_finished(completed_before=T0 + timedelta(days=10))
+
+    assert pruned == 1
+    assert await repo.get(old.id) is None
+    assert {run.id for run in await repo.list_runs(limit=10)} == {recent.id, running.id, queued.id}
+
+
 # --------------------------------------------------------------------------- #
 # Run outcome (E10)                                                            #
 # --------------------------------------------------------------------------- #
