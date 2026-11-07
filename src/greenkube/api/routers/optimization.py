@@ -13,7 +13,7 @@ Endpoints:
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response, status
@@ -33,6 +33,9 @@ router = APIRouter()
 
 #: Response header naming the run queued by a deprecated ``refresh=true`` GET.
 RUN_ID_HEADER = "X-GreenKube-Run-Id"
+#: A ``refresh=true`` GET reuses a pending run, or one that finished this
+#: recently, for its scope instead of queuing another scan.
+REFRESH_REUSE_WINDOW = timedelta(minutes=5)
 
 
 async def get_optimization_run_repository() -> OptimizationRunRepository:
@@ -67,15 +70,21 @@ async def enqueue_refresh(
 ) -> Optional[int]:
     """Deprecated ``refresh=true`` semantics: queue a run, expose its id, never scan inline.
 
-    Failures are logged and swallowed so the read still returns current data.
+    A run covering the scope that is queued, running or finished within
+    :data:`REFRESH_REUSE_WINDOW` is reused, so page loads that still send
+    ``refresh=true`` do not chain scans. Failures are logged and swallowed so
+    the read still returns current data.
     """
     try:
-        run, _ = await enqueue_optimization_run(
-            run_repo,
-            namespace=namespace,
-            trigger=OptimizationRunTrigger.REFRESH,
-            requested_by=requested_by,
-        )
+        now = datetime.now(timezone.utc)
+        run = await run_repo.find_recent_covering(namespace=namespace, completed_after=now - REFRESH_REUSE_WINDOW)
+        if run is None:
+            run, _ = await enqueue_optimization_run(
+                run_repo,
+                namespace=namespace,
+                trigger=OptimizationRunTrigger.REFRESH,
+                requested_by=requested_by,
+            )
     except Exception as exc:
         logger.warning("Could not queue a recommendation refresh (%s).", type(exc).__name__)
         return None

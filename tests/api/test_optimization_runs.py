@@ -73,6 +73,16 @@ class InMemoryRunRepository(OptimizationRunRepository):
         self.runs[run_id] = run
         return run, True
 
+    async def find_recent_covering(self, *, namespace, completed_after) -> Optional[OptimizationRun]:
+        for run in self.list_sync():
+            if run.namespace not in (None, namespace):
+                continue
+            if run.status in (OptimizationRunStatus.QUEUED, OptimizationRunStatus.RUNNING):
+                return run
+            if run.completed_at is not None and run.completed_at >= completed_after:
+                return run
+        return None
+
     async def enqueue_if_due(self, *, requested_at, due_before, requested_by=None) -> Optional[OptimizationRun]:
         raise AssertionError("the API never schedules runs")
 
@@ -258,6 +268,82 @@ class TestGetEndpointsNeverWrite:
 
         assert ids == {"1"}
         assert len(run_repo.runs) == 1
+
+    def test_refresh_reuses_a_cluster_run_that_finished_recently(self, client, run_repo, no_scan):
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.SUCCEEDED,
+            trigger=OptimizationRunTrigger.SCHEDULED,
+            requested_at=now - timedelta(minutes=3),
+            completed_at=now - timedelta(minutes=2),
+        )
+
+        response = client.get("/api/v1/recommendations/active", params={"namespace": "prod", "refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "1"
+        assert run_repo.enqueue_calls == []
+        assert len(run_repo.runs) == 1
+
+    def test_refresh_reuses_a_running_run_for_the_same_scope(self, client, run_repo, no_scan):
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.RUNNING,
+            trigger=OptimizationRunTrigger.REFRESH,
+            namespace="prod",
+            requested_at=now - timedelta(minutes=1),
+            started_at=now - timedelta(seconds=30),
+        )
+
+        response = client.get("/api/v1/recommendations", params={"namespace": "prod", "refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "1"
+        assert run_repo.enqueue_calls == []
+
+    def test_refresh_queues_a_new_run_after_the_reuse_window(self, client, run_repo, no_scan):
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.SUCCEEDED,
+            trigger=OptimizationRunTrigger.SCHEDULED,
+            requested_at=now - timedelta(minutes=11),
+            completed_at=now - timedelta(minutes=10),
+        )
+
+        response = client.get("/api/v1/recommendations/active", params={"refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "2"
+        assert [call["trigger"] for call in run_repo.enqueue_calls] == [OptimizationRunTrigger.REFRESH]
+
+    def test_refresh_for_another_namespace_is_not_covered(self, client, run_repo, no_scan):
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.SUCCEEDED,
+            trigger=OptimizationRunTrigger.REFRESH,
+            namespace="staging",
+            requested_at=now - timedelta(minutes=2),
+            completed_at=now - timedelta(minutes=1),
+        )
+
+        response = client.get("/api/v1/recommendations/active", params={"namespace": "prod", "refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "2"
+
+    def test_explicit_run_request_is_not_throttled_by_a_recent_run(self, client, run_repo):
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.SUCCEEDED,
+            trigger=OptimizationRunTrigger.SCHEDULED,
+            requested_at=now - timedelta(minutes=2),
+            completed_at=now - timedelta(minutes=1),
+        )
+
+        response = client.post("/api/v1/optimization/runs")
+
+        assert response.json() == {"run_id": 2, "status": "queued"}
 
     def test_refresh_still_returns_data_when_the_queue_is_unavailable(self, client, mock_reco_repo, run_repo):
         run_repo.fail_enqueue = True
