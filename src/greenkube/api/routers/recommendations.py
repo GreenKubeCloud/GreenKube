@@ -10,6 +10,8 @@ Endpoints:
   GET  /recommendations/history    - Historical records filtered by time range
   GET  /recommendations/savings    - Aggregate CO2 and cost savings from applied recs
   PATCH /recommendations/{id}/apply  - Mark a recommendation as applied
+  POST /recommendations/{id}/remeasure - Start a new measurement of a not-realized/inconclusive change
+  POST /recommendations/{id}/rollback-review/dismiss - Dismiss a false-positive rollback review
   PATCH /recommendations/{id}/ignore - Permanently ignore a recommendation
   DELETE /recommendations/{id}/ignore - Un-ignore a recommendation (restore to active)
 """
@@ -42,6 +44,7 @@ from greenkube.models.metrics import (
     RecommendationSavingsSummary,
     TopRecommendation,
 )
+from greenkube.models.verification import DismissRollbackReviewRequest, RemeasureRequest
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 from greenkube.utils.date_utils import parse_duration
@@ -385,8 +388,9 @@ async def apply_recommendation(
     A recommendation is considered applied even when the actual value deviates from
     the recommendation (e.g., reducing CPU to 50m instead of the suggested 40m).
     Applying freezes the verification baseline and starts the observation window.
+    Only ``active`` and ``pr_open`` recommendations can be applied (409 otherwise).
     """
-    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
     lifecycle = RecommendationLifecycle(reco_repo)
     try:
@@ -399,8 +403,71 @@ async def apply_recommendation(
             application_method=request.application_method or "manual",
             actor="user",
         )
+    except RecommendationTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post(
+    "/recommendations/{rec_id}/remeasure",
+    response_model=RecommendationRecord,
+    status_code=202,
+)
+async def remeasure_recommendation(
+    rec_id: int,
+    request: Optional[RemeasureRequest] = None,
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Start a new fixed-horizon measurement of an applied recommendation.
+
+    Allowed when the latest measurement was ``not_realized`` (``verification_status=failed``)
+    or ``inconclusive``. The previous measurement stays immutable; the new one starts now,
+    lasts ``VERIFICATION_WINDOW_HOURS`` and supersedes it. Returns 409 otherwise.
+    """
+    from greenkube.core.optimization.lifecycle import (
+        RecommendationLifecycle,
+        RecommendationNotFoundError,
+        RecommendationTransitionError,
+    )
+
+    try:
+        return await RecommendationLifecycle(reco_repo).request_remeasure(
+            rec_id,
+            reason=request.reason if request is not None else None,
+            actor="user",
+        )
+    except RecommendationNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RecommendationTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/recommendations/{rec_id}/rollback-review/dismiss", response_model=RecommendationRecord)
+async def dismiss_rollback_review(
+    rec_id: int,
+    request: DismissRollbackReviewRequest,
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Dismiss a false-positive rollback review; the change is measured again from now.
+
+    Requires a reason, recorded in the audit trail. Returns 409 when the recommendation
+    is not in ``rollback_review``.
+    """
+    from greenkube.core.optimization.lifecycle import (
+        RecommendationLifecycle,
+        RecommendationNotFoundError,
+        RecommendationTransitionError,
+    )
+
+    try:
+        return await RecommendationLifecycle(reco_repo).dismiss_rollback_review(
+            rec_id, reason=request.reason, actor="user"
+        )
+    except RecommendationNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RecommendationTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.get("/recommendations/{rec_id}/events", response_model=List[RecommendationEvent])
