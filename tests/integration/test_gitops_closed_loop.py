@@ -7,6 +7,7 @@ contracts without requiring a Kubernetes or Git provider.
 """
 
 import asyncio
+import importlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,20 +43,30 @@ async def test_api_lifespan_never_scans_and_still_closes_resources():
     db.connect = AsyncMock()
     db.close = AsyncMock()
     app = FastAPI()
-    run_scan = AsyncMock(side_effect=AssertionError("the API must not scan"))
+    scan_entry_points = {
+        name: AsyncMock(side_effect=AssertionError(f"the API must not call {name}"))
+        for name in ("run_scan", "refresh", "collect", "tick")
+    }
 
     with (
         patch("greenkube.core.db.get_db_manager", return_value=db),
-        patch("greenkube.core.optimization.engine.OptimizationEngine.run_scan", new=run_scan),
+        patch("greenkube.core.optimization.engine.OptimizationEngine.run_scan", new=scan_entry_points["run_scan"]),
+        patch("greenkube.core.optimization.engine.OptimizationEngine.refresh", new=scan_entry_points["refresh"]),
+        patch("greenkube.core.optimization.engine.OptimizationEngine.collect", new=scan_entry_points["collect"]),
+        patch("greenkube.core.optimization.scan_service.RecommendationScanService.tick", new=scan_entry_points["tick"]),
         patch("greenkube.core.k8s_client.close_k8s_client", new=AsyncMock()),
     ):
         async with lifespan(app):
             assert app.state.ready is True
-            await asyncio.sleep(0)
-            for task in app.state._startup_tasks:
-                assert "recommendation" not in task.get_name()
+            # Give every startup task time to reach its first await point and beyond.
+            if app.state._startup_tasks:
+                await asyncio.wait(app.state._startup_tasks, timeout=0.2)
+            for _ in range(10):
+                await asyncio.sleep(0)
 
-    run_scan.assert_not_awaited()
+    for entry_point in scan_entry_points.values():
+        entry_point.assert_not_awaited()
+    assert not hasattr(importlib.import_module("greenkube.api.startup"), "run_startup_recommendation_scan")
     assert app.state.ready is False
     db.connect.assert_awaited_once()
     db.close.assert_awaited_once()
