@@ -176,7 +176,7 @@ GreenKube distinguishes several kinds of savings figures. They are never added t
 
 | Kind | Meaning | Status |
 |---|---|---|
-| **Projected** | Expected annual impact of a recommendation, from the evidence and the cost/carbon model | Available |
+| **Projected** | Expected annual impact of a recommendation, computed by the versioned [Impact Model](methodology/impact-model.md) | Available |
 | **Prorated** | The projection accrued over time for a change that is applied but not yet verified | Available |
 | **Measured** | The before/after difference observed by verification | Available (beta) |
 | **Allocated vs billed** *(planned)* | A request cut lowers what a workload is *allocated* immediately. The cloud bill only drops when nodes are removed, so this will be measured at node-pool level and reported separately. | Planned |
