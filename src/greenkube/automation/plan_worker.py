@@ -1106,7 +1106,14 @@ class PlanWorker:
             raise _replan_error(f"Provider returned invalid blob IDs for revision {start!r}.")
         expected = _expected_changes(start_blobs, file_plan.files, start)
 
-        comparison = await self._git_call(execution, provider.compare_trees, repository, start, branch)
+        try:
+            comparison = await self._git_call(execution, provider.compare_trees, repository, start, branch)
+        except GitProviderError as exc:
+            if isinstance(exc, GitProviderTransientError) or exc.status_code != 404:
+                raise
+            # The start revision was just read, so the plan branch is missing
+            # (deleted, or never created): it does not hold the planned state.
+            return "mismatch"
         changes = _validated_tree_changes(comparison, start, branch)
         if not changes:
             return "base"

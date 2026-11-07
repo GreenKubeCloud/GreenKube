@@ -175,7 +175,10 @@ class GitLabProvider(GitProvider):
                 params={"ref": ref, "recursive": "true", "per_page": "100", "page": str(page)},
             )
             if response.status_code == 404:
-                raise GitProviderError("GitLab repository tree was not found; refusing partial results.")
+                raise GitProviderError(
+                    "GitLab repository tree was not found; refusing partial results.",
+                    status_code=404 if page == 1 else None,
+                )
             data = response.json()
             if not isinstance(data, list):
                 raise GitProviderError("GitLab returned an invalid repository tree; refusing partial results.")
@@ -217,7 +220,9 @@ class GitLabProvider(GitProvider):
             params={"from": base_revision, "to": head_ref, "straight": "true"},
         )
         if response.status_code == 404:
-            raise GitProviderError(f"GitLab could not compare {base_revision} with {head_ref!r} in {repo.full_name}.")
+            raise GitProviderError(
+                f"GitLab could not compare {base_revision} with {head_ref!r} in {repo.full_name}.", status_code=404
+            )
         data = _git_response_object(response, provider=self.name, ref=head_ref)
         diffs = data.get("diffs")
         if data.get("compare_timeout") is True or not isinstance(diffs, list):

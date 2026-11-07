@@ -376,3 +376,22 @@ async def test_exhausted_provider_call_budget_stops_the_operation_and_fails_clos
     from greenkube.api.metrics_endpoint import get_metrics_output
 
     assert 'greenkube_git_provider_budget_exhausted_total{operation="plan_apply"}' in get_metrics_output().decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["github", "gitlab", "gitea"])
+async def test_missing_plan_branch_is_a_mismatch_instead_of_a_provider_failure(provider):
+    """An adopted pull request whose branch was deleted must ask for a re-plan, as before D5."""
+    from greenkube.automation.plan_worker import _Execution
+
+    repository = FakeGitRepository.with_files(_repository_files(20))
+    server = SERVERS[provider](repository)
+    plan = _plan(provider, repository.refs["main"])
+    worker, operations, _, _ = _worker(provider, plan)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
+        target = await worker.provider_resolver.resolve(plan.source)
+        state = await worker._branch_state(_Execution(operations.leases[0]), target, plan_branch_name(plan), plan)
+
+    assert state == "mismatch"

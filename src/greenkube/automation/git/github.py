@@ -114,7 +114,7 @@ class GitHubProvider(GitProvider):
             params={"recursive": "1"},
         )
         if response.status_code == 404:
-            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was not found.")
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was not found.", status_code=404)
         data = _git_response_object(response, provider=self.name, ref=ref)
         if data.get("truncated"):
             raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")

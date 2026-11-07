@@ -190,7 +190,7 @@ class GiteaProvider(GitProvider):
             params={"sha": head_ref, "limit": "1", "stat": "false", "verification": "false", "files": "true"},
         )
         if response.status_code == 404:
-            raise GitProviderError(f"Gitea could not read {head_ref!r} in {repo.full_name}.")
+            raise GitProviderError(f"Gitea could not read {head_ref!r} in {repo.full_name}.", status_code=404)
         data = _git_response_data(response, provider=self.name, ref=head_ref)
         commit = data[0] if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) else None
         head_revision = commit.get("sha") if commit is not None else None
