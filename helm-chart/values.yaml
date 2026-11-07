@@ -328,9 +328,12 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
-  # Comma-separated list of allowed CORS origins.
-  # Use "*" to allow all origins (default).
-  corsOrigins: '*'
+  # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
+  # same-origin: the bundled UI needs no CORS. List exact origins (for example
+  # "https://greenkube.example.com") only for a UI served from another origin;
+  # credentials are allowed for listed origins only. "*" allows any origin but
+  # disables credentialed CORS.
+  corsOrigins: ''
 
   # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
   apiRateLimit: 60/minute

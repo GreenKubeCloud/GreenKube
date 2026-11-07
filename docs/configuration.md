@@ -52,7 +52,7 @@ image:
 | `config.api.port` | `8000` | API/UI container and Service port. |
 | `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health`). |
 | `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`). |
-| `config.corsOrigins` | `*` | Allowed CORS origins. Prefer same-origin UI/API deployments. |
+| `config.corsOrigins` | `""` | Comma-separated allowed CORS origins (`CORS_ORIGINS`). Empty (default) keeps the API same-origin. Credentials are allowed only for explicitly listed origins; `*` allows any origin without credentials. |
 | `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
 | `config.metricsListMaxRangeDays` | `30` | Maximum raw `/metrics` listing window; wider ranges use report endpoints. |

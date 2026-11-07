@@ -83,6 +83,19 @@ def _is_trusted_ip(value: str, networks) -> bool:
     return any(address in network for network in networks)
 
 
+def _cors_policy(raw_origins: str) -> tuple[list[str], bool]:
+    """Return ``(allowed_origins, allow_credentials)`` for ``CORS_ORIGINS``.
+
+    Empty means same-origin only. Credentials are allowed only for an explicit
+    origin list: a wildcard is never combined with credentials (BUG-59).
+    """
+    origins = [origin.strip() for origin in (raw_origins or "").split(",") if origin.strip()]
+    if "*" in origins:
+        logger.warning("CORS_ORIGINS contains '*': any origin is allowed and credentialed CORS is disabled.")
+        return ["*"], False
+    return origins, bool(origins)
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard security headers to every HTTP response.
 
@@ -328,11 +341,11 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
 
     # CORS is closed by default. Explicit origins are required for cross-origin
     # browser clients; same-origin SPA requests do not need CORS headers.
-    cors_origins = [o.strip() for o in (getattr(cfg, "CORS_ORIGINS", "") or "").split(",") if o.strip()]
+    cors_origins, cors_allow_credentials = _cors_policy(getattr(cfg, "CORS_ORIGINS", "") or "")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        allow_credentials=cors_allow_credentials,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )

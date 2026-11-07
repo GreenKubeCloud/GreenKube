@@ -131,11 +131,19 @@ tests:
           path: data.API_PORT
           value: "8000"
 
-  - it: should set CORS_ORIGINS
+  - it: should keep CORS same-origin by default (BUG-59)
     asserts:
       - equal:
           path: data.CORS_ORIGINS
-          value: "*"
+          value: ""
+
+  - it: should render explicit CORS origins
+    set:
+      config.corsOrigins: "https://greenkube.example.com"
+    asserts:
+      - equal:
+          path: data.CORS_ORIGINS
+          value: "https://greenkube.example.com"
 
   - it: should set API_RATE_LIMIT
     asserts:

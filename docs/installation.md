@@ -200,7 +200,7 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `config.normalizationGranularity` | `hour` | `hour`, `day`, or `none`. |
 | `config.logLevel` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `config.logFormat` | `json` | `json` for log pipelines or `console` for human-readable logs. |
-| `config.corsOrigins` | `*` | Allowed CORS origins. Leave `*` only when the API is not publicly exposed. |
+| `config.corsOrigins` | `""` | Allowed CORS origins. Empty keeps the API same-origin (the bundled UI needs no CORS). List exact origins for a UI served elsewhere; `*` allows any origin but never with credentials. |
 | `config.rootPath` | `""` | Sub-path when served behind a reverse proxy, for example `/greenkube`. |
 | `config.prometheus.url` | `""` | Empty attempts in-cluster discovery. |
 | `config.prometheus.queryRangeStep` | `5m` | Prometheus range-query step. Must divide 24 hours. |
