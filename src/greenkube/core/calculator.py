@@ -111,17 +111,34 @@ class CarbonCalculator:
 
         The timestamp is normalized using the same logic as ``calculate_emissions``
         so that a subsequent calculation for the same (zone, normalized-time) will
-        hit the cache instead of querying the repository/API again. Callers that
-        only know the value (no provenance) get ``realtime``: prefetched values
-        come from the age-bounded ``get_for_zone_at_time`` lookup.
+        hit the cache instead of querying the repository/API again.
+
+        A value passed with its ``source`` is cached as-is. A bare value carries
+        no provenance and was usually looked up at the raw sample time, so the
+        point at the normalized time — the one the intensity recompute applies —
+        is resolved instead (once per zone and normalized time). The bare value
+        is kept, as ``realtime``, only when no fresh point exists there: it came
+        from the age-bounded ``get_for_zone_at_time`` lookup.
         """
-        normalized = _iso_z(self._normalize(timestamp))
+        normalized_dt = self._normalize(timestamp)
+        normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
-        entry = _CachedIntensity(value=intensity, source=source or IntensitySource.REALTIME.value)
 
         async with self._lock:
-            if cache_key not in self._intensity_cache:
-                self._intensity_cache[cache_key] = entry
+            if cache_key in self._intensity_cache:
+                return
+            if source is None and isinstance(self.repository, CarbonIntensityRepository):
+                try:
+                    resolved = await self._lookup_intensity(zone, normalized, normalized_dt)
+                except Exception as exc:
+                    logger.debug("Intensity lookup for zone '%s' at %s failed: %s", zone, normalized, exc)
+                    resolved = _CachedIntensity(value=None, source=None)
+                if resolved.value is not None and resolved.source != IntensitySource.STALE.value:
+                    self._intensity_cache[cache_key] = resolved
+                    return
+            self._intensity_cache[cache_key] = _CachedIntensity(
+                value=intensity, source=source or IntensitySource.REALTIME.value
+            )
 
     async def _lookup_intensity(self, zone: str, normalized: str, normalized_dt: datetime) -> _CachedIntensity:
         """Resolve a stored intensity and classify its freshness."""

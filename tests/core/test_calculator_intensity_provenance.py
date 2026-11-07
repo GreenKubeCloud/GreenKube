@@ -101,6 +101,38 @@ async def test_prefetched_values_without_provenance_are_realtime():
     assert result.intensity_source == "realtime"
 
 
+async def test_prefetched_bare_values_defer_to_the_normalized_classified_point():
+    """A prefetched value has no provenance and was looked up at the raw sample time.
+
+    The calculation must use the point at the normalized time — the one the
+    intensity recompute applies later — with its real provenance, so a row is
+    not written as ``realtime`` with one value and flipped by the recompute.
+    """
+    repository = PointRepository(IntensityPoint(value=42.0, observed_at=HOUR, is_estimated=False))
+    calculator = CarbonCalculator(repository, pue=1.0)
+    await calculator.prefetch_intensity("FR", AT.isoformat(), 33.0)
+    await calculator.prefetch_intensity("FR", (AT + timedelta(minutes=5)).isoformat(), 34.0)
+
+    result = await calculator.calculate_emissions(joules=1.0, zone="FR", timestamp=AT)
+
+    assert result is not None
+    assert result.grid_intensity == 42.0
+    assert result.intensity_source == "consolidated"
+    assert repository.calls == 1
+
+
+async def test_prefetched_values_with_explicit_provenance_are_kept():
+    repository = PointRepository(IntensityPoint(value=42.0, observed_at=HOUR, is_estimated=False))
+    calculator = CarbonCalculator(repository, pue=1.0)
+    await calculator.prefetch_intensity("FR", AT.isoformat(), 33.0, source="realtime")
+
+    result = await calculator.calculate_emissions(joules=1.0, zone="FR", timestamp=AT)
+
+    assert result is not None
+    assert (result.grid_intensity, result.intensity_source) == (33.0, "realtime")
+    assert repository.calls == 0
+
+
 async def test_duck_typed_repositories_keep_working():
     repository = MagicMock()
     repository.get_for_zone_at_time = AsyncMock(return_value=77.0)
@@ -135,7 +167,8 @@ async def test_without_a_token_rows_use_the_zone_default_and_history_stays_empty
 
         async with manager.connection_scope() as conn:
             async with conn.execute("SELECT COUNT(*) FROM carbon_intensity_history") as cursor:
-                assert (await cursor.fetchone())[0] == 0
+                row = await cursor.fetchone()
+                assert row is not None and row[0] == 0
     finally:
         await manager.close()
     assert result is not None
