@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, List, Optional
 
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -100,6 +100,11 @@ def _baseline_dict(record: RecommendationRecord) -> dict:
     if hasattr(baseline, "model_dump"):
         return baseline.model_dump(mode="json")
     return dict(baseline)
+
+
+def _group_ids(record: RecommendationRecord, siblings: Iterable[RecommendationRecord]) -> List[int]:
+    """Sorted IDs of a record and the other members of its attribution group."""
+    return sorted({member.id for member in (record, *siblings) if member.id is not None})
 
 
 def freeze_baseline(
@@ -458,27 +463,49 @@ class RecommendationLifecycle:
         reason: str,
         actor: str = "user",
         window_hours: Optional[float] = None,
+        now: Optional[datetime] = None,
     ) -> RecommendationRecord:
-        """Return a false-positive rollback review to ``applied`` with a fresh measurement window."""
+        """Return a false-positive rollback review to ``applied`` with a fresh measurement window.
+
+        The review was raised for the whole change, so every member of the
+        record's attribution group (the CPU and memory records of one plan,
+        C0.10) still in ``rollback_review`` is dismissed with it and measured
+        again over the same window.
+        """
         if not reason or not reason.strip():
             raise ValueError("A reason is required to dismiss a rollback review.")
         record = await self.repo.get_recommendation_by_id(rec_id)
         if record is None:
             raise RecommendationNotFoundError(f"Recommendation {rec_id} not found.")
-        if _status_value(record.status) != RecommendationStatus.ROLLBACK_REVIEW.value:
+        if not self._dismissable(record):
             raise RecommendationTransitionError(
                 f"Recommendation {rec_id} is {_status_value(record.status)}; only rollback_review can be dismissed."
             )
-        updates, previous = self._fresh_measurement_updates(record, window_hours)
-        return await self.transition(
-            rec_id,
-            RecommendationStatus.APPLIED,
-            event_type=RecommendationEventType.ROLLBACK_DISMISSED,
-            updates={**updates, "verification_status": VerificationStatus.PENDING.value},
-            actor=actor,
-            payload={"reason": reason.strip(), "dismissed_measurement_id": previous, **self._window_payload(updates)},
-            expected_statuses=(RecommendationStatus.ROLLBACK_REVIEW,),
-        )
+        moment = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        siblings = await self._attribution_siblings(record)
+        group_ids = _group_ids(record, siblings)
+
+        async def dismiss(member: RecommendationRecord, via: Optional[int]) -> RecommendationRecord:
+            assert member.id is not None
+            updates, previous = self._fresh_measurement_updates(member, window_hours, moment, group_ids)
+            return await self.transition(
+                member.id,
+                RecommendationStatus.APPLIED,
+                event_type=RecommendationEventType.ROLLBACK_DISMISSED,
+                updates={**updates, "verification_status": VerificationStatus.PENDING.value},
+                actor=actor,
+                payload={
+                    "reason": reason.strip(),
+                    "dismissed_measurement_id": previous,
+                    **self._group_payload(group_ids, via),
+                    **self._window_payload(updates),
+                },
+                expected_statuses=(RecommendationStatus.ROLLBACK_REVIEW,),
+            )
+
+        dismissed = await dismiss(record, None)
+        await self._apply_to_siblings(siblings, self._dismissable, lambda member: dismiss(member, rec_id))
+        return dismissed
 
     async def request_remeasure(
         self,
@@ -487,53 +514,127 @@ class RecommendationLifecycle:
         reason: Optional[str] = None,
         actor: str = "user",
         window_hours: Optional[float] = None,
+        now: Optional[datetime] = None,
     ) -> RecommendationRecord:
         """Start a new fixed-horizon measurement of a ``not_realized``/``inconclusive`` change (C0.5).
 
         The previous measurement stays immutable; the next one supersedes it.
+        Every member of the record's attribution group (C0.10) whose last
+        measurement is also ``not_realized``/``inconclusive`` is re-measured
+        with it over the same window; members that keep a decided measurement
+        keep their share of the change's delta, so no member claims it twice.
         """
         record = await self.repo.get_recommendation_by_id(rec_id)
         if record is None:
             raise RecommendationNotFoundError(f"Recommendation {rec_id} not found.")
-        status = _status_value(record.status)
-        if (
-            status != RecommendationStatus.APPLIED.value
-            or record.verification_status not in REMEASURABLE_VERIFICATION_STATUSES
-        ):
+        if not self._remeasurable(record):
             raise RecommendationTransitionError(
-                f"Recommendation {rec_id} is {status} with verification {record.verification_status}; "
-                "only not_realized or inconclusive measurements can be re-measured."
+                f"Recommendation {rec_id} is {_status_value(record.status)} with verification "
+                f"{record.verification_status}; only not_realized or inconclusive measurements can be re-measured."
             )
-        updates, previous = self._fresh_measurement_updates(record, window_hours)
-        return await self.transition(
-            rec_id,
-            RecommendationStatus.VERIFYING,
-            event_type=RecommendationEventType.REMEASURE_REQUESTED,
-            updates={**updates, "verification_status": VerificationStatus.IN_PROGRESS.value},
-            actor=actor,
-            payload={
-                "reason": reason,
-                "previous_verification_status": record.verification_status,
-                "supersedes_measurement_id": previous,
-                **self._window_payload(updates),
-            },
-            expected_statuses=(RecommendationStatus.APPLIED,),
+        moment = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        siblings = await self._attribution_siblings(record)
+        group_ids = _group_ids(record, siblings)
+
+        async def remeasure(member: RecommendationRecord, via: Optional[int]) -> RecommendationRecord:
+            assert member.id is not None
+            updates, previous = self._fresh_measurement_updates(member, window_hours, moment, group_ids)
+            return await self.transition(
+                member.id,
+                RecommendationStatus.VERIFYING,
+                event_type=RecommendationEventType.REMEASURE_REQUESTED,
+                updates={**updates, "verification_status": VerificationStatus.IN_PROGRESS.value},
+                actor=actor,
+                payload={
+                    "reason": reason,
+                    "previous_verification_status": member.verification_status,
+                    "supersedes_measurement_id": previous,
+                    **self._group_payload(group_ids, via),
+                    **self._window_payload(updates),
+                },
+                expected_statuses=(RecommendationStatus.APPLIED,),
+            )
+
+        remeasured = await remeasure(record, None)
+        await self._apply_to_siblings(siblings, self._remeasurable, lambda member: remeasure(member, rec_id))
+        return remeasured
+
+    @staticmethod
+    def _dismissable(record: RecommendationRecord) -> bool:
+        return _status_value(record.status) == RecommendationStatus.ROLLBACK_REVIEW.value
+
+    @staticmethod
+    def _remeasurable(record: RecommendationRecord) -> bool:
+        return (
+            _status_value(record.status) == RecommendationStatus.APPLIED.value
+            and record.verification_status in REMEASURABLE_VERIFICATION_STATUSES
         )
+
+    async def _attribution_siblings(self, record: RecommendationRecord) -> List[RecommendationRecord]:
+        """The other members of the change ``record`` belongs to (its attribution group, C0.10)."""
+        from greenkube.core.optimization.verifier import IN_EFFECT_STATUSES, attribution_groups
+
+        if record.id is None:
+            return []
+        try:
+            records = await self.repo.get_recommendations_by_statuses(
+                list(IN_EFFECT_STATUSES), namespace=record.namespace
+            )
+        except Exception as exc:
+            logger.warning("Could not read the attribution group of recommendation %s: %s", record.id, exc)
+            return []
+        candidates = [
+            item for item in records or [] if item.id is not None and item.id != record.id and item.applied_at
+        ]
+        for group in attribution_groups([record, *candidates]):
+            if any(member.id == record.id for member in group):
+                return [member for member in group if member.id != record.id]
+        return []
+
+    @staticmethod
+    async def _apply_to_siblings(
+        siblings: List[RecommendationRecord],
+        eligible: Callable[[RecommendationRecord], bool],
+        action: Callable[[RecommendationRecord], Awaitable[RecommendationRecord]],
+    ) -> None:
+        """Apply a group action to the eligible siblings; a sibling that moved meanwhile is skipped."""
+        for sibling in siblings:
+            if not eligible(sibling):
+                continue
+            try:
+                await action(sibling)
+            except RecommendationTransitionError as exc:
+                logger.warning("Attribution group member %s was not updated: %s", sibling.id, exc)
+
+    @staticmethod
+    def _group_payload(group_ids: List[int], via: Optional[int]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if len(group_ids) > 1:
+            payload["attribution_group_ids"] = group_ids
+        if via is not None:
+            payload["requested_via"] = via
+        return payload
 
     @staticmethod
     def _fresh_measurement_updates(
-        record: RecommendationRecord, window_hours: Optional[float]
+        record: RecommendationRecord,
+        window_hours: Optional[float],
+        now: Optional[datetime] = None,
+        group_ids: Optional[List[int]] = None,
     ) -> tuple[dict[str, Any], Optional[str]]:
         if window_hours is None:
             from greenkube.core.config import get_config
 
             window_hours = float(getattr(get_config(), "VERIFICATION_WINDOW_HOURS", 72))
-        now = datetime.now(timezone.utc)
+        now = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
         baseline = _baseline_dict(record)
         measurement_ids = list(baseline.get("measurement_ids") or [])
         previous = baseline.get("latest_measurement_id") or (measurement_ids[-1] if measurement_ids else None)
         baseline["measurement_sequence"] = int(baseline.get("measurement_sequence") or 1) + 1
         baseline["verification_extended"] = False
+        if group_ids and len(group_ids) > 1:
+            # Sticky membership: the verifier measures the members together (BUG-36).
+            baseline["attribution_group_ids"] = group_ids
         if "baseline_window_end" not in baseline and record.applied_at is not None:
             # Keep the original counterfactual: the baseline never moves past the change.
             baseline["baseline_window_end"] = ensure_utc(record.applied_at).isoformat()

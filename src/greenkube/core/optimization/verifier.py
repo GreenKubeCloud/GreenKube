@@ -73,6 +73,14 @@ _HOURS_PER_YEAR = _SECONDS_PER_YEAR / 3600
 #: Statuses that are candidates for verification.
 VERIFIABLE_STATUSES = ["applied", "verifying"]
 
+#: Statuses of an applied change that is still in effect but not being measured.
+#: A member of an attribution group in one of them keeps its share of the
+#: group's delta when a sibling is measured again (BUG-36).
+SETTLED_IN_EFFECT_STATUSES = ["verified", "rollback_review", "regressed"]
+
+#: Every status of an applied change that is still in effect.
+IN_EFFECT_STATUSES = [*VERIFIABLE_STATUSES, *SETTLED_IN_EFFECT_STATUSES]
+
 #: Verification statuses of a measurement that has not been decided yet. A
 #: ``failed`` (not realized), ``inconclusive`` or ``passed`` measurement is
 #: terminal: re-testing it until it passes would bias the outcome (BUG-31).
@@ -381,54 +389,139 @@ def _baseline_dict(record: RecommendationRecord) -> dict:
     return dict(baseline)
 
 
+def _status_value(record: RecommendationRecord) -> str:
+    status = record.status
+    return str(getattr(status, "value", status))
+
+
 def _anchor(record: RecommendationRecord) -> datetime:
+    """Start of the record's current measurement window (moves on re-measurement)."""
     start = record.verification_window_start or record.applied_at
     return ensure_utc(start) if start is not None else datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _joins_group(group: List[RecommendationRecord], record: RecommendationRecord) -> bool:
+def _change_time(record: RecommendationRecord) -> datetime:
+    """When the change landed; unlike the measurement window it never moves."""
+    moment = record.applied_at or record.verification_window_start
+    return ensure_utc(moment) if moment is not None else datetime.min.replace(tzinfo=timezone.utc)
+
+
+def attribution_target(record: RecommendationRecord) -> tuple:
+    """The container (or workload) whose measured delta an attribution group shares."""
+    return (
+        record.namespace,
+        record.owner_kind or "Pod",
+        record.owner_name or record.pod_name,
+        record.container_name,
+    )
+
+
+def stored_attribution_ids(record: RecommendationRecord) -> List[int]:
+    """Attribution group recorded on the record by its last measurement (sticky membership)."""
+    raw = _baseline_dict(record).get("attribution_group_ids")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    ids: set[int] = set()
+    for item in raw:
+        try:
+            ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return sorted(ids)
+
+
+def _plan_of(record: RecommendationRecord) -> Optional[str]:
+    plan = _baseline_dict(record).get("plan_id")
+    return str(plan) if plan not in (None, "") else None
+
+
+def _joins_group(
+    group: List[RecommendationRecord], record: RecommendationRecord, tolerance: Optional[timedelta]
+) -> bool:
     if record.type not in _RIGHTSIZING_TYPES:
         return False
     if any(member.type not in _RIGHTSIZING_TYPES or member.type == record.type for member in group):
         return False
-    lead = group[0]
-    if abs(_anchor(record) - _anchor(lead)) > GROUPING_TOLERANCE:
-        return False
-    lead_plan = _baseline_dict(lead).get("plan_id")
-    record_plan = _baseline_dict(record).get("plan_id")
-    return lead_plan == record_plan
+    return tolerance is None or abs(_change_time(record) - _change_time(group[0])) <= tolerance
+
+
+def _chain(records: List[RecommendationRecord], tolerance: Optional[timedelta]) -> List[List[RecommendationRecord]]:
+    groups: List[List[RecommendationRecord]] = []
+    current: List[RecommendationRecord] = []
+    for record in sorted(records, key=lambda item: (_change_time(item), item.id or 0)):
+        if current and _joins_group(current, record, tolerance):
+            current.append(record)
+            continue
+        if current:
+            groups.append(current)
+        current = [record]
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _target_groups(members: List[RecommendationRecord]) -> List[List[RecommendationRecord]]:
+    by_id = {member.id: member for member in members if member.id is not None}
+    groups: List[List[RecommendationRecord]] = []
+    claimed: set[int] = set()
+    # 1. Membership recorded by an earlier measurement is sticky, so a member that is
+    #    re-measured or dismissed alone is still measured against its siblings.
+    for record in sorted(members, key=lambda item: item.id or 0):
+        stored = stored_attribution_ids(record)
+        if record.id is None or record.id in claimed or len(stored) < 2:
+            continue
+        ids = sorted(({record.id, *stored} & by_id.keys()) - claimed)
+        claimed.update(ids)
+        groups.append([by_id[member_id] for member_id in ids])
+    # 2. Otherwise one plan is one change, whatever the detection delay; without a
+    #    plan, changes that landed within GROUPING_TOLERANCE of each other.
+    planned: Dict[str, List[RecommendationRecord]] = defaultdict(list)
+    unplanned: List[RecommendationRecord] = []
+    for record in members:
+        if record.id is not None and record.id in claimed:
+            continue
+        plan = _plan_of(record)
+        if plan is None:
+            unplanned.append(record)
+        else:
+            planned[plan].append(record)
+    for records in planned.values():
+        groups.extend(_chain(records, None))
+    groups.extend(_chain(unplanned, GROUPING_TOLERANCE))
+    return groups
 
 
 def attribution_groups(records: Sequence[RecommendationRecord]) -> List[List[RecommendationRecord]]:
     """Group the CPU and memory records that one change applied to one container.
 
-    Records join when they target the same container, were applied by the same
-    plan (or, without a plan, landed within :data:`GROUPING_TOLERANCE`) and are
-    measured over the same window. Everything else is measured alone.
+    Membership recorded by an earlier measurement (``attribution_group_ids``)
+    wins. Otherwise records join when they target the same container and were
+    applied by the same plan or, without a plan, landed within
+    :data:`GROUPING_TOLERANCE`. Grouping depends only on the change, never on
+    the measurement window, so re-measuring or dismissing members at different
+    times keeps them together. Everything else is measured alone.
     """
     by_target: Dict[tuple, List[RecommendationRecord]] = defaultdict(list)
+    seen: set[int] = set()
     for record in records:
-        key = (
-            record.namespace,
-            record.owner_kind or "Pod",
-            record.owner_name or record.pod_name,
-            record.container_name,
-        )
-        by_target[key].append(record)
+        if record.id is not None:
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+        by_target[attribution_target(record)].append(record)
     groups: List[List[RecommendationRecord]] = []
     for members in by_target.values():
-        members.sort(key=lambda item: (_anchor(item), item.id or 0))
-        current: List[RecommendationRecord] = []
-        for record in members:
-            if current and _joins_group(current, record):
-                current.append(record)
-                continue
-            if current:
-                groups.append(current)
-            current = [record]
-        if current:
-            groups.append(current)
+        groups.extend(_target_groups(members))
     return groups
+
+
+def _member_ids(group: Sequence[RecommendationRecord]) -> List[int]:
+    return sorted(member.id for member in group if member.id is not None)
+
+
+def _awaiting(record: RecommendationRecord) -> bool:
+    """Whether the record's current measurement still has to be decided."""
+    return _status_value(record) in VERIFIABLE_STATUSES and record.verification_status in AWAITING_MEASUREMENT
 
 
 def _projected_share(record: RecommendationRecord, group: Sequence[RecommendationRecord]) -> float:
@@ -494,24 +587,36 @@ class RecommendationVerifier:
     # ------------------------------------------------------------------
 
     async def verify_due(self, namespace: Optional[str] = None) -> List[RecommendationRecord]:
-        """Measures every applied recommendation whose fixed window has elapsed."""
-        records = await self.lifecycle.repo.get_recommendations_by_statuses(VERIFIABLE_STATUSES, namespace=namespace)
-        pending = [
+        """Measures every applied recommendation whose fixed window has elapsed.
+
+        Records are grouped with every member of their change that is still in
+        effect, including members already measured, so each measured record
+        claims only its share of the change's delta (BUG-36).
+        """
+        repo = self.lifecycle.repo
+        records = await repo.get_recommendations_by_statuses(VERIFIABLE_STATUSES, namespace=namespace)
+        applied = [record for record in records if record.id is not None and record.applied_at is not None]
+        targets = {attribution_target(record) for record in applied if _awaiting(record)}
+        if not targets:
+            return []
+        settled = await repo.get_recommendations_by_statuses(SETTLED_IN_EFFECT_STATUSES, namespace=namespace)
+        candidates = applied + [
             record
-            for record in records
-            if record.id is not None
-            and record.applied_at is not None
-            and record.verification_status in AWAITING_MEASUREMENT
+            for record in settled
+            if record.id is not None and record.applied_at is not None and attribution_target(record) in targets
         ]
         now = self._now()
         updated: List[RecommendationRecord] = []
-        for group in attribution_groups(pending):
+        for group in attribution_groups(candidates):
+            due = [record for record in group if _awaiting(record)]
+            if not due:
+                continue
             try:
-                updated.extend(await self._verify_group(group, now))
+                updated.extend(await self._verify_group(due, now, attribution=group))
             except Exception as exc:
                 logger.warning(
                     "Verification failed for recommendation(s) %s: %s",
-                    ", ".join(str(record.id) for record in group),
+                    ", ".join(str(record.id) for record in due),
                     exc,
                 )
         return updated
@@ -552,7 +657,19 @@ class RecommendationVerifier:
             after_end=after_end,
         )
 
-    async def _verify_group(self, group: List[RecommendationRecord], now: datetime) -> List[RecommendationRecord]:
+    async def _verify_group(
+        self,
+        group: List[RecommendationRecord],
+        now: datetime,
+        attribution: Optional[Sequence[RecommendationRecord]] = None,
+    ) -> List[RecommendationRecord]:
+        """Measure the due members of one change.
+
+        ``group`` holds the members awaiting measurement; ``attribution`` every
+        member of the change still in effect (defaults to ``group``). Shares of
+        the measured delta are computed against ``attribution``.
+        """
+        attribution = list(attribution) if attribution is not None else list(group)
         window_hours = self._window_hours()
         windows = self.windows_for(group)
         grace = timedelta(hours=max(window_hours * 0.1, 0.05))
@@ -565,10 +682,11 @@ class RecommendationVerifier:
         min_samples = self._min_samples()
 
         if failed:
-            decisions = [self._decide(record, group, observation, failed, min_samples) for record in group]
+            decisions = [self._decide(record, attribution, observation, failed, min_samples) for record in group]
         elif observation.sample_steps < min_samples:
             return await self._extend_or_close(
                 group,
+                attribution,
                 windows,
                 observation,
                 gates,
@@ -577,11 +695,12 @@ class RecommendationVerifier:
                 detail=f"({observation.sample_steps:.0f} < {min_samples})",
             )
         else:
-            decisions = [self._decide(record, group, observation, failed, min_samples) for record in group]
+            decisions = [self._decide(record, attribution, observation, failed, min_samples) for record in group]
             if any(decision.outcome is MeasurementOutcome.INCONCLUSIVE for decision in decisions):
                 trusted = min(observation.before.cost_steps, observation.after.cost_steps)
                 return await self._extend_or_close(
                     group,
+                    attribution,
                     windows,
                     observation,
                     gates,
@@ -592,13 +711,14 @@ class RecommendationVerifier:
 
         group_id = uuid.uuid4().hex
         return [
-            await self._conclude(record, decision, group, group_id, windows, observation, gates, now)
+            await self._conclude(record, decision, attribution, group_id, windows, observation, gates, now)
             for record, decision in zip(group, decisions)
         ]
 
     async def _extend_or_close(
         self,
         group: List[RecommendationRecord],
+        attribution: Sequence[RecommendationRecord],
         windows: MeasurementWindows,
         observation: _Observation,
         gates: List[HealthGateResult],
@@ -615,6 +735,7 @@ class RecommendationVerifier:
                 assert record.id is not None
                 baseline = _baseline_dict(record)
                 baseline["verification_extended"] = True
+                baseline["attribution_group_ids"] = _member_ids(attribution)
                 extended.append(
                     await self.lifecycle.transition(
                         record.id,
@@ -636,13 +757,15 @@ class RecommendationVerifier:
         group_id = uuid.uuid4().hex
         closed: List[RecommendationRecord] = []
         for record in group:
-            decision = self._decide(record, group, observation, [], min_samples)
+            decision = self._decide(record, attribution, observation, [], min_samples)
             decision = _Decision(
                 outcome=MeasurementOutcome.INCONCLUSIVE,
                 reasons=[f"{reason} after extension {detail}"],
                 estimates=decision.estimates,
             )
-            closed.append(await self._conclude(record, decision, group, group_id, windows, observation, gates, now))
+            closed.append(
+                await self._conclude(record, decision, attribution, group_id, windows, observation, gates, now)
+            )
         return closed
 
     # ------------------------------------------------------------------
@@ -1016,7 +1139,7 @@ class RecommendationVerifier:
             measurement_id=uuid.uuid4().hex,
             recommendation_id=record.id,
             group_id=group_id,
-            group_recommendation_ids=sorted(member.id for member in group if member.id is not None),
+            group_recommendation_ids=_member_ids(group),
             plan_id=baseline.get("plan_id"),
             sequence=int(baseline.get("measurement_sequence") or 1),
             scope=observation.scope,
@@ -1059,8 +1182,9 @@ class RecommendationVerifier:
         updated_baseline["measured_ledger_input"] = stored.ledger_input
         updated_baseline["measurement_ids"] = [*previous_ids, stored.measurement_id]
         updated_baseline["latest_measurement_id"] = stored.measurement_id
-        window_start = ensure_utc(stored.windows["after"]["start"])
-        window_end = ensure_utc(stored.windows["after"]["end"])
+        if stored.group_recommendation_ids:
+            # Sticky membership: later measurements of any member share the same delta (BUG-36).
+            updated_baseline["attribution_group_ids"] = sorted(stored.group_recommendation_ids)
         details = {
             "measurement_id": stored.measurement_id,
             "outcome": stored.outcome.value,
@@ -1076,9 +1200,12 @@ class RecommendationVerifier:
         record_verification(_OUTCOME_LABELS[stored.outcome], failed_gates)
         measured_cost = _measured_value(cost, stored.outcome)
         measured_co2e = _measured_value(co2e, stored.outcome)
+        rec_id = record.id
+        window_start = ensure_utc(stored.windows["after"]["start"])
+        window_end = ensure_utc(stored.windows["after"]["end"])
         if stored.outcome is MeasurementOutcome.ROLLBACK_REVIEW:
             return await self.lifecycle.mark_rollback_review(
-                record.id,
+                rec_id,
                 reasons=stored.reasons,
                 verification_window_start=window_start,
                 verification_window_end=window_end,
@@ -1089,7 +1216,7 @@ class RecommendationVerifier:
             )
         if stored.outcome is MeasurementOutcome.REALIZED:
             return await self.lifecycle.mark_verified(
-                record.id,
+                rec_id,
                 measured_co2e_saved_grams=measured_co2e if measured_co2e is not None else 0.0,
                 measured_cost_saved=measured_cost if measured_cost is not None else 0.0,
                 verification_window_start=window_start,
@@ -1099,7 +1226,7 @@ class RecommendationVerifier:
             )
         if stored.outcome is MeasurementOutcome.INCONCLUSIVE:
             return await self.lifecycle.mark_inconclusive(
-                record.id,
+                rec_id,
                 reason="; ".join(stored.reasons) or "inconclusive",
                 verification_window_start=window_start,
                 verification_window_end=window_end,
@@ -1107,7 +1234,7 @@ class RecommendationVerifier:
                 details=details,
             )
         return await self.lifecycle.mark_not_realized(
-            record.id,
+            rec_id,
             reasons=stored.reasons,
             measured_co2e_saved_grams=measured_co2e,
             measured_cost_saved=measured_cost,
