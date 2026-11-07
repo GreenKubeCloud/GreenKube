@@ -111,3 +111,32 @@ async def test_duck_typed_repositories_keep_working():
     assert result is not None
     assert result.grid_intensity == 77.0
     assert result.intensity_source == "realtime"
+
+
+async def test_without_a_token_rows_use_the_zone_default_and_history_stays_empty(monkeypatch):
+    """A8 acceptance: no token → zone_default provenance and an empty intensity history."""
+    from greenkube.collectors.electricity_maps_collector import ElectricityMapsCollector
+    from greenkube.core.db import DatabaseManager
+    from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository
+
+    monkeypatch.setattr("greenkube.collectors.electricity_maps_collector.config.ELECTRICITY_MAPS_TOKEN", None)
+    manager = DatabaseManager()
+    await manager.setup_sqlite(db_path=":memory:")
+    try:
+        repository = SQLiteCarbonIntensityRepository(manager)
+        collector = ElectricityMapsCollector()
+        try:
+            history = await collector.collect(zone="FR", target_datetime=AT)
+        finally:
+            await collector.close()
+        assert await repository.save_history(history, "FR") == 0
+
+        result = await CarbonCalculator(repository, pue=1.0).calculate_emissions(joules=1.0, zone="FR", timestamp=AT)
+
+        async with manager.connection_scope() as conn:
+            async with conn.execute("SELECT COUNT(*) FROM carbon_intensity_history") as cursor:
+                assert (await cursor.fetchone())[0] == 0
+    finally:
+        await manager.close()
+    assert result is not None
+    assert result.intensity_source == "zone_default"
