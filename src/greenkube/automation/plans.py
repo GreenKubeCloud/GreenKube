@@ -723,9 +723,10 @@ class AutomationPlanService:
     async def expire_due_plans(self, *, now: datetime | None = None, limit: int = _EXPIRY_BATCH_SIZE) -> list[Plan]:
         """Mark at most ``limit`` plans whose TTL elapsed as STALE, oldest expiry first.
 
-        The repository selects only expired rows through ``idx_automation_plans_status_expiry``
-        instead of loading every live plan on each sweep (D15, BUG-57); the next sweep picks up
-        any remainder.
+        The repository selects only expired rows instead of loading every live plan on each
+        sweep (D15, BUG-57); the next sweep picks up any remainder. PostgreSQL serves the range
+        from ``idx_automation_plans_status_expiry``; SQLite compares ``julianday(expires_at)``,
+        so it uses only the status prefix of that index, and the batch limit bounds the work.
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("plan expiry limit must be a positive integer")

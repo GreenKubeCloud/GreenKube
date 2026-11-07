@@ -153,8 +153,10 @@ class DatabaseManager:
         SQLite: serialized on the shared connection. When the calling task is already
         inside a transaction (for example a ``UnitOfWork``), the block runs in a
         SAVEPOINT so a failure only undoes its own statements.
-        PostgreSQL: a dedicated pooled connection and transaction (not joined with an
-        outer transaction).
+        PostgreSQL: always a dedicated pooled connection and transaction. It does not join a
+        ``UnitOfWork`` opened by the same task, so never call it while an outer PostgreSQL
+        transaction holds row locks it would need (it would wait on them); run those statements
+        on the ``UnitOfWork`` connection instead.
         """
         if self.db_type == "postgres":
             await self.ensure_connection()
