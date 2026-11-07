@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
 from urllib.parse import quote
@@ -19,6 +19,9 @@ from greenkube.automation.git.base import (
     GitProviderError,
     GitProviderTransientError,
     GitRepository,
+    GitTree,
+    GitTreeComparison,
+    ProviderCallBudgetExceededError,
     PullRequestInfo,
     PullRequestOptions,
     normalize_git_provider_capabilities,
@@ -323,6 +326,18 @@ class _AuthorizedGitProvider(GitProvider):
     async def list_files(self, repo: GitRepository, ref: str) -> list[str]:
         return await self._call(repo, lambda: self._provider.list_files(repo, ref))
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        return await self._call(repo, lambda: self._provider.get_tree(repo, ref))
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        return await self._call(repo, lambda: self._provider.compare_trees(repo, base_revision, head_ref))
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, str | None]:
+        return await self._call(repo, lambda: self._provider.get_blob_ids(repo, ref, paths))
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        return await self._call(repo, lambda: self._provider.is_ancestor(repo, ancestor_sha, descendant_sha))
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         return await self._call(
             repo,
@@ -449,6 +464,8 @@ def _redact_provider_error(error: GitProviderError, token: str) -> GitProviderEr
         return GitProviderCapabilityError(error.provider, error.capability, reason=reason)
     if isinstance(error, GitProviderArchiveLimitError):
         return GitProviderArchiveLimitError(message, status_code=error.status_code)
+    if isinstance(error, ProviderCallBudgetExceededError):
+        return ProviderCallBudgetExceededError(message, status_code=error.status_code)
     if isinstance(error, GitConflictError):
         return GitConflictError(message, status_code=error.status_code)
     if isinstance(error, GitProviderTransientError):

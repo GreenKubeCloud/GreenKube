@@ -201,6 +201,7 @@ async def test_exact_and_glob_allowlists_create_provider_without_git_api_call(pa
             GitProviderCapability.TEAM_REVIEWERS,
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
+            GitProviderCapability.COMMIT_ANCESTRY,
         }
     )
 

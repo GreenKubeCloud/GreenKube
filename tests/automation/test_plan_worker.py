@@ -20,6 +20,8 @@ from greenkube.automation.git.base import (
     GitProviderError,
     GitProviderTransientError,
     GitRepository,
+    GitTreeChange,
+    GitTreeComparison,
     PullRequestInfo,
     PullRequestOptions,
     pull_request_option_capabilities,
@@ -408,6 +410,7 @@ class FakeGitProvider:
         self.plan_repository: FakePlanRepository | None = None
         self.plan_id: str | None = None
         self.mutation_baselines: list[PreApplyWorkloadBaseline | None] = []
+        self.tree_reads: list[tuple[str, str]] = []
 
     def supports(self, capability: GitProviderCapability | str) -> bool:
         return capability in self.capabilities
@@ -438,6 +441,29 @@ class FakeGitProvider:
         else:
             tree = {}
         return sorted(tree)
+
+    def _tree_at(self, ref: str) -> dict[str, GitFile]:
+        if ref in self.branches:
+            return self.branches[ref]
+        return self.base_tree if ref == BASE_REVISION else {}
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, str | None]:
+        self.tree_reads.append(("blobs", ref))
+        tree = self._tree_at(ref)
+        return {path: (tree[path].blob_sha if path in tree else None) for path in paths}
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        self.tree_reads.append(("compare", head_ref))
+        base, head = self._tree_at(base_revision), self._tree_at(head_ref)
+        changes: list[GitTreeChange] = []
+        for path in sorted(set(base) | set(head)):
+            if path not in head:
+                changes.append(GitTreeChange(path, "deleted"))
+            elif path not in base:
+                changes.append(GitTreeChange(path, "added", head[path].blob_sha))
+            elif base[path].blob_sha != head[path].blob_sha or base[path].content != head[path].content:
+                changes.append(GitTreeChange(path, "modified", head[path].blob_sha))
+        return GitTreeComparison(base_revision, head_ref, tuple(changes))
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         if self.plan_repository is not None and self.plan_id is not None:

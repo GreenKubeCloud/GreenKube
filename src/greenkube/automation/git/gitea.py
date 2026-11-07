@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -19,11 +19,16 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderError,
     GitRepository,
+    GitTree,
+    GitTreeChange,
+    GitTreeComparison,
+    GitTreeEntry,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_data,
     _git_response_object,
     _validate_full_commit_sha,
+    is_full_commit_sha,
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
@@ -37,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 MAX_REPOSITORY_FILES = 20_000
 MAX_CONTENTS_DEPTH = 64
+_COMMIT_FILE_STATUSES: dict[str, Literal["added", "modified", "deleted"]] = {
+    "added": "added",
+    "modified": "modified",
+    "removed": "deleted",
+    "deleted": "deleted",
+}
 
 
 class GiteaProvider(GitProvider):
@@ -55,6 +66,7 @@ class GiteaProvider(GitProvider):
             GitProviderCapability.TEAM_REVIEWERS,
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
+            GitProviderCapability.COMMIT_ANCESTRY,
         }
     )
 
@@ -120,6 +132,135 @@ class GiteaProvider(GitProvider):
         # closed if any entry cannot be represented in the repository tree.
         return await self._list_files_via_contents(repo, ref, "", depth=0, files=[])
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Read the recursive tree with object IDs (paginated; used only as a fallback)."""
+        entries: dict[str, GitTreeEntry] = {}
+        page = 1
+        while page <= 10000:
+            response = await self._request(
+                "GET",
+                f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
+                params={"recursive": "true", "per_page": "1000", "page": str(page)},
+            )
+            if response.status_code != 200:
+                if page == 1:
+                    return await super().get_tree(repo, ref)
+                raise GitProviderError("Gitea tree pagination failed; refusing partial results.")
+            data = _git_response_object(response, provider=self.name, ref=ref)
+            items = data.get("tree") or []
+            if not isinstance(items, list):
+                raise GitProviderError("Gitea returned an invalid repository tree; refusing partial results.")
+            for item in items:
+                if not isinstance(item, dict):
+                    raise GitProviderError("Gitea returned an invalid tree entry; refusing partial results.")
+                item_type = item.get("type")
+                if item_type == "tree":
+                    continue
+                path, sha, mode = item.get("path"), item.get("sha"), item.get("mode")
+                if (
+                    item_type not in ("blob", "commit")
+                    or not isinstance(path, str)
+                    or not isinstance(sha, str)
+                    or not sha
+                    or path in entries
+                ):
+                    raise GitProviderError("Gitea returned an invalid tree entry; refusing partial results.")
+                entries[path] = GitTreeEntry(
+                    path=path,
+                    sha=sha,
+                    mode=mode if isinstance(mode, str) else "100644",
+                    type=item_type,
+                )
+            if not data.get("truncated"):
+                tree_sha = data.get("sha")
+                return GitTree(entries=entries, sha=tree_sha if isinstance(tree_sha, str) else None)
+            page += 1
+        raise GitProviderError("Gitea tree pagination did not progress; refusing partial results.")
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        """Diff a head that is the base or one commit on top of it with a single commit read.
+
+        Any other shape (several commits, merges, older Gitea without affected
+        file lists) falls back to a complete paginated tree comparison.
+        """
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/commits",
+            params={"sha": head_ref, "limit": "1", "stat": "false", "verification": "false", "files": "true"},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Gitea could not read {head_ref!r} in {repo.full_name}.")
+        data = _git_response_data(response, provider=self.name, ref=head_ref)
+        commit = data[0] if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) else None
+        head_revision = commit.get("sha") if commit is not None else None
+        if not is_full_commit_sha(head_revision):
+            raise GitProviderError(f"Gitea returned an invalid head commit for {head_ref!r} in {repo.full_name}.")
+        if head_revision.lower() == base_revision.lower():
+            return GitTreeComparison(base_revision=base_revision, head_ref=head_ref, head_revision=head_revision)
+
+        assert commit is not None
+        parents = commit.get("parents")
+        files = commit.get("files")
+        parent_shas = (
+            [parent.get("sha") for parent in parents if isinstance(parent, dict)] if isinstance(parents, list) else []
+        )
+        changes = self._single_commit_changes(files) if isinstance(files, list) else None
+        if (
+            changes is None
+            or len(parent_shas) != 1
+            or not isinstance(parent_shas[0], str)
+            or parent_shas[0].lower() != base_revision.lower()
+        ):
+            comparison = await super().compare_trees(repo, base_revision, head_revision)
+            return GitTreeComparison(
+                base_revision=base_revision,
+                head_ref=head_ref,
+                changes=comparison.changes,
+                head_revision=head_revision,
+            )
+        return GitTreeComparison(
+            base_revision=base_revision,
+            head_ref=head_ref,
+            changes=changes,
+            head_revision=head_revision,
+        )
+
+    @staticmethod
+    def _single_commit_changes(files: list[object]) -> tuple[GitTreeChange, ...] | None:
+        changes: dict[str, GitTreeChange] = {}
+        for item in files:
+            if not isinstance(item, dict):
+                return None
+            path = item.get("filename")
+            status = _COMMIT_FILE_STATUSES.get(str(item.get("status")).casefold())
+            if not isinstance(path, str) or status is None or path in changes:
+                return None
+            try:
+                GitFileEdit(path=path, action="delete")
+            except GitProviderError:
+                return None
+            changes[path] = GitTreeChange(path=path, status=status)
+        return tuple(changes[path] for path in sorted(changes))
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        ancestor, descendant = self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        if ancestor == descendant:
+            return True
+        # ``descendant...ancestor`` lists commits of the ancestor candidate that
+        # the descendant lacks; none means the candidate is in its history.
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/compare/{descendant}...{ancestor}",
+        )
+        if response.status_code == 404:
+            return None
+        data = _git_response_object(response, provider=self.name, ref=f"{descendant}...{ancestor}")
+        total = data.get("total_commits")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            return None
+        return total == 0
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         revision = self._validate_archive_request(repo, revision, max_bytes)
         return await self._request_archive(
@@ -178,16 +319,22 @@ class GiteaProvider(GitProvider):
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         branch = validate_git_ref(branch, field="branch name")
         from_ref = validate_git_ref(from_ref, field="base branch")
+        # Create first: an existing branch answers 409, so the common case costs one write.
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/branches",
+            json_body={"new_branch_name": branch, "old_branch_name": from_ref},
+            ok_statuses=(200, 201, 409),
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.", status_code=404)
+        if response.status_code != 409:
+            return
         exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/branches/{quote(branch, safe='/')}")
         if exists.status_code == 200:
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
             return
-
-        await self._request(
-            "POST",
-            f"/repos/{repo.owner}/{repo.name}/branches",
-            json_body={"new_branch_name": branch, "old_branch_name": from_ref},
-        )
+        raise GitProviderError(f"Gitea could not create branch '{branch}' in {repo.full_name}.", status_code=409)
 
     async def update_file(
         self,
@@ -300,18 +447,6 @@ class GiteaProvider(GitProvider):
         staging_branch = f"greenkube-commit-{uuid4().hex}"
         staging_branch_created = False
         try:
-            await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/branches",
-                json_body={"new_branch_name": staging_branch, "old_branch_name": branch},
-                conflict_statuses=(409,),
-                retryable=False,
-            )
-            staging_branch_created = True
-            staging_head = await self._branch_head_sha(repo, staging_branch)
-            if staging_head != base_revision:
-                raise GitConflictError(f"Branch '{branch}' moved from base revision {base_revision} to {staging_head}.")
-
             file_states = await self._validate_commit_edits(request)
             files = []
             for edit in request.files:
@@ -329,11 +464,16 @@ class GiteaProvider(GitProvider):
                     file_operation["sha"] = current.sha
                 files.append(file_operation)
 
+            # ``new_branch`` stages the commit on a throwaway branch cut from the
+            # plan branch in the same call; the plan branch only moves through
+            # the compare-and-swap update below once the parent is verified.
+            staging_branch_created = True
             commit_response = await self._request(
                 "POST",
                 f"/repos/{repo.owner}/{repo.name}/contents",
                 json_body={
-                    "branch": staging_branch,
+                    "branch": branch,
+                    "new_branch": staging_branch,
                     "message": request.message,
                     "author": {"name": request.author_name, "email": request.author_email},
                     "committer": {"name": request.author_name, "email": request.author_email},

@@ -10,18 +10,25 @@ only locates manifests through workload annotations and edits YAML.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterable, List, Literal, Optional
+from typing import Iterable, List, Literal, Optional, TypeGuard
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from greenkube.automation.git.budget import charge_provider_call
+
 logger = logging.getLogger(__name__)
+
+_IMMUTABLE_CACHE_SIZE = 64
 
 
 class GitProviderCapability(StrEnum):
@@ -41,6 +48,7 @@ class GitProviderCapability(StrEnum):
     BRANCH_PROTECTION_CHECK = "branch_protection_check"
     FIND_OPEN_PULL_REQUEST_FOR_BRANCH = "find_open_pull_request_for_branch"
     DELETE_PLAN_BRANCH = "delete_plan_branch"
+    COMMIT_ANCESTRY = "commit_ancestry"
 
 
 class GitProviderError(RuntimeError):
@@ -65,6 +73,12 @@ class GitConflictError(GitProviderError):
     """Raised when a commit cannot be applied to the expected repository revision."""
 
     code = "revision-conflict"
+
+
+class ProviderCallBudgetExceededError(GitProviderError):
+    """Raised before a request when the operation's provider call budget is spent."""
+
+    code = "provider-call-budget-exceeded"
 
 
 class GitProviderCapabilityError(GitProviderError):
@@ -195,6 +209,19 @@ def validate_greenkube_plan_branch(ref: str) -> str:
     return value
 
 
+def is_full_commit_sha(value: object) -> TypeGuard[str]:
+    """Return whether ``value`` is an immutable full SHA-1 or SHA-256 object ID."""
+    return isinstance(value, str) and _GIT_OBJECT_SHA.fullmatch(value) is not None
+
+
+def git_blob_id(content: str | bytes, *, object_format: Literal["sha1", "sha256"] = "sha1") -> str:
+    """Return the Git blob object ID (``git hash-object``) of UTF-8 file content."""
+    payload = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+    header = b"blob " + str(len(payload)).encode("ascii") + b"\0"
+    digest = hashlib.sha256 if object_format == "sha256" else hashlib.sha1
+    return digest(header + payload).hexdigest()
+
+
 def _validate_full_commit_sha(revision: object, *, provider: str, ref: str) -> str:
     if not isinstance(revision, str) or _GIT_OBJECT_SHA.fullmatch(revision) is None:
         raise GitProviderError(f"{provider} returned an invalid full commit SHA for ref '{ref}'.")
@@ -238,6 +265,67 @@ class GitFile:
     content: str
     sha: Optional[str] = None
     blob_sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeEntry:
+    """One non-directory entry of a recursive repository tree."""
+
+    path: str
+    sha: str
+    mode: str = "100644"
+    type: str = "blob"
+
+
+@dataclass(frozen=True, slots=True)
+class GitTree:
+    """A complete recursive listing of file entries at one revision."""
+
+    entries: Mapping[str, GitTreeEntry]
+    sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeChange:
+    """One path whose entry differs between two trees.
+
+    ``blob_sha`` is the head-side object ID when the provider reports it; it is
+    ``None`` for deletions and for providers whose comparison API only lists
+    paths (callers then read the head blob of the paths they care about).
+    """
+
+    path: str
+    status: Literal["added", "modified", "deleted"]
+    blob_sha: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitTreeComparison:
+    """The complete set of paths that differ between an immutable base and a head ref."""
+
+    base_revision: str
+    head_ref: str
+    changes: tuple[GitTreeChange, ...] = ()
+    head_revision: Optional[str] = None
+
+
+def diff_git_trees(base: GitTree, head: GitTree) -> tuple[GitTreeChange, ...]:
+    """Compare two complete trees by entry identity (object ID, mode and type)."""
+    changes: list[GitTreeChange] = []
+    for path in sorted(set(base.entries) | set(head.entries)):
+        base_entry = base.entries.get(path)
+        head_entry = head.entries.get(path)
+        if head_entry is None:
+            changes.append(GitTreeChange(path=path, status="deleted"))
+        elif base_entry is None:
+            changes.append(GitTreeChange(path=path, status="added", blob_sha=head_entry.sha))
+        elif (base_entry.sha.lower(), base_entry.mode, base_entry.type) != (
+            head_entry.sha.lower(),
+            head_entry.mode,
+            head_entry.type,
+        ):
+            changes.append(GitTreeChange(path=path, status="modified", blob_sha=head_entry.sha))
+    return tuple(changes)
 
 
 @dataclass
@@ -425,6 +513,7 @@ class GitProvider(ABC):
         self.timeout = timeout
         self._client = client
         self._owns_client = client is None
+        self._immutable_cache: OrderedDict[tuple[str, ...], object] = OrderedDict()
 
     capabilities: frozenset[GitProviderCapability] = frozenset()
 
@@ -502,7 +591,7 @@ class GitProvider(ABC):
         """Check file-operation preconditions against the requested base revision."""
         files: dict[str, Optional[GitFile]] = {}
         for edit in request.files:
-            current = await self.get_file(request.repo, edit.path, request.base_revision)
+            current = await self._get_file_cached(request.repo, edit.path, request.base_revision)
             if edit.action == "create" and current is not None:
                 raise GitConflictError(f"Cannot create '{edit.path}': the file already exists at the base revision.")
             if edit.action != "create" and current is None:
@@ -521,6 +610,39 @@ class GitProvider(ABC):
             default_branch=base_branch or "main",
             validate_provider=self.name in ("github", "gitlab", "gitea"),
         )
+
+    # ------------------------------------------------------------------
+    # Immutable-revision cache
+    # ------------------------------------------------------------------
+
+    def _cache_get(self, key: tuple[str, ...]) -> object | None:
+        cache = getattr(self, "_immutable_cache", None)
+        if cache is None or key not in cache:
+            return None
+        cache.move_to_end(key)
+        return cache[key]
+
+    def _cache_put(self, key: tuple[str, ...], value: object) -> None:
+        cache = getattr(self, "_immutable_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._immutable_cache = cache
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > _IMMUTABLE_CACHE_SIZE:
+            cache.popitem(last=False)
+
+    async def _get_file_cached(self, repo: GitRepository, path: str, ref: str) -> Optional[GitFile]:
+        """Read a file once per immutable commit SHA; mutable refs are always re-read."""
+        if not is_full_commit_sha(ref):
+            return await self.get_file(repo, path, ref)
+        key = ("file", repo.full_name, ref.lower(), path)
+        cached = self._cache_get(key)
+        if isinstance(cached, _CachedFile):
+            return cached.file
+        git_file = await self.get_file(repo, path, ref)
+        self._cache_put(key, _CachedFile(git_file))
+        return git_file
 
     # ------------------------------------------------------------------
     # HTTP plumbing
@@ -545,6 +667,7 @@ class GitProvider(ABC):
         client = await self._client_or_create()
         url = f"{self.api_base_url}{path}" if self.api_base_url else path
         for attempt in range(3 if retryable else 1):
+            charge_provider_call(self.name)
             try:
                 response = await client.request(
                     method,
@@ -611,6 +734,7 @@ class GitProvider(ABC):
             try:
                 redirects = 0
                 while True:
+                    charge_provider_call(self.name)
                     async with client.stream(
                         "GET",
                         current_url,
@@ -725,6 +849,87 @@ class GitProvider(ABC):
     @abstractmethod
     async def list_files(self, repo: GitRepository, ref: str) -> List[str]: ...
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Return every file entry at ``ref`` with its object ID.
+
+        This portable fallback costs one call per file; adapters override it
+        with their recursive tree API so cost does not grow with repository size.
+        """
+        entries: dict[str, GitTreeEntry] = {}
+        for path in await self.list_files(repo, ref):
+            git_file = await self._get_file_cached(repo, path, ref)
+            if git_file is None:
+                raise GitProviderError(f"{self.name} could not read listed file {path!r} at {ref!r}.")
+            entries[path] = GitTreeEntry(path=path, sha=git_file.blob_sha or git_blob_id(git_file.content))
+        return GitTree(entries=entries)
+
+    async def _get_tree_cached(self, repo: GitRepository, ref: str) -> GitTree:
+        if not is_full_commit_sha(ref):
+            return await self.get_tree(repo, ref)
+        key = ("tree", repo.full_name, ref.lower())
+        cached = self._cache_get(key)
+        if isinstance(cached, GitTree):
+            return cached
+        tree = await self.get_tree(repo, ref)
+        self._cache_put(key, tree)
+        return tree
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        """Return every path whose entry differs between ``base_revision`` and ``head_ref``.
+
+        ``base_revision`` must be an immutable full commit SHA. The result is a
+        direct (two-dot) tree comparison and is always complete: adapters whose
+        fast comparison API cannot prove completeness fall back to full trees.
+        """
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        base_tree = await self._get_tree_cached(repo, base_revision)
+        head_tree = await self._get_tree_cached(repo, head_ref)
+        return GitTreeComparison(
+            base_revision=base_revision,
+            head_ref=head_ref,
+            changes=diff_git_trees(base_tree, head_tree),
+            head_revision=head_ref if is_full_commit_sha(head_ref) else None,
+        )
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, Optional[str]]:
+        """Return the blob object ID of each path at ``ref`` (``None`` when absent).
+
+        Costs at most one call per requested path; results for immutable commit
+        SHAs are cached for the lifetime of the adapter.
+        """
+        blob_ids: dict[str, Optional[str]] = {}
+        for path in paths:
+            _validate_git_path(path)
+            git_file = await self._get_file_cached(repo, path, ref)
+            blob_ids[path] = None if git_file is None else git_file.blob_sha or git_blob_id(git_file.content)
+        return blob_ids
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        """Return whether ``descendant_sha`` contains ``ancestor_sha`` in its history.
+
+        ``True`` also covers identical commits. ``None`` means the provider
+        cannot tell (unknown commit, unsupported API); callers must not treat
+        it as a negative answer.
+        """
+        self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        raise GitProviderCapabilityError(
+            self.name,
+            GitProviderCapability.COMMIT_ANCESTRY,
+            reason="This adapter does not implement commit ancestry checks.",
+        )
+
+    def _validate_ancestry_request(
+        self,
+        repo: GitRepository,
+        ancestor_sha: str,
+        descendant_sha: str,
+    ) -> tuple[str, str]:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Ancestry check must target a {self.name} repository.")
+        ancestor = _validate_full_commit_sha(ancestor_sha, provider=self.name, ref=str(ancestor_sha))
+        descendant = _validate_full_commit_sha(descendant_sha, provider=self.name, ref=str(descendant_sha))
+        return ancestor.lower(), descendant.lower()
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         """Return a bounded archive for one immutable full commit SHA."""
         self._validate_archive_request(repo, revision, max_bytes)
@@ -818,6 +1023,11 @@ class GitProvider(ABC):
             return False
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedFile:
+    file: Optional[GitFile]
+
+
 def _error_detail(response: httpx.Response) -> str:
     """Extracts a compact error message from a provider response."""
     try:
@@ -877,9 +1087,22 @@ def _archive_redirect_target(
     return target_url, same_origin
 
 
+class MergeCommitSource(StrEnum):
+    """Which provider field identified the commit that landed on the base branch."""
+
+    MERGE_COMMIT = "merge_commit"
+    SQUASH_COMMIT = "squash_commit"
+    FAST_FORWARD_HEAD = "fast_forward_head"
+
+
 @dataclass
 class PullRequestInfo:
-    """Normalized pull-request information across providers."""
+    """Normalized pull-request information across providers.
+
+    ``merge_commit_sha`` is set only for merged requests and names the commit
+    that landed on the base branch; ``merge_commit_source`` records which
+    provider field it came from (:class:`MergeCommitSource`).
+    """
 
     number: int
     url: str
@@ -888,6 +1111,8 @@ class PullRequestInfo:
     raw: dict = field(default_factory=dict)
     head_branch: Optional[str] = None
     base_branch: Optional[str] = None
+    merge_commit_sha: Optional[str] = None
+    merge_commit_source: Optional[str] = None
 
     # Keep compatibility with the service's existing mapping-style access
     # while exposing a typed result to callers.
@@ -929,6 +1154,10 @@ def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInf
     base = data.get("base")
     head_branch = head.get("ref") if isinstance(head, dict) else data.get("source_branch")
     base_branch = base.get("ref") if isinstance(base, dict) else data.get("target_branch")
+    # GitHub keeps a test-merge ``merge_commit_sha`` on requests closed without
+    # merging; only a merged request has a merge commit (BUG-45).
+    raw_merge_sha = data.get("merge_commit_sha")
+    merge_commit_sha = raw_merge_sha if merged and is_full_commit_sha(raw_merge_sha) else None
     return PullRequestInfo(
         number=number,
         url=url,
@@ -937,6 +1166,8 @@ def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInf
         raw=data,
         head_branch=head_branch if isinstance(head_branch, str) else None,
         base_branch=base_branch if isinstance(base_branch, str) else None,
+        merge_commit_sha=merge_commit_sha,
+        merge_commit_source=MergeCommitSource.MERGE_COMMIT.value if merge_commit_sha is not None else None,
     )
 
 

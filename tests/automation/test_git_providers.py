@@ -974,6 +974,17 @@ def _commit_request(repo, files):
     )
 
 
+def _github_tree(tree_sha, blobs, *, modes=None):
+    modes = modes or {}
+    return {
+        "sha": tree_sha,
+        "truncated": False,
+        "tree": [
+            {"path": path, "mode": modes.get(path, "100644"), "type": "blob", "sha": sha} for path, sha in blobs.items()
+        ],
+    }
+
+
 def test_git_commit_contract_validates_file_actions_and_paths():
     with pytest.raises(GitProviderError):
         GitFileEdit(path="../secret.yaml", action="create", content="x")
@@ -996,20 +1007,16 @@ async def test_github_create_commit_uses_one_git_data_commit_for_file_edits():
     respx.get(f"{api}/git/ref/heads/feature/atomic").mock(
         return_value=Response(200, json={"object": {"sha": "base-sha"}})
     )
-    respx.get(f"{api}/git/commits/base-sha").mock(return_value=Response(200, json={"tree": {"sha": "base-tree"}}))
-    respx.get(f"{api}/contents/new.yaml").mock(return_value=Response(404, json={"message": "Not Found"}))
-    respx.get(f"{api}/contents/apps/update.yaml").mock(
+    base_tree_route = respx.get(f"{api}/git/trees/base-sha", params={"recursive": "1"}).mock(
         return_value=Response(
             200,
-            json={"content": base64.b64encode(b"old").decode(), "sha": "update-blob"},
+            json=_github_tree(
+                "base-tree",
+                {"apps/update.yaml": "update-blob", "apps/delete.yaml": "delete-blob", "README.md": "readme-blob"},
+            ),
         )
     )
-    respx.get(f"{api}/contents/apps/delete.yaml").mock(
-        return_value=Response(
-            200,
-            json={"content": base64.b64encode(b"old").decode(), "sha": "delete-blob"},
-        )
-    )
+    contents_route = respx.get(url__startswith=f"{api}/contents/").mock(return_value=Response(500))
 
     def create_tree(request):
         seen["tree"] = json.loads(request.content)
@@ -1047,6 +1054,8 @@ async def test_github_create_commit_uses_one_git_data_commit_for_file_edits():
     assert tree_route.call_count == 1
     assert commit_route.call_count == 1
     assert ref_route.call_count == 1
+    assert base_tree_route.call_count == 1
+    assert contents_route.call_count == 0
     assert seen["tree"]["base_tree"] == "base-tree"
     assert seen["tree"]["tree"] == [
         {"path": "new.yaml", "mode": "100644", "type": "blob", "content": "new"},
@@ -1090,9 +1099,8 @@ async def test_github_create_commit_maps_non_fast_forward_ref_update_to_conflict
     respx.get(f"{api}/git/ref/heads/feature/atomic").mock(
         return_value=Response(200, json={"object": {"sha": "base-sha"}})
     )
-    respx.get(f"{api}/git/commits/base-sha").mock(return_value=Response(200, json={"tree": {"sha": "base-tree"}}))
-    respx.get(f"{api}/contents/apps/api.yaml").mock(
-        return_value=Response(200, json={"content": base64.b64encode(b"old").decode(), "sha": "old-blob"})
+    respx.get(f"{api}/git/trees/base-sha").mock(
+        return_value=Response(200, json=_github_tree("base-tree", {"apps/api.yaml": "old-blob"}))
     )
     respx.post(f"{api}/git/trees").mock(return_value=Response(201, json={"sha": "new-tree"}))
     respx.post(f"{api}/git/commits").mock(return_value=Response(201, json={"sha": "new-commit"}))
@@ -1237,18 +1245,9 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
     api = "http://gitea.local/api/v1/repos/acme/manifests"
     seen = {}
     respx.get(f"{api}/branches/feature/atomic").mock(return_value=Response(200, json={"commit": {"id": "base-sha"}}))
-
-    def create_staging_branch(request):
-        seen["staging_create"] = json.loads(request.content)
-        seen["staging_branch"] = seen["staging_create"]["new_branch_name"]
-        return Response(201, json={"name": seen["staging_branch"]})
-
-    def get_staging_branch(request):
-        return Response(200, json={"commit": {"id": "base-sha"}})
-
-    staging_create_route = respx.post(f"{api}/branches").mock(side_effect=create_staging_branch)
+    staging_create_route = respx.post(f"{api}/branches").mock(return_value=Response(201, json={}))
     staging_get_route = respx.get(url__startswith=f"{api}/branches/greenkube-commit-").mock(
-        side_effect=get_staging_branch
+        return_value=Response(200, json={"commit": {"id": "base-sha"}})
     )
     respx.get(f"{api}/contents/new.yaml").mock(return_value=Response(404, json={"message": "Not Found"}))
     respx.get(f"{api}/contents/apps%2Fupdate.yaml").mock(
@@ -1266,6 +1265,7 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
 
     def create_commit(request):
         seen["commit"] = json.loads(request.content)
+        seen["staging_branch"] = seen["commit"]["new_branch"]
         return Response(
             201,
             json={"commit": {"sha": "new-commit", "parents": [{"sha": "base-sha"}]}},
@@ -1306,16 +1306,17 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
     assert result.commit_sha == "new-commit"
     assert result.branch == "feature/atomic"
     assert result.files_changed == ["new.yaml", "apps/update.yaml", "apps/delete.yaml"]
-    assert staging_create_route.call_count == 1
-    assert staging_get_route.call_count == 1
+    # The staging branch is cut from the plan branch by the commit call itself.
+    assert staging_create_route.call_count == 0
+    assert staging_get_route.call_count == 0
     assert commit_route.call_count == 1
     assert single_file_route.call_count == 0
     assert branch_update_route.call_count == 1
     assert staging_delete_route.call_count == 1
-    assert seen["staging_create"]["old_branch_name"] == "feature/atomic"
-    assert seen["staging_create"]["new_branch_name"].startswith("greenkube-commit-")
+    assert seen["staging_branch"].startswith("greenkube-commit-")
     assert seen["commit"] == {
-        "branch": seen["staging_branch"],
+        "branch": "feature/atomic",
+        "new_branch": seen["staging_branch"],
         "message": "apply plan",
         "author": {"name": "GreenKube Bot", "email": "bot@greenkube.cloud"},
         "committer": {"name": "GreenKube Bot", "email": "bot@greenkube.cloud"},
@@ -1366,15 +1367,6 @@ async def test_gitea_create_commit_rejects_a_stale_base_without_staging():
 async def test_gitea_create_commit_maps_compare_and_swap_failure_to_conflict():
     api = "http://gitea.local/api/v1/repos/acme/manifests"
     respx.get(f"{api}/branches/feature/atomic").mock(return_value=Response(200, json={"commit": {"id": "base-sha"}}))
-
-    def create_staging_branch(request):
-        body = json.loads(request.content)
-        return Response(201, json={"name": body["new_branch_name"]})
-
-    respx.post(f"{api}/branches").mock(side_effect=create_staging_branch)
-    respx.get(url__startswith=f"{api}/branches/greenkube-commit-").mock(
-        return_value=Response(200, json={"commit": {"id": "base-sha"}})
-    )
     respx.get(f"{api}/contents/apps%2Fapi.yaml").mock(
         return_value=Response(200, json={"content": base64.b64encode(b"old").decode(), "sha": "old-blob"})
     )

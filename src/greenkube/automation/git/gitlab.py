@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Optional
+from dataclasses import replace
+from typing import List, Literal, Optional
 from urllib.parse import quote
 
 from greenkube.automation.git.base import (
@@ -13,14 +14,21 @@ from greenkube.automation.git.base import (
     GitCommitResult,
     GitConflictError,
     GitFile,
+    GitFileEdit,
     GitProvider,
     GitProviderCapability,
     GitProviderError,
     GitRepository,
+    GitTree,
+    GitTreeChange,
+    GitTreeComparison,
+    GitTreeEntry,
+    MergeCommitSource,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_object,
     _validate_full_commit_sha,
+    is_full_commit_sha,
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
@@ -48,6 +56,7 @@ class GitLabProvider(GitProvider):
             GitProviderCapability.REVIEWERS,
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
+            GitProviderCapability.COMMIT_ANCESTRY,
         }
     )
 
@@ -150,6 +159,157 @@ class GitLabProvider(GitProvider):
             except (TypeError, ValueError):
                 raise GitProviderError("GitLab returned an invalid pagination cursor; refusing partial results.")
         return files
+
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Read the recursive tree with object IDs (paginated; used only as a fallback)."""
+        entries: dict[str, GitTreeEntry] = {}
+        page = 1
+        seen_pages: set[int] = set()
+        while True:
+            if page in seen_pages or page > 10000:
+                raise GitProviderError("GitLab pagination did not progress; refusing partial results.")
+            seen_pages.add(page)
+            response = await self._request(
+                "GET",
+                f"/projects/{self._project(repo)}/repository/tree",
+                params={"ref": ref, "recursive": "true", "per_page": "100", "page": str(page)},
+            )
+            if response.status_code == 404:
+                raise GitProviderError("GitLab repository tree was not found; refusing partial results.")
+            data = response.json()
+            if not isinstance(data, list):
+                raise GitProviderError("GitLab returned an invalid repository tree; refusing partial results.")
+            for item in data:
+                if not isinstance(item, dict):
+                    raise GitProviderError("GitLab returned an invalid tree entry; refusing partial results.")
+                item_type = item.get("type")
+                if item_type == "tree":
+                    continue
+                path, sha, mode = item.get("path"), item.get("id"), item.get("mode")
+                if (
+                    item_type not in ("blob", "commit")
+                    or not isinstance(path, str)
+                    or not isinstance(sha, str)
+                    or not sha
+                    or path in entries
+                ):
+                    raise GitProviderError("GitLab returned an invalid tree entry; refusing partial results.")
+                entries[path] = GitTreeEntry(
+                    path=path,
+                    sha=sha,
+                    mode=mode if isinstance(mode, str) else "100644",
+                    type=item_type,
+                )
+            next_page = response.headers.get("x-next-page")
+            if not data or not next_page:
+                return GitTree(entries=entries)
+            try:
+                page = int(next_page)
+            except (TypeError, ValueError):
+                raise GitProviderError("GitLab returned an invalid pagination cursor; refusing partial results.")
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
+        """Diff ``base_revision..head_ref`` with one direct compare call (paths only, no blob IDs)."""
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        response = await self._request(
+            "GET",
+            f"/projects/{self._project(repo)}/repository/compare",
+            params={"from": base_revision, "to": head_ref, "straight": "true"},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitLab could not compare {base_revision} with {head_ref!r} in {repo.full_name}.")
+        data = _git_response_object(response, provider=self.name, ref=head_ref)
+        diffs = data.get("diffs")
+        if data.get("compare_timeout") is True or not isinstance(diffs, list):
+            # GitLab could not compute a complete diff: fall back to full trees.
+            return await super().compare_trees(repo, base_revision, head_ref)
+
+        statuses: dict[str, Literal["added", "modified", "deleted"]] = {}
+
+        def record(path: object, status: Literal["added", "modified", "deleted"]) -> None:
+            if not isinstance(path, str):
+                raise GitProviderError("GitLab returned an invalid compare entry.")
+            GitFileEdit(path=path, action="delete")
+            previous = statuses.get(path)
+            statuses[path] = status if previous is None or previous == status else "modified"
+
+        for diff in diffs:
+            if not isinstance(diff, dict):
+                raise GitProviderError("GitLab returned an invalid compare entry.")
+            old_path, new_path = diff.get("old_path"), diff.get("new_path")
+            if diff.get("deleted_file") is True:
+                record(old_path, "deleted")
+            elif diff.get("new_file") is True:
+                record(new_path, "added")
+            elif diff.get("renamed_file") is True or old_path != new_path:
+                record(old_path, "deleted")
+                record(new_path, "added")
+            else:
+                record(new_path, "modified")
+
+        commit = data.get("commit")
+        head_revision = commit.get("id") if isinstance(commit, dict) else None
+        if not is_full_commit_sha(head_revision):
+            head_revision = head_ref if is_full_commit_sha(head_ref) else None
+        changes = tuple(GitTreeChange(path=path, status=status) for path, status in sorted(statuses.items()))
+        return GitTreeComparison(
+            base_revision=base_revision,
+            head_ref=head_ref,
+            changes=changes,
+            head_revision=head_revision,
+        )
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        ancestor, descendant = self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        if ancestor == descendant:
+            return True
+        response = await self._request(
+            "GET",
+            f"/projects/{self._project(repo)}/repository/merge_base",
+            params={"refs[]": [ancestor, descendant]},
+        )
+        if response.status_code == 404:
+            return None
+        data = _git_response_object(response, provider=self.name, ref=f"{ancestor}...{descendant}")
+        merge_base = data.get("id")
+        if not is_full_commit_sha(merge_base):
+            return None
+        return merge_base.lower() == ancestor
+
+    async def _project_merge_method(self, repo: GitRepository) -> Optional[str]:
+        response = await self._request("GET", f"/projects/{self._project(repo)}")
+        if response.status_code == 404:
+            return None
+        data = _git_response_object(response, provider=self.name, ref=repo.full_name)
+        merge_method = data.get("merge_method")
+        return merge_method if isinstance(merge_method, str) else None
+
+    async def _with_landed_commit(self, repo: GitRepository, pull_request: PullRequestInfo) -> PullRequestInfo:
+        """Resolve the commit that landed for merges without a merge commit (BUG-46).
+
+        Squash merges expose ``squash_commit_sha``; fast-forward merges leave
+        both SHAs empty and land the merge request head (``sha``) itself.
+        """
+        if not pull_request.merged or pull_request.merge_commit_sha is not None:
+            return pull_request
+        raw = pull_request.raw
+        squash_sha = raw.get("squash_commit_sha")
+        head_sha = raw.get("sha")
+        if is_full_commit_sha(squash_sha):
+            landed, source = squash_sha, MergeCommitSource.SQUASH_COMMIT
+        elif raw.get("squash") is not True and is_full_commit_sha(head_sha):
+            if await self._project_merge_method(repo) != "ff":
+                return pull_request
+            landed, source = head_sha, MergeCommitSource.FAST_FORWARD_HEAD
+        else:
+            return pull_request
+        logger.info(
+            "GitLab merge request !%d in %s merged without a merge commit; using its %s.",
+            pull_request.number,
+            repo.full_name,
+            source.value,
+        )
+        return replace(pull_request, merge_commit_sha=landed, merge_commit_source=source.value)
 
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         revision = self._validate_archive_request(repo, revision, max_bytes)
@@ -327,7 +487,7 @@ class GitLabProvider(GitProvider):
         response = await self._request("GET", f"/projects/{self._project(repo)}/merge_requests/{number}")
         if response.status_code == 404:
             raise GitProviderError(f"Merge request {number} not found in {repo.full_name}.")
-        return normalize_pull_request(response.json(), repo=repo)
+        return await self._with_landed_commit(repo, normalize_pull_request(response.json(), repo=repo))
 
     async def find_pull_request(self, repo: GitRepository, head: str, base: str) -> Optional[PullRequestInfo]:
         if repo.provider != self.name:
