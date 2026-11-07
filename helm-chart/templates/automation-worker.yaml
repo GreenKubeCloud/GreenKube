@@ -78,7 +78,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.secretName" . }}
+                  name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "DB_CONNECTION_STRING") }}
                   key: DB_CONNECTION_STRING
             {{- end }}
             - name: K8S_NODE_NAME

@@ -29,7 +29,7 @@ spec:
       authorization:
         type: Bearer
         credentials:
-          name: {{ include "greenkube.secretName" . }}
+          name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_API_KEY") }}
           key: GREENKUBE_API_KEY
       metricRelabelings:
         # Prometheus renames metric labels that conflict with Kubernetes discovery

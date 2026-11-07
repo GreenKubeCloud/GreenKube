@@ -64,7 +64,7 @@ This creates:
 
 - the GreenKube API/collector workload,
 - a bundled PostgreSQL StatefulSet and Service,
-- a Secret containing a generated `GREENKUBE_API_KEY` and database credentials,
+- a one-time credentials bootstrap hook that generates `GREENKUBE_API_KEY` and the PostgreSQL password into the Secret `greenkube` (see [Credentials and GitOps](#credentials-and-gitops-argo-cd-flux)),
 - the read-only Kubernetes RBAC required by the collectors and recommendation engine.
 
 ### 3. Verify the rollout
@@ -92,16 +92,18 @@ kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
 
 Open <http://localhost:8000>.
 
-Service names follow the Helm fullname convention. With the release name `greenkube` above, the Service is `greenkube-api` and the chart-managed Secret is `greenkube`. For a release named `greenkube-prod`, they are `greenkube-prod-api` and `greenkube-prod` unless you set `secrets.existingSecret`.
+Service names follow the Helm fullname convention. With the release name `greenkube` above, the Service is `greenkube-api`, generated credentials are in the Secret `greenkube`, and credentials you set in values are in `greenkube-values`. For a release named `greenkube-prod`, they are `greenkube-prod-api`, `greenkube-prod` and `greenkube-prod-values`, unless you set `secrets.existingSecret`.
 
 ### 5. Retrieve the API key
 
-In `production` authentication mode the dashboard asks for an API key. Retrieve the generated value from the release Secret:
+In `production` authentication mode the dashboard asks for an API key. `helm install` prints the exact command for your release in its notes; for the default release it reads the generated value from the Secret `greenkube`:
 
 ```bash
 kubectl -n greenkube get secret greenkube \
   -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
 ```
+
+If you set `secrets.apiKey`, read it from `greenkube-values` instead; with `secrets.existingSecret`, from your own Secret.
 
 Paste the value into the dashboard's **API authentication required** dialog and select **Connect**. The browser keeps the key in memory only: it is never stored in `localStorage` or cookies, so a full page reload asks for it again.
 
@@ -225,8 +227,8 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 
 | Value | Purpose |
 |---|---|
-| `secrets.existingSecret` | Use a pre-created Secret instead of the chart-managed one. Recommended for production. |
-| `secrets.apiKey` | API bearer key. If empty, the chart generates one on first install and preserves it on upgrades. |
+| `secrets.existingSecret` | Use a pre-created Secret instead of chart-rendered and generated credentials. Recommended for production and GitOps. |
+| `secrets.apiKey` | API bearer key. If empty, the credentials bootstrap hook generates one once; upgrades and GitOps syncs never rotate it. |
 | `secrets.electricityMapsToken` | Electricity Maps token. |
 | `secrets.wattnetEmail`, `secrets.wattnetPassword` | Wattnet credentials when `config.electricityProvider=wattnet`. |
 | `secrets.boaviztaToken` | Optional Boavizta token. |
@@ -397,6 +399,33 @@ Key-handling rules:
 - The browser keeps the entered key in memory only; it is not persisted. Users must re-enter it after a reload.
 - Run the UI and API on the same origin. If they must differ, set `config.corsOrigins` explicitly and make sure the proxy forwards `Authorization` and `OPTIONS`.
 
+### Credentials and GitOps (Argo CD, Flux)
+
+The chart never generates a credential at render time: it uses no `lookup` and no random function, so two
+`helm template` runs with the same values produce identical manifests. This matters for Argo CD, which renders
+charts with `helm template` and cannot see existing Secrets; a chart that generated credentials while rendering
+would rotate the API key and the PostgreSQL password on every sync while the database volume kept the old password.
+
+Credentials come from three places:
+
+| Source | Secret | Managed by |
+|---|---|---|
+| `secrets.existingSecret` | your Secret | you (recommended for GitOps: create it with External Secrets, Sealed Secrets, SOPS, or `kubectl`) |
+| Values you set (`secrets.*`, `postgres.auth.password`, `config.prometheus.url`, ...) | `<release>-values` | Helm / Argo CD / Flux, as a regular release resource |
+| Generated when not supplied: `GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database | `<release>` | the `<release>-credentials-bootstrap` hook |
+
+The bootstrap hook runs before every install and upgrade (Argo CD runs it as a PreSync hook on every sync). It
+creates the Secret `<release>` only when it is absent and afterwards only adds missing keys, so it never rotates
+a value. That Secret carries no Helm or Argo CD tracking metadata: Argo CD does not report or prune it, and
+`helm uninstall` keeps it, like the PostgreSQL volume whose password it holds. The hook needs `rbac.create=true`;
+with `rbac.create=false`, supply the credentials or use `secrets.existingSecret`.
+
+For a fully declarative setup, set `secrets.existingSecret`: the chart then renders no Secret and runs no
+bootstrap hook. See [Production API-key handling](#production-api-key-handling) for the keys it must contain.
+
+Upgrading from 0.3.x keeps the Secret `<release>` created by the earlier chart as-is: the hook finds the existing
+API key and PostgreSQL password and adds nothing.
+
 ### Reach the frontend
 
 **Local access with port forwarding**
@@ -554,7 +583,7 @@ kubectl -n greenkube rollout status deployment/greenkube-controller --timeout=10
 kubectl -n greenkube rollout status deployment/greenkube-automation --timeout=10m
 ```
 
-The chart preserves generated API keys, PostgreSQL passwords, and runtime service overrides that were written to the Secret.
+Upgrades never rotate generated API keys or PostgreSQL passwords: the credentials bootstrap hook only adds missing keys to the Secret `<release>`, which also keeps runtime service overrides written from the Settings page. Values you set in Helm take precedence over those overrides.
 
 Changes to Helm-managed runtime configuration roll the standalone or production component Pods through a ConfigMap checksum. If you update an existing provider Secret or an API key outside Helm, restart the affected API/worker Pods so they reload the changed Secret values.
 
@@ -564,15 +593,16 @@ Uninstall:
 helm uninstall greenkube --namespace greenkube
 ```
 
-The bundled PostgreSQL PVC survives uninstallation. For a clean reinstall, delete the release's PVC as well, then verify whether the storage class removed its PV:
+The bundled PostgreSQL PVC and the generated-credentials Secret `greenkube` survive uninstallation, so a reinstall reuses the existing password. For a clean reinstall, delete both, then verify whether the storage class removed its PV:
 
 ```bash
 kubectl -n greenkube delete pvc data-greenkube-postgres-0 --ignore-not-found --wait=true
+kubectl -n greenkube delete secret greenkube --ignore-not-found
 kubectl -n greenkube get pvc
 kubectl get pv
 ```
 
-Only delete a remaining PV after checking its claim reference and reclaim policy. A storage class with reclaim policy `Delete` removes its PV after the claim is released; a class with `Retain` requires the storage administrator's cleanup procedure. If the chart-managed Secret is missing but the PostgreSQL PVC is kept, a reinstall may generate a new password that cannot authenticate against the existing database. The pod then crash-loops with `password authentication failed for user "greenkube"`.
+Only delete a remaining PV after checking its claim reference and reclaim policy. A storage class with reclaim policy `Delete` removes its PV after the claim is released; a class with `Retain` requires the storage administrator's cleanup procedure. If the Secret `greenkube` was deleted but the PostgreSQL PVC was kept, a new password could not authenticate against the existing database, so the credentials bootstrap hook refuses to generate one and the install fails with the recovery command.
 
 Either delete the volume for a clean install, or provide the existing database password before reinstalling:
 
@@ -582,7 +612,15 @@ kubectl -n greenkube delete pvc data-greenkube-postgres-0
 ```
 
 ```bash
-# Keep the data: reuse the old password through an explicit Secret
+# Keep the data: recreate the generated-credentials Secret with the old password
+# (the bootstrap hook then only adds a new API key)
+kubectl -n greenkube create secret generic greenkube \
+  --from-literal=POSTGRES_PASSWORD="<the-password-used-by-the-existing-database>" \
+  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<the-password-used-by-the-existing-database>@greenkube-postgres:5432/greenkube"
+```
+
+```bash
+# Or keep the data and manage every credential through an explicit Secret
 kubectl -n greenkube create secret generic greenkube-secrets \
   --from-literal=GREENKUBE_API_KEY="$(openssl rand -hex 32)" \
   --from-literal=POSTGRES_PASSWORD="<the-password-used-by-the-existing-database>" \
@@ -593,7 +631,7 @@ helm upgrade --install greenkube greenkube/greenkube \
   --set secrets.existingSecret=greenkube-secrets
 ```
 
-The chart rejects a fresh install when a retained PostgreSQL PVC exists without its Secret, instead of starting a database that cannot authenticate.
+The credentials bootstrap hook rejects an install when a retained PostgreSQL PVC exists without its password, instead of starting a database that cannot authenticate.
 
 ## Troubleshooting
 
@@ -604,8 +642,9 @@ The chart rejects a fresh install when a retained PostgreSQL PVC exists without 
 | API returns `503` with "API authentication is not configured" | `config.environment=production` but the Secret has no key. | Create/reference a Secret containing `GREENKUBE_API_KEY`. |
 | Dashboard shows no data | Prometheus is unreachable or not discovered. | Open **Settings**, check service health, and set `config.prometheus.url` explicitly. |
 | Pod stays in `InvalidImageName` or events show `couldn't parse image name "...:sha256:..."` | A digest was passed through `image.tag`. | Use `--set image.digest=sha256:<64 hex>` instead. `image.repository` must stay a repository name. |
-| Collector/API crash-loop with `password authentication failed for user "greenkube"` | A PostgreSQL PVC from an earlier installation was reused with a newly generated password. | Delete `data-greenkube-postgres-0` for a clean install, or set `secrets.existingSecret` (or `postgres.auth.password`) to the password used by the existing database. |
-| `helm upgrade` fails with a pre-upgrade hook error for `<release>-db-credential-check` | The chart Secret no longer matches the existing PostgreSQL volume. | Run `kubectl -n greenkube logs job/<release>-db-credential-check`; it prints the recovery steps. Delete the PVC or provide the original password. |
+| Collector/API crash-loop with `password authentication failed for user "greenkube"` | A PostgreSQL PVC from an earlier installation was reused with a different password. | Delete `data-greenkube-postgres-0` for a clean install, or put the password used by the existing database in the Secret `greenkube`, `postgres.auth.password`, or `secrets.existingSecret`. |
+| Install fails in the `<release>-credentials-bootstrap` hook | A retained PostgreSQL PVC has no matching password, or the hook lacks RBAC. | Run `kubectl -n greenkube logs job/<release>-credentials-bootstrap`; it prints the recovery steps. |
+| `helm upgrade` fails with a pre-upgrade hook error for `<release>-db-credential-check` | The database credentials no longer match the existing PostgreSQL volume. | Run `kubectl -n greenkube logs job/<release>-db-credential-check`; it prints the recovery steps. Delete the PVC or provide the original password. |
 | Pod stays in `Init` waiting for PostgreSQL | The bundled database is not ready. | `kubectl -n greenkube logs <pod> -c wait-for-postgres`; check the PostgreSQL pod and PVC. |
 | Migration Job fails | Database credentials or connectivity are wrong. | Read the Job logs; verify `DB_CONNECTION_STRING`, `POSTGRES_PASSWORD`, and the Service name. |
 | Automation page reports discovery unavailable | GreenKube cannot read Kubernetes/GitOps APIs or no controllers are installed. | Check RBAC and controller CRDs; run `POST /api/v1/gitops/refresh`. |

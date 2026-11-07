@@ -452,13 +452,19 @@ config:
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
-# Option A (default): leave existingSecret empty and fill in the values below.
-# The chart creates a Secret named "<release>". Not recommended when
-# values.yaml is committed to Git (credentials would be stored in plain text).
+# Option A (default): leave existingSecret empty. Values set below are rendered
+# into the Secret "<release>-values". Credentials left empty (the API key and
+# the bundled PostgreSQL password) are generated once at install time by the
+# "<release>-credentials-bootstrap" hook into the Secret "<release>", which is
+# not part of the Helm release: upgrades and Argo CD/Flux syncs never rotate
+# it, and `helm uninstall` keeps it alongside the PostgreSQL volume. Rendering
+# never uses lookup or random functions, so `helm template` output is stable.
+# Do not commit plain-text credentials to Git.
 #
-# Option B (recommended for production): create the Secret manually, then
-# set secrets.existingSecret to its name. The chart will skip Secret
-# creation and all other secrets.* values are ignored.
+# Option B (recommended for production and GitOps): create the Secret manually
+# (or with External Secrets / Sealed Secrets), then set secrets.existingSecret
+# to its name. The chart renders no Secret, runs no bootstrap hook, and all
+# other secrets.* values are ignored.
 #
 #   kubectl create secret generic greenkube-secrets -n greenkube \
 #     --from-literal=GREENKUBE_API_KEY="..." \
@@ -591,9 +597,10 @@ postgres:
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    # Set a fixed password here to ensure stability across upgrades.
-    # If left empty, a random password is generated on first install and
-    # preserved automatically on subsequent upgrades via secret lookup.
+    # If left empty, a random password is generated once by the credentials
+    # bootstrap hook and kept in the Secret "<release>" across upgrades and
+    # GitOps syncs. Set it here (or use secrets.existingSecret) to manage it
+    # yourself.
     password: ''
     database: greenkube
   persistence:

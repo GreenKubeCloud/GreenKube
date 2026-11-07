@@ -4,7 +4,7 @@ The GreenKube REST API is available under `/api/v1`. Interactive documentation a
 
 ## Authentication
 
-When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The chart defaults to `config.environment: production` and generates a random `GREENKUBE_API_KEY` in its managed Secret. In production, a missing key makes protected routes fail closed with `503`; in development, an installation whose Secret has no key leaves protected routes open. The current API middleware supports API-key authentication; selecting another mode does not enable an OIDC or session implementation.
+When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The chart defaults to `config.environment: production` and generates a random `GREENKUBE_API_KEY` once, with its credentials bootstrap hook, in the Secret `<release>`. In production, a missing key makes protected routes fail closed with `503`; in development, an installation whose Secret has no key leaves protected routes open. The current API middleware supports API-key authentication; selecting another mode does not enable an OIDC or session implementation.
 
 The browser dashboard sends the key only after you paste it into the authentication dialog, keeps it in memory, and never persists it. Retrieve the key with:
 
@@ -13,7 +13,7 @@ kubectl -n <namespace> get secret <release-secret> \
   -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
 ```
 
-The exact Secret name is `<release>` for a chart-managed Secret or the value of `secrets.existingSecret`. See the [Installation guide](installation.md#production-api-key-handling).
+The exact Secret name is `<release>` for a generated key, `<release>-values` for a key set with `secrets.apiKey`, or the value of `secrets.existingSecret`; `helm install` prints the exact command. See the [Installation guide](installation.md#production-api-key-handling).
 
 ## Endpoints
 

@@ -298,14 +298,16 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 
 | Key | Description |
 |-----|-------------|
-| `secrets.apiKey` | API bearer token. A random key is generated for the chart-managed Secret when omitted and is preserved across upgrades. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
+| `secrets.apiKey` | API bearer token, rendered into the Secret `<release>-values`. When omitted, the `<release>-credentials-bootstrap` hook generates one once into the Secret `<release>`; upgrades and GitOps syncs never rotate it. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
 | `secrets.electricityMapsToken` | Electricity Maps API token when `config.electricityProvider` is `electricity_maps`. Without it, GreenKube uses bundled zone-specific fallback data when available, then the configured global intensity. Get a token at [electricitymaps.com](https://www.electricitymaps.com/). |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
 | `secrets.boaviztaToken` | Optional Boavizta API token. |
-| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml`. This skips chart Secret creation, so include every credential the installation needs (for the bundled database: `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`). |
+| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of chart-rendered and generated credentials; the GitOps path. The chart renders no Secret and runs no credentials bootstrap hook, so include every credential the installation needs (for the bundled database: `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`). |
 | `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`) with the chart-managed Secret. When `secrets.existingSecret` is set, put `DB_CONNECTION_STRING` in that Secret instead. |
 | `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
+
+Rendering never uses `lookup` or random functions, so `helm template` output is stable under Argo CD and Flux. Values set above go to the Secret `<release>-values`; generated credentials (`GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database) are created once by the credentials bootstrap hook in the Secret `<release>`, which is not part of the release and survives `helm uninstall`. See [Credentials and GitOps](installation.md#credentials-and-gitops-argo-cd-flux).
 
 ### Monitoring (`monitoring`)
 
@@ -430,7 +432,7 @@ config:
 
 ### API authentication and runtime service settings
 
-The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and creates a random API key in its managed Secret when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
+The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
 
 The Settings page sends integration changes to `POST /api/v1/config/services`. The API accepts only the current configured service hosts or exact hosts listed in `config.serviceUrlAllowlist`, and does not log the submitted URLs. It updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.
 

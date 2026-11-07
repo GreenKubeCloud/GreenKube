@@ -97,7 +97,9 @@ reference, so reject it with an actionable message.
 
 {{/*
 Return the name of the Secret to use.
-If secrets.existingSecret is set, use that; otherwise use the chart-managed name.
+If secrets.existingSecret is set, use that; otherwise use the Secret that holds
+generated credentials. The credentials bootstrap hook creates that Secret once,
+outside the Helm release, so the chart never renders generated values (N1).
 */}}
 {{- define "greenkube.secretName" -}}
 {{- if .Values.secrets.existingSecret -}}
@@ -105,6 +107,91 @@ If secrets.existingSecret is set, use that; otherwise use the chart-managed name
 {{- else -}}
 {{- include "greenkube.fullname" . -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Name of the chart-rendered Secret that holds credentials supplied in values.
+*/}}
+{{- define "greenkube.valuesSecretName" -}}
+{{- printf "%s-values" (include "greenkube.fullname" .) -}}
+{{- end -}}
+
+{{/*
+True when the chart deploys and owns the PostgreSQL database.
+*/}}
+{{- define "greenkube.bundledPostgres" -}}
+{{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Credentials supplied through values, as a YAML map of key to plain value.
+Rendering depends on values only (no lookup, no random function), so every
+`helm template` render is identical (BUG-58). Empty with secrets.existingSecret.
+*/}}
+{{- define "greenkube.secretValues" -}}
+{{- $data := dict -}}
+{{- if not .Values.secrets.existingSecret -}}
+  {{- $secrets := .Values.secrets -}}
+  {{- range $pair := list (list "ELECTRICITY_MAPS_TOKEN" $secrets.electricityMapsToken) (list "BOAVIZTA_TOKEN" $secrets.boaviztaToken) (list "WATTNET_EMAIL" $secrets.wattnetEmail) (list "WATTNET_PASSWORD" $secrets.wattnetPassword) (list "GREENKUBE_API_KEY" $secrets.apiKey) (list "PROMETHEUS_URL" $.Values.config.prometheus.url) (list "OPENCOST_API_URL" $.Values.config.opencost.url) (list "BOAVIZTA_API_URL" $.Values.config.boavizta.url) -}}
+    {{- if index $pair 1 -}}
+      {{- $_ := set $data (index $pair 0) (index $pair 1 | toString) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if include "greenkube.bundledPostgres" . -}}
+    {{- with .Values.postgres.auth.password -}}
+      {{- $_ := set $data "POSTGRES_PASSWORD" (toString .) -}}
+      {{- $_ := set $data "DB_CONNECTION_STRING" (printf "postgresql://%s:%s@%s-postgres:5432/%s" $.Values.postgres.auth.username (toString .) (include "greenkube.fullname" $) $.Values.postgres.auth.database) -}}
+    {{- end -}}
+  {{- else if .Values.secrets.dbConnectionString -}}
+    {{- $_ := set $data "DB_CONNECTION_STRING" (toString .Values.secrets.dbConnectionString) -}}
+  {{- end -}}
+  {{- range $pair := list (list "PROMETHEUS_USERNAME" $secrets.prometheus.username) (list "PROMETHEUS_PASSWORD" $secrets.prometheus.password) (list "PROMETHEUS_BEARER_TOKEN" $secrets.prometheus.bearerToken) -}}
+    {{- if index $pair 1 -}}
+      {{- $_ := set $data (index $pair 0) (index $pair 1 | toString) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- toYaml $data -}}
+{{- end -}}
+
+{{/*
+Name of the Secret that provides one application key:
+secrets.existingSecret when set; otherwise the values Secret for a key supplied
+in values, else the generated-credentials Secret.
+Usage: include "greenkube.secretNameFor" (dict "context" $ "key" "DB_CONNECTION_STRING")
+*/}}
+{{- define "greenkube.secretNameFor" -}}
+{{- $context := .context -}}
+{{- if $context.Values.secrets.existingSecret -}}
+{{- $context.Values.secrets.existingSecret -}}
+{{- else if hasKey (include "greenkube.secretValues" $context | fromYaml) .key -}}
+{{- include "greenkube.valuesSecretName" $context -}}
+{{- else -}}
+{{- include "greenkube.fullname" $context -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+True when the credentials bootstrap hook must run. Without RBAC the hook cannot
+create the generated-credentials Secret, so generation then requires an
+explicit Secret instead.
+*/}}
+{{- define "greenkube.credentialsBootstrapEnabled" -}}
+{{- if not .Values.secrets.existingSecret -}}
+  {{- $generates := or (not .Values.secrets.apiKey) (and (include "greenkube.bundledPostgres" .) (not .Values.postgres.auth.password)) -}}
+  {{- if .Values.rbac.create -}}
+true
+  {{- else if $generates -}}
+    {{- fail "rbac.create=false: the chart cannot create generated credentials without its bootstrap RBAC. Set secrets.existingSecret (recommended for GitOps), or supply secrets.apiKey and, for the bundled PostgreSQL, postgres.auth.password." -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the credentials bootstrap hook resources (Job, ServiceAccount, Role).
+*/}}
+{{- define "greenkube.credentialsBootstrapName" -}}
+{{- printf "%s-credentials-bootstrap" (include "greenkube.fullname" . | trunc 41 | trimSuffix "-") -}}
 {{- end -}}
 
 {{- define "greenkube.configChecksum" -}}
@@ -153,6 +240,31 @@ Project only the application Secret keys required by one component.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Projected Secret sources for one component: each key comes from exactly one
+Secret (see greenkube.secretNameFor), and a Secret without keys is omitted.
+*/}}
+{{- define "greenkube.applicationSecretSources" -}}
+{{- $context := .context -}}
+{{- $items := include "greenkube.applicationSecretItems" . | fromYamlArray -}}
+{{- $names := list (include "greenkube.secretName" $context) (include "greenkube.valuesSecretName" $context) -}}
+{{- range $name := $names | uniq }}
+  {{- $selected := list -}}
+  {{- range $item := $items -}}
+    {{- if eq (include "greenkube.secretNameFor" (dict "context" $context "key" $item.key)) $name -}}
+      {{- $selected = append $selected $item -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if $selected }}
+- secret:
+    name: {{ $name }}
+    optional: true
+    items:
+      {{- toYaml $selected | nindent 6 }}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "greenkube.applicationSecretVolumeMount" -}}
 {{- $volumeName := .volumeName | default "secrets" -}}
 - name: {{ $volumeName }}
@@ -167,11 +279,7 @@ Project only the application Secret keys required by one component.
 - name: {{ $volumeName }}
   projected:
     sources:
-      - secret:
-          name: {{ include "greenkube.secretName" $context }}
-          optional: true
-          items:
-            {{- include "greenkube.applicationSecretItems" (dict "context" $context "component" $component) | nindent 12 }}
+      {{- include "greenkube.applicationSecretSources" (dict "context" $context "component" $component) | trim | nindent 6 }}
 {{- end -}}
 
 {{/*

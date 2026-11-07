@@ -1,0 +1,309 @@
+"""Create GreenKube's generated credentials once, outside the Helm release.
+
+The chart runs this script in a pre-install/pre-upgrade hook Job (an Argo CD
+PreSync hook). It creates the Secret named by GREENKUBE_SECRET_NAME when it is
+absent and only ever adds missing keys afterwards, so running it on every
+upgrade or sync never rotates a credential. Rendering the chart therefore stays
+a pure function of the values (roadmap N1, BUG-58).
+
+Generated keys:
+  GREENKUBE_API_KEY                         when secrets.apiKey is empty;
+  POSTGRES_PASSWORD, DB_CONNECTION_STRING   for the bundled PostgreSQL when
+                                            postgres.auth.password is empty.
+
+The Secret carries no Helm or Argo CD tracking metadata: uninstalling the
+release keeps it, like the PostgreSQL volume whose password it holds.
+
+Standard library only, so the Job runs with any GreenKube image.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import secrets
+import ssl
+import string
+import sys
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+API_KEY = "GREENKUBE_API_KEY"
+POSTGRES_PASSWORD = "POSTGRES_PASSWORD"
+DB_CONNECTION_STRING = "DB_CONNECTION_STRING"
+
+API_KEY_LENGTH = 64
+POSTGRES_PASSWORD_LENGTH = 24
+_ALPHABET = string.ascii_letters + string.digits
+_SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+# No app.kubernetes.io/instance label and no tracking annotation: Argo CD must
+# never treat this Secret as part of the application (and prune it), and Helm
+# must never adopt it into the release.
+SECRET_LABELS = {
+    "app.kubernetes.io/name": "greenkube",
+    "app.kubernetes.io/part-of": "greenkube",
+    "app.kubernetes.io/component": "credentials",
+    "app.kubernetes.io/managed-by": "greenkube-credentials-bootstrap",
+}
+SECRET_ANNOTATIONS = {
+    "argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+    "argocd.argoproj.io/sync-options": "Prune=false",
+}
+
+
+class BootstrapError(RuntimeError):
+    """The credentials cannot be bootstrapped safely; the message says why."""
+
+
+class ConflictError(RuntimeError):
+    """The Secret changed concurrently (HTTP 409)."""
+
+
+def _flag(value: str | None) -> bool:
+    return (value or "").strip().lower() == "true"
+
+
+@dataclass(frozen=True)
+class Settings:
+    namespace: str
+    secret_name: str
+    release: str = ""
+    generate_api_key: bool = False
+    generate_postgres_password: bool = False
+    postgres_user: str = ""
+    postgres_database: str = ""
+    postgres_host: str = ""
+    postgres_port: str = "5432"
+    postgres_pvc: str = ""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> Settings:
+        namespace = env.get("GREENKUBE_NAMESPACE", "").strip()
+        secret_name = env.get("GREENKUBE_SECRET_NAME", "").strip()
+        if not namespace or not secret_name:
+            raise BootstrapError("GREENKUBE_NAMESPACE and GREENKUBE_SECRET_NAME are required")
+        settings = cls(
+            namespace=namespace,
+            secret_name=secret_name,
+            release=env.get("GREENKUBE_RELEASE", "").strip(),
+            generate_api_key=_flag(env.get("GREENKUBE_GENERATE_API_KEY")),
+            generate_postgres_password=_flag(env.get("GREENKUBE_GENERATE_POSTGRES_PASSWORD")),
+            postgres_user=env.get("GREENKUBE_POSTGRES_USER", "").strip(),
+            postgres_database=env.get("GREENKUBE_POSTGRES_DATABASE", "").strip(),
+            postgres_host=env.get("GREENKUBE_POSTGRES_HOST", "").strip(),
+            postgres_port=env.get("GREENKUBE_POSTGRES_PORT", "5432").strip() or "5432",
+            postgres_pvc=env.get("GREENKUBE_POSTGRES_PVC", "").strip(),
+        )
+        if settings.generate_postgres_password and not (
+            settings.postgres_user and settings.postgres_database and settings.postgres_host
+        ):
+            raise BootstrapError("PostgreSQL user, database and host are required to generate its password")
+        return settings
+
+
+def generate_token(length: int) -> str:
+    """Return a random alphanumeric token (safe inside a connection URL)."""
+    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
+
+
+def connection_string(settings: Settings, password: str) -> str:
+    return (
+        f"postgresql://{settings.postgres_user}:{password}@"
+        f"{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_database}"
+    )
+
+
+def missing_credentials(
+    current: Mapping[str, str],
+    settings: Settings,
+    *,
+    pvc_exists: Callable[[], bool],
+    token: Callable[[int], str] = generate_token,
+) -> dict[str, str]:
+    """Return the keys to add to ``current``. Existing values are never replaced."""
+    additions: dict[str, str] = {}
+    if settings.generate_api_key and not current.get(API_KEY):
+        additions[API_KEY] = token(API_KEY_LENGTH)
+    if settings.generate_postgres_password:
+        password = current.get(POSTGRES_PASSWORD, "")
+        if not password:
+            if settings.postgres_pvc and pvc_exists():
+                raise BootstrapError(_retained_volume_message(settings))
+            password = token(POSTGRES_PASSWORD_LENGTH)
+            additions[POSTGRES_PASSWORD] = password
+        if POSTGRES_PASSWORD in additions or not current.get(DB_CONNECTION_STRING):
+            additions[DB_CONNECTION_STRING] = connection_string(settings, password)
+    return additions
+
+
+def _retained_volume_message(settings: Settings) -> str:
+    return (
+        f"The PostgreSQL volume {settings.postgres_pvc} already exists in namespace {settings.namespace}, "
+        f"but Secret {settings.secret_name} has no {POSTGRES_PASSWORD}. A newly generated password cannot "
+        "authenticate against the existing database. Either delete the volume for a clean install "
+        f"(kubectl -n {settings.namespace} delete pvc {settings.postgres_pvc}), or provide the original "
+        f"password: set postgres.auth.password, use secrets.existingSecret, or add {POSTGRES_PASSWORD} to "
+        f"Secret {settings.secret_name}."
+    )
+
+
+def _decode(data: Mapping[str, str] | None) -> dict[str, str]:
+    decoded = {}
+    for key, value in (data or {}).items():
+        try:
+            decoded[key] = base64.b64decode(value).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded[key] = ""
+    return decoded
+
+
+def _encode(data: Mapping[str, str]) -> dict[str, str]:
+    return {key: base64.b64encode(value.encode("utf-8")).decode("ascii") for key, value in sorted(data.items())}
+
+
+def new_secret(settings: Settings, data: Mapping[str, str]) -> dict[str, Any]:
+    annotations = dict(SECRET_ANNOTATIONS)
+    if settings.release:
+        annotations["greenkube.cloud/helm-release"] = settings.release
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": settings.secret_name, "labels": dict(SECRET_LABELS), "annotations": annotations},
+        "type": "Opaque",
+        "data": _encode(data),
+    }
+
+
+class SecretApi(Protocol):
+    def read_secret(self, name: str) -> dict[str, Any] | None: ...
+
+    def create_secret(self, body: dict[str, Any]) -> None: ...
+
+    def patch_secret(self, name: str, body: dict[str, Any]) -> None: ...
+
+    def pvc_exists(self, name: str) -> bool: ...
+
+
+def ensure_credentials(
+    api: SecretApi,
+    settings: Settings,
+    *,
+    token: Callable[[int], str] = generate_token,
+    attempts: int = 5,
+) -> str:
+    """Create the Secret if absent, add missing generated keys, and describe what happened."""
+    for _ in range(attempts):
+        secret = api.read_secret(settings.secret_name)
+        current = _decode(secret.get("data") if secret else None)
+        additions = missing_credentials(
+            current,
+            settings,
+            pvc_exists=lambda: api.pvc_exists(settings.postgres_pvc),
+            token=token,
+        )
+        try:
+            if secret is None:
+                api.create_secret(new_secret(settings, additions))
+                return f"Created Secret {settings.secret_name} with keys: {', '.join(sorted(additions)) or 'none'}"
+            if not additions:
+                return f"Secret {settings.secret_name} already holds the generated credentials; nothing to do"
+            resource_version = (secret.get("metadata") or {}).get("resourceVersion")
+            patch: dict[str, Any] = {"data": _encode(additions)}
+            if resource_version:
+                patch["metadata"] = {"resourceVersion": resource_version}
+            api.patch_secret(settings.secret_name, patch)
+            return f"Added missing keys to Secret {settings.secret_name}: {', '.join(sorted(additions))}"
+        except ConflictError:
+            continue
+    raise BootstrapError(f"Secret {settings.secret_name} kept changing concurrently; retry the upgrade")
+
+
+class InClusterApi:
+    """Minimal Kubernetes REST client using the pod's service-account token."""
+
+    def __init__(self, namespace: str, base_url: str, token: str, context: ssl.SSLContext, timeout: float = 10.0):
+        self.namespace = namespace
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.context = context
+        self.timeout = timeout
+
+    @classmethod
+    def from_environment(cls, namespace: str, env: Mapping[str, str]) -> InClusterApi:
+        host = env.get("KUBERNETES_SERVICE_HOST", "")
+        port = env.get("KUBERNETES_SERVICE_PORT", "443")
+        if not host:
+            raise BootstrapError("KUBERNETES_SERVICE_HOST is not set; this script must run inside the cluster")
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        try:
+            with open(os.path.join(_SERVICE_ACCOUNT_DIR, "token"), encoding="utf-8") as token_file:
+                token = token_file.read().strip()
+            context = ssl.create_default_context(cafile=os.path.join(_SERVICE_ACCOUNT_DIR, "ca.crt"))
+        except OSError as error:
+            raise BootstrapError(f"Cannot read the service-account credentials: {error}") from error
+        return cls(namespace, f"https://{host}:{port}", token, context)
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None, content_type: str = "") -> Any:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method)
+        request.add_header("Authorization", f"Bearer {self.token}")
+        request.add_header("Accept", "application/json")
+        if data is not None:
+            request.add_header("Content-Type", content_type or "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
+                payload = response.read()
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            if error.code == 409:
+                raise ConflictError(path) from error
+            raise BootstrapError(f"{method} {path} failed with HTTP {error.code}: {_status_message(error)}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise BootstrapError(f"{method} {path} failed: {error}") from error
+        return json.loads(payload) if payload else {}
+
+    def _path(self, resource: str, name: str = "") -> str:
+        suffix = f"/{name}" if name else ""
+        return f"/api/v1/namespaces/{self.namespace}/{resource}{suffix}"
+
+    def read_secret(self, name: str) -> dict[str, Any] | None:
+        return self._request("GET", self._path("secrets", name))
+
+    def create_secret(self, body: dict[str, Any]) -> None:
+        self._request("POST", self._path("secrets"), body)
+
+    def patch_secret(self, name: str, body: dict[str, Any]) -> None:
+        self._request("PATCH", self._path("secrets", name), body, "application/merge-patch+json")
+
+    def pvc_exists(self, name: str) -> bool:
+        return self._request("GET", self._path("persistentvolumeclaims", name)) is not None
+
+
+def _status_message(error: urllib.error.HTTPError) -> str:
+    try:
+        return str(json.loads(error.read()).get("message") or error.reason)
+    except (ValueError, OSError, AttributeError):
+        return str(error.reason)
+
+
+def main(env: Mapping[str, str] | None = None) -> int:
+    env = os.environ if env is None else env
+    try:
+        settings = Settings.from_env(env)
+        api = InClusterApi.from_environment(settings.namespace, env)
+        print(f"GreenKube: {ensure_credentials(api, settings)}")
+    except BootstrapError as error:
+        print(f"GreenKube credentials bootstrap failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
