@@ -533,7 +533,7 @@ async def test_container_metrics_compression_keeps_sibling_containers_separate(r
     )
 
     await MetricsCompressor(real_database.manager)._compress_to_hourly()
-    hourly = await repo.read_container_metrics_smart(timestamp, timestamp, namespace="prod")
+    hourly = await repo.read_container_metrics_smart(timestamp, timestamp + timedelta(hours=1), namespace="prod")
 
     assert {metric.container_name for metric in hourly} == {"web", "telemetry-sidecar"}
     assert {metric.container_name: metric.cpu_request for metric in hourly} == {"web": 500, "telemetry-sidecar": 100}
