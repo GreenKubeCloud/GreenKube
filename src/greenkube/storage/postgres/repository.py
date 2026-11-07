@@ -12,6 +12,7 @@ from ..base_repository import (
     ContainerMetricsRepository,
     IntensityPoint,
     is_persistable_intensity_record,
+    measured_intensity_sql,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,10 +77,11 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
 
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                query = """
+                query = f"""
                     SELECT carbon_intensity
                     FROM carbon_intensity_history
                     WHERE zone = $1 AND datetime <= $2 AND datetime >= $3
+                      AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
@@ -99,10 +101,10 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
         try:
             async with self.db_manager.connection_scope() as conn:
                 row = await conn.fetchrow(
-                    """
+                    f"""
                     SELECT carbon_intensity, datetime, is_estimated, estimation_method
                     FROM carbon_intensity_history
-                    WHERE zone = $1 AND datetime <= $2
+                    WHERE zone = $1 AND datetime <= $2 AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                     """,
@@ -1488,10 +1490,11 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         """Set-based recompute of pod and container carbon figures (A9, BUG-06).
 
         One UPDATE per table joins each row in ``[start, end)`` to the latest
-        carbon intensity at or before its normalized lookup time, provided the
-        point is younger than ``INTENSITY_MAX_AGE``. Only rows whose intensity
-        or ``intensity_source`` changes are written. See the base-class
-        docstring for the full semantics.
+        measured carbon intensity at or before its normalized lookup time,
+        provided the point is younger than ``INTENSITY_MAX_AGE``. Only rows
+        whose intensity or ``intensity_source`` changes are written. Both
+        UPDATEs run in one transaction so container rows never drift from
+        their pod rows. See the base-class docstring for the full semantics.
         """
         from ...core.config import get_config as _get_cfg
 
@@ -1503,7 +1506,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             lookup_expr = "t.timestamp"
         total = 0
         try:
-            async with self.db_manager.connection_scope() as conn:
+            async with self.db_manager.connection_scope() as conn, conn.transaction():
                 for table in ("combined_metrics", "container_metrics"):
                     ns_clause = "AND t.namespace = $6" if namespace else ""
                     query = f"""
@@ -1524,6 +1527,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                                 SELECT c.carbon_intensity, c.is_estimated, c.datetime
                                 FROM carbon_intensity_history AS c
                                 WHERE c.zone = l.zone AND c.datetime <= l.lookup_ts
+                                  AND {measured_intensity_sql("c")}
                                 ORDER BY c.datetime DESC
                                 LIMIT 1
                             ) AS ci ON TRUE

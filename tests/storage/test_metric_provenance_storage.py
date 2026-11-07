@@ -16,13 +16,16 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+from greenkube.core.calculator import CarbonCalculator
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.core.metrics_compressor import MetricsCompressor
+from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.provenance import is_cost_trusted, is_usage_trusted
 from greenkube.storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
+from greenkube.utils.time import to_iso_z
 
 T0 = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
 
@@ -261,3 +264,70 @@ async def test_recompute_updates_pod_and_container_rows(db):
     containers = await repo.read_container_metrics(T0, T0 + timedelta(hours=1))
     assert containers[0].intensity_source == "consolidated"
     assert await repo.recompute_carbon_with_latest_intensities(carbon, T0, T0 + timedelta(hours=1)) == 0
+
+
+async def _insert_legacy_default(manager: DatabaseManager, zone: str, at: datetime, value: float) -> None:
+    """Store a zone default the way collectors did before A8 (bypassing ``save_history``)."""
+    async with manager.connection_scope() as conn:
+        if manager.db_type == "postgres":
+            await conn.execute(
+                "INSERT INTO carbon_intensity_history (zone, carbon_intensity, datetime, is_estimated, "
+                "estimation_method) VALUES ($1, $2, $3, TRUE, 'default_fallback')",
+                zone,
+                value,
+                at,
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO carbon_intensity_history (zone, carbon_intensity, datetime, is_estimated, "
+                "estimation_method) VALUES (?, ?, ?, 1, 'default_fallback')",
+                (zone, value, to_iso_z(at)),
+            )
+            await conn.commit()
+
+
+async def test_legacy_default_fallback_rows_never_pass_for_measurements(db):
+    """BUG-07: zone defaults persisted by older versions are ignored by lookups, the calculator and the recompute."""
+    repo, carbon = _repos(db)
+    zone_default = float(DEFAULT_GRID_INTENSITY_BY_ZONE["FR"])
+    await _insert_legacy_default(db, "FR", T0 - timedelta(hours=1), 21.0)
+
+    assert await carbon.get_for_zone_at_time("FR", T0.isoformat()) is None
+    assert await carbon.get_intensity_point("FR", T0.isoformat()) is None
+
+    result = await CarbonCalculator(carbon, pue=1.0).calculate_emissions(3.6e6, "FR", T0 + timedelta(minutes=10))
+    assert result is not None
+    assert result.intensity_source == "zone_default"
+    assert result.grid_intensity == pytest.approx(zone_default)
+
+    sample = T0 + timedelta(minutes=10)
+    defaults = {"grid_intensity": zone_default, "co2e_grams": zone_default, "intensity_source": "zone_default"}
+    await repo.write_combined_metrics([_pod_row(sample, **defaults), _container_row(sample, **defaults)])
+
+    assert await repo.recompute_carbon_with_latest_intensities(carbon, T0, T0 + timedelta(hours=1)) == 0
+    pods = await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))
+    containers = await repo.read_container_metrics(T0, T0 + timedelta(hours=1))
+    for row in (*pods, *containers):
+        assert row.intensity_source == "zone_default"
+        assert row.grid_intensity == pytest.approx(zone_default)
+
+
+async def test_legacy_default_fallback_row_does_not_hide_an_older_measurement(db):
+    repo, carbon = _repos(db)
+    await carbon.save_history(
+        [{"carbonIntensity": 40.0, "datetime": (T0 - timedelta(hours=2)).isoformat(), "isEstimated": False}], "FR"
+    )
+    await _insert_legacy_default(db, "FR", T0 - timedelta(hours=1), 21.0)
+
+    assert await carbon.get_for_zone_at_time("FR", T0.isoformat()) == pytest.approx(40.0)
+    point = await carbon.get_intensity_point("FR", T0.isoformat())
+    assert point is not None and point.value == pytest.approx(40.0) and point.is_estimated is False
+
+    sample = T0 + timedelta(minutes=10)
+    await repo.write_combined_metrics(
+        [_pod_row(sample, grid_intensity=26.0, co2e_grams=26.0, intensity_source="zone_default")]
+    )
+    assert await repo.recompute_carbon_with_latest_intensities(carbon, T0, T0 + timedelta(hours=1)) == 1
+    (row,) = await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))
+    assert row.grid_intensity == pytest.approx(40.0)
+    assert row.intensity_source == "consolidated"

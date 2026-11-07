@@ -7,7 +7,9 @@ stored (``none`` otherwise, including rows priced by the missing-cost
 default), ``usage_source = prometheus`` when usage was stored,
 ``intensity_source = unknown``; container rows inherit their pod's
 ``cost_source`` (their cost was allocated from it) and ``emaps_zone`` (so the
-intensity recompute, A9, can reach them).
+intensity recompute, A9, can reach them). Zone defaults that older collectors
+persisted into ``carbon_intensity_history`` (``estimation_method =
+default_fallback``) are purged so they never pass for measurements (A8, BUG-07).
 """
 
 from __future__ import annotations
@@ -75,6 +77,14 @@ NEW_COLUMNS = {
     "intensity_source",
 }
 CONTAINER_ONLY_COLUMNS = {"emaps_zone", "cpu_limit", "memory_limit"}
+INTENSITY_ROWS = [
+    # zone, carbon_intensity, datetime, is_estimated, estimation_method
+    ("FR", 21.0, "2026-10-01T09:00:00Z", True, "default_fallback"),
+    ("FR", 48.0, "2026-10-01T08:00:00Z", False, None),
+    ("DE", 310.0, "2026-10-01T09:00:00Z", True, "TIME_SLICER_AVERAGE"),
+]
+#: Measured points survive the upgrade; persisted defaults are gone.
+EXPECTED_INTENSITY = {("FR", 48.0), ("DE", 310.0)}
 
 
 async def _sqlite_at_previous_version(path: str) -> None:
@@ -108,6 +118,11 @@ async def test_sqlite_upgrade_backfills_provenance_of_legacy_rows(tmp_path):
             "VALUES (?, 'shop', '2026-09-30T10:00:00Z', ?, ?)",
             HOURLY_ROWS,
         )
+        connection.executemany(
+            "INSERT INTO carbon_intensity_history (zone, carbon_intensity, datetime, is_estimated, "
+            "estimation_method) VALUES (?, ?, ?, ?, ?)",
+            INTENSITY_ROWS,
+        )
 
     runner = MigrationRunner("sqlite")
     async with aiosqlite.connect(db_file) as connection:
@@ -140,10 +155,12 @@ async def test_sqlite_upgrade_backfills_provenance_of_legacy_rows(tmp_path):
             )
         }
         watermarks = connection.execute("SELECT COUNT(*) FROM metrics_compression_watermarks").fetchone()
+        intensities = set(connection.execute("SELECT zone, carbon_intensity FROM carbon_intensity_history"))
 
     assert pods == EXPECTED_PODS
     assert containers == EXPECTED_CONTAINERS
     assert hourly == EXPECTED_HOURLY
+    assert intensities == EXPECTED_INTENSITY
     # The watermark starts empty: the first compression run derives it from the raw tables.
     assert watermarks == (0,)
 
@@ -180,6 +197,11 @@ async def test_postgres_upgrade_backfills_provenance_of_legacy_rows():
             "INSERT INTO combined_metrics_hourly (pod_name, namespace, hour_bucket, total_cost, cpu_usage_avg) "
             "VALUES ($1, 'shop', '2026-09-30T10:00:00Z', $2, $3)",
             HOURLY_ROWS,
+        )
+        await connection.executemany(
+            "INSERT INTO carbon_intensity_history (zone, carbon_intensity, datetime, is_estimated, "
+            "estimation_method) VALUES ($1, $2, $3::text::timestamptz, $4, $5)",
+            INTENSITY_ROWS,
         )
 
         assert await MigrationRunner("postgres").run(connection) >= 2
@@ -222,6 +244,10 @@ async def test_postgres_upgrade_backfills_provenance_of_legacy_rows():
             )
         }
         watermarks = await connection.fetchval("SELECT COUNT(*) FROM metrics_compression_watermarks")
+        intensities = {
+            (row["zone"], row["carbon_intensity"])
+            for row in await connection.fetch("SELECT zone, carbon_intensity FROM carbon_intensity_history")
+        }
     finally:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await connection.close()
@@ -229,4 +255,5 @@ async def test_postgres_upgrade_backfills_provenance_of_legacy_rows():
     assert pods == EXPECTED_PODS
     assert containers == EXPECTED_CONTAINERS
     assert hourly == EXPECTED_HOURLY
+    assert intensities == EXPECTED_INTENSITY
     assert watermarks == 0

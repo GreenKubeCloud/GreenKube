@@ -1,9 +1,10 @@
--- 0039: Per-dimension provenance, cost components and container limits (A4, A7, A9, A11).
+-- 0039: Per-dimension provenance, cost components and container limits (A4, A7, A8, A9, A11).
 -- Columns are additive. Legacy rows are backfilled once: cost_source is opencost
 -- when a positive cost was stored without a missing-cost estimation reason,
 -- usage_source is prometheus when usage was stored, intensity_source is unknown.
 -- Container rows inherit their pod row's cost_source and emaps_zone (their cost
 -- was allocated from it). Orphan container rows fall back to the same rule.
+-- Zone defaults persisted by earlier collectors are purged from the intensity history.
 
 ALTER TABLE combined_metrics ADD COLUMN cost_cpu REAL;
 ALTER TABLE combined_metrics ADD COLUMN cost_ram REAL;
@@ -101,3 +102,7 @@ UPDATE container_metrics_hourly SET
     END),
     intensity_source = COALESCE(intensity_source, 'unknown')
 WHERE cost_source IS NULL OR intensity_source IS NULL;
+
+-- Zone defaults that collectors persisted before A8 (BUG-07) would pass for
+-- measurements: defaults are computed at read time, so the stored copies go.
+DELETE FROM carbon_intensity_history WHERE estimation_method = 'default_fallback';

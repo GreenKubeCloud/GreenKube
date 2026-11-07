@@ -105,6 +105,23 @@ def is_persistable_intensity_record(record: object) -> bool:
     return record.get("carbonIntensity") is not None
 
 
+def is_default_fallback_point(point: object) -> bool:
+    """Return whether a stored intensity point is a persisted zone default, not a measurement."""
+    return getattr(point, "estimation_method", None) == DEFAULT_FALLBACK_ESTIMATION_METHOD
+
+
+def measured_intensity_sql(alias: str = "") -> str:
+    """SQL predicate (SQLite and PostgreSQL) that skips zone defaults persisted before A8.
+
+    Older collectors stored zone defaults in ``carbon_intensity_history`` with
+    ``estimation_method = 'default_fallback'``. Migration 0039 purges them; every
+    intensity lookup also ignores them so such a row can never pass for a
+    measurement (BUG-07).
+    """
+    column = f"{alias}.estimation_method" if alias else "estimation_method"
+    return f"COALESCE({column}, '') <> '{DEFAULT_FALLBACK_ESTIMATION_METHOD}'"
+
+
 class CarbonIntensityRepository(ABC):
     """
     Abstract base class for carbon intensity data repositories.
@@ -633,7 +650,7 @@ class CombinedMetricsRepository(ABC):
                     point = await carbon_intensity_repo.get_intensity_point(m.emaps_zone, to_iso_z(lookup_at))
                 except Exception:
                     point = None
-                if point is None:
+                if point is None or is_default_fallback_point(point):
                     continue
                 age = point.age(lookup_at)
                 if age is not None and age > max_age:

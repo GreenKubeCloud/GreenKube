@@ -15,6 +15,8 @@ def connection_mock():
     conn.fetchrow.return_value = None
     conn.fetch.return_value = []
     conn.executemany.return_value = None
+    # asyncpg's Connection.transaction() is a plain call returning an async context manager.
+    conn.transaction = MagicMock()
     return conn
 
 
@@ -183,6 +185,10 @@ async def test_recompute_carbon_with_latest_intensities(combined_repository, con
     assert "UPDATE combined_metrics" in queries[0]
     assert "UPDATE container_metrics" in queries[1]
     assert all("carbon_intensity_history" in query for query in queries)
+    # Persisted zone defaults never pass for measurements (BUG-07).
+    assert all("'default_fallback'" in query for query in queries)
+    # Both UPDATEs commit together so container rows never drift from pod rows.
+    connection_mock.transaction.assert_called_once_with()
     params = connection_mock.fetchval.await_args.args[1:]
     assert params[1] == start
     assert params[2] == end

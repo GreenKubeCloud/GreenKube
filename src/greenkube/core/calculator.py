@@ -10,7 +10,7 @@ from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from ..models.provenance import IntensitySource
-from ..storage.base_repository import CarbonIntensityRepository, IntensityPoint
+from ..storage.base_repository import CarbonIntensityRepository, IntensityPoint, is_default_fallback_point
 from .config import Config, get_config
 
 logger = logging.getLogger(__name__)
@@ -145,6 +145,9 @@ class CarbonCalculator:
         repository = self.repository
         if isinstance(repository, CarbonIntensityRepository):
             point = await repository.get_intensity_point(zone, normalized)
+            if isinstance(point, IntensityPoint) and is_default_fallback_point(point):
+                # A zone default persisted by an older version is not a measurement (BUG-07).
+                return _CachedIntensity(value=None, source=None)
             if isinstance(point, IntensityPoint):
                 age = point.age(normalized_dt)
                 if age is not None and age > self._max_age():

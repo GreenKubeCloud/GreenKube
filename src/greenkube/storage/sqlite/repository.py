@@ -17,6 +17,7 @@ from ..base_repository import (
     ContainerMetricsRepository,
     IntensityPoint,
     is_persistable_intensity_record,
+    measured_intensity_sql,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,10 +108,11 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 except ValueError:
                     normalized_ts = timestamp
 
-                query = """
+                query = f"""
                     SELECT carbon_intensity
                     FROM carbon_intensity_history
                     WHERE zone = ? AND datetime <= ? AND datetime >= ?
+                      AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
@@ -136,10 +138,10 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
                 async with conn.execute(
-                    """
+                    f"""
                     SELECT carbon_intensity, datetime, is_estimated, estimation_method
                     FROM carbon_intensity_history
-                    WHERE zone = ? AND datetime <= ?
+                    WHERE zone = ? AND datetime <= ? AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                     """,
@@ -1168,7 +1170,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """Set-based recompute of pod and container carbon figures (A9, BUG-06).
 
         One ``UPDATE ... FROM`` per table joins each row in ``[start, end)`` to
-        the latest stored intensity at or before its normalized lookup time,
+        the latest measured intensity at or before its normalized lookup time,
         provided that point is younger than ``INTENSITY_MAX_AGE``. Only rows
         whose intensity or ``intensity_source`` changes are written. See the
         base-class docstring for the full semantics.
@@ -1202,7 +1204,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         latest AS (
                             SELECT row_id, zone, lookup_ts,
                                    (SELECT MAX(ci.datetime) FROM carbon_intensity_history AS ci
-                                    WHERE ci.zone = lookup.zone AND ci.datetime <= lookup.lookup_ts) AS point_ts
+                                    WHERE ci.zone = lookup.zone AND ci.datetime <= lookup.lookup_ts
+                                      AND {measured_intensity_sql("ci")}) AS point_ts
                             FROM lookup
                         ),
                         fresh AS (
