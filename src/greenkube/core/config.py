@@ -166,6 +166,12 @@ class Config(BaseSettings):
     PROMETHEUS_URL: str = ""
     PROMETHEUS_QUERY_RANGE_STEP: str = "5m"
     PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: int = 10000
+    # Prometheus scrape interval of cAdvisor; rate windows span max(step, 4 x scrape interval).
+    PROMETHEUS_SCRAPE_INTERVAL: str = "30s"
+    # Collection catch-up: windows end at now - COLLECTION_SAFETY_LAG; after downtime the
+    # job backfills missing windows up to COLLECTION_MAX_BACKFILL in the past.
+    COLLECTION_SAFETY_LAG: str = "1m"
+    COLLECTION_MAX_BACKFILL: str = "24h"
     PROMETHEUS_VERIFY_CERTS: bool = True
     PROMETHEUS_NODE_INSTANCE_LABEL: str = "label_node_kubernetes_io_instance_type"
 
@@ -420,6 +426,13 @@ class Config(BaseSettings):
             if total_seconds <= 0 or (24 * 3600) % total_seconds != 0:
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         return v
+
+    @field_validator("PROMETHEUS_SCRAPE_INTERVAL", "COLLECTION_SAFETY_LAG", "COLLECTION_MAX_BACKFILL", mode="after")
+    @classmethod
+    def _validate_collection_durations(cls, value: str, info) -> str:
+        if not re.match(r"^\d+[smhd]$", str(value).strip().lower()) or int(str(value).strip()[:-1]) <= 0:
+            raise ValueError(f"{info.field_name} must be a positive duration such as '30s', '5m', '1h' or '1d'.")
+        return str(value).strip().lower()
 
     # ------------------------------------------------------------------ #
     # Model validators (cross-field & computed fields)                    #

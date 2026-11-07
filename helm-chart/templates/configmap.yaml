@@ -110,6 +110,9 @@ data:
   # Note: PROMETHEUS_URL is managed in the Secret (supports UI-set overrides via lookup).
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
   PROMETHEUS_QUERY_RANGE_STEP: {{ .Values.config.prometheus.queryRangeStep | quote }}
+  PROMETHEUS_SCRAPE_INTERVAL: {{ .Values.config.prometheus.scrapeInterval | default "30s" | quote }}
+  COLLECTION_SAFETY_LAG: {{ (.Values.config.collection).safetyLag | default "1m" | quote }}
+  COLLECTION_MAX_BACKFILL: {{ (.Values.config.collection).maxBackfill | default "24h" | quote }}
   PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: {{ .Values.config.prometheus.queryRangeMaxSamples | quote }}
   PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
 
