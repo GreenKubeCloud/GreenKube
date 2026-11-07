@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
@@ -212,6 +212,44 @@ async def cancel_automation_plan(
     if cancelled is None:
         return _error_response(404, "plan_not_found", "Automation plan not found.")
     return _plan_response(cancelled)
+
+
+@router.delete(
+    "/automation/plans/{plan_id}",
+    status_code=204,
+    response_class=Response,
+    responses=_ERROR_RESPONSES,
+)
+async def delete_automation_plan(
+    plan_id: str,
+    http_request: Request,
+    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+) -> Response:
+    """Cancel an unapproved preview: a DRAFT or VALIDATED plan becomes SUPERSEDED.
+
+    Called by the UI when a preview is dismissed so re-opening it never returns 409.
+    Deleting an already superseded plan is a no-op; any other status returns 409.
+    """
+    if service is None:
+        return _service_unavailable(
+            "plan_service_unavailable", "Server-side automation plan service is not configured."
+        )
+    cancel = getattr(service, "cancel_plan", None)
+    if not callable(cancel):
+        return _service_unavailable("plan_cancel_unavailable", "Server-side plan cancellation is not configured.")
+    try:
+        cancelled = await cast(Any, cancel)(plan_id, actor=get_authenticated_actor(http_request))
+    except AutomationPlanError as error:
+        if error.code is AutomationErrorCode.PLAN_STALE:
+            return _error_response(
+                409,
+                AutomationErrorCode.PLAN_STALE.value,
+                "Only draft or validated plans can be cancelled.",
+            )
+        return _domain_error_response(error)
+    if cancelled is None:
+        return _error_response(404, "plan_not_found", "Automation plan not found.")
+    return Response(status_code=204)
 
 
 def _plan_response(plan: Plan, operation: Operation | None = None) -> AutomationPlanResponse:

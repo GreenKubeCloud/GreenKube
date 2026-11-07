@@ -67,6 +67,9 @@ _BUSY_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.
 _REPLANABLE_STATUSES = frozenset(
     {PlanStatus.CLOSED, PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
 )
+# Unapproved previews a newer request for the same workload replaces instead of 409 (D6, BUG-48).
+SUPERSEDABLE_PREVIEW_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED})
+_CANCELLABLE_PREVIEW_STATUSES = SUPERSEDABLE_PREVIEW_STATUSES
 
 
 class AutomationPlanError(RuntimeError):
@@ -373,8 +376,8 @@ class AutomationPlanService:
                 and existing.expires_at is not None
                 and _as_utc(existing.expires_at) <= now
             ):
-                await self._transition(existing, PlanStatus.STALE)
-                raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
+                # A fresh request after the previous identical preview expired re-plans instead of 409.
+                existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
             if existing.status in _REPLANABLE_STATUSES:
                 plan = await self._next_attempt_plan(plan)
             elif existing.status not in _REPLACEABLE_STATUSES | {PlanStatus.APPLYING, PlanStatus.PR_OPEN}:
@@ -385,10 +388,7 @@ class AutomationPlanService:
             else:
                 return existing
 
-        previous_plans = []
-        for previous_status in _BUSY_STATUSES | _REPLACEABLE_STATUSES:
-            previous_plans.extend(await self.repository.list_plans(status=previous_status))
-        previous_plans = [candidate for candidate in previous_plans if _same_workload_binding(candidate.source, source)]
+        previous_plans = await self._workload_plans(source, _BUSY_STATUSES | _REPLACEABLE_STATUSES)
         previous_plans.sort(key=lambda candidate: (candidate.created_at, candidate.plan_id))
         busy = [item for item in previous_plans if item.status in _BUSY_STATUSES]
         if busy:
@@ -718,6 +718,41 @@ class AutomationPlanService:
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         return await self.repository.prune_automation_history(cutoff=cutoff)
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview: a DRAFT/VALIDATED plan becomes SUPERSEDED (D6)."""
+        plan = await self.repository.get_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is PlanStatus.SUPERSEDED:
+            return plan
+        if plan.status not in _CANCELLABLE_PREVIEW_STATUSES:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"plan cannot be cancelled from status {plan.status.value}",
+            )
+        return await self._transition(plan, PlanStatus.SUPERSEDED, actor=actor, reason_code="cancelled_by_user")
+
+    async def _workload_plans(self, source: WorkloadSource, statuses: frozenset[PlanStatus]) -> list[Plan]:
+        ordered_statuses = sorted(statuses, key=lambda status: status.value)
+        reader = getattr(self.repository, "list_plans_for_workload", None)
+        if callable(reader):
+            plans = await reader(
+                cluster=source.cluster,
+                namespace=source.namespace,
+                workload_kind=source.workload_kind,
+                workload_name=source.workload_name,
+                statuses=ordered_statuses,
+            )
+        else:
+            plans = []
+            for status in ordered_statuses:
+                plans.extend(await self.repository.list_plans(status=status))
+        return [
+            candidate
+            for candidate in plans
+            if candidate.status in statuses and _same_workload_binding(candidate.source, source)
+        ]
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         plan = await self.repository.get_plan(plan_id)

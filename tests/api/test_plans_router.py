@@ -315,6 +315,9 @@ class _AutomationPlanApiService:
     ) -> Plan | None:
         return await self.plans.mark_stale(plan_id, actor=actor, reason_code=reason_code)
 
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        return await self.plans.cancel_plan(plan_id, actor=actor)
+
 
 @pytest.fixture
 def plan_api():
@@ -732,6 +735,35 @@ def test_cancel_marks_non_applying_plan_stale_and_conflicts_for_applying_plan(pl
     assert applying.json()["code"] == "plan_stale"
 
 
+def test_delete_cancels_a_preview_and_conflicts_for_progressed_plans(plan_api):
+    """D6 / BUG-48: dismissing a preview cancels it so re-opening never returns 409."""
+    client, _, repository, _, _ = plan_api
+    repository.plans["applying-plan"] = _plan(status=PlanStatus.APPLYING).model_copy(
+        update={"plan_id": "applying-plan"}
+    )
+    repository.plans["approved-plan"] = _plan(status=PlanStatus.APPROVED).model_copy(
+        update={"plan_id": "approved-plan"}
+    )
+
+    deleted = client.delete("/api/v1/automation/plans/plan-1")
+    deleted_again = client.delete("/api/v1/automation/plans/plan-1")
+    missing = client.delete("/api/v1/automation/plans/missing")
+    applying = client.delete("/api/v1/automation/plans/applying-plan")
+    approved = client.delete("/api/v1/automation/plans/approved-plan")
+
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert repository.plans["plan-1"].status is PlanStatus.SUPERSEDED
+    assert deleted_again.status_code == 204
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "plan_not_found"
+    assert applying.status_code == 409
+    assert applying.json()["code"] == "plan_stale"
+    assert repository.plans["applying-plan"].status is PlanStatus.APPLYING
+    assert approved.status_code == 409
+    assert repository.plans["approved-plan"].status is PlanStatus.APPROVED
+
+
 def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     client, _, _, _, _ = plan_api
 
@@ -739,7 +771,8 @@ def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     paths = schema["paths"]
 
     assert set(paths["/api/v1/automation/plans"]) == {"post"}
-    assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get", "delete"}
+    assert "204" in paths["/api/v1/automation/plans/{plan_id}"]["delete"]["responses"]
     assert set(paths["/api/v1/automation/plans/{plan_id}/rollback-preview"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}/approve"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}/cancel"]) == {"post"}

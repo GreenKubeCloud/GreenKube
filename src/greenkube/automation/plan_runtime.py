@@ -40,6 +40,7 @@ from greenkube.automation.plan_worker import (
     RegistryPlanProviderResolver,
 )
 from greenkube.automation.plans import (
+    SUPERSEDABLE_PREVIEW_STATUSES,
     AutomationPlanError,
     AutomationPlanService,
     GitBlobFile,
@@ -401,7 +402,11 @@ class RuntimePlanService:
     ) -> Plan:
         """Create a plan from persisted actionable recommendations and a resolved DB binding."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
         if source.renderer not in {
             RendererKind.RAW,
@@ -481,7 +486,11 @@ class RuntimePlanService:
     async def preview_plan(self, recommendation_ids: Sequence[int]) -> Plan:
         """Render an eligibility preview without persisting plans or changing recommendation state."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
         if source.renderer not in {
             RendererKind.RAW,
@@ -617,6 +626,43 @@ class RuntimePlanService:
                 "the resolved workload binding expired; refresh GitOps discovery before retrying",
             )
         return action, source
+
+    async def _supersedable_preview_plan_ids(self, source: WorkloadSource) -> tuple[str, ...]:
+        """Unapproved previews of this workload that a new request supersedes (D6, BUG-48).
+
+        Persisting the new plan transitions them to SUPERSEDED, so they must not count as a
+        competing active plan. A history read failure returns nothing: the policy history
+        gate then fails closed on its own read.
+        """
+        repository = getattr(self._plan_service, "repository", None)
+        reader = getattr(repository, "list_plans_for_workload", None)
+        statuses = sorted(SUPERSEDABLE_PREVIEW_STATUSES, key=lambda status: status.value)
+        try:
+            if callable(reader):
+                plans = await reader(
+                    cluster=source.cluster,
+                    namespace=source.namespace,
+                    workload_kind=source.workload_kind,
+                    workload_name=source.workload_name,
+                    statuses=statuses,
+                )
+            elif callable(getattr(repository, "list_plans", None)):
+                plans = [plan for status in statuses for plan in await cast(Any, repository).list_plans(status=status)]
+            else:
+                return ()
+        except Exception:
+            return ()
+        return tuple(
+            plan.plan_id
+            for plan in plans
+            if plan.status in SUPERSEDABLE_PREVIEW_STATUSES
+            and (plan.source.cluster, plan.source.namespace, plan.source.workload_kind, plan.source.workload_name)
+            == (source.cluster, source.namespace, source.workload_kind, source.workload_name)
+        )
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview (DELETE /automation/plans/{id}); it becomes SUPERSEDED."""
+        return await self._plan_service.cancel_plan(plan_id, actor=actor)
 
     async def _evaluate_policy(
         self,
