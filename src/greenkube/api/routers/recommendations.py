@@ -335,8 +335,9 @@ async def apply_recommendation(
 ):
     """Mark a recommendation as applied.
 
-    Optionally provide the actual values applied (CPU/memory). If actual savings
-    are not provided, the estimated potential savings are used as a conservative proxy.
+    Optionally provide the actual values applied (CPU/memory). The projected
+    savings are always estimated server-side; savings provided in the request
+    are validated and recorded separately as user-declared savings.
 
     A recommendation is considered applied even when the actual value deviates from
     the recommendation (e.g., reducing CPU to 50m instead of the suggested 40m).
@@ -347,19 +348,31 @@ async def apply_recommendation(
     lifecycle = RecommendationLifecycle(reco_repo)
     declared = await _validate_declared_savings(rec_id, request, reco_repo)
     try:
+        # Declared savings never reach the projection columns: those keep the
+        # server-side estimate, and declarations live in user_declared_savings.
         applied = await lifecycle.apply(
             rec_id,
             actual_cpu=request.actual_cpu_request_millicores,
             actual_memory=request.actual_memory_request_bytes,
-            carbon_saved_co2e_grams=request.carbon_saved_co2e_grams,
-            cost_saved=request.cost_saved,
+            carbon_saved_co2e_grams=None,
+            cost_saved=None,
             application_method=request.application_method or "manual",
             actor="user",
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if declared is not None:
-        applied = await record_user_declared_savings(reco_repo, applied, declared)
+        try:
+            applied = await record_user_declared_savings(reco_repo, applied, declared)
+        except Exception as exc:
+            logger.error("Recommendation %s applied, but its declared savings were not stored: %s", rec_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The recommendation was applied with the projected savings, but the declared savings "
+                    "could not be stored. Retry the request to record them."
+                ),
+            ) from exc
     return applied
 
 

@@ -80,6 +80,9 @@ async def test_valid_declaration_is_applied_and_marked_user_declared(apply_clien
     stored = await repo.get_recommendation_by_id(rec_id)
     declared = user_declared_savings(stored)
     assert declared is not None and declared.cost_per_year == -20.0
+    # The projection columns keep the server-side estimate, never the declared value.
+    assert stored.cost_saved == pytest.approx(100.0)
+    assert stored.carbon_saved_co2e_grams == pytest.approx(1000.0)
     components = {component.method: component for component in accrual_components(stored)}
     assert components["user_declared"].cost_per_year == -20.0
     # The undeclared CO2e keeps accruing as a projection; nothing is labelled measured.
@@ -96,3 +99,23 @@ async def test_apply_without_declaration_keeps_projection(apply_client):
     stored = await repo.get_recommendation_by_id(rec_id)
     assert user_declared_savings(stored) is None
     assert [component.method for component in accrual_components(stored)] == ["projected"]
+
+
+async def test_failed_declaration_write_never_accrues_declared_values_as_projected(apply_client, monkeypatch):
+    """The apply and the declaration are separate writes: a failed second write leaves a clean projection."""
+    client, repo, rec_id = apply_client
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("greenkube.api.routers.recommendations.record_user_declared_savings", unavailable)
+    response = client.patch(f"/api/v1/recommendations/{rec_id}/apply", json={"cost_saved": 900.0})
+
+    assert response.status_code == 503
+    assert "declared savings could not be stored" in response.json()["detail"]
+    stored = await repo.get_recommendation_by_id(rec_id)
+    assert stored.status.value == "applied"
+    assert user_declared_savings(stored) is None
+    components = {component.method: component for component in accrual_components(stored)}
+    assert components["projected"].cost_per_year == pytest.approx(100.0)
+    assert set(components) == {"projected"}
