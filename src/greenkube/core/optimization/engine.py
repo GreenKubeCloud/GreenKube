@@ -149,6 +149,7 @@ class OptimizationEngine:
             if not available:
                 logger.debug("Recommendation source '%s' is not available; skipping.", source_name)
                 return [], outcome(SourceRunStatus.UNAVAILABLE)
+            _reset_completeness(source)
             collected = list(await asyncio.wait_for(source.collect(context), timeout=self.collect_timeout_seconds))
         except asyncio.CancelledError:
             raise
@@ -162,7 +163,8 @@ class OptimizationEngine:
             return [], outcome(SourceRunStatus.FAILED, error=type(exc).__name__)
 
         # Seam for connectors that degrade gracefully (return a partial list
-        # instead of raising): they set ``last_collect_complete = False``.
+        # instead of raising): they set ``last_collect_complete = False`` during
+        # ``collect()``. The engine resets the flag before every call.
         if getattr(source, "last_collect_complete", True) is False:
             logger.warning("Recommendation source '%s' returned an incomplete result.", source_name)
             return collected, outcome(SourceRunStatus.INCOMPLETE, len(collected), "incomplete result")
@@ -228,7 +230,7 @@ class OptimizationEngine:
             )
             generation = await self.collect(context)
             outcomes = generation.source_outcomes
-            diff = await self._persist(
+            diff, persisted = await self._persist(
                 generation.recommendations,
                 reco_repo,
                 namespace=namespace,
@@ -255,15 +257,15 @@ class OptimizationEngine:
         run = await self._finish_run(
             run,
             status,
-            recommendations=generation.recommendations,
+            recommendations=persisted,
             outcomes=outcomes,
             diff=diff,
             error=error,
         )
-        record_run(status.value, elapsed(timer), len(generation.recommendations))
+        record_run(status.value, elapsed(timer), len(persisted))
         return ScanResult(
             status=status,
-            recommendations=generation.recommendations,
+            recommendations=persisted,
             source_outcomes=outcomes,
             diff=diff,
             run=run,
@@ -340,10 +342,13 @@ class OptimizationEngine:
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
         incomplete_sources: FrozenSet[str] = frozenset(),
-    ) -> RecommendationDiff:
+    ) -> Tuple[RecommendationDiff, List[Recommendation]]:
         """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
 
-        Raises on repository errors so the run can be recorded as failed.
+        Returns the diff against the active set of the scanned scope and the
+        recommendations actually written (an incomplete winner's last known
+        advice is kept instead of a lower-priority replacement). Raises on
+        repository errors so the run can be recorded as failed.
         """
         # Expire actives whose TTL elapsed before reconciling so they are not
         # accidentally reported as stale.
@@ -372,7 +377,10 @@ class OptimizationEngine:
             namespace=namespace,
             incomplete_sources=sorted(incomplete_sources),
         )
-        return compute_diff(previous, records, incomplete_sources)
+        # A namespaced scan snapshots and reconciles that namespace only; any
+        # cluster-scoped record it emits is outside the baseline, not "new".
+        in_scope = records if namespace is None else [record for record in records if record.namespace == namespace]
+        return compute_diff(previous, in_scope, incomplete_sources), kept
 
     @staticmethod
     async def _active_snapshot(
@@ -477,6 +485,19 @@ class OptimizationEngine:
             recommendation.action = plan
             patch = build_patch(recommendation, plan)
             recommendation.patch = RecommendationPatchV2.model_validate(patch) if patch is not None else None
+
+
+def _reset_completeness(source: RecommendationSource) -> None:
+    """Clear a connector's partial-result flag before each ``collect()`` call.
+
+    The flag describes one call; without the reset a single partial result
+    would keep the source "incomplete" (and its recommendations un-reconciled)
+    forever. Sources whose flag is read-only are left as they are.
+    """
+    try:
+        setattr(source, "last_collect_complete", True)
+    except (AttributeError, TypeError):
+        pass
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

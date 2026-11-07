@@ -50,8 +50,7 @@ class FakeSource(RecommendationSource):
         self._available = available
         self._error = error
         self._delay = delay
-        if complete is not None:
-            self.last_collect_complete = complete
+        self._complete = complete
 
     async def is_available(self) -> bool:
         return self._available
@@ -61,6 +60,9 @@ class FakeSource(RecommendationSource):
             await asyncio.sleep(self._delay)
         if self._error:
             raise self._error
+        # Connectors report a partial result per call, during collect().
+        if self._complete is False:
+            self.last_collect_complete = False
         return list(self._recs)
 
 
@@ -293,3 +295,95 @@ class TestRunOutcome:
         assert _run_id(result) == queued.id
         assert [run.id for run in await runs.list_runs()] == [queued.id]
         assert (await _stored(runs, queued.id)).status == OptimizationRunStatus.SUCCEEDED
+
+
+class FlakyPartialSource(FakeSource):
+    """Reports a partial result on its first collect() only."""
+
+    def __init__(self, name: str, recs: List[Recommendation]):
+        super().__init__(name, recs)
+        self.calls = 0
+
+    async def collect(self, context):
+        self.calls += 1
+        if self.calls == 1:
+            self.last_collect_complete = False
+        return list(self._recs)
+
+
+class TestCompletenessFlagIsPerCall:
+    async def test_source_is_authoritative_again_after_a_partial_run(self, sqlite_db):
+        repo = SQLiteRecommendationRepository(sqlite_db)
+        await _seed(repo, _rec("vpa-a", source="vpa"), _rec("vpa-b", source="vpa"))
+        engine = _engine([FlakyPartialSource("vpa", [_rec("vpa-a", source="vpa")])])
+
+        first = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
+        assert first.source_outcomes[0].status == SourceRunStatus.INCOMPLETE
+        assert set(await _active(repo)) == {"vpa-a", "vpa-b"}
+
+        second = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
+
+        assert second.source_outcomes[0].status == SourceRunStatus.SUCCEEDED
+        assert set(await _active(repo)) == {"vpa-a"}
+
+    async def test_read_only_flag_is_left_alone(self):
+        class ComputedSource(RecommendationSource):
+            name = "vpa"
+
+            @property
+            def last_collect_complete(self) -> bool:
+                return False
+
+            async def is_available(self) -> bool:
+                return True
+
+            async def collect(self, context):
+                return [_rec("a", source="vpa")]
+
+        engine = _engine([ComputedSource()])
+        reco_repo = AsyncMock()
+        reco_repo.get_active_recommendations = AsyncMock(return_value=[])
+
+        result = await engine.run_scan(AsyncMock(), AsyncMock(), reco_repo)
+
+        assert result.source_outcomes[0].status == SourceRunStatus.INCOMPLETE
+
+
+class TestRunCountsReflectPersistence:
+    async def test_namespaced_run_does_not_count_cluster_scoped_output_as_new(self, sqlite_db):
+        repo = SQLiteRecommendationRepository(sqlite_db)
+        runs = SQLiteOptimizationRunRepository(sqlite_db)
+        await _seed(repo, _rec("api", namespace="prod"))
+        node_level = Recommendation(
+            namespace=None,
+            type=RecommendationType.RIGHTSIZING_CPU,
+            scope="node",
+            target_node="node-1",
+            description="Node-level advice",
+            potential_savings_cost=5.0,
+            source=SourceName("greenkube"),
+        )
+        engine = _engine([FakeSource("greenkube", [_rec("api", namespace="prod"), node_level])], run_repository=runs)
+
+        result = await engine.run_scan(AsyncMock(), AsyncMock(), repo, namespace="prod")
+
+        run = await _stored(runs, _run_id(result))
+        assert (run.new_count, run.changed_count, run.resolved_count, run.unchanged_count) == (0, 0, 0, 1)
+        assert run.recommendation_count == 2
+
+    async def test_recommendation_count_is_what_was_persisted(self, sqlite_db):
+        repo = SQLiteRecommendationRepository(sqlite_db)
+        runs = SQLiteOptimizationRunRepository(sqlite_db)
+        vpa_advice = _rec("api", source="vpa", cpu=300).model_copy(update={"sources": ["vpa", "greenkube"]})
+        await _seed(repo, vpa_advice)
+        engine = _engine(
+            [FakeSource("vpa", error=RuntimeError("down")), FakeSource("greenkube", [_rec("api", cpu=150)])],
+            run_repository=runs,
+        )
+
+        result = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
+
+        run = await _stored(runs, _run_id(result))
+        assert run.recommendation_count == 0
+        assert result.recommendations == []
+        assert (run.new_count, run.changed_count, run.resolved_count, run.unchanged_count) == (0, 0, 0, 1)
