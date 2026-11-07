@@ -156,6 +156,43 @@ describe('API key persistence (F13)', () => {
 		await expect(pending).rejects.toMatchObject({ status: 401 });
 		expect(window.sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBe('gk-new');
 	});
+
+	it.each([
+		['no key', null],
+		['an older key', 'gk-old']
+	])('does not reopen the sign-in dialog for a stale 401 sent with %s', async (_label, oldKey) => {
+		const listener = vi.fn();
+		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
+		let reject;
+		globalThis.fetch = vi.fn(
+			() =>
+				new Promise((resolve) => {
+					reject = () => resolve(errorResponse(401));
+				})
+		);
+		if (oldKey) setApiToken(oldKey);
+		else clearApiToken();
+		const pending = getHealth();
+		setApiToken('gk-new');
+		reject();
+
+		await expect(pending).rejects.toMatchObject({ status: 401 });
+		expect(listener).not.toHaveBeenCalled();
+		expect(hasApiToken()).toBe(true);
+		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
+	});
+
+	it('asks for authentication when a request without any key is rejected', async () => {
+		const listener = vi.fn();
+		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
+		globalThis.fetch = vi.fn(() => Promise.resolve(errorResponse(401)));
+		clearApiToken();
+
+		await expect(getHealth()).rejects.toMatchObject({ status: 401 });
+
+		expect(listener).toHaveBeenCalledTimes(1);
+		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
+	});
 });
 
 describe('mutation helpers route through request() (K9, BUG-25)', () => {
@@ -285,16 +322,23 @@ describe('discardAutomationPlan (D6, BUG-48)', () => {
 		expect(lastCall().options.method).toBe('DELETE');
 	});
 
-	it('falls back to the cancel endpoint on a server without DELETE', async () => {
-		globalThis.fetch = vi
-			.fn()
-			.mockResolvedValueOnce(errorResponse(405, { detail: 'Method Not Allowed' }))
-			.mockResolvedValueOnce(okResponse({ plan_id: 'pln-1', status: 'stale' }));
+	it('reports the status the server answered', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ plan_id: 'pln-1', status: 'superseded' })));
 
-		await expect(discardAutomationPlan('pln-1')).resolves.toEqual({ discarded: true, status: 405 });
-		expect(lastCall().url.pathname).toBe('/api/v1/automation/plans/pln-1/cancel');
-		expect(lastCall().options.method).toBe('POST');
+		await expect(discardAutomationPlan('pln-1')).resolves.toEqual({ discarded: true, status: 200 });
 	});
+
+	it.each([404, 405])(
+		'never falls back to the cancel endpoint, which also cancels approved plans (%s)',
+		async (status) => {
+			globalThis.fetch = vi.fn(() => Promise.resolve(errorResponse(status, { detail: 'Not supported' })));
+
+			await expect(discardAutomationPlan('pln-1')).rejects.toMatchObject({ status });
+			expect(fetch).toHaveBeenCalledTimes(1);
+			expect(lastCall().url.pathname).toBe('/api/v1/automation/plans/pln-1');
+			expect(lastCall().options.method).toBe('DELETE');
+		}
+	);
 
 	it('reports a plan that can no longer be discarded', async () => {
 		globalThis.fetch = vi.fn(() =>

@@ -162,10 +162,11 @@ async function send(path, params = {}, options = {}) {
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		const details = errorDetails(body, res.status);
-		if (res.status === 401) {
-			// Only forget the key this request used: a newer key entered while
-			// the request was in flight must survive a stale rejection.
-			if (token && apiToken === token) clearApiToken();
+		// Only react to a rejection of the current credentials: a key entered
+		// while this request was in flight must survive a stale 401, and must
+		// not reopen the sign-in dialog.
+		if (res.status === 401 && apiToken === token) {
+			if (token) clearApiToken();
 			notifyAuthRequired();
 		}
 		throw new ApiError(details.message, { status: res.status, ...details });
@@ -523,24 +524,16 @@ export function cancelAutomationPlan(planId) {
  * Discard an unapproved (DRAFT/VALIDATED) preview so that previewing the same
  * workload again does not hit WORKLOAD_PLAN_ALREADY_EXISTS (D6, BUG-48).
  *
- * `DELETE /automation/plans/{id}` answers 204 and marks the plan SUPERSEDED.
- * A server without that route answers 405; the plan is then invalidated
- * through the older cancel endpoint, which marks it STALE.
+ * `DELETE /automation/plans/{id}` answers 204 and marks the plan SUPERSEDED;
+ * any other plan status answers 409. There is deliberately no fallback to
+ * POST .../cancel: that endpoint also cancels APPROVED plans. A server
+ * without the route rejects with 404/405 and the preview simply expires.
  * @param {string} planId
- * @returns {Promise<{discarded: boolean, status: number|null}>}
+ * @returns {Promise<{discarded: boolean, status: number}>}
  */
 export async function discardAutomationPlan(planId) {
-	const path = `${BASE}/automation/plans/${encodeURIComponent(planId)}`;
-	try {
-		await request(path, {}, { method: 'DELETE' });
-		return { discarded: true, status: 204 };
-	} catch (error) {
-		if (error instanceof ApiError && error.status === 405) {
-			await cancelAutomationPlan(planId);
-			return { discarded: true, status: 405 };
-		}
-		throw error;
-	}
+	const res = await send(`${BASE}/automation/plans/${encodeURIComponent(planId)}`, {}, { method: 'DELETE' });
+	return { discarded: true, status: res.status };
 }
 
 /**
