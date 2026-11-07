@@ -238,8 +238,48 @@ class TestAccrual:
             measured_cost_saved=0.0,
         )
         await SavingsAttributor(ledger, "c").accrue([record], now=NOW)
-        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 1)
-        assert ledger.method_sum("measured") == pytest.approx(4.0)
+        # 08:07-10:07 projected (1/h), 10:07-12:00 measured (2/h): the slot that
+        # holds verified_at is split pro rata between the two methods.
+        assert ledger.method_sum("projected") == pytest.approx(2.0)
+        assert ledger.method_sum("measured") == pytest.approx(2 * (53 / 60 + 1))
+        split_slot = NOW.replace(minute=0) - timedelta(hours=2)
+        in_split_slot = {r.measurement_method: r for r in ledger.rows.values() if r.slot_start == split_slot}
+        assert in_split_slot["projected"].period_end == record.verified_at
+        assert in_split_slot["measured"].period_start == record.verified_at
+        assert in_split_slot["measured"].period_end == split_slot + timedelta(hours=1)
+
+    @pytest.mark.asyncio
+    async def test_late_detected_apply_is_caught_up_behind_the_watermark(self):
+        """A change detected after its applied_at keeps the slots already behind the watermark."""
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c")
+        await attributor.accrue([], now=NOW)
+        assert ledger.watermarks[("c", "recommendation_savings")] == NOW.replace(minute=0)
+
+        late = _record(applied_at=NOW - timedelta(hours=5))
+        result = await attributor.accrue([late], now=NOW + timedelta(hours=1))
+
+        assert result.slots == 1
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 5)
+        again = await attributor.accrue([late], now=NOW + timedelta(hours=2))
+        assert again.written == 1
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 6)
+
+    @pytest.mark.asyncio
+    async def test_catch_up_is_bounded_and_skips_records_that_already_accrued(self):
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c", initial_backfill=timedelta(hours=2))
+        accrued = _record(1, applied_at=NOW - timedelta(hours=1))
+        await attributor.accrue([accrued], now=NOW)
+        assert ledger.method_sum("projected", rec_id=1) == pytest.approx(53 / 60)
+
+        # Record 1 already has ledger rows: no gap is re-accrued, only the new slot.
+        # Record 2 never accrued: caught up, but no further back than the backfill horizon.
+        old = _record(2, applied_at=NOW - timedelta(days=3))
+        await attributor.accrue([accrued, old], now=NOW + timedelta(hours=1))
+
+        assert ledger.method_sum("projected", rec_id=1) == pytest.approx(53 / 60 + 1)
+        assert ledger.method_sum("projected", rec_id=2) == pytest.approx(3.0)
 
     @pytest.mark.asyncio
     async def test_invalid_record_does_not_block_others(self):

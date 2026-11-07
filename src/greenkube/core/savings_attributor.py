@@ -13,6 +13,9 @@ records the end of the last accrued slot; each run accrues every complete slot
 after it (backfilling downtime) and advances it with a compare-and-swap in the
 same transaction as the inserts. Rows are keyed by recommendation, method and
 slot, so restarts, retries and concurrent controllers cannot double count.
+A recommendation that has never accrued is also caught up for the slots since
+its ``applied_at`` that are already behind the watermark (bounded by the
+initial backfill), so a change detected late keeps its full history.
 
 Which rate accrues, and under which method, depends on the recommendation's
 outcome (roadmap C0.4):
@@ -326,36 +329,72 @@ class SavingsAttributor:
         accrue_from = ensure_utc(record.applied_at)
         if floor is not None and floor > accrue_from:
             accrue_from = floor
+        # A verified record accrues its projection until verified_at and its
+        # measured savings afterwards; the slot holding verified_at is split.
+        split_at = verified_at if status in _MEASURED_STATUSES else None
         rec_type = _value(record.type)
         rows: List[SavingsLedgerRecord] = []
         for slot_start, slot_end in slots:
             begin = max(slot_start, accrue_from)
             if begin >= slot_end:
                 continue
-            seconds = (slot_end - begin).total_seconds()
-            factor = seconds / _SECONDS_PER_YEAR
-            components = before_verification if verified_at is not None and slot_end <= verified_at else current
-            for component in components:
-                rows.append(
-                    SavingsLedgerRecord(
-                        recommendation_id=record.id,
-                        cluster_name=self._cluster,
-                        namespace=record.namespace or "",
-                        recommendation_type=rec_type,
-                        co2e_saved_grams=component.co2e_grams_per_year * factor,
-                        cost_saved_dollars=component.cost_per_year * factor,
-                        period_seconds=max(1, ceil(seconds)),
-                        timestamp=slot_end,
-                        period_start=begin,
-                        period_end=slot_end,
-                        slot_start=slot_start,
-                        measurement_method=component.method,
-                        baseline_value=record.potential_savings_co2e_grams,
-                        actual_value=component.co2e_grams_per_year,
-                        confidence=record.confidence if component.method == METHOD_PROJECTED else None,
+            if split_at is None:
+                segments = [(begin, current)]
+            else:
+                segments = []
+                if begin < split_at:
+                    segments.append((begin, before_verification))
+                if split_at < slot_end:
+                    segments.append((max(begin, split_at), current))
+            for segment_index, (segment_start, components) in enumerate(segments):
+                segment_end = segments[segment_index + 1][0] if segment_index + 1 < len(segments) else slot_end
+                seconds = (segment_end - segment_start).total_seconds()
+                if seconds <= 0:
+                    continue
+                factor = seconds / _SECONDS_PER_YEAR
+                for component in components:
+                    rows.append(
+                        SavingsLedgerRecord(
+                            recommendation_id=record.id,
+                            cluster_name=self._cluster,
+                            namespace=record.namespace or "",
+                            recommendation_type=rec_type,
+                            co2e_saved_grams=component.co2e_grams_per_year * factor,
+                            cost_saved_dollars=component.cost_per_year * factor,
+                            period_seconds=max(1, ceil(seconds)),
+                            timestamp=segment_end,
+                            period_start=segment_start,
+                            period_end=segment_end,
+                            slot_start=slot_start,
+                            measurement_method=component.method,
+                            baseline_value=record.potential_savings_co2e_grams,
+                            actual_value=component.co2e_grams_per_year,
+                            confidence=record.confidence if component.method == METHOD_PROJECTED else None,
+                        )
                     )
-                )
         return rows
+
+    def _catch_up_slots(
+        self,
+        record: RecommendationRecord,
+        first_slot_start: datetime,
+        lower_bound: datetime,
+    ) -> List[tuple[datetime, datetime]]:
+        """Return the slots before this run that a never-accrued record missed.
+
+        The watermark is global, so a record that became applied after its
+        ``applied_at`` (late detection, rollout-completion time, downtime) would
+        otherwise lose every slot between ``applied_at`` and the watermark.
+        The ``(recommendation_id, method, slot_start)`` key keeps this safe.
+        """
+        if record.applied_at is None:
+            return []
+        cursor = floor_to_slot(max(ensure_utc(record.applied_at), lower_bound))
+        slots: List[tuple[datetime, datetime]] = []
+        while cursor < first_slot_start:
+            slots.append((cursor, cursor + self._slot))
+            cursor += self._slot
+        return slots
 
     async def accrue(
         self,
@@ -379,11 +418,19 @@ class SavingsAttributor:
         candidates = [record for record in applied_records if record.id is not None]
         floors = await self._repo.get_accrual_floors([record.id for record in candidates if record.id is not None])
 
+        # Records that never accrued are caught up for slots already behind the
+        # watermark, within the same horizon as a first run.
+        catch_up_from = slots[0][0] - self._initial_backfill if watermark is not None else None
+
         rows: List[SavingsLedgerRecord] = []
         errors = 0
         for record in candidates:
             try:
-                rows.extend(self._accruals_for(record, slots, floors.get(record.id or 0)))
+                floor = floors.get(record.id or 0)
+                record_slots = slots
+                if floor is None and catch_up_from is not None:
+                    record_slots = self._catch_up_slots(record, slots[0][0], catch_up_from) + slots
+                rows.extend(self._accruals_for(record, record_slots, floor))
             except Exception as exc:
                 errors += 1
                 ATTRIBUTION_ERRORS.labels(reason="invalid_record").inc()
