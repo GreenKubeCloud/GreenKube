@@ -220,6 +220,23 @@ describe('rescan (K9, E1)', () => {
 		expect(screen.getByRole('alert')).toHaveTextContent('Recommendation scan #13 failed: Prometheus unreachable');
 	});
 
+	it.each([404, 405])(
+		'still requests a scan when the optional run list endpoint is missing (%s)',
+		async (status) => {
+			api.listOptimizationRuns.mockRejectedValue(Object.assign(new Error('Missing'), { status }));
+			api.requestOptimizationRun.mockResolvedValue({ run_id: 21, status: 'queued' });
+			api.getOptimizationRun.mockReturnValue(new Promise(() => {}));
+			render(RecommendationsPage);
+			await screen.findByText('Reason 1');
+			await vi.waitFor(() => expect(api.listOptimizationRuns).toHaveBeenCalled());
+
+			await fireEvent.click(screen.getByRole('button', { name: /Rescan/ }));
+
+			await vi.waitFor(() => expect(api.requestOptimizationRun).toHaveBeenCalledTimes(1));
+			expect(await screen.findByText(/Recommendation scan #21 is queued/)).toBeInTheDocument();
+		}
+	);
+
 	it('falls back to a plain reload on a server without the runs API', async () => {
 		api.requestOptimizationRun.mockRejectedValue(Object.assign(new Error('Not Found'), { status: 404 }));
 		render(RecommendationsPage);

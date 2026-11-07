@@ -3,8 +3,12 @@
  *
  * Page loads only read persisted recommendations. A scan is requested
  * explicitly with POST /optimization/runs, then the run is polled until it
- * completes so the page can reload its results. Servers without the runs API
- * answer 404/405: callers then fall back to plain reads.
+ * completes so the page can reload its results. Only a 404/405 from that POST
+ * means the server has no runs API: callers then fall back to plain reads.
+ *
+ * Following a scan that is already running when a page opens uses the
+ * optional list endpoint GET /optimization/runs?limit=N. Its absence is
+ * cached separately and never disables requesting scans.
  */
 import { getOptimizationRun, listOptimizationRuns, requestOptimizationRun } from '$lib/api.js';
 
@@ -16,17 +20,25 @@ export const MAX_POLL_INTERVAL_MS = 10000;
 export const DEFAULT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 
-/** null = not probed yet; false once the server answered 404/405. */
+/** null = not probed yet; false once POST /optimization/runs answered 404/405. */
 let runsApiSupported = null;
+/** null = not probed yet; false once GET /optimization/runs answered 404/405. */
+let runsListSupported = null;
 
 /** Whether the runs API is known to be available (null until probed). */
 export function optimizationRunsSupported() {
 	return runsApiSupported;
 }
 
+/** Whether the optional run list endpoint is known to be available (null until probed). */
+export function optimizationRunListSupported() {
+	return runsListSupported;
+}
+
 /** Forget the cached feature detection (tests, or after a server upgrade). */
 export function resetOptimizationRunsSupport() {
 	runsApiSupported = null;
+	runsListSupported = null;
 }
 
 function isMissingRoute(error) {
@@ -104,18 +116,22 @@ export async function startOptimizationScan({ signal } = {}) {
 /**
  * Return the most recent run when it is still queued or running, so a page
  * opened during a scheduled scan reloads when that scan completes.
- * Never throws: an unavailable runs API simply means "nothing to follow".
+ *
+ * The list endpoint is optional: E1 only requires POST /optimization/runs and
+ * GET /optimization/runs/{id}. A 404/405 here is cached as "no list" and
+ * leaves scan requests enabled. Never throws except on abort: an unavailable
+ * list simply means "nothing to follow".
  */
 export async function findPendingOptimizationRun({ signal } = {}) {
-	if (runsApiSupported === false) return null;
+	if (runsApiSupported === false || runsListSupported === false) return null;
 	try {
 		const runs = await listOptimizationRuns({ limit: 1, signal });
-		runsApiSupported = true;
+		runsListSupported = true;
 		const latest = normalizeRun(Array.isArray(runs) ? runs[0] : null);
 		return latest && isRunPending(latest) ? latest : null;
 	} catch (error) {
 		if (error?.name === 'AbortError') throw error;
-		if (isMissingRoute(error)) runsApiSupported = false;
+		if (isMissingRoute(error)) runsListSupported = false;
 		return null;
 	}
 }

@@ -9,6 +9,7 @@ import {
 	isRunPending,
 	isRunTerminal,
 	normalizeRun,
+	optimizationRunListSupported,
 	optimizationRunsSupported,
 	resetOptimizationRunsSupport,
 	sleep,
@@ -101,12 +102,51 @@ describe('findPendingOptimizationRun', () => {
 		await expect(findPendingOptimizationRun()).resolves.toBeNull();
 	});
 
-	it('returns null without throwing on an older server', async () => {
-		api.listOptimizationRuns.mockRejectedValue(apiError(404));
+	it.each([404, 405])('returns null without throwing when the list endpoint is missing (%s)', async (status) => {
+		api.listOptimizationRuns.mockRejectedValue(apiError(status));
 
 		await expect(findPendingOptimizationRun()).resolves.toBeNull();
 		await expect(findPendingOptimizationRun()).resolves.toBeNull();
 		expect(api.listOptimizationRuns).toHaveBeenCalledTimes(1);
+		expect(optimizationRunListSupported()).toBe(false);
+	});
+
+	it.each([404, 405])(
+		'keeps requesting scans when only the optional list endpoint is missing (%s)',
+		async (status) => {
+			// E1 defines POST /optimization/runs and GET /optimization/runs/{id} only:
+			// a missing list must not disable the Rescan button.
+			api.listOptimizationRuns.mockRejectedValue(apiError(status));
+			api.requestOptimizationRun.mockResolvedValue({ run_id: 11, status: 'queued' });
+
+			await expect(findPendingOptimizationRun()).resolves.toBeNull();
+			expect(optimizationRunsSupported()).toBeNull();
+
+			await expect(startOptimizationScan()).resolves.toEqual({
+				supported: true,
+				run: { run_id: 11, status: 'queued' }
+			});
+			expect(api.requestOptimizationRun).toHaveBeenCalledTimes(1);
+			expect(optimizationRunsSupported()).toBe(true);
+		}
+	);
+
+	it('does not probe the list once the runs API is known to be missing', async () => {
+		api.requestOptimizationRun.mockRejectedValue(apiError(404));
+		await startOptimizationScan();
+
+		await expect(findPendingOptimizationRun()).resolves.toBeNull();
+		expect(api.listOptimizationRuns).not.toHaveBeenCalled();
+	});
+
+	it('returns null on transient list errors and probes again later', async () => {
+		api.listOptimizationRuns.mockRejectedValueOnce(apiError(503));
+		await expect(findPendingOptimizationRun()).resolves.toBeNull();
+		expect(optimizationRunListSupported()).toBeNull();
+
+		api.listOptimizationRuns.mockResolvedValueOnce({ items: [] });
+		await expect(findPendingOptimizationRun()).resolves.toBeNull();
+		expect(api.listOptimizationRuns).toHaveBeenCalledTimes(2);
 	});
 });
 
