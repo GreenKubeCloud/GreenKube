@@ -345,6 +345,15 @@ async def run_recommendation_lifecycle() -> None:
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
+def _collection_offset_seconds(cfg) -> float:
+    from ..collectors.promql import parse_duration_seconds
+
+    try:
+        return float(parse_duration_seconds(getattr(cfg, "COLLECTION_SAFETY_LAG", "1m")))
+    except ValueError:
+        return 60.0
+
+
 def _create_controller_leader_election(cfg):
     """Build the optional controller Lease elector from the chart-provided settings."""
     if not getattr(cfg, "LEADER_ELECTION_ENABLED", False):
@@ -543,10 +552,13 @@ async def _async_start(last: Optional[str]):
             skip_initial=True,
         )
 
+        # Fire right after each window closes (step boundary + safety lag); the
+        # job itself catches up every window missed since the watermark.
         scheduler.add_job_from_string(
             _leader_gated_callback(scheduled_write_metrics, should_run),
             cfg.PROMETHEUS_QUERY_RANGE_STEP,
             skip_initial=True,
+            align_offset_seconds=_collection_offset_seconds(cfg),
         )
         scheduler.add_job_from_string(
             _leader_gated_callback(analyze_nodes, should_run),

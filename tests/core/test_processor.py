@@ -816,7 +816,8 @@ async def test_run_range_uses_historical_node_data(
     mock_prometheus_collector.collect_range.return_value = [
         {
             "metric": {"namespace": "ns-1", "pod": "pod-A", "node": "node-1"},
-            "values": [[1672567200, "1.0"]],  # 10:00:00
+            # Evaluated at 10:05, the sample describes [10:00, 10:05) and is stored at 10:00.
+            "values": [[1672567500, "1.0"]],
         }
     ]
 
@@ -884,7 +885,7 @@ async def test_run_range_uses_historical_node_data(
     assert len(calls) > 0
 
     # Check the profile used in the call corresponding to the timestamp
-    # The timestamp in collect_range is 1672567200 (10:00:00)
+    # The first row describes [10:00, 10:05) (evaluated at 10:05)
     # So it should use t3.medium profile
     args, kwargs = calls[0]
     assert kwargs["node_name"] == "node-1"
@@ -934,7 +935,7 @@ async def test_run_range_preserves_container_metrics_for_the_scheduled_pipeline(
             return [
                 {
                     "metric": {"namespace": "ns-1", "pod": "pod-A", "container": "web", "node": "node-1"},
-                    "values": [[1672567200, "0.02"]],
+                    "values": [[1672567500, "0.02"]],
                 },
                 {
                     "metric": {
@@ -943,14 +944,14 @@ async def test_run_range_preserves_container_metrics_for_the_scheduled_pipeline(
                         "container": "telemetry-sidecar",
                         "node": "node-1",
                     },
-                    "values": [[1672567200, "0.01"]],
+                    "values": [[1672567500, "0.01"]],
                 },
             ]
         if query and "container_memory_working_set_bytes" in query:
             return [
                 {
                     "metric": {"namespace": "ns-1", "pod": "pod-A", "container": "web", "node": "node-1"},
-                    "values": [[1672567200, str(120 * 1024**2)]],
+                    "values": [[1672567500, str(120 * 1024**2)]],
                 },
                 {
                     "metric": {
@@ -959,7 +960,7 @@ async def test_run_range_preserves_container_metrics_for_the_scheduled_pipeline(
                         "container": "telemetry-sidecar",
                         "node": "node-1",
                     },
-                    "values": [[1672567200, str(40 * 1024**2)]],
+                    "values": [[1672567500, str(40 * 1024**2)]],
                 },
             ]
         return []
@@ -1034,7 +1035,7 @@ async def test_run_range_uses_metrics_api_when_prometheus_drops_container_labels
             return [
                 {
                     "metric": {"namespace": "ns-1", "pod": "pod-A", "node": "node-1"},
-                    "values": [[start.timestamp() + 60, "0.03"]],
+                    "values": [[end.timestamp(), "0.03"]],
                 }
             ]
         return []

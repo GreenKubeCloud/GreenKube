@@ -3,9 +3,11 @@
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List
 
 from .. import __version__
 from ..collectors.metrics_server_collector import MetricsServerCollector
@@ -13,17 +15,35 @@ from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
+from ..collectors.promql import PromQLCatalog
+from ..core import collection_telemetry
 from ..core.calculator import CarbonCalculator
+from ..core.collection import CollectionWindow
 from ..core.config import Config, get_config
 from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
+from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..models.metrics import CombinedMetric
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
 logger = logging.getLogger(__name__)
+
+#: Bumped when the range pipeline changes how stored values are computed
+#: (A1: pod cgroup no longer double counted; A2: half-open per-step samples;
+#: A10: capacity-derived power profiles).  Rows written before carry the bare
+#: package version and over-state CPU, memory and energy.
+CALCULATION_VERSION = f"{__version__}+range.2"
+# Day-sized chunks bound the memory of long backfills.
+_CHUNK_SECONDS = 86400
+# Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
+_TIMESTAMP_TOLERANCE = 1e-3
+
+
+class RangeCollectionError(RuntimeError):
+    """Prometheus could not be queried for a window; the window must be retried."""
 
 
 class HistoricalRangeProcessor:
@@ -61,6 +81,7 @@ class HistoricalRangeProcessor:
         self.zone_mapper = zone_mapper
         self._config = config if config is not None else get_config()
         self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
+        self._promql = PromQLCatalog.from_config(self._config)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -70,18 +91,116 @@ class HistoricalRangeProcessor:
     def _parse_duration_to_seconds(s: str) -> int:
         return parse_query_step_seconds(s)
 
+    @staticmethod
+    def _sample_value(raw) -> float | None:
+        """Parse one Prometheus sample value, dropping non-finite and clamping negatives (A6)."""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_MALFORMED)
+            return None
+        if not math.isfinite(value):
+            collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_NON_FINITE)
+            return None
+        if value < 0:
+            collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_NEGATIVE)
+            return 0.0
+        return value
+
+    @classmethod
+    def _iter_window_samples(cls, series: dict, chunk: CollectionWindow) -> Iterator[tuple[int, float]]:
+        """Yield ``(sample_start, value)`` for the samples of ``series`` that fall in ``chunk``.
+
+        Prometheus evaluates ``rate(x[w])`` at ``t`` over the preceding step, so
+        the sample evaluated at ``t`` describes ``[t - step, t)`` and is stored
+        at ``t - step`` (half-open, A2).
+        """
+        step = chunk.step_seconds
+        start = chunk.start.timestamp()
+        end = chunk.end.timestamp()
+        for raw_ts, raw_value in series.get("values", []) or []:
+            try:
+                evaluated_at = float(raw_ts)
+            except (TypeError, ValueError):
+                collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_MALFORMED)
+                continue
+            sample_start = math.ceil((evaluated_at - _TIMESTAMP_TOLERANCE) / step) * step - step
+            if not start <= sample_start < end:
+                collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_OUT_OF_WINDOW)
+                continue
+            value = cls._sample_value(raw_value)
+            if value is not None:
+                yield int(sample_start), value
+
+    @staticmethod
+    def _series_identity(series: dict) -> tuple[str, str, str, str]:
+        metric = series.get("metric", {}) or {}
+        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name") or ""
+        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name") or ""
+        container = metric.get("container") or metric.get("container_name") or ""
+        node = metric.get("node") or metric.get("kubernetes_node") or ""
+        return namespace, pod, container, node
+
+    @classmethod
+    def _pod_series_by_sample(cls, results, chunk: CollectionWindow) -> dict[int, dict[tuple[str, str], float]]:
+        """Sum series per pod for every sample of the chunk."""
+        by_sample: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
+        for series in results or []:
+            namespace, pod, _container, _node = cls._series_identity(series)
+            if not namespace or not pod:
+                continue
+            for sample_start, value in cls._iter_window_samples(series, chunk):
+                by_sample[sample_start][(namespace, pod)] += value
+        return by_sample
+
+    @classmethod
+    def _container_series_by_sample(
+        cls, results, chunk: CollectionWindow
+    ) -> tuple[dict[int, dict[tuple[str, str], float]], dict[int, dict[tuple[str, str, str], float]]]:
+        """Return pod sums and per-container values for every sample of the chunk."""
+        pods: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
+        containers: dict[int, dict[tuple[str, str, str], float]] = defaultdict(lambda: defaultdict(float))
+        for series in results or []:
+            namespace, pod, container, _node = cls._series_identity(series)
+            if not namespace or not pod:
+                continue
+            for sample_start, value in cls._iter_window_samples(series, chunk):
+                pods[sample_start][(namespace, pod)] += value
+                if container:
+                    containers[sample_start][(namespace, pod, container)] += value
+        return pods, containers
+
+    async def _query_range(self, chunk: CollectionWindow, query: str):
+        return await self.prometheus_collector.collect_range(
+            start=chunk.first_evaluation,
+            end=chunk.last_evaluation,
+            step=self._promql.step,
+            query=query,
+        )
+
+    async def _collect_cpu(self, chunk: CollectionWindow):
+        """Container CPU series; falls back to the pod cgroup series (counted once)."""
+        try:
+            results = await self._query_range(chunk, self._promql.container_cpu_usage())
+            if results:
+                return results
+        except Exception as error:
+            logger.warning(
+                "Container CPU range query failed for %s -> %s (%s); trying the pod cgroup series.",
+                chunk.start,
+                chunk.end,
+                error,
+            )
+        try:
+            return await self._query_range(chunk, self._promql.pod_cgroup_cpu_usage())
+        except Exception as error:
+            raise RangeCollectionError(
+                f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
+            ) from error
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    async def _read_stored_metrics(
-        self, start_dt: datetime, end_dt: datetime, namespace: Optional[str]
-    ) -> List[CombinedMetric]:
-        """Read stored metrics for the range, filtered by namespace when requested."""
-        stored_metrics = await self.combined_metrics_repository.read_combined_metrics(start_dt, end_dt)
-        if namespace:
-            stored_metrics = [m for m in stored_metrics if m.namespace == namespace]
-        return stored_metrics
 
     async def run_range(
         self,
@@ -90,32 +209,20 @@ class HistoricalRangeProcessor:
         step=None,
         namespace=None,
     ) -> List[CombinedMetric]:
-        """Generate CombinedMetric list for a historical time range.
+        """Collect CombinedMetric rows for every step of the half-open range ``[start, end)``.
 
-        To avoid OOM for large clusters over long periods, the range is
-        processed in day-sized chunks.
+        ``start``/``end`` are widened to the configured step; each returned
+        pod row has ``timestamp = T`` and ``duration_seconds = step`` and
+        describes usage during ``[T, T + step)``.  Nothing is read back from
+        storage: the caller decides which windows to (re)collect and writes
+        the rows with an idempotent upsert.  Long ranges are processed in
+        day-sized chunks to bound memory.
+
+        Raises :class:`RangeCollectionError` when Prometheus cannot be
+        queried, so callers never mistake an outage for an empty window.
         """
-        # Try to read from repository first
-        start_dt: datetime | None = None
-        end_dt: datetime | None = None
-        try:
-            start_dt = ensure_utc(start) if not isinstance(start, str) else parse_iso_date(start)
-            end_dt = ensure_utc(end) if not isinstance(end, str) else parse_iso_date(end)
-
-            if start_dt and end_dt:
-                stored_metrics = await self._read_stored_metrics(start_dt, end_dt, namespace)
-                if stored_metrics:
-                    logger.info(
-                        "Found %d stored metrics in repository for range %s - %s",
-                        len(stored_metrics),
-                        start,
-                        end,
-                    )
-                    return stored_metrics
-        except Exception as e:
-            logger.warning("Failed to read stored metrics: %s", e)
-
-        # Ensure start_dt and end_dt are resolved — fall back to parsing as datetime if still None
+        start_dt = ensure_utc(start) if not isinstance(start, str) else parse_iso_date(start)
+        end_dt = ensure_utc(end) if not isinstance(end, str) else parse_iso_date(end)
         if start_dt is None:
             raise ValueError(f"Could not parse start time: {start!r}")
         if end_dt is None:
@@ -123,11 +230,11 @@ class HistoricalRangeProcessor:
         if end_dt <= start_dt:
             raise ValueError("Historical range end must be after start")
 
-        cfg_step_str = self._config.PROMETHEUS_QUERY_RANGE_STEP
-        cfg_step_sec = self._parse_duration_to_seconds(cfg_step_str)
-        chosen_step_sec = cfg_step_sec
-        chosen_step = f"{chosen_step_sec}s"
-        rate_window = f"{chosen_step_sec}s"
+        chosen_step_sec = self._promql.step_seconds
+        window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
+        # Every downstream consumer (OpenCost window, cost per step) uses the aligned window.
+        start = start_dt = window.start
+        end = end_dt = window.end
         now = datetime.now(timezone.utc)
         current_window = end_dt >= now - timedelta(seconds=max(chosen_step_sec * 2, 60))
         # PodMetrics is point-in-time data; never use today's sample to backfill older ranges.
@@ -185,32 +292,6 @@ class HistoricalRangeProcessor:
         except Exception:
             current_node_map = {}
 
-        def profile_for_node(node_name: str, timestamp: datetime):
-            node_info = get_node_info_at(node_name, timestamp)
-            inst = None
-            cpu_capacity = None
-            if node_info:
-                inst = node_info.instance_type
-                cpu_capacity = node_info.cpu_capacity_cores
-            else:
-                inst = current_node_map.get(node_name)
-            if inst:
-                profile = estimator.instance_profiles.get(inst)
-                if profile:
-                    return profile
-                if isinstance(inst, str) and inst.startswith("cpu-"):
-                    try:
-                        cores = int(inst.split("-", 1)[1])
-                        return estimator._create_cpu_profile(cores)
-                    except Exception:
-                        logger.debug(
-                            "Failed to parse inferred CPU count from instance type '%s'",
-                            inst,
-                        )
-            if cpu_capacity:
-                return estimator._create_cpu_profile(cpu_capacity)
-            return estimator.DEFAULT_INSTANCE_PROFILE
-
         # Pod request maps
         try:
             pod_metrics_list = await pod_collector.collect()
@@ -238,6 +319,26 @@ class HistoricalRangeProcessor:
             nodes_info = await self.node_collector.collect() or {}
         except Exception:
             nodes_info = {}
+
+        def profile_for_node(node_name: str, timestamp: datetime) -> NodePowerProfile:
+            """Resolve the node power profile with provenance (A10)."""
+            node_info = get_node_info_at(node_name, timestamp) if node_name else None
+            current_info = nodes_info.get(node_name) if node_name else None
+            info = node_info or current_info
+            instance_type = (info.instance_type if info else None) or current_node_map.get(node_name)
+            cpu_capacity = None
+            for candidate in (node_info, current_info):
+                if candidate is not None and candidate.cpu_capacity_cores:
+                    cpu_capacity = candidate.cpu_capacity_cores
+                    break
+            return resolve_node_power_profile(
+                node_name=node_name,
+                instance_type=instance_type,
+                cpu_capacity_cores=cpu_capacity,
+                provider=(info.cloud_provider if info else None),
+                instance_profiles=estimator.instance_profiles,
+                default_profile=estimator.DEFAULT_INSTANCE_PROFILE,
+            )
 
         # Node contexts for zone mapping — pass already-collected nodes_info
         # so the zone mapper never triggers an extra K8s API call.
@@ -267,47 +368,20 @@ class HistoricalRangeProcessor:
             pod_storage_map = {}
 
         # --- Chunked processing ---
-        CHUNK_SIZE = timedelta(days=1)
         combined: List[CombinedMetric] = []
-        chunk_start = start_dt
         skipped_carbon = 0
+        unknown_power_nodes: set[str] = set()
+        # (node, sample_start) -> PowerSource value; seam for per-row power provenance (A11).
+        node_power_sources: dict[tuple[str, int], str] = {}
+        promql = self._promql
 
-        while chunk_start < end_dt:
-            chunk_end = min(chunk_start + CHUNK_SIZE, end_dt)
+        for chunk in window.split(max(1, _CHUNK_SECONDS // chosen_step_sec)):
+            chunk_start, chunk_end = chunk.start, chunk.end
             logger.debug("Processing chunk: %s -> %s", chunk_start, chunk_end)
 
-            primary_query = (
-                f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,container,node)"
-            )
-            try:
-                results = await self.prometheus_collector.collect_range(
-                    start=chunk_start, end=chunk_end, step=chosen_step, query=primary_query
-                )
-            except Exception:
-                logger.warning(
-                    "Prometheus collector failed for chunk %s -> %s; attempting fallback.",
-                    chunk_start,
-                    chunk_end,
-                )
-                try:
-                    fallback_query = (
-                        f"sum(rate(container_cpu_usage_seconds_total[{rate_window}])) by (namespace,pod,node)"
-                    )
-                    results = await self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=fallback_query
-                    )
-                except Exception:
-                    results = []
-
-            # Fetch additional resource metrics for this chunk (best-effort)
-            net_rx_query = f"sum(rate(container_network_receive_bytes_total[{rate_window}])) by (namespace,pod,node)"
-            net_tx_query = f"sum(rate(container_network_transmit_bytes_total[{rate_window}])) by (namespace,pod,node)"
-            disk_read_query = f"sum(rate(container_fs_reads_bytes_total[{rate_window}])) by (namespace,pod,node)"
-            disk_write_query = f"sum(rate(container_fs_writes_bytes_total[{rate_window}])) by (namespace,pod,node)"
-            restart_query = "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
-            memory_query = "sum(container_memory_working_set_bytes) by (namespace,pod,container,node)"
-            ephemeral_usage_query = "sum(container_fs_usage_bytes) by (namespace,pod,node)"
-
+            results = await self._collect_cpu(chunk)
+            # Every query of the chunk must succeed: a Prometheus error fails the
+            # window so the watermark is not advanced over missing data.
             try:
                 (
                     net_rx_results,
@@ -317,169 +391,104 @@ class HistoricalRangeProcessor:
                     restart_results,
                     memory_results,
                     ephemeral_usage_results,
+                    pod_node_results,
                 ) = await asyncio.gather(
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=net_rx_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=net_tx_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=disk_read_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=disk_write_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=restart_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=memory_query
-                    ),
-                    self.prometheus_collector.collect_range(
-                        start=chunk_start, end=chunk_end, step=chosen_step, query=ephemeral_usage_query
-                    ),
+                    self._query_range(chunk, promql.pod_network_receive()),
+                    self._query_range(chunk, promql.pod_network_transmit()),
+                    self._query_range(chunk, promql.pod_disk_read()),
+                    self._query_range(chunk, promql.pod_disk_write()),
+                    self._query_range(chunk, promql.pod_restarts()),
+                    self._query_range(chunk, promql.container_memory_working_set()),
+                    self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
+                    self._query_range(chunk, promql.pod_node()),
                 )
-            except Exception:
-                net_rx_results = []
-                net_tx_results = []
-                disk_read_results = []
-                disk_write_results = []
-                restart_results = []
-                memory_results = []
-                ephemeral_usage_results = []
+            except Exception as error:
+                raise RangeCollectionError(
+                    f"Prometheus resource queries failed for {chunk_start.isoformat()} -> {chunk_end.isoformat()}"
+                ) from error
 
-            def _build_pod_map_from_range(range_results):
-                pod_map = {}
-                for series in range_results:
-                    m = series.get("metric", {}) or {}
-                    ns = m.get("namespace") or m.get("kubernetes_namespace") or ""
-                    p = m.get("pod") or m.get("pod_name") or ""
-                    if not ns or not p:
-                        continue
-                    values = series.get("values", [])
-                    if values:
-                        try:
-                            key = (ns, p)
-                            pod_map[key] = pod_map.get(key, 0.0) + float(values[-1][1])
-                        except (ValueError, IndexError):
-                            pass
-                return pod_map
+            net_rx_by_sample = self._pod_series_by_sample(net_rx_results, chunk)
+            net_tx_by_sample = self._pod_series_by_sample(net_tx_results, chunk)
+            disk_read_by_sample = self._pod_series_by_sample(disk_read_results, chunk)
+            disk_write_by_sample = self._pod_series_by_sample(disk_write_results, chunk)
+            restart_by_sample = self._pod_series_by_sample(restart_results, chunk)
+            ephemeral_usage_by_sample = self._pod_series_by_sample(ephemeral_usage_results, chunk)
+            memory_by_sample, container_memory_samples = self._container_series_by_sample(memory_results, chunk)
 
-            range_net_rx_map = _build_pod_map_from_range(net_rx_results)
-            range_net_tx_map = _build_pod_map_from_range(net_tx_results)
-            range_disk_read_map = _build_pod_map_from_range(disk_read_results)
-            range_disk_write_map = _build_pod_map_from_range(disk_write_results)
-            range_restart_map = _build_pod_map_from_range(restart_results)
-            range_memory_map = _build_pod_map_from_range(memory_results)
-            range_ephemeral_usage_map = _build_pod_map_from_range(ephemeral_usage_results)
-            container_memory_samples = defaultdict(lambda: defaultdict(float))
-            for series in memory_results:
-                metric = series.get("metric", {}) or {}
-                series_ns = metric.get("namespace") or metric.get("kubernetes_namespace") or ""
-                pod = metric.get("pod") or metric.get("pod_name") or ""
-                container = metric.get("container") or metric.get("container_name") or ""
-                if not series_ns or not pod or not container:
+            # Pod -> node placement from kube-state-metrics, for cAdvisor series without `node` (A10).
+            pod_info_node_by_sample: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
+            pod_info_node_latest: dict[tuple[str, str], str] = {}
+            for series in pod_node_results or []:
+                series_ns, pod, _container, node = self._series_identity(series)
+                if not series_ns or not pod or not node:
                     continue
-                for ts_val, val in series.get("values", []):
-                    try:
-                        ts_f = float(ts_val)
-                        memory_bytes = float(val)
-                    except (TypeError, ValueError):
-                        continue
-                    normalized_ts = (ts_f // chosen_step_sec) * chosen_step_sec
-                    container_memory_samples[normalized_ts][(series_ns, pod, container)] += memory_bytes
+                for sample_start, _value in self._iter_window_samples(series, chunk):
+                    pod_info_node_by_sample[sample_start][(series_ns, pod)] = node
+                pod_info_node_latest[(series_ns, pod)] = node
 
             del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
-            del memory_results
-            del ephemeral_usage_results
+            del memory_results, ephemeral_usage_results, pod_node_results
 
-            # Parse results into samples
-            samples = defaultdict(lambda: defaultdict(float))
-            container_samples = defaultdict(lambda: defaultdict(float))
-            pod_node_map_by_ts = defaultdict(dict)
+            # Parse CPU results into per-sample pod and container usage (cores).
+            samples: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
+            normalized_container_samples: dict[int, dict[tuple[str, str, str], float]] = defaultdict(
+                lambda: defaultdict(float)
+            )
+            pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
             for series in results:
-                metric = series.get("metric", {}) or {}
-                series_ns = (
-                    metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name")
-                )
-                pod = (
-                    metric.get("pod")
-                    or metric.get("pod_name")
-                    or metric.get("kubernetes_pod_name")
-                    or metric.get("container")
-                )
-                container = metric.get("container") or metric.get("container_name") or ""
-                node = metric.get("node") or metric.get("kubernetes_node") or ""
+                series_ns, pod, container, node = self._series_identity(series)
                 if not series_ns or not pod:
                     continue
-                for ts_val, val in series.get("values", []):
-                    try:
-                        usage = float(val)
-                        ts_f = float(ts_val)
-                    except Exception:
-                        continue
-                    key = (series_ns, pod)
-                    samples[ts_f][key] += usage
+                key = (series_ns, pod)
+                for sample_start, usage in self._iter_window_samples(series, chunk):
+                    samples[sample_start][key] += usage
                     if container:
-                        container_samples[ts_f][(series_ns, pod, container)] += usage
-                    pod_node_map_by_ts[ts_f][key] = node
+                        normalized_container_samples[sample_start][(series_ns, pod, container)] += usage
+                    resolved_node = (
+                        node or pod_info_node_by_sample.get(sample_start, {}).get(key) or pod_info_node_latest.get(key)
+                    )
+                    if resolved_node:
+                        pod_node_map_by_ts[sample_start][key] = resolved_node
 
             del results
 
-            # Compute energy metrics for this chunk
-            chunk_energy_metrics = []
-
-            normalized_samples = defaultdict(lambda: defaultdict(float))
-            normalized_container_samples = defaultdict(lambda: defaultdict(float))
-            for ts_f, pod_map in samples.items():
-                normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
-                for pod_key, cpu_usage in pod_map.items():
-                    normalized_samples[normalized_ts_f][pod_key] += cpu_usage
-            for ts_f, container_map in container_samples.items():
-                normalized_ts_f = (ts_f // chosen_step_sec) * chosen_step_sec
-                for container_key, cpu_usage in container_map.items():
-                    normalized_container_samples[normalized_ts_f][container_key] += cpu_usage
-
-            # Build per-pod CPU usage map (average cores → millicores) across the chunk
-            cpu_usage_sum: dict = defaultdict(float)
-            cpu_usage_count: dict = defaultdict(int)
-            for ts_f, pod_map in normalized_samples.items():
-                for pod_key, cpu_cores in pod_map.items():
-                    cpu_usage_sum[pod_key] += cpu_cores
-                    cpu_usage_count[pod_key] += 1
-            range_cpu_usage_map = {
-                k: int(round((cpu_usage_sum[k] / cpu_usage_count[k]) * 1000))
-                for k in cpu_usage_sum
-                if cpu_usage_count[k] > 0
+            cpu_usage_by_sample = {
+                sample_start: {key: int(round(cores * 1000)) for key, cores in pod_map.items()}
+                for sample_start, pod_map in samples.items()
             }
 
-            latest_sample_ts = max(normalized_samples) if normalized_samples else None
+            # Compute energy metrics for this chunk
+            chunk_energy_metrics = []
+            latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt
-            for ts_f, pod_map in sorted(normalized_samples.items()):
-                sample_dt = datetime.fromtimestamp(ts_f, tz=timezone.utc)
+            for sample_start, pod_map in sorted(samples.items()):
+                sample_dt = datetime.fromtimestamp(sample_start, tz=timezone.utc)
 
                 node_total_cpu = defaultdict(float)
                 node_pod_map = defaultdict(list)
                 for pod_key, cpu in pod_map.items():
-                    node = pod_node_map_by_ts.get(ts_f, {}).get(pod_key) or ""
+                    node = pod_node_map_by_ts.get(sample_start, {}).get(pod_key) or ""
                     node_total_cpu[node] += cpu
                     node_pod_map[node].append((pod_key, cpu))
 
                 for node_name, pods_on_node in node_pod_map.items():
-                    profile = profile_for_node(node_name, sample_dt)
+                    power = profile_for_node(node_name, sample_dt)
+                    node_power_sources[(node_name, sample_start)] = power.source
+                    if power.is_fallback:
+                        unknown_power_nodes.add(node_name)
                     calculated_metrics = estimator.calculate_node_energy(
                         node_name=node_name,
-                        node_profile=profile,
+                        node_profile=power.profile,
                         node_total_cpu=node_total_cpu.get(node_name, 0.0),
                         pods_on_node=pods_on_node,
                         duration_seconds=chosen_step_sec,
+                        estimation_reasons=list(power.reasons),
                     )
                     for m in calculated_metrics:
                         m.timestamp = sample_dt
                         chunk_energy_metrics.append(m)
 
-            del samples, pod_node_map_by_ts, normalized_samples
+            del samples, pod_node_map_by_ts
 
             # Prefetch carbon intensities
             for em in chunk_energy_metrics:
@@ -501,6 +510,16 @@ class HistoricalRangeProcessor:
                 node_name: str = em.node or ""
                 joules = em.joules
                 ts = em.timestamp
+                # Per-sample resource usage: each row carries its own step, never a chunk aggregate.
+                sample_key = int(ts.timestamp())
+                range_cpu_usage_map = cpu_usage_by_sample.get(sample_key, {})
+                range_memory_map = memory_by_sample.get(sample_key, {})
+                range_net_rx_map = net_rx_by_sample.get(sample_key, {})
+                range_net_tx_map = net_tx_by_sample.get(sample_key, {})
+                range_disk_read_map = disk_read_by_sample.get(sample_key, {})
+                range_disk_write_map = disk_write_by_sample.get(sample_key, {})
+                range_restart_map = restart_by_sample.get(sample_key, {})
+                range_ephemeral_usage_map = ephemeral_usage_by_sample.get(sample_key, {})
                 node_context = node_contexts.get(node_name) if node_name else None
                 zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
                 _ni_prov = nodes_info.get(node_name)
@@ -579,23 +598,24 @@ class HistoricalRangeProcessor:
                             int(range_ephemeral_usage_map[pod_key]) if pod_key in range_ephemeral_usage_map else None
                         ),
                         restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
-                        calculation_version=__version__,
+                        calculation_version=CALCULATION_VERSION,
                     )
                     combined.append(aggregate_metric)
 
                     container_cpu_usage = {
                         key: int(round(value * 1000))
-                        for key, value in normalized_container_samples.get(ts.timestamp(), {}).items()
+                        for key, value in normalized_container_samples.get(sample_key, {}).items()
                     }
                     container_memory_usage = {
-                        key: int(round(value))
-                        for key, value in container_memory_samples.get(ts.timestamp(), {}).items()
+                        key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                     }
-                    container_timestamp_map = {}
-                    container_duration_map = {}
                     container_sample_count_map = {}
-                    if current_chunk and ts_f == latest_sample_ts:
-                        freshness_cutoff = now - timedelta(seconds=max(chosen_step_sec * 2, 60))
+                    # Point-in-time metrics-server usage only fills gaps of the latest
+                    # sample of a current window, and only when it was measured during
+                    # or after that sample (A5, BUG-05).  The row keeps its own
+                    # timestamp and step duration.
+                    if current_chunk and sample_key == latest_sample_ts:
+                        freshness_cutoff = max(now - timedelta(seconds=max(chosen_step_sec * 2, 60)), ts)
                         for usage in container_usages:
                             if (
                                 usage.timestamp is None
@@ -612,16 +632,11 @@ class HistoricalRangeProcessor:
                                 container_memory_usage[container_key] = usage.memory_usage_bytes
                                 usage_added = True
                             if usage_added:
-                                container_timestamp_map[container_key] = usage.timestamp
                                 container_sample_count_map[container_key] = 1
-                                if usage.duration_seconds is not None:
-                                    container_duration_map[container_key] = usage.duration_seconds
                     if container_cpu_usage or container_memory_usage:
                         container_maps = PodResourceMaps(
                             container_cpu_usage_map=container_cpu_usage,
                             container_memory_usage_map=container_memory_usage,
-                            container_timestamp_map=container_timestamp_map,
-                            container_duration_seconds_map=container_duration_map,
                             container_sample_count_map=container_sample_count_map,
                         )
                         combined.extend(
@@ -632,13 +647,17 @@ class HistoricalRangeProcessor:
                             )
                         )
 
-            del chunk_energy_metrics
-            del range_net_rx_map, range_net_tx_map
-            del range_disk_read_map, range_disk_write_map, range_restart_map
-            del range_cpu_usage_map, range_memory_map, range_ephemeral_usage_map
-            del container_memory_samples, container_samples, normalized_container_samples
+            del chunk_energy_metrics, cpu_usage_by_sample, memory_by_sample
+            del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
+            del restart_by_sample, ephemeral_usage_by_sample
+            del container_memory_samples, normalized_container_samples
 
-            chunk_start = chunk_end
+        collection_telemetry.set_unknown_power_profile_nodes(len(unknown_power_nodes))
+        if unknown_power_nodes:
+            logger.warning(
+                "No instance type or CPU capacity for node(s) %s; energy uses DEFAULT_INSTANCE_PROFILE.",
+                ", ".join(sorted(name or "<unresolved>" for name in unknown_power_nodes)),
+            )
 
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
