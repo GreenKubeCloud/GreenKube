@@ -181,7 +181,9 @@ All collectors are fully asynchronous and implement a common pattern.
   - Node instance type labels
 - **Features:**
   - Auto-discovery of Prometheus endpoints (multiple URL candidates)
-  - Fallback queries when container-level metrics unavailable
+  - Every PromQL expression comes from `PromQLCatalog` (`collectors/promql.py`); container-scoped series exclude the pod cgroup (`container=""`) and pause (`container="POD"`) series
+  - Fallback to the pod cgroup series (counted once) when container-level metrics are unavailable
+  - Range queries raise `PrometheusQueryError` when Prometheus is unreachable, so an outage is never stored as an empty window
   - TLS/authentication support (basic auth, bearer token)
   - Concurrent query execution (8 queries via `asyncio.gather`)
   - Robust error handling with detailed logging
@@ -273,7 +275,7 @@ The main orchestrator that coordinates the data pipeline from collection to metr
   - **Phase 2** — Zone resolution (NodeZoneMapper, depends on Phase 1)
   - **Phase 3** — Parallel metrics collection + Boavizta profiles (Prometheus, OpenCost, Pods, embodied emissions — all concurrent, safe because nodes are already resolved)
   - **Phase 4** — Carbon-intensity prefetch and CombinedMetric assembly
-- **Range Mode (`run_range()`):** Historical analysis with day-sized chunking for memory efficiency
+- **Range Mode (`run_range()`):** The production path. Collects every step of a half-open, step-aligned window `[start, end)` with day-sized chunking for memory efficiency; driven by the watermark-based catch-up job (see *Historical Analysis* below)
 
 **Implementation Pattern:**
 - Follows Clean Architecture principles with dependency injection
@@ -563,42 +565,55 @@ Used for real-time monitoring and scheduled collection.
    └─ Repeated for each namespace
    ```
 
-### Historical Analysis (run_range())
-Used for reporting over time ranges with historical accuracy.
+### Historical Analysis (run_range()) — the production collection path
+The controller's `collect_metrics` job is the only production writer of usage, energy, cost and carbon rows.
 
-1. **Historical Node State Loading:**
+1. **Catch-up planning** (`core/collection.py`, `MetricsCollectionJob`):
+   ```
+   watermark = collection_watermarks[(cluster, "combined_metrics")].last_complete_end
+   windows   = [watermark, align(now - COLLECTION_SAFETY_LAG))   # half-open, step-aligned
+               └─ bounded by COLLECTION_MAX_BACKFILL (older windows counted as gaps)
+               └─ split into ~1h chunks, oldest first
+   For each chunk:
+     rows = run_range(chunk.start, chunk.end)   # raises on Prometheus errors
+     LeaderFence.check(); upsert rows
+     LeaderFence.check(); advance watermark to chunk.end
+   ```
+   The job is scheduled on wall-clock step boundaries plus the safety lag, so a window is collected right after it closes. A failed chunk leaves the watermark in place; the next run retries it. Re-collecting a window is an idempotent upsert.
+
+2. **Row semantics:** a row with `timestamp = T` and `duration_seconds = step` describes `[T, T + step)`. Prometheus evaluates `rate(x[rate_window])` at `T + step`, with `rate_window = max(step, 4 × PROMETHEUS_SCRAPE_INTERVAL)`. Every repository range read uses `timestamp >= start AND timestamp < end`.
+
+3. **Historical Node State Loading:**
    ```
    NodeRepository.get_latest_snapshots_before(start)
    NodeRepository.get_snapshots(start, end)
    └─ Reconstruct node timeline
    ```
 
-2. **Chunked Processing** (day-sized chunks to prevent OOM):
+4. **Chunked Processing** (day-sized chunks to prevent OOM):
    ```
    For each chunk (1 day):
-     ├─ Prometheus range queries (concurrent):
-     │   ├─ CPU usage over time
-     │   ├─ Network I/O over time
-     │   ├─ Disk I/O over time
-     │   ├─ Restart counts over time
-     │   └─ (5 queries via asyncio.gather)
+     ├─ Prometheus range queries from PromQLCatalog (concurrent):
+     │   ├─ CPU and memory per container (container!="", container!="POD")
+     │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
+     │   ├─ Restart counts and kube_pod_info (pod → node placement)
+     │   └─ any query error fails the window (never stored as "empty")
      │
-     ├─ Parse time-series data:
-     │   └─ Build per-pod resource maps from range results
+     ├─ Parse time-series data per sample:
+     │   ├─ NaN/Inf dropped, negative rates clamped to 0
+     │   └─ greenkube_collection_dropped_samples_total{reason}
      │
-     ├─ Energy estimation per timestamp:
-     │   └─ Use historical node profile at each timestamp
+     ├─ Energy estimation per sample:
+     │   └─ Node power profile: instance profile → node capacity × CCF per-vCPU
+     │      coefficients → DEFAULT_INSTANCE_PROFILE (flagged, counted)
      │
      ├─ Carbon calculation:
      │   └─ Historical intensity lookup
      │
-     └─ Generate CombinedMetrics for chunk
+     └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-3. **Aggregation:**
-   ```
-   Collect all chunks → Filter by namespace → Return
-   ```
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}` and `greenkube_unknown_power_profile_nodes`.
 
 ### Recommendation Flow
 
@@ -682,6 +697,9 @@ All configuration flows through `src/greenkube/core/config.py`:
 
 **Collection:**
 - `PROMETHEUS_QUERY_RANGE_STEP` — Default: 5m
+- `PROMETHEUS_SCRAPE_INTERVAL` — Default: 30s (rate window = max(step, 4 × scrape interval))
+- `COLLECTION_SAFETY_LAG` — Default: 1m (a window is collected once it is this old)
+- `COLLECTION_MAX_BACKFILL` — Default: 24h (catch-up horizon after downtime)
 - `NODE_ANALYSIS_INTERVAL` — Default: 5m
 - `NODE_DATA_MAX_AGE_DAYS` — Default: 30
 

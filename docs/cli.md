@@ -26,7 +26,7 @@ greenkube start [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--last TEXT` | Initial backfill window, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month). Only used for the initial run; scheduled runs use the normalized window. |
+| `--last TEXT` | Re-collect this range at startup, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month), overwriting existing rows with an idempotent upsert. Without it, the initial and scheduled runs catch up every window missing since the collection watermark (bounded by `COLLECTION_MAX_BACKFILL`). |
 
 This is the default runtime for the collector container in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 

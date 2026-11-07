@@ -24,7 +24,13 @@ Known instance profiles use the provider's per-vCPU constants multiplied by the 
 | OVH | 0.80 | 3.52 |
 | Scaleway | 0.60 | 2.78 |
 
-Instance types absent from the bundled profile data use `config.defaults.instance` (default: 1 vCPU, 1–10 W); inferred `cpu-N` node profiles scale those configured per-vCPU defaults by `N`.
+When the instance type has no bundled profile, the collector resolves the node profile in this order and records where it came from (`power_source`):
+
+1. `instance_profile` — the instance type is in the bundled CCF profile data.
+2. `node_capacity_derived` — the node's CPU capacity (from a historical node snapshot, the live node list, or an inferred `cpu-N` type) multiplied by the per-vCPU coefficients of the node's provider in the table above; when the provider is unknown, the average of the listed providers is used (0.73–3.56 W per vCPU). The row is flagged as estimated with the reason.
+3. `default_profile` — no instance type and no capacity are known: `config.defaults.instance` (default: 1 vCPU, 1–10 W) is used. The row is flagged as estimated and the node is counted in `greenkube_unknown_power_profile_nodes`.
+
+When cAdvisor series carry no `node` label, the node is resolved from kube-state-metrics' `kube_pod_info` before falling back to the default profile, so a missing label no longer collapses the whole cluster onto one 10 W pseudo-node.
 
 For operational emissions, GreenKube converts joules to kWh (`joules / 3,600,000`) and multiplies by grid intensity and PUE. These are model-based estimates, not direct power-meter readings.
 
@@ -79,7 +85,7 @@ We applied this approach by:
 - **Max Watts:** 2.78
 
 ## Usage
-The OVH and Scaleway values are stored in `provider_power_estimates.csv` and are used with the bundled instance profiles for known instance types. An unknown instance type uses the configured generic profile described above.
+The OVH and Scaleway values are stored in `provider_power_estimates.csv` and are used with the bundled instance profiles for known instance types. An unknown instance type uses the capacity-derived profile described above, and only falls back to the configured generic profile when the node's CPU capacity is unknown.
 
 ## GHG Protocol Scope Classification
 
