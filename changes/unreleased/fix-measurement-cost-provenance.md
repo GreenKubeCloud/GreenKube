@@ -15,11 +15,16 @@
 - Demo metrics carry provenance (`opencost`, `prometheus`, `instance_profile`, `consolidated`/`realtime`) so measurement gates trust them like an instrumented cluster. (A11)
 - Electricity Maps and Wattnet collectors return no record when no measurement is available; zone and global defaults are applied at read time only. (A8)
 - Raw metrics pruning removes whole hours below the compression watermark only, whatever `METRICS_RAW_RETENTION_DAYS`. (A3)
+- The compressor logs a warning when `METRICS_COMPRESSION_AGE_HOURS` is below the 24-hour carbon-intensity recompute window, because compressed hours are never re-read. (A3)
+- Rows priced with the flat `DEFAULT_COST` placeholder carry `cost_source=none` (as the 0039 backfill does), keeping `custom_rate` for configured per-unit rates. (A11)
+- The Wattnet collector records every request outcome (`skipped`, `error`, `empty`, `success`) and its duration in `greenkube_collection_source_*`. (A12)
 
 ### Fixed
 
 - Hourly compression lost samples in every hour crossing the raw-retention boundary (non-aligned cutoff + overwrite upsert); it now compresses closed hours once, from their complete raw set, behind a watermark, and never re-reads compressed hours. (A3, BUG-02)
 - Same-named pods in different namespaces (e.g. `redis-0`) shared one OpenCost cost. (A4, BUG-04)
 - Stale carbon intensities were used without age limit and static defaults were written into the intensity history as if measured. (A8, BUG-07)
+- Zone defaults that earlier versions stored in `carbon_intensity_history` (`estimation_method=default_fallback`) are deleted by migration 0039 and ignored by every intensity lookup and by the recompute, so an upgraded install no longer labels default-priced rows `realtime`. (A8, BUG-07)
+- When the recompute moves a row from a default to a measured intensity, it drops the "Carbon intensity uses the ..." entry of the deprecated `estimation_reasons` and clears `is_estimated` when that was the only reason; on PostgreSQL the pod and container updates run in one transaction. (A9)
 - Intensities prefetched at the raw sample time were labelled `realtime` and could differ from the value the hourly recompute applies; the calculation now uses the classified point at the normalized lookup time. (A8)
 - The intensity recompute updated `combined_metrics` only; container rows now follow (set-based on SQLite and PostgreSQL), and PostgreSQL now refreshes `is_estimated` when a provider consolidates a value. (A9, BUG-06)
