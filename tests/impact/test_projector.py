@@ -164,3 +164,20 @@ class TestProjectorFacade:
         assert fields["potential_savings_co2e_grams"] is None
         assert delta.cost_breakdown_annual.storage == 12.0
         assert delta.realization_factor == 1.0
+
+
+class TestEvidenceSavingsMethod:
+    def test_evidence_names_the_impact_model_method(self):
+        """The recommendations page shows the method that produced the savings, not the retired ratio."""
+        from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer
+        from greenkube.core.optimization.context import OptimizationContext
+        from greenkube.core.optimization.evidence import build_evidence
+
+        rows = [_row(timestamp=START + timedelta(minutes=5 * index)) for index in range(12)]
+        context = OptimizationContext(config=Config(), metrics=rows, analysis_window_seconds=3600)
+        (rec,) = CpuRightsizingAnalyzer(Config()).analyze(context)
+
+        evidence = build_evidence(rec, context)
+
+        assert evidence is not None
+        assert evidence.savings_method == "impact_model/1.0.0/container_resources"

@@ -193,6 +193,10 @@ def _rollback_conditions(
 
 
 def _savings_method(rec: Recommendation) -> str:
+    impact = rec.impact or {}
+    if impact.get("model_version") and impact.get("kind"):
+        # Savings projected by the Impact Model (docs/methodology/impact-model.md).
+        return f"impact_model/{impact['model_version']}/{impact['kind']}"
     if rec.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY):
         return "request_reduction_ratio"
     if rec.type in (RecommendationType.ZOMBIE_POD, RecommendationType.IDLE_NAMESPACE):
