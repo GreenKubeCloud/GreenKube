@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 
 from ..core.config import config
-from ..core.observability import record_collection_request
+from ..core.observability import elapsed, record_collection_request, start_timer
 from ..utils.http_client import get_async_http_client
 from .base_electricity_provider import BaseElectricityProvider
 
@@ -281,14 +281,18 @@ class WattnetCollector(BaseElectricityProvider):
         wattnet_zone = to_wattnet_zone(zone)
         if wattnet_zone is None:
             logger.info("Zone '%s' is not covered by Wattnet. Using default grid intensity.", zone)
+            record_collection_request("wattnet", "skipped")
             return self._default_records(zone, target_datetime)
 
         if not self.email or not self.password:
             logger.warning("Wattnet credentials missing. Using default grid intensity for zone '%s'.", zone)
+            record_collection_request("wattnet", "skipped")
             return self._default_records(zone, target_datetime)
 
+        timer = start_timer()
         token = await self._get_token()
         if not token:
+            record_collection_request("wattnet", "error", elapsed(timer))
             return self._default_records(zone, target_datetime)
 
         start_dt, end_dt = self._compute_window(target_datetime)
@@ -311,6 +315,7 @@ class WattnetCollector(BaseElectricityProvider):
                 logger.info("Wattnet token rejected (status %s). Refreshing token and retrying.", response.status_code)
                 token = await self._get_token(force_refresh=True)
                 if not token:
+                    record_collection_request("wattnet", "error", elapsed(timer))
                     return self._default_records(zone, target_datetime)
                 headers = {"Authorization": f"Bearer {token}"}
                 response = await client.get(url, params=params, headers=headers)
@@ -318,17 +323,19 @@ class WattnetCollector(BaseElectricityProvider):
             data = response.json()
         except httpx.HTTPError as e:
             logger.error("Error fetching data from Wattnet API: %s", e)
-            record_collection_request("wattnet", "error")
+            record_collection_request("wattnet", "error", elapsed(timer))
             return self._default_records(zone, target_datetime)
         except Exception as e:
             logger.error("Unexpected error fetching data from Wattnet API: %s", e)
+            record_collection_request("wattnet", "error", elapsed(timer))
             return self._default_records(zone, target_datetime)
 
         records = self._flatten_footprints(data, zone)
         if not records:
             logger.info("Wattnet returned no carbon footprint data for zone: %s", zone)
+            record_collection_request("wattnet", "empty", elapsed(timer))
             return self._default_records(zone, target_datetime)
-        record_collection_request("wattnet", "success")
+        record_collection_request("wattnet", "success", elapsed(timer))
         return records
 
     # ------------------------------------------------------------------

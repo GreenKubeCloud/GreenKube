@@ -438,3 +438,55 @@ async def test_token_cached_and_reused(mock_config):
         await collector.close()
 
     assert token_route.call_count == 1
+
+
+# --------------------------------------------------------------------------
+# Collection telemetry (A12)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("zone", "credentials", "token_status", "footprints", "outcome", "timed"),
+    [
+        ("FR", True, 200, Response(200, json=MOCK_FOOTPRINTS_RESPONSE), "success", True),
+        ("FR", True, 200, Response(200, json=[]), "empty", True),
+        ("FR", True, 200, Response(500), "error", True),
+        # A body that is not JSON takes the unexpected-error path.
+        ("FR", True, 200, Response(200, content=b"<html>maintenance</html>"), "error", True),
+        ("FR", True, 401, None, "error", True),
+        ("FR", False, None, None, "skipped", False),
+        ("US-CAL-CISO", True, None, None, "skipped", False),
+    ],
+    ids=["success", "empty", "http-error", "unexpected-error", "token-failure", "no-credentials", "zone-not-covered"],
+)
+@respx.mock
+@patch("greenkube.collectors.wattnet_collector.record_collection_request")
+@patch("greenkube.collectors.wattnet_collector.config")
+async def test_collect_records_one_request_outcome(
+    mock_config, record, zone, credentials, token_status, footprints, outcome, timed
+):
+    if credentials:
+        _configure_collector(mock_config)
+    else:
+        _configure_collector(mock_config, email=None, password=None)
+    if token_status is not None:
+        respx.post(f"{DEFAULT_TOKEN_SERVICE_URL}/get_token").mock(
+            return_value=Response(token_status, json=MOCK_TOKEN_RESPONSE)
+        )
+    if footprints is not None:
+        respx.get(url__startswith=f"{DEFAULT_API_BASE_URL}/footprints").mock(return_value=footprints)
+
+    collector = WattnetCollector()
+    try:
+        await collector.collect(zone=zone)
+    finally:
+        await collector.close()
+
+    record.assert_called_once()
+    source, recorded_outcome, *duration = record.call_args.args
+    assert (source, recorded_outcome) == ("wattnet", outcome)
+    if timed:
+        assert len(duration) == 1 and duration[0] >= 0
+    else:
+        assert duration == []
