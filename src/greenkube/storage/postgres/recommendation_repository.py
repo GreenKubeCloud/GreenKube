@@ -606,8 +606,21 @@ class PostgresRecommendationRepository(RecommendationRepository):
             )
             return event.model_copy(update={"id": row["id"], "created_at": row["created_at"]})
 
-    async def transition_and_record_event(self, rec_id: int, updates: dict, event_type: str, actor: str, payload: dict):
-        """Atomically update a recommendation and append its lifecycle event."""
+    async def transition_and_record_event(
+        self,
+        rec_id: int,
+        updates: dict,
+        event_type: str,
+        actor: str,
+        payload: dict,
+        *,
+        expected_statuses: Optional[List[str]] = None,
+    ) -> Optional[RecommendationRecord]:
+        """Atomically update a recommendation and append its lifecycle event.
+
+        With ``expected_statuses`` the update is a compare-and-swap: nothing is
+        written and ``None`` is returned when the stored status differs.
+        """
         filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
         if not filtered:
             raise ValueError("No mutable recommendation columns supplied.")
@@ -615,24 +628,32 @@ class PostgresRecommendationRepository(RecommendationRepository):
         filtered.setdefault("updated_at", now)
         columns = list(filtered)
         assignments = ", ".join(f"{column} = ${index}" for index, column in enumerate(columns, 1))
+        params: list = [_encode_value(filtered[column]) for column in columns]
+        params.append(rec_id)
+        where = f"id = ${len(params)}"
+        if expected_statuses is not None:
+            params.append([_encode_value(status) for status in expected_statuses])
+            where += f" AND status = ANY(${len(params)}::text[])"
         async with self.db_manager.connection_scope() as conn:
-            row = await conn.fetchrow(
-                f"UPDATE recommendation_history SET {assignments} WHERE id = ${len(columns) + 1} RETURNING *",
-                *[_encode_value(filtered[column]) for column in columns],
-                rec_id,
-            )
-            if row is None:
-                raise ValueError(f"Recommendation {rec_id} not found.")
-            await conn.execute(
-                """INSERT INTO recommendation_events
-                (recommendation_id, event_type, actor, payload, created_at)
-                VALUES ($1, $2, $3, $4, $5)""",
-                rec_id,
-                event_type,
-                actor,
-                json.dumps(payload),
-                now,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"UPDATE recommendation_history SET {assignments} WHERE {where} RETURNING *",
+                    *params,
+                )
+                if row is None:
+                    if expected_statuses is not None:
+                        return None
+                    raise ValueError(f"Recommendation {rec_id} not found.")
+                await conn.execute(
+                    """INSERT INTO recommendation_events
+                    (recommendation_id, event_type, actor, payload, created_at)
+                    VALUES ($1, $2, $3, $4, $5)""",
+                    rec_id,
+                    event_type,
+                    actor,
+                    json.dumps(payload, default=str),
+                    now,
+                )
             return row_to_record(row)
 
     async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
