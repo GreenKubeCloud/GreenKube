@@ -8,6 +8,7 @@ a pure function of the values; generated credentials are created once, at run
 time, by the credentials bootstrap hook.
 """
 
+import base64
 import re
 import subprocess
 from pathlib import Path
@@ -52,6 +53,8 @@ RENDER_PROFILES = {
         "automation.mode=inline",
     ],
     "sqlite": ["--set", "config.db.type=sqlite"],
+    "values-credentials": ["--set", "secrets.apiKey=k3y", "--set", "postgres.auth.password=pw"],
+    "values-postgres-password-production": ["--set", "profile=production", "--set", "postgres.auth.password=pw"],
     "external-postgres": [
         "--set",
         "postgres.enabled=false",
@@ -150,6 +153,41 @@ def test_supplied_credentials_are_not_generated():
         e for e in statefulset["spec"]["template"]["spec"]["containers"][0]["env"] if e["name"] == "POSTGRES_PASSWORD"
     )
     assert password["valueFrom"]["secretKeyRef"]["name"] == "greenkube-values"
+
+
+def _hook_weight(doc: dict) -> int:
+    return int(doc["metadata"]["annotations"]["helm.sh/hook-weight"])
+
+
+def test_credential_check_validates_a_newly_supplied_postgres_password():
+    """The values Secret is applied after pre-upgrade hooks (and after Argo CD
+    PreSync), so the check must read the new password from a hook Secret that
+    exists before it runs, not the previous revision's values Secret."""
+    docs = _documents(_render("--set", "postgres.auth.password=new-password"))
+
+    job = _get(docs, "Job", "greenkube-db-credential-check")
+    dsn_ref = job["spec"]["template"]["spec"]["containers"][0]["env"][0]
+    assert dsn_ref["name"] == "DB_CONNECTION_STRING"
+    check_secret = _get(docs, "Secret", dsn_ref["valueFrom"]["secretKeyRef"]["name"])
+
+    annotations = check_secret["metadata"]["annotations"]
+    assert annotations["helm.sh/hook"] == "pre-upgrade"
+    assert _hook_weight(check_secret) < _hook_weight(job)
+    assert "hook-succeeded" in annotations["helm.sh/hook-delete-policy"]
+    assert set(check_secret["data"]) == {"DB_CONNECTION_STRING"}
+    dsn = base64.b64decode(check_secret["data"]["DB_CONNECTION_STRING"]).decode()
+    assert dsn == "postgresql://greenkube:new-password@greenkube-postgres:5432/greenkube"
+
+
+def test_credential_check_reads_generated_credentials_after_the_bootstrap_hook():
+    docs = _documents(_render())
+
+    job = _get(docs, "Job", "greenkube-db-credential-check")
+    dsn_ref = job["spec"]["template"]["spec"]["containers"][0]["env"][0]["valueFrom"]["secretKeyRef"]
+    assert dsn_ref["name"] == "greenkube"
+    bootstrap = _get(docs, "Job", "greenkube-credentials-bootstrap")
+    assert _hook_weight(bootstrap) < _hook_weight(job)
+    assert _find(docs, "Secret", "greenkube-db-credential-check") is None
 
 
 def test_existing_secret_is_the_gitops_path():
