@@ -312,7 +312,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[1].livenessProbe.httpGet.path
-          value: /api/v1/health
+          value: /api/v1/health/heartbeat
       - equal:
           path: spec.template.spec.containers[1].livenessProbe.httpGet.port
           value: http-api

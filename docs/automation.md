@@ -271,7 +271,7 @@ Worker loops are supervised:
 
 - An iteration that raises is logged with an error code and retried with jittered backoff.
 - A loop task that crashes or exits is restarted with backoff.
-- In inline mode, `GET /api/v1/health` returns `503` (`degraded`) and `GET /api/v1/automation/status` reports `ready: false` while the in-process loop is down or its heartbeat is stale. The readiness probe no longer reports a dead queue as ready.
+- In inline mode, `GET /api/v1/health` returns `503` (`degraded`) and `GET /api/v1/automation/status` reports `ready: false` while the in-process loop is down or its heartbeat is stale. The readiness probe no longer reports a dead queue as ready. The chart's liveness probe uses `/api/v1/health/heartbeat`, so a stalled loop takes the pod out of the Service but does not restart the API container.
 
 ## Intervals and operations
 

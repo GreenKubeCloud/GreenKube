@@ -81,6 +81,22 @@ tests:
           path: spec.template.spec.containers[0].livenessProbe.exec.command[0]
           value: sh
 
+  - it: keeps the API alive while readiness reflects the automation loop heartbeat
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /api/v1/health/heartbeat
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /api/v1/health
+
   - it: waits for bundled PostgreSQL before starting production components
     set:
       profile: production

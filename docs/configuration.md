@@ -50,8 +50,8 @@ image:
 | `config.api.enabled` | `true` | Serve the REST API and the SPA frontend. |
 | `config.api.host` | `0.0.0.0` | API bind address inside the container. |
 | `config.api.port` | `8000` | API/UI container and Service port. |
-| `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health`). |
-| `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`). |
+| `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health/heartbeat`, which answers while the process is responsive and does not depend on the automation loop). |
+| `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`, which returns `503` while a supervised in-process automation loop is down or stale). |
 | `config.corsOrigins` | `*` | Allowed CORS origins. Prefer same-origin UI/API deployments. |
 | `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
