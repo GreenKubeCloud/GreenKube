@@ -12,6 +12,11 @@ The controller runs :meth:`RecommendationScanService.tick` every
 3. claims and executes queued runs, including API requests
    (``POST /api/v1/optimization/runs``), oldest first.
 
+The controller does not poll before its initial collection finished; it then
+runs one forced tick (``tick(force=True)``) so the first scan always sees the
+freshly collected data. Terminal runs older than :data:`RUN_RETENTION` are
+pruned whenever a cluster-wide run is queued.
+
 API processes never scan: they only enqueue. Two API replicas plus one
 controller therefore produce exactly one scan per interval.
 """
@@ -20,7 +25,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, List, Optional
 
-from greenkube.models.optimization_run import OptimizationRun
+from greenkube.models.optimization_run import OptimizationRun, OptimizationRunTrigger
 
 if TYPE_CHECKING:
     from greenkube.core.optimization.engine import OptimizationEngine
@@ -35,6 +40,8 @@ RECOMMENDATION_SCAN_POLL_INTERVAL = "15s"
 ABANDONED_RUN_AFTER = timedelta(minutes=30)
 #: Upper bound on runs executed in one tick so other controller jobs keep their cadence.
 MAX_RUNS_PER_TICK = 3
+#: Succeeded and failed runs older than this are deleted.
+RUN_RETENTION = timedelta(days=30)
 
 
 def _utcnow() -> datetime:
@@ -73,6 +80,7 @@ class RecommendationScanService:
         abandoned_after: timedelta = ABANDONED_RUN_AFTER,
         max_runs_per_tick: int = MAX_RUNS_PER_TICK,
         should_continue: Optional[Callable[[], bool]] = None,
+        run_retention: timedelta = RUN_RETENTION,
     ) -> None:
         if interval <= timedelta(0):
             raise ValueError("The recommendation scan interval must be positive.")
@@ -87,9 +95,15 @@ class RecommendationScanService:
         self.abandoned_after = abandoned_after
         self.max_runs_per_tick = max(1, int(max_runs_per_tick))
         self.should_continue = should_continue
+        self.run_retention = run_retention
 
-    async def tick(self) -> List[OptimizationRun]:
-        """Run one scheduling cycle and return the runs executed by this process."""
+    async def tick(self, *, force: bool = False) -> List[OptimizationRun]:
+        """Run one scheduling cycle and return the runs executed by this process.
+
+        ``force`` queues a cluster-wide run even when the interval is already
+        covered (deduplicated against a queued one). The controller forces its
+        first tick after the initial collection so that scan uses fresh data.
+        """
         now = self.clock()
         reaped = await self.run_repository.fail_abandoned(
             started_before=now - self.abandoned_after,
@@ -99,13 +113,25 @@ class RecommendationScanService:
         if reaped:
             logger.warning("Marked %d abandoned optimization run(s) as failed.", reaped)
 
-        scheduled = await self.run_repository.enqueue_if_due(
-            requested_at=now,
-            due_before=now - self.interval,
-            requested_by=self.identity,
-        )
+        scheduled: Optional[OptimizationRun]
+        if force:
+            scheduled, created = await self.run_repository.enqueue(
+                namespace=None,
+                trigger=OptimizationRunTrigger.SCHEDULED,
+                requested_at=now,
+                requested_by=self.identity,
+            )
+            if not created:
+                scheduled = None
+        else:
+            scheduled = await self.run_repository.enqueue_if_due(
+                requested_at=now,
+                due_before=now - self.interval,
+                requested_by=self.identity,
+            )
         if scheduled is not None:
             logger.info("Queued scheduled optimization run %s.", scheduled.id)
+            await self._prune(now)
 
         executed: List[OptimizationRun] = []
         for _ in range(self.max_runs_per_tick):
@@ -117,6 +143,16 @@ class RecommendationScanService:
                 break
             executed.append(await self._execute(run))
         return executed
+
+    async def _prune(self, now: datetime) -> None:
+        """Delete terminal runs past retention; failures never block scheduling."""
+        try:
+            pruned = await self.run_repository.prune_finished(completed_before=now - self.run_retention)
+        except Exception as exc:
+            logger.warning("Could not prune old optimization runs (%s).", type(exc).__name__)
+            return
+        if pruned:
+            logger.info("Pruned %d optimization run(s) older than %s.", pruned, self.run_retention)
 
     async def _execute(self, run: OptimizationRun) -> OptimizationRun:
         from greenkube.core.optimization.context_builder import RecommendationScanLimitError

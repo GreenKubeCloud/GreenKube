@@ -212,7 +212,51 @@ async def test_run_recommendation_scan_ticks_the_scan_service_with_the_lease_gat
         await start_module.run_recommendation_scan(should_continue=should_run)
 
     create.assert_called_once_with(should_continue=should_run)
-    service.tick.assert_awaited_once()
+    service.tick.assert_awaited_once_with(force=False)
+
+
+@pytest.mark.asyncio
+async def test_run_recommendation_scan_forwards_the_startup_force_flag():
+    service = MagicMock()
+    service.tick = AsyncMock(return_value=[])
+
+    with patch("greenkube.core.optimization.scan_service.create_recommendation_scan_service", return_value=service):
+        await start_module.run_recommendation_scan(force=True)
+
+    service.tick.assert_awaited_once_with(force=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_task", [False, True], ids=["completed", "failed-task"])
+async def test_deferred_initial_work_always_reports_that_it_finished(failing_task):
+    finished = []
+    first = AsyncMock(side_effect=RuntimeError("boom") if failing_task else None)
+    second = AsyncMock()
+
+    await start_module._run_deferred_initial_controller_work(
+        ((first, (), {}), (second, (), {})),
+        lambda: True,
+        asyncio.Event(),
+        on_finished=lambda: finished.append(True),
+    )
+
+    assert finished == [True]
+    assert second.await_count == (0 if failing_task else 1)
+
+
+@pytest.mark.asyncio
+async def test_deferred_initial_work_reports_finished_on_shutdown():
+    finished = []
+    stop_event = asyncio.Event()
+    stop_event.set()
+    task = AsyncMock()
+
+    await start_module._run_deferred_initial_controller_work(
+        ((task, (), {}),), lambda: False, stop_event, on_finished=lambda: finished.append(True)
+    )
+
+    task.assert_not_awaited()
+    assert finished == [True]
 
 
 @pytest.mark.asyncio
@@ -372,7 +416,7 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks(monkeypatch):
     assert len(scan_jobs) == 1
     assert scan_jobs[0].args[1] == "15s"
     assert scan_jobs[0].kwargs["skip_initial"] is True
-    scan.assert_awaited_once_with(should_continue=None)
+    scan.assert_awaited_once_with(should_continue=None, force=True)
     add_job_kwargs = {call.args[0]: call.kwargs for call in scheduler.add_job.call_args_list}
     assert add_job_kwargs[compress]["skip_initial"] is True
     assert add_job_kwargs[refresh]["skip_initial"] is True

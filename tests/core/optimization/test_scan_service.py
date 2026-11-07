@@ -270,6 +270,61 @@ async def test_tick_bounds_runs_per_cycle(shared_sqlite):
     assert len(first) == 2 and len(second) == 2
 
 
+async def test_forced_tick_scans_even_when_the_interval_is_covered(shared_sqlite):
+    clock = Clock(T0)
+    controller = _controller(await shared_sqlite(), clock)
+    await controller.tick()
+    clock.advance(timedelta(minutes=5))
+
+    assert await controller.tick() == []
+    forced = await controller.tick(force=True)
+
+    assert [run.trigger for run in forced] == [OptimizationRunTrigger.SCHEDULED]
+    assert [scan[0] for scan in CountingEngine.scans] == [T0, T0 + timedelta(minutes=5)]
+    clock.advance(POLL)
+    assert await controller.tick() == []
+
+
+async def test_forced_tick_reuses_a_queued_cluster_run(shared_sqlite):
+    clock = Clock(T0)
+    manager = await shared_sqlite()
+    api = SQLiteOptimizationRunRepository(manager)
+    queued, _ = await api.enqueue(namespace=None, trigger=OptimizationRunTrigger.MANUAL, requested_at=T0)
+    controller = _controller(manager, clock)
+
+    executed = await controller.tick(force=True)
+
+    assert [run.id for run in executed] == [queued.id]
+    assert len(await api.list_runs(limit=10)) == 1
+
+
+async def test_scheduling_prunes_runs_past_retention(shared_sqlite):
+    clock = Clock(T0)
+    manager = await shared_sqlite()
+    runs = SQLiteOptimizationRunRepository(manager)
+    controller = _controller(manager, clock, run_retention=timedelta(days=30))
+    await controller.tick()
+    old_run = (await runs.list_runs(limit=1))[0]
+
+    clock.advance(timedelta(days=31))
+    await controller.tick()
+
+    remaining = await runs.list_runs(limit=10)
+    assert old_run.id not in {run.id for run in remaining}
+    assert len(remaining) == 1
+
+
+async def test_pruning_failure_does_not_block_the_scan(shared_sqlite, monkeypatch):
+    clock = Clock(T0)
+    manager = await shared_sqlite()
+    controller = _controller(manager, clock)
+    monkeypatch.setattr(controller.run_repository, "prune_finished", AsyncMock(side_effect=ConnectionError("down")))
+
+    executed = await controller.tick()
+
+    assert [run.status for run in executed] == [OptimizationRunStatus.SUCCEEDED]
+
+
 def test_interval_must_be_positive():
     with pytest.raises(ValueError):
         RecommendationScanService(
