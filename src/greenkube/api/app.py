@@ -267,6 +267,10 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
+        # Stop the supervisor first: a loop it restarted after a crash is not in _startup_tasks.
+        loop_supervisor = getattr(app.state, "automation_loop_supervisor", None)
+        if loop_supervisor is not None:
+            await loop_supervisor.stop()
         for t in getattr(app.state, "_startup_tasks", []) or []:
             if not t.done():
                 t.cancel()

@@ -97,6 +97,9 @@ async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_m
         assert supervisor is not None and supervisor.health.ready()
 
     assert cancelled.is_set()
+    # Shutdown stops the supervisor itself, so it cannot restart the loop afterwards.
+    assert supervisor.health.state == "stopped"
+    assert supervisor.task is not None and supervisor.task.done()
 
 
 @pytest.mark.asyncio
