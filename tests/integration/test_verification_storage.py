@@ -260,3 +260,49 @@ async def test_verification_cycle_persists_and_remeasures_on_real_repositories(d
     assert baseline["measured_ledger_input"]["measurement_id"] == history[1].measurement_id
     event_types = [event.event_type for event in await repo.get_events(record.id)]  # type: ignore[arg-type]
     assert event_types[-3:] == ["not_realized", "remeasure_requested", "verified"]
+
+
+async def test_remeasured_attribution_group_claims_the_delta_once(database):
+    """BUG-36 through re-measurement: CPU and memory of one plan, re-measured together."""
+    repo = _recommendation_repo(database)
+    measurements = SavingsMeasurementRepository(database)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    applied_at = now - timedelta(hours=30)
+    shared = dict(
+        verification_status="inconclusive",
+        baseline={"restart_count": 0, "plan_id": "plan-1", "baseline_window_end": applied_at.isoformat()},
+        recommended_memory_request_bytes=512 * 1024**2,
+    )
+    await repo.save_recommendations(
+        [
+            _record(applied_at, potential_savings_cost=300.0, **shared),
+            _record(applied_at, type=RecommendationType.RIGHTSIZING_MEMORY, potential_savings_cost=100.0, **shared),
+        ]
+    )
+    stored = await repo.get_recommendations_by_statuses(["applied"])
+    cpu_id = next(record.id for record in stored if record.type is RecommendationType.RIGHTSIZING_CPU)
+    memory_id = next(record.id for record in stored if record.type is RecommendationType.RIGHTSIZING_MEMORY)
+    assert cpu_id is not None and memory_id is not None
+
+    await RecommendationLifecycle(repo).request_remeasure(cpu_id, window_hours=6, now=now)
+    memory = await repo.get_recommendation_by_id(memory_id)
+    assert memory is not None and memory.status is RecommendationStatus.VERIFYING
+
+    clock = now + timedelta(hours=7)
+    metrics = WindowedMetricsRepo(
+        rows(applied_at - WINDOW, applied_at, cost=0.01, memory=200 * 1024**2)
+        + rows(applied_at, clock, cost=0.007, memory=200 * 1024**2)
+    )
+    updated = await RecommendationVerifier(
+        RecommendationLifecycle(repo),
+        metrics,  # pyrefly: ignore[bad-argument-type]
+        config=Config(VERIFICATION_WINDOW_HOURS=6, VERIFICATION_MIN_SAMPLES=12),
+        measurement_repo=measurements,
+        clock=lambda: clock,
+    ).verify_due()
+
+    assert {record.status for record in updated} == {RecommendationStatus.VERIFIED}
+    assert sum(record.measured_cost_saved or 0.0 for record in updated) == pytest.approx(0.003 * 12 * HOURS_PER_YEAR)
+    for record_id in (cpu_id, memory_id):
+        latest = (await measurements.list_for_recommendation(record_id))[-1]
+        assert latest.group_recommendation_ids == sorted([cpu_id, memory_id])
