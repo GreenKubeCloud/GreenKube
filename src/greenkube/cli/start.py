@@ -549,7 +549,13 @@ async def _async_start(last: Optional[str]):
     processor = None
     scheduler = None
     sync_task = None
+    metrics_listener = None
     try:
+        # Scans, verification and collection record their control-loop metrics
+        # in this process; serve them on every replica (leader or standby).
+        from .controller_metrics import start_controller_metrics_listener
+
+        metrics_listener = await start_controller_metrics_listener()
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
             should_run = None
@@ -703,6 +709,8 @@ async def _async_start(last: Optional[str]):
             await asyncio.gather(*tasks, return_exceptions=True)
             if processor is not None:
                 await processor.close()
+            if metrics_listener is not None:
+                await metrics_listener.stop()
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 
