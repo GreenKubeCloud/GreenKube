@@ -21,8 +21,11 @@ from greenkube.core.observability import REGISTRY
 
 DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET = 200
 DEFAULT_SYNC_ANCESTRY_PROVIDER_CALL_BUDGET = 10
+DEFAULT_SYNC_PLANNED_CHANGE_PROVIDER_CALL_BUDGET = 20
 
-_OPERATIONS = frozenset({"plan_apply", "plan_rollback", "plan_unknown", "sync_ancestry", "unscoped"})
+_OPERATIONS = frozenset(
+    {"plan_apply", "plan_rollback", "plan_unknown", "sync_ancestry", "sync_planned_change", "unscoped"}
+)
 _PROVIDERS = frozenset({"github", "gitlab", "gitea"})
 
 GIT_PROVIDER_REQUESTS = Counter(
