@@ -428,6 +428,10 @@ config:
     rankingWeights: ''
     # Minimum raw samples expected for a high-confidence recommendation.
     minSamples: 36
+    # Interval between scheduled recommendation scans. Scans run only in the
+    # controller (leader-gated); the API enqueues on-demand runs through
+    # POST /api/v1/optimization/runs. Accepts s, m or h (1m to 24h).
+    scanInterval: 1h
     # --- Verification (apply detection, health gates, rollback review) ---
     verification:
       # Observation window after a change lands before the outcome is verified.

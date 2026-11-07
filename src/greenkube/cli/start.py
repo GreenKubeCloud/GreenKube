@@ -345,6 +345,24 @@ async def run_recommendation_lifecycle() -> None:
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
+async def run_recommendation_scan(should_continue: Callable[[], bool] | None = None) -> None:
+    """Schedule and execute queued recommendation scans (E1).
+
+    Runs only in the controller, behind the Lease: each cycle queues the
+    scheduled scan when ``RECOMMENDATION_SCAN_INTERVAL`` elapsed and executes
+    queued runs, including API requests from ``POST /optimization/runs``.
+    """
+    try:
+        from ..core.optimization.scan_service import create_recommendation_scan_service
+
+        service = create_recommendation_scan_service(should_continue=should_continue)
+        executed = await service.tick()
+        if executed:
+            logger.info("Recommendation scan cycle executed %d run(s).", len(executed))
+    except Exception as e:
+        logger.error("Recommendation scan task failed: %s", e)
+
+
 def _create_controller_leader_election(cfg):
     """Build the optional controller Lease elector from the chart-provided settings."""
     if not getattr(cfg, "LEADER_ELECTION_ENABLED", False):
@@ -554,6 +572,18 @@ async def _async_start(last: Optional[str]):
             getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
             skip_initial=True,
         )
+        # Leader-gated recommendation scans: schedule on RECOMMENDATION_SCAN_INTERVAL
+        # and drain API run requests; the first cycle runs after initial collection.
+        from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
+
+        async def recommendation_scan() -> None:
+            await run_recommendation_scan(should_continue=should_run)
+
+        scheduler.add_job_from_string(
+            _leader_gated_callback(recommendation_scan, should_run),
+            RECOMMENDATION_SCAN_POLL_INTERVAL,
+            skip_initial=True,
+        )
         # Compress old raw metrics into hourly aggregates every hour.
         # skip_initial=True because both jobs are awaited once in the startup block below.
         scheduler.add_job(_leader_gated_callback(compress_metrics, should_run), interval_hours=1, skip_initial=True)
@@ -575,6 +605,7 @@ async def _async_start(last: Optional[str]):
             (run_recommendation_lifecycle, (), {}),
             (compress_metrics, (), {}),
             (refresh_dashboard_summary, (), {}),
+            (recommendation_scan, (), {}),
         )
         if should_run is None:
             logger.info("Running initial controller work...")

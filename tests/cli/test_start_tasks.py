@@ -199,6 +199,32 @@ async def test_leader_gated_controller_callback_runs_only_for_the_lease_holder()
 
 
 @pytest.mark.asyncio
+async def test_run_recommendation_scan_ticks_the_scan_service_with_the_lease_gate():
+    service = MagicMock()
+    service.tick = AsyncMock(return_value=[object()])
+
+    def should_run():
+        return True
+
+    with patch(
+        "greenkube.core.optimization.scan_service.create_recommendation_scan_service", return_value=service
+    ) as create:
+        await start_module.run_recommendation_scan(should_continue=should_run)
+
+    create.assert_called_once_with(should_continue=should_run)
+    service.tick.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_recommendation_scan_swallows_failures():
+    with patch(
+        "greenkube.core.optimization.scan_service.create_recommendation_scan_service",
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        await start_module.run_recommendation_scan()
+
+
+@pytest.mark.asyncio
 async def test_attribute_recommendation_savings_success():
     reco_repo = MagicMock()
     reco_repo.get_applied_recommendations = AsyncMock(return_value=["rec"])
@@ -331,11 +357,22 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks(monkeypatch):
                                             with patch(
                                                 "greenkube.cli.start.asyncio.get_running_loop", return_value=loop
                                             ):
-                                                await start_module._async_start(last="1h")
+                                                with patch(
+                                                    "greenkube.cli.start.run_recommendation_scan",
+                                                    new_callable=AsyncMock,
+                                                ) as scan:
+                                                    await start_module._async_start(last="1h")
 
     db_manager.connect.assert_awaited_once()
     assert scheduler.add_job.call_count == 3
-    assert scheduler.add_job_from_string.call_count == 4
+    assert scheduler.add_job_from_string.call_count == 5
+    scan_jobs = [
+        call for call in scheduler.add_job_from_string.call_args_list if call.args[0].__name__ == "recommendation_scan"
+    ]
+    assert len(scan_jobs) == 1
+    assert scan_jobs[0].args[1] == "15s"
+    assert scan_jobs[0].kwargs["skip_initial"] is True
+    scan.assert_awaited_once_with(should_continue=None)
     add_job_kwargs = {call.args[0]: call.kwargs for call in scheduler.add_job.call_args_list}
     assert add_job_kwargs[compress]["skip_initial"] is True
     assert add_job_kwargs[refresh]["skip_initial"] is True

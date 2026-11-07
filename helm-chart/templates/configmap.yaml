@@ -165,6 +165,7 @@ data:
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}
   RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  RECOMMENDATION_SCAN_INTERVAL: {{ .scanInterval | default "1h" | quote }}
   {{- with .verification }}
   VERIFICATION_WINDOW_HOURS: {{ .windowHours | default 72 | quote }}
   VERIFICATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}

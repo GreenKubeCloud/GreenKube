@@ -34,6 +34,14 @@ def parse_gitops_duration_seconds(value: str) -> float:
     return seconds
 
 
+def _scan_interval_seconds(value: str) -> int:
+    """Parse a scheduler interval such as ``30m`` or ``1h`` (units s, m, h)."""
+    match = re.fullmatch(r"(\d+)([smh])", str(value).strip().lower())
+    if match is None:
+        raise ValueError("RECOMMENDATION_SCAN_INTERVAL must be a number followed by s, m or h (e.g. 1h).")
+    return int(match.group(1)) * {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+
+
 def _read_secret(key: str, default: str | None = None) -> str | None:
     """
     Read a secret from a mounted file or fall back to an environment variable.
@@ -303,6 +311,9 @@ class Config(BaseSettings):
     VERIFICATION_MAX_THROTTLE_RATIO: float = 0.05
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
+    # Interval between scheduled, leader-gated recommendation scans in the
+    # controller (E1). API requests only enqueue runs. Accepts s, m or h.
+    RECOMMENDATION_SCAN_INTERVAL: str = "1h"
 
     # Plan queue execution mode. Inline starts the worker in the API lifespan;
     # worker mode uses the separate automation-worker process.
@@ -396,6 +407,20 @@ class Config(BaseSettings):
         if value < 10_000:
             raise ValueError("RECOMMENDATION_MAX_METRIC_ROWS must be at least 10000")
         return value
+
+    @field_validator("RECOMMENDATION_SCAN_INTERVAL", mode="before")
+    @classmethod
+    def _default_blank_recommendation_scan_interval(cls, value: Any) -> Any:
+        return "1h" if value in ("", None) else value
+
+    @field_validator("RECOMMENDATION_SCAN_INTERVAL", mode="after")
+    @classmethod
+    def _validate_recommendation_scan_interval(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        seconds = _scan_interval_seconds(normalized)
+        if not 60 <= seconds <= 86_400:
+            raise ValueError("RECOMMENDATION_SCAN_INTERVAL must be between 1m and 24h.")
+        return normalized
 
     @field_validator("RECOMMENDATION_APPLY_TOLERANCE", mode="after")
     @classmethod
@@ -589,6 +614,10 @@ class Config(BaseSettings):
     @property
     def gitops_binding_ttl(self) -> timedelta:
         return timedelta(seconds=parse_gitops_duration_seconds(self.GITOPS_BINDING_TTL))
+
+    @property
+    def recommendation_scan_interval(self) -> timedelta:
+        return timedelta(seconds=_scan_interval_seconds(self.RECOMMENDATION_SCAN_INTERVAL))
 
     def get_pue_for_provider(self, provider: str | None) -> float:
         """Retrieve the PUE for a specific cloud provider.
