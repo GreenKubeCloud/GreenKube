@@ -189,10 +189,12 @@ initContainer:
 # Probes for the collector process. The collector has no HTTP API, so
 # these process-heartbeat probes verify that its PID is still alive.
 collector:
-  # Port of the controller's authenticated Prometheus endpoint
-  # (/prometheus/metrics): collection health, provenance mix and verification
-  # telemetry. Exposed through the <release>-controller-metrics Service and,
-  # when monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it.
+  # Port of the controller's Prometheus endpoint (/prometheus/metrics and
+  # /metrics): collection health, provenance mix and verification telemetry.
+  # The chart keeps the API key out of the controller, so the endpoint is
+  # unauthenticated; monitoring.networkPolicy restricts it to Prometheus.
+  # Exposed through the <release>-controller-metrics Service and, when
+  # monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it.
   metricsPort: 9102
   livenessProbe:
     enabled: true

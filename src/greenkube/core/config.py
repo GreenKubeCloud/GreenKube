@@ -205,8 +205,9 @@ class Config(BaseSettings):
     METRICS_AGGREGATED_RETENTION_DAYS: int = -1
 
     # --- Controller observability ---
-    # Port of the controller's authenticated Prometheus endpoint
-    # (/prometheus/metrics). 0 disables the listener.
+    # Port of the controller's Prometheus endpoint (/prometheus/metrics and /metrics),
+    # bound on all interfaces. A bearer token is required only when the controller
+    # has an API key (the Helm chart keeps it out). 0 disables the listener.
     CONTROLLER_METRICS_PORT: int = 9102
 
     # --- Kubernetes client variables ---

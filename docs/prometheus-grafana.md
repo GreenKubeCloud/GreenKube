@@ -276,7 +276,8 @@ The chart keeps the API key out of the controller (least privilege): the
 endpoint is reachable on the pod network only, serves bounded, non-sensitive
 counters, and is restricted to Prometheus when `monitoring.networkPolicy` is
 enabled. If an API key is set in the controller's environment, scrapes must
-send it as a bearer token.
+send it as a bearer token. Outside Kubernetes, `greenkube start` also listens on
+`0.0.0.0:9102` by default; set `CONTROLLER_METRICS_PORT=0` to turn it off.
 
 | Metric | Type and labels | Description |
 |---|---|---|
