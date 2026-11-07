@@ -1,6 +1,7 @@
 import logging
+import math
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -11,11 +12,98 @@ from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 from ..core.config import config
+from ..core.observability import elapsed, record_collection_request, start_timer
 from ..models.metrics import CostMetric
 from ..utils.http_client import get_async_http_client
 from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
+
+
+def _number(value: Any) -> float:
+    """Return a finite float from an OpenCost JSON value (``None``/NaN become 0)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _parse_time(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime) -> Optional[CostMetric]:
+    """Convert one OpenCost allocation into a pod ``CostMetric`` (``None`` for idle/unallocated entries)."""
+    if not isinstance(item, dict):
+        return None
+    properties = item.get("properties") or {}
+    namespace = properties.get("namespace")
+    pod_name = properties.get("pod")
+    if (not namespace or not pod_name) and "/" in resource_id:
+        namespace, _, pod_name = resource_id.partition("/")
+    if not pod_name:
+        pod_name = resource_id
+    if not namespace:
+        logger.warning("Skipping metric for '%s' because namespace is missing.", pod_name)
+        return None
+    if namespace.startswith("__") or pod_name.startswith("__"):
+        # __idle__, __unallocated__ and __unmounted__ are not pods.
+        return None
+
+    cpu = _number(item.get("cpuCost")) + _number(item.get("cpuCostAdjustment"))
+    ram = _number(item.get("ramCost")) + _number(item.get("ramCostAdjustment"))
+    storage = _number(item.get("pvCost")) + _number(item.get("pvCostAdjustment"))
+    network = _number(item.get("networkCost")) + _number(item.get("networkCostAdjustment"))
+    lb = _number(item.get("loadBalancerCost")) + _number(item.get("loadBalancerCostAdjustment"))
+    gpu = _number(item.get("gpuCost")) + _number(item.get("gpuCostAdjustment"))
+    components = cpu + ram + storage + network + lb + gpu
+    total = _number(item["totalCost"]) if item.get("totalCost") is not None else components
+
+    window = item.get("window") if isinstance(item.get("window"), dict) else {}
+    minutes = item.get("minutes")
+    return CostMetric(
+        pod_name=pod_name,
+        namespace=namespace,
+        cpu_cost=cpu,
+        ram_cost=ram,
+        storage_cost=storage,
+        network_cost=network,
+        lb_cost=lb,
+        gpu_cost=gpu,
+        total_cost=total,
+        timestamp=timestamp,
+        window_start=_parse_time(window.get("start")),
+        window_end=_parse_time(window.get("end")),
+        minutes=_number(minutes) if minutes is not None else None,
+        source="opencost",
+    )
+
+
+def opencost_step_share(cost: CostMetric, step_seconds: float, window_seconds: float) -> float:
+    """Return the fraction of an allocation that belongs to one ``step_seconds`` sample.
+
+    OpenCost reports how many minutes the pod ran inside the queried window.
+    Dividing by those running minutes (not by the whole window) keeps a pod
+    created mid-window from being under-costed (BUG-41); the share of a
+    window that is a single step is 1.
+    """
+    running_seconds: Optional[float] = None
+    if cost.minutes is not None and cost.minutes > 0:
+        running_seconds = cost.minutes * 60.0
+    elif cost.window_start is not None and cost.window_end is not None:
+        running_seconds = (cost.window_end - cost.window_start).total_seconds()
+    if not running_seconds or running_seconds <= 0:
+        running_seconds = window_seconds
+    if not running_seconds or running_seconds <= 0 or step_seconds <= 0:
+        return 1.0
+    return min(1.0, step_seconds / running_seconds)
 
 
 class OpenCostCollector(BaseCollector):
@@ -43,16 +131,34 @@ class OpenCostCollector(BaseCollector):
             await self._client.aclose()
             self._client = None
 
-    async def collect(self, window: str = "1d", timestamp: Optional[datetime] = None) -> List[CostMetric]:
+    async def collect(
+        self,
+        window: str = "1d",
+        timestamp: Optional[datetime] = None,
+        *,
+        accumulate: bool = False,
+    ) -> List[CostMetric]:
         """
-        Fetches cost data from OpenCost by making an HTTP request to its API.
+        Fetches pod cost allocations from OpenCost ``/allocation/compute``.
+
+        Allocations are aggregated by ``namespace,pod`` so same-named pods in
+        different namespaces never collide (BUG-04), and idle cost is excluded
+        (``includeIdle=false``; idle is allocated separately, see roadmap B2).
+
+        Args:
+            window: OpenCost window (duration such as ``1d`` or ``start,end`` unix timestamps).
+            timestamp: Timestamp stamped on the returned metrics (defaults to now).
+            accumulate: Sum the whole window into one allocation set.
 
         Returns:
             A list of CostMetric objects, or an empty list if an error occurs.
         """
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
-        params = {"window": window, "aggregate": "pod"}
+        params = {"window": window, "aggregate": "namespace,pod"}
+        if accumulate:
+            params["accumulate"] = "true"
+        params["includeIdle"] = "false"
         verify_certs = config.OPENCOST_VERIFY_CERTS
 
         client = await self._get_client(verify=verify_certs)
@@ -61,7 +167,11 @@ class OpenCostCollector(BaseCollector):
 
         if not url:
             logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
+            record_collection_request("opencost", "skipped")
             return []
+
+        timer = start_timer()
+        errors: list[str] = []
 
         async def _fetch(u: str):
             try:
@@ -69,6 +179,7 @@ class OpenCostCollector(BaseCollector):
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 logger.debug("Request to %s failed: %s", u, exc)
+                errors.append(u)
                 return None
 
             try:
@@ -77,13 +188,14 @@ class OpenCostCollector(BaseCollector):
                 # httpx doesn't separate json decode easily, usually ValueError? No, json.JSONDecodeError
                 logger.error("Failed to decode JSON from %s. Server sent non-JSON response.", u)
                 logger.debug("Raw response content from %s: %s", u, resp.text[:500])
+                errors.append(u)
                 return None
 
         response_data = await _fetch(url)
 
         # If the base url returned no usable data, try appending the well-known
         # allocation path used by some OpenCost deployments.
-        if not response_data:
+        if not response_data and not url.rstrip("/").endswith("/allocation/compute"):
             alt_path = url.rstrip("/") + "/allocation/compute"
             logger.debug("Trying alternative OpenCost path: %s", alt_path)
             response_data = await _fetch(alt_path)
@@ -95,35 +207,20 @@ class OpenCostCollector(BaseCollector):
             logger.warning(
                 "OpenCost API returned no data. This can happen if the cluster is new or the endpoint is different."
             )
+            record_collection_request("opencost", "error" if errors else "empty", elapsed(timer))
             return []
 
-        cost_data = response_data[0]
-
-        collected_metrics = []
         now = timestamp if timestamp else datetime.now(timezone.utc)
-
-        for resource_id, item in cost_data.items():
-            properties = item.get("properties", {})
-            pod_name = properties.get("pod")
-            namespace = properties.get("namespace")
-
-            if not pod_name:
-                pod_name = resource_id
-
-            if not namespace:
-                logger.warning("Skipping metric for '%s' because namespace is missing.", pod_name)
+        collected_metrics = []
+        for allocation_set in response_data:
+            if not isinstance(allocation_set, dict):
                 continue
+            for resource_id, item in allocation_set.items():
+                metric = _allocation_to_cost_metric(str(resource_id), item, now)
+                if metric is not None:
+                    collected_metrics.append(metric)
 
-            metric = CostMetric(
-                pod_name=pod_name,
-                namespace=namespace,
-                cpu_cost=item.get("cpuCost", 0.0),
-                ram_cost=item.get("ramCost", 0.0),
-                total_cost=item.get("totalCost", 0.0),
-                timestamp=now,
-            )
-            collected_metrics.append(metric)
-
+        record_collection_request("opencost", "success" if collected_metrics else "empty", elapsed(timer))
         logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
 
@@ -301,12 +398,24 @@ class OpenCostCollector(BaseCollector):
             logger.info("Retrieved real OpenCost LoadBalancer costs for %d Services.", len(costs))
         return costs
 
-    async def collect_range(self, start, end) -> List[CostMetric]:
-        """Collect cost allocation data for a time range."""
+    async def collect_range(self, start: datetime, end: datetime) -> List[CostMetric]:
+        """Collect the cost allocated to each pod over exactly ``[start, end)``.
+
+        The window is queried as-is with ``accumulate=true`` (no trailing
+        ``1d`` divided by steps, BUG-41). Each metric carries its window and
+        the minutes the pod ran in it, so callers can attribute a step's share
+        with :func:`opencost_step_share`.
+        """
         start_ts = int(start.timestamp())
         end_ts = int(end.timestamp())
         window = f"{start_ts},{end_ts}"
-        return await self.collect(window=window, timestamp=end)
+        metrics = await self.collect(window=window, timestamp=end, accumulate=True)
+        for metric in metrics:
+            if metric.window_start is None:
+                metric.window_start = start
+            if metric.window_end is None:
+                metric.window_end = end
+        return metrics
 
     async def is_available(self) -> bool:
         """

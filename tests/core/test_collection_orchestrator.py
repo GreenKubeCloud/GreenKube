@@ -88,12 +88,12 @@ class TestCollectionOrchestratorHappyPath:
 
     @pytest.mark.asyncio
     async def test_collect_all_returns_cost_map(self, mock_prometheus, mock_opencost, mock_pod_collector):
-        """cost_map is keyed by pod_name from OpenCost."""
+        """cost_map is keyed by (namespace, pod_name) from OpenCost (BUG-04)."""
         orchestrator = CollectionOrchestrator(mock_prometheus, mock_opencost, mock_pod_collector)
         result = await orchestrator.collect_all()
 
-        assert "pod-a" in result.cost_map
-        assert result.cost_map["pod-a"].total_cost == pytest.approx(0.3)
+        assert ("ns-1", "pod-a") in result.cost_map
+        assert result.cost_map[("ns-1", "pod-a")].total_cost == pytest.approx(0.3)
 
     @pytest.mark.asyncio
     async def test_collect_all_returns_pod_metrics(self, mock_prometheus, mock_opencost, mock_pod_collector):
@@ -196,7 +196,7 @@ class TestCollectionOrchestratorResilience:
         assert result.prom_metrics is None
         assert result.node_instance_map == {}
         # Other collectors must still succeed
-        assert "pod-a" in result.cost_map
+        assert ("ns-1", "pod-a") in result.cost_map
         assert len(result.pod_metrics_list) == 1
 
     @pytest.mark.asyncio
@@ -226,7 +226,7 @@ class TestCollectionOrchestratorResilience:
         assert result.pod_request_map_agg == {}
         # Prometheus and OpenCost should succeed
         assert result.prom_metrics is not None
-        assert "pod-a" in result.cost_map
+        assert ("ns-1", "pod-a") in result.cost_map
 
     @pytest.mark.asyncio
     async def test_all_collectors_fail_no_exception_raised(self):
@@ -273,8 +273,8 @@ class TestCollectionOrchestratorResilience:
         orchestrator = CollectionOrchestrator(mock_prometheus, mock_oc, mock_pod_collector)
         result = await orchestrator.collect_all()
 
-        assert "" not in result.cost_map
-        assert "pod-x" in result.cost_map
+        assert ("ns", "") not in result.cost_map
+        assert ("ns", "pod-x") in result.cost_map
 
 
 class TestMultiContainerPodRequests:
