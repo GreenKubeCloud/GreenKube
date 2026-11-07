@@ -1,6 +1,6 @@
 ### Added
 
-- Per-dimension provenance on pod and container metric rows and their hourly aggregates: `cost_source`, `usage_source`, `power_source`, `intensity_source` (migration 0039, `greenkube.models.provenance` with `is_cost_trusted()` / `is_usage_trusted()` helpers). Legacy rows are backfilled (`cost_source=opencost` when a positive cost was stored, `intensity_source=unknown`). (A11)
+- Per-dimension provenance on pod and container metric rows and their hourly aggregates: `cost_source`, `usage_source`, `power_source`, `intensity_source` (migration 0039, `greenkube.models.provenance` with `is_cost_trusted()` / `is_usage_trusted()` helpers). Legacy rows are backfilled (`cost_source=opencost` when a positive cost was stored, `intensity_source=unknown`; container rows inherit their pod row's `cost_source` and `emaps_zone`). (A11)
 - OpenCost cost components `cost_cpu`, `cost_ram`, `cost_storage`, `cost_network`, `cost_lb` on pod and container rows; container rows split CPU cost by CPU share and RAM cost by memory share. (A4)
 - Container `cpu_limit` / `memory_limit` collection and persistence; native sidecars (init containers with `restartPolicy: Always`) are collected as steady-state containers (`kind="sidecar"`), classic init containers only on request (`kind="init"`). (A7, BUG-10)
 - `INTENSITY_MAX_AGE` setting (Helm `config.intensityMaxAge`, default `6h`). (A8)

@@ -2,6 +2,8 @@
 -- Columns are additive. Legacy rows are backfilled once: cost_source is opencost
 -- when a positive cost was stored without a missing-cost estimation reason,
 -- usage_source is prometheus when usage was stored, intensity_source is unknown.
+-- Container rows inherit their pod row's cost_source and emaps_zone (their cost
+-- was allocated from it). Orphan container rows fall back to the same rule.
 
 ALTER TABLE combined_metrics ADD COLUMN cost_cpu REAL;
 ALTER TABLE combined_metrics ADD COLUMN cost_ram REAL;
@@ -69,7 +71,13 @@ UPDATE combined_metrics_hourly SET
 WHERE cost_source IS NULL OR intensity_source IS NULL;
 
 UPDATE container_metrics SET
-    cost_source = COALESCE(cost_source, CASE
+    cost_source = COALESCE(cost_source, (
+        SELECT cm.cost_source
+        FROM combined_metrics AS cm
+        WHERE cm.namespace = container_metrics.namespace
+          AND cm.pod_name = container_metrics.pod_name
+          AND cm."timestamp" = container_metrics.timestamp
+    ), CASE
         WHEN total_cost > 0 AND COALESCE(estimation_reasons, '') NOT LIKE '%No cost data for pod%' THEN 'opencost'
         ELSE 'none'
     END),
