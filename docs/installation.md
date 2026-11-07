@@ -420,11 +420,43 @@ a value. That Secret carries no Helm or Argo CD tracking metadata: Argo CD does 
 `helm uninstall` keeps it, like the PostgreSQL volume whose password it holds. The hook needs `rbac.create=true`;
 with `rbac.create=false`, supply the credentials or use `secrets.existingSecret`.
 
+The hook creates the Secret `<release>` even when you supply every credential in values. It then stays empty
+until the Settings page stores a runtime override in it (see
+[runtime service settings](configuration.md#api-authentication-and-runtime-service-settings)). The hook's Role
+lets it create Secrets anywhere in the release namespace, because Kubernetes cannot restrict `create` to one
+Secret name; `get` and `patch` are limited to `<release>`. The ServiceAccount, Role and RoleBinding are hook
+resources that are deleted once the hook succeeds.
+
+Before an upgrade rolls any Pod, the `<release>-db-credential-check` hook connects to the bundled PostgreSQL with
+the new credentials and fails the upgrade if the database rejects them. A password set in `postgres.auth.password`
+is checked through a short-lived hook Secret, `<release>-db-credential-check`, because Helm and Argo CD update
+`<release>-values` only after the hooks have run. The check is skipped when no credentials exist yet or when
+PostgreSQL does not answer within about 40 seconds (first install, first Argo CD sync, or a database restart
+during the upgrade). In that case the Pods themselves report `password authentication failed`, as described in
+[Troubleshooting](#troubleshooting).
+
 For a fully declarative setup, set `secrets.existingSecret`: the chart then renders no Secret and runs no
 bootstrap hook. See [Production API-key handling](#production-api-key-handling) for the keys it must contain.
 
 Upgrading from 0.3.x keeps the Secret `<release>` created by the earlier chart as-is: the hook finds the existing
 API key and PostgreSQL password and adds nothing.
+
+Breaking change for `rbac.create=false`: chart 0.3.x generated the API key and the PostgreSQL password while
+rendering, so it installed without RBAC. This chart refuses to render that combination. Before you upgrade such an
+install, point the chart at the Secret the earlier chart created, which already holds the generated values:
+
+```bash
+helm upgrade greenkube greenkube/greenkube \
+  --namespace greenkube \
+  --reuse-values \
+  --set secrets.existingSecret=greenkube
+```
+
+Alternatively, set `secrets.apiKey` and `postgres.auth.password` to the values stored in that Secret.
+
+`config.boavizta.url` is now empty by default, like the Prometheus and OpenCost URLs, and GreenKube then uses the
+public Boavizta API. A Boavizta URL saved on the Settings page now survives Pod restarts. A URL you set in values
+still takes precedence.
 
 ### Reach the frontend
 
