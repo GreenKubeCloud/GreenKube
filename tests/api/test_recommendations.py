@@ -70,7 +70,13 @@ class TestRecommendationsEndpoint:
         zombie_rec = next(r for r in response.json() if r["type"] == "ZOMBIE_POD")
         annualization_factor = 365 / get_config().RECOMMENDATION_LOOKBACK_DAYS
         assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
-        assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(0.02 * annualization_factor)
+        # CO2e comes from the Impact Model (allocated idle, dynamic and embodied
+        # share released by deleting the pod), returned with its provenance.
+        impact = zombie_rec["impact"]
+        assert impact["kind"] == "workload_deletion"
+        assert impact["assumptions"]["annualization_factor"] == pytest.approx(annualization_factor)
+        assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(impact["co2e_expected_annual_g"])
+        assert zombie_rec["potential_savings_co2e_grams"] > 0
 
     def test_recommendations_filter_by_namespace(self, client, mock_combined_metrics_repo):
         """Should filter recommendations by namespace."""
