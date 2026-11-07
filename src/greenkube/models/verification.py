@@ -60,20 +60,6 @@ class HealthGateResult(BaseModel):
     detail: str = ""
 
 
-class TrafficSeasonalityControl(BaseModel):
-    """Factors used to make before/after measurements comparable."""
-
-    before_traffic: Optional[float] = None
-    after_traffic: Optional[float] = None
-    seasonality_factor: float = Field(1.0, gt=0)
-
-    @property
-    def traffic_ratio(self) -> Optional[float]:
-        if self.before_traffic is None or self.before_traffic <= 0 or self.after_traffic is None:
-            return None
-        return self.after_traffic / self.before_traffic
-
-
 class MeasuredLedgerInput(BaseModel):
     """Auditable, measured values used when attributing verified savings.
 
@@ -91,7 +77,6 @@ class MeasuredLedgerInput(BaseModel):
     sample_count: int = 0
     readiness_ratio: Optional[float] = None
     traffic_ratio: Optional[float] = None
-    seasonality_factor: float = 1.0
     measurement_id: Optional[str] = None
     group_id: Optional[str] = None
     outcome: Optional[str] = None

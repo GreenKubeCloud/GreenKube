@@ -182,7 +182,8 @@ class TestVerifierOutcomes:
         assert verified[0].status == RecommendationStatus.VERIFIED
         assert verified[0].savings_realized is True
         assert verified[0].measured_cost_saved is not None and verified[0].measured_cost_saved > 0
-        assert verified[0].measured_co2e_saved_grams is not None and verified[0].measured_co2e_saved_grams > 0
+        # Rightsizing frees requests; the usage-based CO2e delta is reported but never claimed.
+        assert verified[0].measured_co2e_saved_grams == 0.0
 
     @pytest.mark.asyncio
     async def test_negligible_carbon_projection_does_not_block_verification(self, repo):
@@ -206,9 +207,15 @@ class TestVerifierOutcomes:
     async def test_rollback_review_on_restart_delta(self, repo):
         applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
         await repo.save_recommendations([_applied_record(applied_at)])
+        first = applied_at + timedelta(minutes=10)
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo([_metric(cost=0.01, co2=0.5, cpu=200, restart=2)]),  # pyrefly: ignore[bad-argument-type]
+            FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
+                [
+                    _metric(cost=0.01, co2=0.5, cpu=200, restart=0, timestamp=first),
+                    _metric(cost=0.01, co2=0.5, cpu=200, restart=2, timestamp=first + timedelta(minutes=5)),
+                ]
+            ),
             config=_config(),
         )
 
@@ -216,6 +223,49 @@ class TestVerifierOutcomes:
 
         assert updated[0].status == RecommendationStatus.ROLLBACK_REVIEW
         assert updated[0].verification_status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_restart_gate_uses_per_pod_deltas_not_cumulative_sums(self, repo):
+        """Pods first observed with old restarts, and stable afterwards, did not restart (BUG-28)."""
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        first = applied_at + timedelta(minutes=10)
+        second = first + timedelta(minutes=5)
+        after = [
+            _metric(0.01, 0.5, 100, restart=3, pod_name="api-a", timestamp=first),
+            _metric(0.01, 0.5, 100, restart=4, pod_name="api-b", timestamp=first),
+            _metric(0.01, 0.5, 100, restart=3, pod_name="api-a", timestamp=second),
+            _metric(0.01, 0.5, 100, restart=4, pod_name="api-b", timestamp=second),
+        ]
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(after, before_metrics=[_metric(0.05, 2.5, 100, timestamp=first)]),  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        updated = await verifier.verify_due()
+
+        assert updated[0].status == RecommendationStatus.VERIFIED
+
+    @pytest.mark.asyncio
+    async def test_restart_counter_reset_counts_from_zero(self, repo):
+        applied_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repo.save_recommendations([_applied_record(applied_at)])
+        first = applied_at + timedelta(minutes=10)
+        after = [
+            _metric(0.01, 0.5, 100, restart=5, pod_name="db-0", timestamp=first),
+            # Same pod name recreated (StatefulSet): the counter restarts at 0 then increases.
+            _metric(0.01, 0.5, 100, restart=1, pod_name="db-0", timestamp=first + timedelta(minutes=5)),
+        ]
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(repo),
+            FakeCombinedRepo(after),  # pyrefly: ignore[bad-argument-type]
+            config=_config(),
+        )
+
+        updated = await verifier.verify_due()
+
+        assert updated[0].status == RecommendationStatus.ROLLBACK_REVIEW
 
     @pytest.mark.asyncio
     async def test_rollback_review_on_cpu_headroom(self, repo):
