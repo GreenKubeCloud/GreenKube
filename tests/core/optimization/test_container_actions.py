@@ -143,7 +143,13 @@ def test_rightsizing_savings_never_project_negative_cost(multi_container_metrics
     ]
 
     assert recommendations
-    assert all(recommendation.potential_savings_cost == 0.0 for recommendation in recommendations)
+    # Negative observed totals are ignored: request cuts are priced per resource
+    # (here at the OpenCost default rates), so savings stay positive.
+    for recommendation in recommendations:
+        assert recommendation.potential_savings_cost is not None
+        assert recommendation.potential_savings_cost > 0
+        assert recommendation.impact is not None
+        assert recommendation.impact["assumptions"]["unit_prices"][0]["source"] == "custom_rate"
 
 
 def test_evidence_is_scoped_to_the_recommendation_container(multi_container_metrics):

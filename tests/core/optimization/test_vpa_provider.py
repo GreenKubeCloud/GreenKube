@@ -3,6 +3,8 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from greenkube.collectors.vpa_collector import VPARecommendation
 from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
@@ -71,10 +73,15 @@ class TestVpaSource:
         assert cpu.container_name == "api"
         assert cpu.current_cpu_request_millicores == 1000
         assert cpu.recommended_cpu_request_millicores == 300
-        # 70% reduction of the annualized cost
-        annual_cost = 1.0 * (365 / 7)
-        assert cpu.potential_savings_cost is not None
-        assert abs(cpu.potential_savings_cost - annual_cost * 0.7) < 0.01
+        # 0.7 core released for one 5-minute sample, annualized over the 7-day
+        # window and priced at the OpenCost default CPU rate.
+        released_core_hours = 0.7 * (300 / 3600) * (365 / 7)
+        assert cpu.potential_savings_cost == pytest.approx(released_core_hours * 0.031611)
+        assert cpu.impact is not None
+        assert cpu.impact["cost_breakdown_annual"]["ram"] == 0.0
+        memory = by_type[RecommendationType.RIGHTSIZING_MEMORY]
+        assert memory.impact is not None
+        assert memory.impact["cost_breakdown_annual"]["cpu"] == 0.0
 
     async def test_skips_increases(self):
         source = VpaSource(Config(), collector=FakeCollector([_vpa(cpu_target=2000, memory_target=2 * 1024**3)]))
@@ -86,7 +93,7 @@ class TestVpaSource:
         recs = await source.collect(_context([_metric(total_cost=-1.0)]))
 
         assert recs
-        assert all(recommendation.potential_savings_cost == 0.0 for recommendation in recs)
+        assert all((recommendation.potential_savings_cost or 0.0) > 0 for recommendation in recs)
 
     async def test_preserves_multiple_container_recommendations(self):
         vpas = [

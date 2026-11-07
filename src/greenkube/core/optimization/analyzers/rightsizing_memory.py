@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.statistics import (
-    annualized_nonnegative_window_total,
-    annualized_window_total,
     balanced_rightsizing_target,
     latest_request_value,
     percentile,
@@ -20,6 +18,7 @@ from greenkube.core.optimization.targeting import (
     split_series_by_container,
     target_label,
 )
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
@@ -36,6 +35,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
+        projector = ImpactProjector.for_context(context)
 
         for (ns, target_kind, target_name), target_series in context.target_series().items():
             for container_name, series in split_series_by_container(target_series):
@@ -57,8 +57,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
                     p95 = percentile(usages, 95)
                     raw_recommended = balanced_rightsizing_target(cfg, avg_usage, observed_max, p95)
                     recommended = max(raw_recommended, cfg.RECOMMENDATION_MIN_MEMORY_BYTES)
-                    savings_ratio = resource_savings_ratio(mem_request, recommended)
-                    if savings_ratio is None:
+                    if resource_savings_ratio(mem_request, recommended) is None:
                         LOG.debug(
                             "Skipping memory rightsizing for %s/%s: final %s bytes is not below current %s bytes.",
                             ns,
@@ -68,10 +67,13 @@ class MemoryRightsizingAnalyzer(Analyzer):
                         )
                         continue
 
-                    total_cost = sum(m.total_cost for m in series)
-                    total_co2 = sum(m.co2e_grams for m in series)
-                    annual_cost = annualized_nonnegative_window_total(total_cost, context.analysis_window_seconds)
-                    annual_co2 = annualized_window_total(total_co2, context.analysis_window_seconds)
+                    # The Impact Model prices only the released memory reservation
+                    # (BUG-15) and projects CO2e from the released idle and embodied share (BUG-16).
+                    delta = projector.container_resources(
+                        projector.workload_ref(ns, target_kind, target_name, container_name),
+                        series,
+                        memory_bytes=(mem_request, recommended),
+                    )
                     label = target_label(target_kind, target_name)
                     if container_name:
                         label = f"{label} container '{container_name}'"
@@ -109,8 +111,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
                             priority="medium",
                             current_memory_request_bytes=mem_request,
                             recommended_memory_request_bytes=recommended,
-                            potential_savings_cost=annual_cost * savings_ratio,
-                            potential_savings_co2e_grams=annual_co2 * savings_ratio,
+                            **impact_fields(delta),
                         )
                     )
         return recs

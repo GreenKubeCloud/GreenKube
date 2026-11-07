@@ -12,12 +12,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
 
 from greenkube.collectors.vpa_collector import VPACollector, VPARecommendation
 from greenkube.core.optimization.providers.base import RecommendationSource
-from greenkube.core.optimization.statistics import (
-    annualized_nonnegative_window_total,
-    annualized_window_total,
-    latest_request_value,
-    resource_savings_ratio,
-)
+from greenkube.core.optimization.statistics import latest_request_value, resource_savings_ratio
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 from greenkube.models.metrics import RecommendationSource as Source
 
@@ -129,6 +125,7 @@ class VpaSource(RecommendationSource):
             return []
 
         target_series = context.target_series()
+        projector = ImpactProjector.for_context(context)
         recs: List[Recommendation] = []
 
         for (ns, target_kind, target_name, container_name), agg in _aggregate_by_container(vpas).items():
@@ -139,10 +136,7 @@ class VpaSource(RecommendationSource):
 
             current_cpu = latest_request_value(series, "cpu_request")
             current_mem = latest_request_value(series, "memory_request")
-            total_cost = sum(m.total_cost for m in series)
-            total_co2 = sum(m.co2e_grams for m in series)
-            annual_cost = annualized_nonnegative_window_total(total_cost, context.analysis_window_seconds)
-            annual_co2 = annualized_window_total(total_co2, context.analysis_window_seconds)
+            ref = projector.workload_ref(ns, target_kind, target_name, container_name)
 
             vpa_ref = f"{ns}/{agg['vpa_names'][0]}" if agg["vpa_names"] else ns
             label = f"{target_kind} '{target_name}' container '{container_name}'"
@@ -151,6 +145,9 @@ class VpaSource(RecommendationSource):
                 target = int(agg["cpu_target"])
                 ratio = resource_savings_ratio(current_cpu, target)
                 if ratio is not None:
+                    # One container, one resource: the Impact Model prices only the
+                    # released CPU reservation (BUG-15, BUG-16).
+                    delta = projector.container_resources(ref, series, cpu_millicores=(current_cpu, target))
                     recs.append(
                         Recommendation(
                             pod_name=target_name,
@@ -173,8 +170,7 @@ class VpaSource(RecommendationSource):
                             priority="medium",
                             current_cpu_request_millicores=current_cpu,
                             recommended_cpu_request_millicores=target,
-                            potential_savings_cost=annual_cost * ratio,
-                            potential_savings_co2e_grams=annual_co2 * ratio,
+                            **impact_fields(delta),
                         )
                     )
 
@@ -182,6 +178,7 @@ class VpaSource(RecommendationSource):
                 target_mem = int(agg["memory_target"])
                 ratio = resource_savings_ratio(current_mem, target_mem)
                 if ratio is not None:
+                    delta = projector.container_resources(ref, series, memory_bytes=(current_mem, target_mem))
                     recs.append(
                         Recommendation(
                             pod_name=target_name,
@@ -206,8 +203,7 @@ class VpaSource(RecommendationSource):
                             priority="medium",
                             current_memory_request_bytes=current_mem,
                             recommended_memory_request_bytes=target_mem,
-                            potential_savings_cost=annual_cost * ratio,
-                            potential_savings_co2e_grams=annual_co2 * ratio,
+                            **impact_fields(delta),
                         )
                     )
 

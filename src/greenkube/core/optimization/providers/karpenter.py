@@ -8,10 +8,12 @@ installed.
 """
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol
+import math
+from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
 
 from greenkube.collectors.karpenter_collector import KarpenterCollector, NodePoolInfo
 from greenkube.core.optimization.providers.base import RecommendationSource
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import (
     Recommendation,
     RecommendationCapability,
@@ -83,8 +85,14 @@ class KarpenterSource(RecommendationSource):
             if pool.node_count < 2 or utilization is None or utilization >= threshold:
                 continue
 
-            annual_cost = _pool_annual_cost(pool, context)
             label = f"NodePool '{pool.name}'"
+            savings_fields: dict = {}
+            removable, removed_nodes = _removable_nodes(pool, utilization, context)
+            if removed_nodes:
+                # Node-hours removed × node price; the consolidation is the action
+                # itself, so the Impact Model uses a realization factor of 1.
+                delta = ImpactProjector.for_context(context).node_removal(removed_nodes)
+                savings_fields = impact_fields(delta)
             recs.append(
                 Recommendation(
                     pod_name=None,
@@ -102,10 +110,11 @@ class KarpenterSource(RecommendationSource):
                     reason=(
                         f"Karpenter NodePool '{pool.name}' is below the "
                         f"{threshold:.0%} utilization threshold across {pool.node_count} claimed nodes. "
-                        "Karpenter can consolidate workloads onto fewer, larger nodes."
+                        "Karpenter can consolidate workloads onto fewer, larger nodes"
+                        + (f"; about {removable} node(s) could be removed." if removable else ".")
                     ),
                     priority="medium",
-                    potential_savings_cost=annual_cost * (1 - utilization) if annual_cost else None,
+                    **savings_fields,
                 )
             )
         return recs
@@ -144,12 +153,24 @@ def _pool_cpu_utilization(pool: NodePoolInfo, context: "OptimizationContext") ->
     return sum(ratios) / len(ratios)
 
 
-def _pool_annual_cost(pool: NodePoolInfo, context: "OptimizationContext") -> Optional[float]:
-    """Annualizes the cost observed on a pool's nodes, when metrics are available."""
-    window = context.analysis_window_seconds
-    if not window or window <= 0:
-        return None
-    total = sum(m.total_cost for m in context.metrics if m.node in pool.node_names)
-    if total <= 0:
-        return None
-    return total / window * (365.25 * 24 * 3600)
+def _removable_nodes(
+    pool: NodePoolInfo,
+    utilization: float,
+    context: "OptimizationContext",
+) -> Tuple[int, List[str]]:
+    """Nodes a consolidation could remove, choosing the cheapest ones (conservative).
+
+    After consolidation the pool still needs ``ceil(node_count × utilization)``
+    nodes (at least one) to host its current CPU requests.
+    """
+    keep = max(1, math.ceil(pool.node_count * max(utilization, 0.0)))
+    removable = max(pool.node_count - keep, 0)
+    if removable == 0:
+        return 0, []
+    projector = ImpactProjector.for_context(context)
+    priced = sorted(
+        (price, name)
+        for name in pool.node_names
+        if (price := projector.node_hourly_price(name)) is not None and price > 0
+    )
+    return removable, [name for _price, name in priced[:removable]]
