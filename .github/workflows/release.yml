@@ -121,7 +121,8 @@ jobs:
         run: |
           echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           # Move "latest" only for the highest release, never back to an older patch line.
-          newest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          # Pre-release tags (v0.5.0-rc1) sort above their release and never count.
+          newest="$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           if [ "$newest" = "$GITHUB_REF_NAME" ]; then
             echo "latest=true" >> "$GITHUB_OUTPUT"
           else

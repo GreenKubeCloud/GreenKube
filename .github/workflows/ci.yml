@@ -132,3 +132,4 @@ jobs:
           check --set automation.enabled=true
           check --set profile=production
           check -f helm-chart/values-production.yaml
+          check --set secrets.apiKey=ci-api-key --set postgres.auth.password=ci-password
