@@ -584,6 +584,36 @@ class TestKarpenterProjection:
         assert impact["realization_factor"] == 1.0
         assert _co2e(recs[0]) > 0
 
+    async def test_memory_requests_limit_removable_nodes(self):
+        """A pool idle on CPU but full on memory cannot drop nodes: keep max(CPU, memory) need."""
+        nodes = [
+            NodeInfo(name=f"n{i}", cpu_capacity_cores=4, memory_capacity_bytes=16 * GIB, cloud_provider="aws")
+            for i in range(3)
+        ]
+        rows = [
+            CombinedMetric(
+                pod_name=f"p{i}",
+                namespace="default",
+                node=f"n{i}",
+                cpu_request=200,
+                memory_request=12 * GIB,
+                timestamp=START,
+            )
+            for i in range(3)
+        ]
+        context = OptimizationContext(config=Config(), metrics=rows, node_infos=nodes, analysis_window_seconds=86400)
+
+        class _Collector:
+            async def collect(self):
+                return [NodePoolInfo(name="default", node_names=["n0", "n1", "n2"])]
+
+        recs = await KarpenterSource(Config(), collector=_Collector()).collect(context)
+
+        assert len(recs) == 1
+        # CPU alone would keep one node; 12 GiB of 15.2 GiB allocatable (79%) keeps all three.
+        assert recs[0].potential_savings_cost is None
+        assert recs[0].impact is None
+
 
 class TestScheduleAndDeletionAnalyzers:
     def _context(self, rows, window=86400.0, **extra):

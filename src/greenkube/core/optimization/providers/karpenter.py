@@ -122,13 +122,28 @@ class KarpenterSource(RecommendationSource):
 
 def _pool_cpu_utilization(pool: NodePoolInfo, context: "OptimizationContext") -> Optional[float]:
     """Estimates time-weighted CPU request utilization across a pool's nodes."""
+    return _pool_request_utilization(pool, context, "cpu_request", "cpu_allocatable_millicores")
+
+
+def _pool_memory_utilization(pool: NodePoolInfo, context: "OptimizationContext") -> Optional[float]:
+    """Estimates time-weighted memory request utilization across a pool's nodes."""
+    return _pool_request_utilization(pool, context, "memory_request", "memory_allocatable_bytes")
+
+
+def _pool_request_utilization(
+    pool: NodePoolInfo,
+    context: "OptimizationContext",
+    request_field: str,
+    capacity_field: str,
+) -> Optional[float]:
+    """Time-weighted request utilization of one resource across a pool's nodes."""
     if not pool.node_names:
         return None
 
     capacities: Dict[str, float] = {}
     for node in context.node_infos or []:
         name = getattr(node, "name", None)
-        capacity = getattr(node, "cpu_allocatable_millicores", None)
+        capacity = getattr(node, capacity_field, None)
         if name and capacity:
             capacities[name] = float(capacity)
 
@@ -138,7 +153,8 @@ def _pool_cpu_utilization(pool: NodePoolInfo, context: "OptimizationContext") ->
         if node_name and node_name in pool.node_names:
             timestamp = metric.timestamp or len(requests)
             requests.setdefault(timestamp, {})
-            requests[timestamp][node_name] = requests[timestamp].get(node_name, 0.0) + float(metric.cpu_request or 0)
+            requested = float(getattr(metric, request_field, 0) or 0)
+            requests[timestamp][node_name] = requests[timestamp].get(node_name, 0.0) + requested
 
     ratios = []
     for point in requests.values():
@@ -161,8 +177,12 @@ def _removable_nodes(
     """Nodes a consolidation could remove, choosing the cheapest ones (conservative).
 
     After consolidation the pool still needs ``ceil(node_count × utilization)``
-    nodes (at least one) to host its current CPU requests.
+    nodes (at least one) to host its current requests, where utilization is
+    the larger of the CPU and memory request utilization.
     """
+    memory_utilization = _pool_memory_utilization(pool, context)
+    if memory_utilization is not None:
+        utilization = max(utilization, memory_utilization)
     keep = max(1, math.ceil(pool.node_count * max(utilization, 0.0)))
     removable = max(pool.node_count - keep, 0)
     if removable == 0:
