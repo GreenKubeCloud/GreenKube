@@ -115,7 +115,12 @@ class SavingsLedgerRepository(ABC):
 
     @abstractmethod
     async def get_lifetime_counters(self, cluster_name: str) -> List[SavingsCounterTotal]:
-        """Return monotonic accrued / reversed totals per recommendation type and method."""
+        """Return monotonic accrued / reversed totals per recommendation type and method.
+
+        ``accrued`` sums positive accruals; ``reversed`` sums negative accruals
+        (negative declarations or signed projections) plus every superseded
+        accrual, so ``accrued - reversed`` is the net non-superseded total.
+        """
 
     @abstractmethod
     async def has_legacy_compressed_rows(
@@ -123,8 +128,13 @@ class SavingsLedgerRepository(ABC):
         cluster_name: str,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
     ) -> bool:
-        """Return True when legacy compressed hourly rows overlap the window."""
+        """Return True when legacy compressed hourly rows overlap the window.
+
+        ``namespace`` narrows the check like :meth:`get_accrual_breakdown`
+        (``""`` selects cluster-scoped rows).
+        """
 
     # ------------------------------------------------------------------
     # Convenience aggregations (backend independent)

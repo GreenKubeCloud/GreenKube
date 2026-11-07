@@ -81,7 +81,7 @@ class FakeLedger(SavingsLedgerRepository):
     async def get_lifetime_counters(self, cluster_name: str) -> List[SavingsCounterTotal]:
         return []
 
-    async def has_legacy_compressed_rows(self, cluster_name, start_time=None, end_time=None) -> bool:
+    async def has_legacy_compressed_rows(self, cluster_name, start_time=None, end_time=None, namespace=None) -> bool:
         return False
 
     def method_sum(self, method: str, rec_id: Optional[int] = None) -> float:

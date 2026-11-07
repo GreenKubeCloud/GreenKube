@@ -88,6 +88,10 @@ async def test_sqlite_upgrade_flags_legacy_rows_and_keeps_totals(tmp_path, monke
         start = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
         assert await repo.has_legacy_compressed_rows("c", start, start + timedelta(hours=1))
         assert not await repo.has_legacy_compressed_rows("c", start + timedelta(days=1), start + timedelta(days=2))
+        # The diagnostic follows the namespace filter of the report.
+        assert await repo.has_legacy_compressed_rows("c", start, start + timedelta(hours=1), namespace="prod")
+        assert not await repo.has_legacy_compressed_rows("c", start, start + timedelta(hours=1), namespace="dev")
+        assert not await repo.has_legacy_compressed_rows("c", namespace="")
         # The partial first legacy hour is included pro rata (BUG-40).
         window = await repo.get_window_totals("c", start, start + timedelta(hours=1, minutes=30))
         assert window["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(2.0 + 12.0)
@@ -171,6 +175,9 @@ async def test_postgres_upgrade_flags_legacy_rows_and_keeps_totals(monkeypatch):
         assert totals["measured"]["co2e_saved_grams"] == pytest.approx(3.0)
         assert await repo.has_legacy_compressed_rows("c")
         start = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
+        assert await repo.has_legacy_compressed_rows("c", start, start + timedelta(hours=1), namespace="prod")
+        assert not await repo.has_legacy_compressed_rows("c", start, start + timedelta(hours=1), namespace="dev")
+        assert not await repo.has_legacy_compressed_rows("c", namespace="")
         window = await repo.get_window_totals("c", start, start + timedelta(hours=1, minutes=30))
         assert window["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(2.0 + 12.0)
         async with manager.connection_scope() as conn:

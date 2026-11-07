@@ -296,7 +296,7 @@ async def get_savings_summary(
     try:
         cluster_name = _get_savings_cluster_name()
         breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
-        legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end)
+        legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end, namespace=namespace)
     except Exception as exc:
         logger.error("Could not read the savings ledger: %s", exc)
         raise HTTPException(status_code=503, detail="Savings ledger unavailable.") from exc

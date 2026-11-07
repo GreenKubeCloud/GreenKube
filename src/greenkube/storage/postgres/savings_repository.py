@@ -273,12 +273,18 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
         cluster_name: str,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
     ) -> bool:
         params: list = [cluster_name]
         window = ""
         if start_time is not None and end_time is not None:
             window = " AND period_end > $2 AND period_start < $3"
             params.extend([ensure_utc(start_time), ensure_utc(end_time)])
+        if namespace == "":
+            window += " AND (namespace IS NULL OR namespace = '')"
+        elif namespace is not None:
+            params.append(namespace)
+            window += f" AND namespace = ${len(params)}"
         async with self._db.connection_scope() as conn:
             value = await conn.fetchval(
                 f"""

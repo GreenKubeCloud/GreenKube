@@ -286,12 +286,18 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         cluster_name: str,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
     ) -> bool:
         params: list = [cluster_name]
         window = ""
         if start_time is not None and end_time is not None:
             window = " AND period_end > ? AND period_start < ?"
             params.extend([_bound(start_time), _bound(end_time)])
+        if namespace == "":
+            window += " AND (namespace IS NULL OR namespace = '')"
+        elif namespace is not None:
+            window += " AND namespace = ?"
+            params.append(namespace)
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 f"""
