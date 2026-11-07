@@ -7,11 +7,13 @@ C0.12 (non-overlapping windows) and C0.13 (immutable measurements).
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from greenkube.core.config import Config
 from greenkube.core.db import db_manager
+from greenkube.core.optimization import verifier as verifier_module
 from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 from greenkube.core.optimization.verifier import RecommendationVerifier, attribution_groups, window_rates
 from greenkube.models.measurement import MeasurementOutcome, QuantityOutcome
@@ -280,6 +282,56 @@ class TestProvenance:
         assert record.status is RecommendationStatus.VERIFIED
         assert record.measured_cost_saved == pytest.approx(0.024 * HOURS_PER_YEAR)
         assert (await measurements.list_for_recommendation(record.id))[0].scope == "workload_fallback"
+
+    @pytest.mark.parametrize("total_cost", [-0.01, float("nan"), float("inf")])
+    def test_negative_or_non_finite_cost_is_not_trusted(self, monkeypatch, total_cost):
+        monkeypatch.setattr(verifier_module, "_provenance_module", None)
+        row = ProvenancedMetric(pod_name="api-a", namespace="prod", total_cost=total_cost, cost_source="opencost")
+
+        assert verifier_module.cost_is_trusted(row) is False
+
+    def test_rows_follow_the_a11_provenance_helper_when_installed(self, monkeypatch):
+        seen: list[tuple[str, str | None]] = []
+
+        def record(kind, verdict):
+            def check(row):
+                seen.append((kind, getattr(row, f"{kind}_source", None)))
+                return verdict
+
+            return check
+
+        helper = SimpleNamespace(
+            is_cost_trusted=record("cost", True),
+            is_usage_trusted=record("usage", False),
+            is_intensity_measured=record("intensity", True),
+            is_power_profiled=record("power", False),
+        )
+        monkeypatch.setattr(verifier_module, "_provenance_module", helper)
+        tagged = ProvenancedMetric(
+            pod_name="api-a",
+            namespace="prod",
+            total_cost=0.01,
+            cost_source="custom_rate",
+            usage_source="prometheus",
+            intensity_source="realtime",
+            power_source="default_profile",
+        )
+        legacy = ProvenancedMetric(pod_name="api-a", namespace="prod", total_cost=0.01, is_estimated=False)
+
+        # Tagged rows: the helper decides, whatever the verifier's own defaults say.
+        assert verifier_module.cost_is_trusted(tagged) is True
+        assert verifier_module.usage_is_trusted(tagged) is False
+        assert verifier_module.carbon_is_trusted(tagged) is False
+        assert seen == [
+            ("cost", "custom_rate"),
+            ("usage", "prometheus"),
+            ("power", "default_profile"),
+        ]
+        # Rows written before provenance existed keep the legacy rule (C0.3 fallback).
+        seen.clear()
+        assert verifier_module.cost_is_trusted(legacy) is True
+        assert verifier_module.usage_is_trusted(legacy) is True
+        assert seen == []
 
 
 class TestAttributionGroups:

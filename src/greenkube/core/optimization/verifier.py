@@ -8,8 +8,9 @@ applied recommendation gets **one fixed-horizon measurement**:
   once when data coverage is insufficient;
 * baseline window of the same length, ending at the PR merge or plan approval
   and never overlapping the after-window (C0.12);
-* only trusted rows: cost provenance (``cost_source``) when the rows carry it,
-  otherwise ``total_cost > 0 and is_estimated is False`` (C0.3);
+* only trusted rows: cost provenance (``cost_source``, judged by the shared
+  A11 helpers in ``greenkube.models.provenance`` when installed) when the rows
+  carry it, otherwise ``total_cost > 0 and is_estimated is False`` (C0.3);
 * rates normalized by the time the rows cover; traffic normalization is
   disabled until the load-driver counterfactual ships (C0.1, BUG-27);
 * health gates per replica and per-pod restart deltas (C0.2, BUG-28), plus
@@ -32,12 +33,14 @@ Outcomes on the recommendation: ``verified``, ``rollback_review``,
 
 from __future__ import annotations
 
+import importlib
 import logging
+import math
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, cast
 
 from greenkube.models.measurement import (
     MeasurementOutcome,
@@ -104,40 +107,89 @@ _OUTCOME_LABELS = {
 # ----------------------------------------------------------------------
 
 
+_UNRESOLVED: Any = object()
+#: The A11 provenance helper module (``greenkube.models.provenance``) once
+#: resolved; ``None`` when this build does not ship it.
+_provenance_module: Any = _UNRESOLVED
+
+
+def _provenance() -> Any:
+    """The shared A11 provenance helpers, when this build ships them.
+
+    Rows tagged with provenance are judged by the same helpers every other
+    consumer uses; the local rules below only apply when they are absent.
+    """
+    global _provenance_module
+    if _provenance_module is _UNRESOLVED:
+        try:
+            _provenance_module = importlib.import_module("greenkube.models.provenance")
+        except ImportError:
+            _provenance_module = None
+    return _provenance_module
+
+
+def _helper(name: str) -> Optional[Callable[[Any], Any]]:
+    helper = getattr(_provenance(), name, None)
+    if not callable(helper):
+        return None
+    return cast(Callable[[Any], Any], helper)
+
+
 def _source(metric: Any, name: str) -> Optional[str]:
     value = getattr(metric, name, None)
     if value is None or value == "":
         return None
-    return str(getattr(value, "value", value))
+    return str(getattr(value, "value", value)).strip().lower() or None
+
+
+def _finite_non_negative(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number >= 0
 
 
 def cost_is_trusted(metric: Any) -> bool:
     """Whether a row's cost may back a savings measurement.
 
     Rows carrying cost provenance (A11) are trusted for OpenCost, Kubecost and
-    pricing-catalog costs. Legacy rows fall back to ``total_cost > 0`` and an
-    explicit ``is_estimated is False``.
+    pricing-catalog costs with a finite, non-negative total. Legacy rows fall
+    back to ``total_cost > 0`` and an explicit ``is_estimated is False``.
     """
     source = _source(metric, "cost_source")
     if source is not None:
-        return source in TRUSTED_COST_SOURCES
-    return float(getattr(metric, "total_cost", 0.0) or 0.0) > 0 and getattr(metric, "is_estimated", None) is False
+        helper = _helper("is_cost_trusted")
+        if helper is not None:
+            return bool(helper(metric))
+        total = getattr(metric, "total_cost", None)
+        return source in TRUSTED_COST_SOURCES and (total is None or _finite_non_negative(total))
+    total = getattr(metric, "total_cost", None)
+    return _finite_non_negative(total) and float(total or 0.0) > 0 and getattr(metric, "is_estimated", None) is False
 
 
 def carbon_is_trusted(metric: Any) -> bool:
     """Whether a row's CO2e may back a claimed carbon saving."""
-    if _source(metric, "power_source") == "default_profile":
-        return False
+    if _source(metric, "power_source") is not None:
+        power_helper = _helper("is_power_profiled")
+        if power_helper is not None and not power_helper(metric):
+            return False
+        if _source(metric, "power_source") == "default_profile":
+            return False
     source = _source(metric, "intensity_source")
     if source is not None:
-        return source in TRUSTED_INTENSITY_SOURCES
+        helper = _helper("is_intensity_measured")
+        return bool(helper(metric)) if helper is not None else source in TRUSTED_INTENSITY_SOURCES
     return getattr(metric, "is_estimated", None) is False
 
 
 def usage_is_trusted(metric: Any) -> bool:
     """Whether a row's usage may back a health gate (``usage_source=prometheus`` when known)."""
     source = _source(metric, "usage_source")
-    return source is None or source in TRUSTED_USAGE_SOURCES
+    if source is None:
+        return True
+    helper = _helper("is_usage_trusted")
+    return bool(helper(metric)) if helper is not None else source in TRUSTED_USAGE_SOURCES
 
 
 # ----------------------------------------------------------------------
@@ -485,12 +537,13 @@ class RecommendationVerifier:
         ]
         after_end = max(max(ends), after_start)
         baseline_ends = []
-        for record in group:
+        for record, start in zip(group, starts):
+            applied = ensure_utc(record.applied_at) if record.applied_at is not None else start
             value = _baseline_dict(record).get("baseline_window_end")
             try:
-                baseline_ends.append(ensure_utc(value) if value else ensure_utc(record.applied_at))  # type: ignore[arg-type]
+                baseline_ends.append(ensure_utc(value) if value else applied)
             except (TypeError, ValueError):
-                baseline_ends.append(ensure_utc(record.applied_at))  # type: ignore[arg-type]
+                baseline_ends.append(applied)
         baseline_end = min(min(baseline_ends), after_start)
         return MeasurementWindows(
             baseline_start=baseline_end - (after_end - after_start),
