@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class KubernetesHealthObservation(BaseModel):
@@ -100,3 +100,12 @@ class DismissRollbackReviewRequest(BaseModel):
     """Body of ``POST /recommendations/{id}/rollback-review/dismiss`` (C0.11)."""
 
     reason: str = Field(..., min_length=1, max_length=500, description="Why the health finding is a false positive.")
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        """A whitespace-only reason is no reason: reject it (422) and store the trimmed text."""
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reason must not be blank")
+        return stripped

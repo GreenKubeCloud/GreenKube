@@ -468,6 +468,9 @@ async def dismiss_rollback_review(
         raise HTTPException(status_code=404, detail=str(e))
     except RecommendationTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        # Invalid input the body validation let through (e.g. a blank reason): never a 500.
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.get("/recommendations/{rec_id}/events", response_model=List[RecommendationEvent])

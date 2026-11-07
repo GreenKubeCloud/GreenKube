@@ -139,6 +139,39 @@ class TestDismissRollbackReview:
         assert response.json()["status"] == "applied"
         assert response.json()["verification_status"] == "pending"
 
+    @pytest.mark.parametrize("reason", ["", "   ", "\n\t"])
+    async def test_blank_reason_is_422_not_500(self, reco_repo, reason):
+        rec_id = await _saved(
+            reco_repo,
+            status=RecommendationStatus.ROLLBACK_REVIEW,
+            applied_at=datetime.now(timezone.utc) - timedelta(days=4),
+            verification_status="failed",
+        )
+        app = create_app()
+        app.dependency_overrides[get_recommendation_repository] = lambda: reco_repo
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/api/v1/recommendations/{rec_id}/rollback-review/dismiss", json={"reason": reason})
+
+        assert response.status_code == 422
+        record = await reco_repo.get_recommendation_by_id(rec_id)
+        assert record is not None and record.status is RecommendationStatus.ROLLBACK_REVIEW
+
+    async def test_reason_is_stored_trimmed(self, client, reco_repo):
+        rec_id = await _saved(
+            reco_repo,
+            status=RecommendationStatus.ROLLBACK_REVIEW,
+            applied_at=datetime.now(timezone.utc) - timedelta(days=4),
+            verification_status="failed",
+        )
+
+        response = client.post(
+            f"/api/v1/recommendations/{rec_id}/rollback-review/dismiss", json={"reason": "  node drain  "}
+        )
+
+        assert response.status_code == 200
+        events = await reco_repo.get_events(rec_id)
+        assert events[-1].payload.model_dump()["reason"] == "node drain"
+
     async def test_dismiss_outside_rollback_review_is_409(self, client, reco_repo):
         rec_id = await _saved(reco_repo)
 
