@@ -11,7 +11,7 @@
 - The API no longer runs a recommendation scan at startup (one per replica) and recommendation GET endpoints never run the optimizer or write: `refresh=true` on `/recommendations`, `/recommendations/active` and `/recommendations/top` is deprecated and only queues a run, returning its id in the `X-GreenKube-Run-Id` header (E1, BUG-21).
 - `GET /api/v1/recommendations` no longer generates recommendations on an empty first read.
 - The controller's scan poll waits for its initial collection; the initial cycle then always runs one cluster-wide scan on the fresh data, so the first recommendations no longer wait a full `RECOMMENDATION_SCAN_INTERVAL` after a (re)start (E1).
-- The deprecated `refresh=true` reuses a run covering the scope that is pending or finished within 5 minutes instead of queuing another scan (E1).
+- The deprecated `refresh=true` reuses a run covering the scope that is pending or finished within 5 minutes instead of queuing another scan; a failed run is reused for 1 minute only, then a refresh queues a retry (E1).
 - The controller's default memory limit (`resources`, `production.components.controller.resources`) is raised from 512Mi to 1Gi because scans now run there (E1).
 - Each recommendation source runs in isolation with a 30 s probe and 5 min collection bound; a hung connector is recorded as failed instead of stalling the scan (E8).
 - A run with some failed sources is now a degraded success (failed sources are listed in `error` and `sources`); it fails only when every attempted source failed or persistence failed. Persistence errors now fail the run instead of being logged as a success.

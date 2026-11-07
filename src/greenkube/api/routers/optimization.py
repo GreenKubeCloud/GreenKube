@@ -20,9 +20,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Respon
 
 from greenkube.api.dependencies import get_authenticated_actor, validate_namespace
 from greenkube.models.optimization_run import (
+    OptimizationRun,
     OptimizationRunAccepted,
     OptimizationRunRequest,
     OptimizationRunResponse,
+    OptimizationRunStatus,
     OptimizationRunTrigger,
 )
 from greenkube.storage.base_optimization_run_repository import MAX_RUN_LIST_LIMIT, OptimizationRunRepository
@@ -36,6 +38,9 @@ RUN_ID_HEADER = "X-GreenKube-Run-Id"
 #: A ``refresh=true`` GET reuses a pending run, or one that finished this
 #: recently, for its scope instead of queuing another scan.
 REFRESH_REUSE_WINDOW = timedelta(minutes=5)
+#: A failed run is reused only this long, so a refresh retries soon after a
+#: failure without page loads chaining back-to-back scans.
+REFRESH_FAILURE_BACKOFF = timedelta(minutes=1)
 
 
 async def get_optimization_run_repository() -> OptimizationRunRepository:
@@ -72,12 +77,15 @@ async def enqueue_refresh(
 
     A run covering the scope that is queued, running or finished within
     :data:`REFRESH_REUSE_WINDOW` is reused, so page loads that still send
-    ``refresh=true`` do not chain scans. Failures are logged and swallowed so
-    the read still returns current data.
+    ``refresh=true`` do not chain scans. A failed run is reused only for
+    :data:`REFRESH_FAILURE_BACKOFF`; after that the refresh queues a retry.
+    Failures are logged and swallowed so the read still returns current data.
     """
     try:
         now = datetime.now(timezone.utc)
         run = await run_repo.find_recent_covering(namespace=namespace, completed_after=now - REFRESH_REUSE_WINDOW)
+        if run is not None and _failed_before(run, now - REFRESH_FAILURE_BACKOFF):
+            run = None
         if run is None:
             run, _ = await enqueue_optimization_run(
                 run_repo,
@@ -92,6 +100,16 @@ async def enqueue_refresh(
         return None
     response.headers[RUN_ID_HEADER] = str(run.id)
     return run.id
+
+
+def _failed_before(run: OptimizationRun, cutoff: datetime) -> bool:
+    """Whether ``run`` failed before ``cutoff`` (a stale failure is not worth reusing)."""
+    if run.status != OptimizationRunStatus.FAILED or run.completed_at is None:
+        return False
+    completed_at = run.completed_at
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=timezone.utc)
+    return completed_at < cutoff
 
 
 @router.post(

@@ -316,6 +316,40 @@ class TestGetEndpointsNeverWrite:
         assert response.headers[RUN_ID_HEADER] == "2"
         assert [call["trigger"] for call in run_repo.enqueue_calls] == [OptimizationRunTrigger.REFRESH]
 
+    def test_refresh_retries_after_a_failed_run(self, client, run_repo, no_scan):
+        """A failed run is not fresh data: past a short backoff, refresh queues a new run."""
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.FAILED,
+            trigger=OptimizationRunTrigger.SCHEDULED,
+            requested_at=now - timedelta(minutes=3),
+            completed_at=now - timedelta(minutes=2),
+            error="every source failed",
+        )
+
+        response = client.get("/api/v1/recommendations/active", params={"refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "2"
+        assert [call["trigger"] for call in run_repo.enqueue_calls] == [OptimizationRunTrigger.REFRESH]
+
+    def test_refresh_backs_off_briefly_after_a_failed_run(self, client, run_repo, no_scan):
+        """Page loads right after a failure point at it instead of chaining retries."""
+        now = datetime.now(timezone.utc)
+        run_repo.runs[1] = OptimizationRun(
+            id=1,
+            status=OptimizationRunStatus.FAILED,
+            trigger=OptimizationRunTrigger.REFRESH,
+            requested_at=now - timedelta(seconds=40),
+            completed_at=now - timedelta(seconds=20),
+            error="every source failed",
+        )
+
+        response = client.get("/api/v1/recommendations/active", params={"refresh": "true"})
+
+        assert response.headers[RUN_ID_HEADER] == "1"
+        assert run_repo.enqueue_calls == []
+
     def test_refresh_for_another_namespace_is_not_covered(self, client, run_repo, no_scan):
         now = datetime.now(timezone.utc)
         run_repo.runs[1] = OptimizationRun(
