@@ -1,15 +1,66 @@
 # src/greenkube/storage/sqlite/savings_repository.py
-"""SQLite implementation of the SavingsLedgerRepository."""
+"""SQLite implementation of the append-only SavingsLedgerRepository."""
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from datetime import datetime, timezone
+from typing import Dict, Iterable, List, Optional
 
-from ...models.savings import SavingsLedgerRecord
-from ...utils.date_utils import to_iso_z
-from ..base_savings_repository import SavingsLedgerRepository
+from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
+from ...utils.date_utils import ensure_utc, to_iso_z
+from ..base_savings_repository import ATTRIBUTION_STREAM, AccrualWatermarkConflict, SavingsLedgerRepository
 
 logger = logging.getLogger(__name__)
+
+_INSERT_SQL = """
+    INSERT INTO recommendation_savings_ledger
+        (recommendation_id, cluster_name, namespace,
+         recommendation_type, co2e_saved_grams,
+         cost_saved_dollars, period_seconds, timestamp,
+         period_start, period_end, slot_start,
+         measurement_method, baseline_value, actual_value,
+         confidence, superseded)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO NOTHING
+"""
+
+# Share of a row's period that falls inside the [:start, :end) window.
+_WINDOW_SHARE_SQL = """
+    CASE
+        WHEN period_start >= :start AND period_end <= :end THEN 1.0
+        ELSE MAX(
+            0.0,
+            MIN(julianday(period_end), julianday(:end)) - MAX(julianday(period_start), julianday(:start))
+        ) / NULLIF(julianday(period_end) - julianday(period_start), 0)
+    END
+"""
+
+_ID_CHUNK = 500
+
+
+def _bound(value: datetime) -> str:
+    """Serialize a window bound in the canonical whole-second ledger format."""
+    return to_iso_z(ensure_utc(value).replace(microsecond=0))
+
+
+def _row_params(record: SavingsLedgerRecord) -> tuple:
+    return (
+        record.recommendation_id,
+        record.cluster_name,
+        record.namespace or "",
+        record.recommendation_type,
+        record.co2e_saved_grams,
+        record.cost_saved_dollars,
+        record.period_seconds,
+        to_iso_z(record.timestamp),
+        to_iso_z(record.period_start or record.timestamp),
+        to_iso_z(record.period_end or record.timestamp),
+        to_iso_z(record.slot_start) if record.slot_start is not None else None,
+        normalize_savings_method(record.measurement_method),
+        record.baseline_value,
+        record.actual_value,
+        record.confidence,
+        int(bool(record.superseded)),
+    )
 
 
 class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
@@ -18,271 +69,236 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
     def __init__(self, db_manager):
         self._db = db_manager
 
-    async def save_records(self, records: List[SavingsLedgerRecord]) -> int:
-        """Bulk-insert raw savings records for the current collection period."""
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    async def _insert(self, conn, records: List[SavingsLedgerRecord]) -> int:
         if not records:
             return 0
+        cursor = await conn.executemany(_INSERT_SQL, [_row_params(r) for r in records])
+        return max(cursor.rowcount, 0)
 
-        rows = [
-            (
-                r.recommendation_id,
-                r.cluster_name,
-                r.namespace,
-                r.recommendation_type,
-                r.co2e_saved_grams,
-                r.cost_saved_dollars,
-                r.period_seconds,
-                to_iso_z(r.timestamp),
-                to_iso_z(r.period_start or r.timestamp),
-                to_iso_z(r.period_end or r.timestamp),
-                r.measurement_method,
-                r.baseline_value,
-                r.actual_value,
-                r.confidence,
-                int(bool(r.superseded)),
-            )
-            for r in records
-        ]
-
+    async def save_records(self, records: List[SavingsLedgerRecord]) -> int:
+        """Append accrual rows; rows whose key already exists are left untouched."""
+        if not records:
+            return 0
         async with self._db.connection_scope() as conn:
-            await conn.executemany(
-                """
-                INSERT INTO recommendation_savings_ledger
-                    (recommendation_id, cluster_name, namespace,
-                     recommendation_type, co2e_saved_grams,
-                     cost_saved_dollars, period_seconds, timestamp,
-                     period_start, period_end,
-                     measurement_method, baseline_value, actual_value,
-                     confidence, superseded)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (recommendation_id, period_start, period_end, measurement_method)
-                DO UPDATE SET
-                     cluster_name = excluded.cluster_name,
-                     namespace = excluded.namespace,
-                     recommendation_type = excluded.recommendation_type,
-                     co2e_saved_grams = excluded.co2e_saved_grams,
-                     cost_saved_dollars = excluded.cost_saved_dollars,
-                     period_seconds = excluded.period_seconds,
-                     timestamp = excluded.timestamp,
-                     baseline_value = excluded.baseline_value,
-                     actual_value = excluded.actual_value,
-                     confidence = excluded.confidence,
-                     superseded = excluded.superseded
-                """,
-                rows,
-            )
-            for record in records:
-                if record.measurement_method == "measured":
-                    period_start = record.period_start or record.timestamp
-                    period_end = record.period_end or record.timestamp
-                    await conn.execute(
-                        """
-                         UPDATE recommendation_savings_ledger
-                         SET superseded = 1
-                         WHERE recommendation_id = ?
-                           AND measurement_method = 'prorated'
-                           AND period_start < ?
-                           AND period_end > ?
-                         """,
-                        (record.recommendation_id, to_iso_z(period_end), to_iso_z(period_start)),
-                    )
-                    await conn.execute(
-                        """
-                         UPDATE recommendation_savings_ledger_hourly
-                         SET superseded = 1
-                         WHERE recommendation_id = ?
-                           AND measurement_method = 'prorated'
-                           AND period_start < ?
-                           AND period_end > ?
-                         """,
-                        (record.recommendation_id, to_iso_z(period_end), to_iso_z(period_start)),
-                    )
-            await conn.commit()
-        logger.debug("Saved %d savings ledger records to SQLite.", len(records))
-        return len(records)
+            try:
+                inserted = await self._insert(conn, records)
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        logger.debug("Appended %d/%d savings ledger rows to SQLite.", inserted, len(records))
+        return inserted
 
-    async def get_cumulative_totals(
+    async def append_accruals(
         self,
+        records: List[SavingsLedgerRecord],
+        *,
         cluster_name: str,
-        group_by_method: bool = False,
-    ) -> Dict[str, Dict[str, float]]:
-        """Combine raw + hourly totals into a single cumulative dict.
-
-        Groups by recommendation type by default, or by measurement method when
-        ``group_by_method`` is set. Superseded rows are always excluded.
-        """
-        column = "measurement_method" if group_by_method else "recommendation_type"
-        result: Dict[str, Dict[str, float]] = {}
-
+        stream: str,
+        expected_watermark: Optional[datetime],
+        new_watermark: datetime,
+    ) -> int:
+        """Compare-and-swap the watermark and append rows in one transaction."""
+        now = to_iso_z(datetime.now(timezone.utc))
         async with self._db.connection_scope() as conn:
-            for table in ("recommendation_savings_ledger", "recommendation_savings_ledger_hourly"):
-                cursor = await conn.execute(
-                    f"""
-                    SELECT {column},
-                           SUM(co2e_saved_grams)   AS co2e,
-                           SUM(cost_saved_dollars) AS cost
-                    FROM {table}
-                    WHERE cluster_name = ?
-                      AND COALESCE(superseded, 0) = 0
-                    GROUP BY {column}
-                    """,
-                    (cluster_name,),
-                )
-                for row in await cursor.fetchall():
-                    key = row[0] or ("prorated" if group_by_method else "unknown")
-                    result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                    result[key]["co2e_saved_grams"] += row[1] or 0.0
-                    result[key]["cost_saved_dollars"] += row[2] or 0.0
-
-        return result
-
-    async def get_window_totals(
-        self,
-        cluster_name: str,
-        start_time: datetime,
-        end_time: datetime,
-        namespace: str | None = None,
-        group_by_method: bool = False,
-    ) -> Dict[str, Dict[str, float]]:
-        """Combine raw + hourly totals for an exact time window."""
-        start = to_iso_z(start_time)
-        end = to_iso_z(end_time)
-        column = "measurement_method" if group_by_method else "recommendation_type"
-        result: Dict[str, Dict[str, float]] = {}
-        namespace_filter = ""
-        raw_params: list = [cluster_name, start, end]
-        hourly_params: list = [cluster_name, start, end]
-        if namespace == "":
-            namespace_filter = "\n                  AND (namespace IS NULL OR namespace = '')"
-        elif namespace is not None:
-            namespace_filter = "\n                  AND namespace = ?"
-            raw_params.append(namespace)
-            hourly_params.append(namespace)
-
-        async with self._db.connection_scope() as conn:
-            cursor = await conn.execute(
-                f"""
-                SELECT {column},
-                       COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
-                       COALESCE(SUM(cost_saved_dollars), 0) AS cost
-                FROM recommendation_savings_ledger
-                WHERE cluster_name = ?
-                  AND COALESCE(superseded, 0) = 0
-                  AND timestamp >= ?
-                                    AND timestamp <= ?{namespace_filter}
-                GROUP BY {column}
-                """,
-                tuple(raw_params),
-            )
-            for row in await cursor.fetchall():
-                key = row[0] or ("prorated" if group_by_method else "unknown")
-                result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[key]["co2e_saved_grams"] += row[1] or 0.0
-                result[key]["cost_saved_dollars"] += row[2] or 0.0
-
-            cursor = await conn.execute(
-                f"""
-                SELECT {column},
-                       COALESCE(SUM(co2e_saved_grams), 0)   AS co2e,
-                       COALESCE(SUM(cost_saved_dollars), 0) AS cost
-                FROM recommendation_savings_ledger_hourly
-                WHERE cluster_name = ?
-                  AND COALESCE(superseded, 0) = 0
-                  AND hour_bucket >= ?
-                                    AND hour_bucket <= ?{namespace_filter}
-                GROUP BY {column}
-                """,
-                tuple(hourly_params),
-            )
-            for row in await cursor.fetchall():
-                key = row[0] or ("prorated" if group_by_method else "unknown")
-                result.setdefault(key, {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
-                result[key]["co2e_saved_grams"] += row[1] or 0.0
-                result[key]["cost_saved_dollars"] += row[2] or 0.0
-
-        return result
+            try:
+                if expected_watermark is None:
+                    cursor = await conn.execute(
+                        """
+                        INSERT INTO accrual_watermarks (cluster_name, stream, watermark, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (cluster_name, stream, to_iso_z(new_watermark), now),
+                    )
+                else:
+                    cursor = await conn.execute(
+                        """
+                        UPDATE accrual_watermarks
+                        SET watermark = ?, updated_at = ?
+                        WHERE cluster_name = ? AND stream = ? AND watermark = ?
+                        """,
+                        (to_iso_z(new_watermark), now, cluster_name, stream, to_iso_z(expected_watermark)),
+                    )
+                if cursor.rowcount != 1:
+                    raise AccrualWatermarkConflict(
+                        f"Accrual watermark for {cluster_name}/{stream} moved; another writer is attributing."
+                    )
+                inserted = await self._insert(conn, records)
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return inserted
 
     async def supersede_for_recommendation(self, recommendation_id: int) -> int:
         """Flags every attribution row for a recommendation as superseded."""
         total = 0
         async with self._db.connection_scope() as conn:
-            for table in ("recommendation_savings_ledger", "recommendation_savings_ledger_hourly"):
-                cursor = await conn.execute(
-                    f"UPDATE {table} SET superseded = 1 WHERE recommendation_id = ? AND COALESCE(superseded, 0) = 0",
-                    (recommendation_id,),
-                )
-                total += cursor.rowcount
-            await conn.commit()
+            try:
+                for table in ("recommendation_savings_ledger", "recommendation_savings_ledger_hourly"):
+                    cursor = await conn.execute(
+                        f"UPDATE {table} SET superseded = 1 WHERE recommendation_id = ? AND superseded = 0",
+                        (recommendation_id,),
+                    )
+                    total += cursor.rowcount
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
         if total:
             logger.info("Superseded %d savings ledger row(s) for recommendation %d.", total, recommendation_id)
         return total
 
-    async def compress_to_hourly(self, cutoff_hours: int = 24) -> int:
-        """Aggregate raw records older than cutoff_hours into hourly buckets."""
-        cutoff = to_iso_z(datetime.now(timezone.utc) - timedelta(hours=cutoff_hours))
+    # ------------------------------------------------------------------
+    # Watermarks
+    # ------------------------------------------------------------------
 
+    async def get_accrual_watermark(self, cluster_name: str, stream: str = ATTRIBUTION_STREAM) -> Optional[datetime]:
+        async with self._db.connection_scope() as conn:
+            cursor = await conn.execute(
+                "SELECT watermark FROM accrual_watermarks WHERE cluster_name = ? AND stream = ?",
+                (cluster_name, stream),
+            )
+            row = await cursor.fetchone()
+        return ensure_utc(row[0]) if row and row[0] else None
+
+    async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
+        ids = sorted({int(i) for i in recommendation_ids})
+        floors: Dict[int, datetime] = {}
+        if not ids:
+            return floors
+        async with self._db.connection_scope() as conn:
+            for offset in range(0, len(ids), _ID_CHUNK):
+                chunk = ids[offset : offset + _ID_CHUNK]
+                placeholders = ", ".join("?" for _ in chunk)
+                cursor = await conn.execute(
+                    f"""
+                    SELECT recommendation_id, MAX(period_end)
+                    FROM savings_ledger_entries
+                    WHERE recommendation_id IN ({placeholders})
+                    GROUP BY recommendation_id
+                    """,
+                    chunk,
+                )
+                for rec_id, period_end in await cursor.fetchall():
+                    if period_end:
+                        floors[int(rec_id)] = ensure_utc(period_end)
+        return floors
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    async def get_accrual_breakdown(
+        self,
+        cluster_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
+    ) -> List[SavingsAccrualTotal]:
+        params: dict = {"cluster": cluster_name}
+        share = "1.0"
+        filters = ""
+        if start_time is not None and end_time is not None:
+            params.update(start=_bound(start_time), end=_bound(end_time))
+            share = _WINDOW_SHARE_SQL
+            filters += " AND period_end > :start AND period_start < :end"
+        if namespace == "":
+            filters += " AND (namespace IS NULL OR namespace = '')"
+        elif namespace is not None:
+            params["namespace"] = namespace
+            filters += " AND namespace = :namespace"
+
+        async with self._db.connection_scope() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT namespace, recommendation_type, measurement_method,
+                       SUM(co2e_saved_grams * share) AS co2e,
+                       SUM(cost_saved_dollars * share) AS cost
+                FROM (
+                    SELECT namespace, recommendation_type, measurement_method,
+                           co2e_saved_grams, cost_saved_dollars,
+                           {share} AS share
+                    FROM savings_ledger_entries
+                    WHERE cluster_name = :cluster
+                      AND superseded = 0{filters}
+                ) AS entries
+                GROUP BY namespace, recommendation_type, measurement_method
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+
+        return [
+            SavingsAccrualTotal(
+                namespace=row[0] or "",
+                recommendation_type=row[1] or "unknown",
+                method=normalize_savings_method(row[2]),
+                co2e_saved_grams=float(row[3] or 0.0),
+                cost_saved_dollars=float(row[4] or 0.0),
+            )
+            for row in rows
+        ]
+
+    async def get_lifetime_counters(self, cluster_name: str) -> List[SavingsCounterTotal]:
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
                 """
-                INSERT INTO recommendation_savings_ledger_hourly
-                    (recommendation_id, cluster_name, namespace,
-                     recommendation_type, co2e_saved_grams,
-                     cost_saved_dollars, sample_count, hour_bucket,
-                     measurement_method, baseline_value, actual_value,
-                     confidence, superseded, period_start, period_end)
-                SELECT
-                    recommendation_id,
-                    cluster_name,
-                    namespace,
-                    recommendation_type,
-                    SUM(co2e_saved_grams),
-                    SUM(cost_saved_dollars),
-                    COUNT(*),
-                    strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour_bucket,
-                    COALESCE(measurement_method, 'prorated'),
-                    MAX(baseline_value),
-                    MAX(actual_value),
-                    MAX(confidence),
-                    MAX(COALESCE(superseded, 0)),
-                    strftime('%Y-%m-%dT%H:00:00Z', timestamp),
-                    strftime('%Y-%m-%dT%H:00:00Z', timestamp, '+1 hour')
-                FROM recommendation_savings_ledger
-                WHERE timestamp < ?
-                GROUP BY recommendation_id, cluster_name, namespace,
-                         recommendation_type,
-                         COALESCE(measurement_method, 'prorated'),
-                         strftime('%Y-%m-%dT%H:00:00Z', timestamp)
-                ON CONFLICT (recommendation_id, hour_bucket, measurement_method)
-                DO UPDATE SET
-                    co2e_saved_grams = excluded.co2e_saved_grams,
-                    cost_saved_dollars = excluded.cost_saved_dollars,
-                    sample_count = excluded.sample_count,
-                    superseded = excluded.superseded,
-                    period_start = excluded.period_start,
-                    period_end = excluded.period_end
+                SELECT recommendation_type, measurement_method,
+                       SUM(CASE WHEN co2e_saved_grams > 0 THEN co2e_saved_grams ELSE 0 END)
+                         + SUM(CASE WHEN superseded <> 0 AND co2e_saved_grams < 0
+                                    THEN -co2e_saved_grams ELSE 0 END),
+                       SUM(CASE WHEN cost_saved_dollars > 0 THEN cost_saved_dollars ELSE 0 END)
+                         + SUM(CASE WHEN superseded <> 0 AND cost_saved_dollars < 0
+                                    THEN -cost_saved_dollars ELSE 0 END),
+                       SUM(CASE WHEN co2e_saved_grams < 0 THEN -co2e_saved_grams ELSE 0 END)
+                         + SUM(CASE WHEN superseded <> 0 AND co2e_saved_grams > 0
+                                    THEN co2e_saved_grams ELSE 0 END),
+                       SUM(CASE WHEN cost_saved_dollars < 0 THEN -cost_saved_dollars ELSE 0 END)
+                         + SUM(CASE WHEN superseded <> 0 AND cost_saved_dollars > 0
+                                    THEN cost_saved_dollars ELSE 0 END)
+                FROM savings_ledger_entries
+                WHERE cluster_name = ?
+                GROUP BY recommendation_type, measurement_method
                 """,
-                (cutoff,),
+                (cluster_name,),
             )
-            count = cursor.rowcount
-            await conn.execute(
-                "DELETE FROM recommendation_savings_ledger WHERE timestamp < ?",
-                (cutoff,),
+            rows = await cursor.fetchall()
+        return [
+            SavingsCounterTotal(
+                recommendation_type=row[0] or "unknown",
+                method=normalize_savings_method(row[1]),
+                accrued_co2e_grams=float(row[2] or 0.0),
+                accrued_cost_dollars=float(row[3] or 0.0),
+                reversed_co2e_grams=float(row[4] or 0.0),
+                reversed_cost_dollars=float(row[5] or 0.0),
             )
-            await conn.commit()
+            for row in rows
+        ]
 
-        logger.debug("Compressed %d savings ledger records to hourly.", count)
-        return count
-
-    async def prune_raw(self, retention_days: int = 7) -> int:
-        """Delete raw savings records older than retention_days."""
-        if retention_days < 0:
-            return 0
-        cutoff = to_iso_z(datetime.now(timezone.utc) - timedelta(days=retention_days))
+    async def has_legacy_compressed_rows(
+        self,
+        cluster_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> bool:
+        params: list = [cluster_name]
+        window = ""
+        if start_time is not None and end_time is not None:
+            window = " AND period_end > ? AND period_start < ?"
+            params.extend([_bound(start_time), _bound(end_time)])
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(
-                "DELETE FROM recommendation_savings_ledger WHERE timestamp < ?",
-                (cutoff,),
+                f"""
+                SELECT 1 FROM recommendation_savings_ledger_hourly
+                WHERE cluster_name = ? AND legacy_compressed = 1{window}
+                LIMIT 1
+                """,
+                params,
             )
-            count = cursor.rowcount
-            await conn.commit()
-        return count
+            return await cursor.fetchone() is not None

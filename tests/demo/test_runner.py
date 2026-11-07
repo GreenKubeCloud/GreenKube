@@ -105,7 +105,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -133,7 +132,6 @@ class TestPopulateDatabase:
         assert "combined_metrics" in counts
         assert "recommendations" in counts
         assert "savings_ledger" in counts
-        assert "savings_ledger_hourly" in counts
         assert "hourly_compressed" in counts
         assert "timeseries_cache_rows" in counts
 
@@ -177,7 +175,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -243,7 +240,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=12)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -312,7 +308,6 @@ class TestPopulateDatabase:
 
         mock_savings_repo = AsyncMock()
         mock_savings_repo.save_records = AsyncMock(side_effect=lambda records: len(records))
-        mock_savings_repo.compress_to_hourly = AsyncMock(return_value=24)
 
         mock_db_manager = AsyncMock()
         mock_db_manager.connect = AsyncMock()
@@ -336,5 +331,5 @@ class TestPopulateDatabase:
             counts = await _populate_database(days=2)
 
         assert counts["savings_ledger"] > 0
-        assert counts["savings_ledger_hourly"] == 24
+        assert "savings_ledger_hourly" not in counts  # the ledger is never compressed (C0.6)
         assert mock_savings_repo.save_records.await_count > 0

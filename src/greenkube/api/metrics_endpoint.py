@@ -17,13 +17,22 @@ from math import log2
 from typing import List, Sequence
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
+from prometheus_client.core import CounterMetricFamily
 
 from greenkube.core.config import get_config
 from greenkube.core.observability import generate_latest_observability, record_automation_backlog
 from greenkube.core.recommendation_ranking import rank_recommendations
+from greenkube.core.savings_attributor import annual_rates_by_method
 from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, Recommendation, RecommendationRecord
 from greenkube.models.node import NodeInfo
+from greenkube.models.savings import (
+    METHOD_MEASURED,
+    METHOD_PROJECTED,
+    SAVINGS_METHODS,
+    SavingsAccrualTotal,
+    SavingsCounterTotal,
+)
 from greenkube.storage.base_gitops_repository import GitOpsRepository
 
 logger = logging.getLogger(__name__)
@@ -260,14 +269,26 @@ DASHBOARD_SUMMARY_NAMESPACE_COUNT = Gauge(
 )
 DASHBOARD_SAVINGS_CO2 = Gauge(
     "greenkube_dashboard_savings_co2e_grams_total",
-    "DB-backed CO2e savings attributed during a fixed dashboard time window.",
+    "Realized (measured) CO2e savings accrued during a fixed dashboard time window.",
     DASHBOARD_SAVINGS_LABELS,
     registry=REGISTRY,
 )
 DASHBOARD_SAVINGS_COST = Gauge(
     "greenkube_dashboard_savings_cost_dollars_total",
-    "DB-backed cost savings attributed during a fixed dashboard time window.",
+    "Realized (measured) cost savings accrued during a fixed dashboard time window.",
     DASHBOARD_SAVINGS_LABELS,
+    registry=REGISTRY,
+)
+DASHBOARD_SAVINGS_ACCRUED_CO2 = Gauge(
+    "greenkube_dashboard_savings_accrued_co2e_grams",
+    "CO2e savings accrued during a fixed dashboard time window, by method. Never sum methods.",
+    DASHBOARD_SAVINGS_LABELS + ["method"],
+    registry=REGISTRY,
+)
+DASHBOARD_SAVINGS_ACCRUED_COST = Gauge(
+    "greenkube_dashboard_savings_accrued_cost_dollars",
+    "Cost savings accrued during a fixed dashboard time window, by method. Never sum methods.",
+    DASHBOARD_SAVINGS_LABELS + ["method"],
     registry=REGISTRY,
 )
 
@@ -407,43 +428,98 @@ NS_REC_SAVINGS_COST = Gauge(
 )
 
 # ---------------------------------------------------------------------------
-# Realized savings gauges (DB-backed cumulative totals)
+# Savings ledger metrics (DB-backed)
 #
-# These gauges hold the CUMULATIVE total savings attributed to each
-# recommendation type since GreenKube installation. Prefer the
-# greenkube_dashboard_savings_* gauges for exact dashboard time windows.
+# The ``*_attributed_*_total`` and ``*_reversed_*_total`` families are monotonic
+# counters computed from the append-only ledger, labelled by ``method``
+# (projected, measured, user_declared). Net savings = attributed − reversed.
+# Never sum methods: only ``method="measured"`` is realized savings.
 # ---------------------------------------------------------------------------
-SAVINGS_CO2_ATTRIBUTED = Gauge(
-    "greenkube_co2e_savings_attributed_grams_total",
-    "Cumulative CO2e (grams) avoided, prorated from applied recommendations. "
-    "Prefer greenkube_dashboard_savings_co2e_grams_total for exact dashboard windows.",
-    ["cluster", "recommendation_type"],
-    registry=REGISTRY,
-)
-SAVINGS_COST_ATTRIBUTED = Gauge(
-    "greenkube_cost_savings_attributed_dollars_total",
-    "Cumulative cloud cost (dollars) avoided, prorated from applied recommendations. "
-    "Prefer greenkube_dashboard_savings_cost_dollars_total for exact dashboard windows.",
-    ["cluster", "recommendation_type"],
-    registry=REGISTRY,
-)
+SAVINGS_COUNTER_LABELS = ["cluster", "recommendation_type", "method"]
+
+
+class _SavingsLedgerCounterCollector:
+    """Expose the latest ledger counter snapshot as Prometheus counters."""
+
+    _FAMILIES = (
+        (
+            "greenkube_co2e_savings_attributed_grams",
+            "Cumulative CO2e (grams) accrued in the savings ledger, by method. Monotonic.",
+            "accrued_co2e_grams",
+        ),
+        (
+            "greenkube_cost_savings_attributed_dollars",
+            "Cumulative cost (dollars) accrued in the savings ledger, by method. Monotonic.",
+            "accrued_cost_dollars",
+        ),
+        (
+            "greenkube_co2e_savings_reversed_grams",
+            "Cumulative CO2e (grams) reversed: superseded accruals and negative declarations. Monotonic.",
+            "reversed_co2e_grams",
+        ),
+        (
+            "greenkube_cost_savings_reversed_dollars",
+            "Cumulative cost (dollars) reversed: superseded accruals and negative declarations. Monotonic.",
+            "reversed_cost_dollars",
+        ),
+    )
+
+    def __init__(self) -> None:
+        self._snapshot: list[tuple[str, SavingsCounterTotal]] = []
+
+    def update(self, cluster: str, counters: Sequence[SavingsCounterTotal]) -> None:
+        self._snapshot = [(cluster, counter) for counter in counters]
+
+    def describe(self):
+        return [
+            CounterMetricFamily(name, documentation, labels=SAVINGS_COUNTER_LABELS)
+            for name, documentation, _ in self._FAMILIES
+        ]
+
+    def collect(self):
+        snapshot = list(self._snapshot)
+        for name, documentation, attribute in self._FAMILIES:
+            family = CounterMetricFamily(name, documentation, labels=SAVINGS_COUNTER_LABELS)
+            for cluster, counter in snapshot:
+                family.add_metric(
+                    [cluster, counter.recommendation_type, counter.method],
+                    max(0.0, float(getattr(counter, attribute))),
+                )
+            yield family
+
+
+SAVINGS_LEDGER_COUNTERS = _SavingsLedgerCounterCollector()
+REGISTRY.register(SAVINGS_LEDGER_COUNTERS)
+
 SAVINGS_MEASURED_RATIO = Gauge(
     "greenkube_savings_measured_vs_projected_ratio",
-    "Share of attributed CO2e savings that has been verified by measurement (0–1).",
+    "Share of net accrued CO2e savings that is measured rather than projected (0–1).",
     ["cluster"],
+    registry=REGISTRY,
+)
+SAVINGS_RUN_RATE_CO2 = Gauge(
+    "greenkube_savings_run_rate_annual_co2e_grams",
+    "Current annual CO2e savings rate of applied recommendations, by method (projected, measured, user_declared).",
+    ["cluster", "method"],
+    registry=REGISTRY,
+)
+SAVINGS_RUN_RATE_COST = Gauge(
+    "greenkube_savings_run_rate_annual_cost_dollars",
+    "Current annual cost savings rate of applied recommendations, by method (projected, measured, user_declared).",
+    ["cluster", "method"],
     registry=REGISTRY,
 )
 # Legacy gauges kept for backward compatibility — show the total annual
 # projection from applied recommendations (not window-aware).
 CLUSTER_CO2_SAVED = Gauge(
     "greenkube_cluster_co2e_saved_grams_total",
-    "Annual projected CO2e savings (grams/year) from all applied recommendations.",
+    "Annual projected CO2e savings (grams/year) of applied recommendations still accruing as projected.",
     ["cluster"],
     registry=REGISTRY,
 )
 CLUSTER_COST_SAVED = Gauge(
     "greenkube_cluster_cost_saved_dollars_total",
-    "Annual projected cost savings (dollars/year) from all applied recommendations.",
+    "Annual projected cost savings (dollars/year) of applied recommendations still accruing as projected.",
     ["cluster"],
     registry=REGISTRY,
 )
@@ -527,6 +603,8 @@ def clear_dashboard_savings_metrics() -> None:
     """Clear all DB-backed dashboard savings Prometheus gauges."""
     _clear_gauge(DASHBOARD_SAVINGS_CO2)
     _clear_gauge(DASHBOARD_SAVINGS_COST)
+    _clear_gauge(DASHBOARD_SAVINGS_ACCRUED_CO2)
+    _clear_gauge(DASHBOARD_SAVINGS_ACCRUED_COST)
 
 
 def _dashboard_window_labels(window_slug: str) -> tuple[str, ...]:
@@ -609,6 +687,51 @@ def update_dashboard_savings_metrics(
             DASHBOARD_SAVINGS_COST.labels(**labels, recommendation_type=recommendation_type).set(
                 totals.get("cost_saved_dollars", 0.0)
             )
+
+
+def update_dashboard_savings_from_breakdown(
+    window_slug: str,
+    breakdown: Sequence[SavingsAccrualTotal],
+    *,
+    cluster: str | None = None,
+    namespaces: Sequence[str] = (),
+) -> None:
+    """Expose ledger accruals of one dashboard window.
+
+    ``greenkube_dashboard_savings_*_total`` carry realized (measured) savings
+    only; every method is exposed separately on
+    ``greenkube_dashboard_savings_accrued_*`` with a ``method`` label.
+    """
+    cluster = cluster if cluster is not None else _get_cluster_name()
+    rows_by_scope: dict[str, list[SavingsAccrualTotal]] = defaultdict(list)
+    for row in breakdown:
+        rows_by_scope[DASHBOARD_NAMESPACE_ALL].append(row)
+        rows_by_scope[row.namespace or DASHBOARD_NAMESPACE_CLUSTER].append(row)
+    scopes = list(dict.fromkeys([DASHBOARD_NAMESPACE_ALL, DASHBOARD_NAMESPACE_CLUSTER, *namespaces, *rows_by_scope]))
+
+    for scope in scopes:
+        rows = rows_by_scope.get(scope, [])
+        realized: dict[str, dict[str, float]] = defaultdict(
+            lambda: {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0}
+        )
+        by_method: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
+        for row in rows:
+            if row.method == METHOD_MEASURED:
+                realized[row.recommendation_type]["co2e_saved_grams"] += row.co2e_saved_grams
+                realized[row.recommendation_type]["cost_saved_dollars"] += row.cost_saved_dollars
+            for type_label in ("all", row.recommendation_type):
+                by_method[(type_label, row.method)][0] += row.co2e_saved_grams
+                by_method[(type_label, row.method)][1] += row.cost_saved_dollars
+        update_dashboard_savings_metrics(window_slug, dict(realized), cluster=cluster, namespace=scope)
+        if rows or scope == DASHBOARD_NAMESPACE_ALL:
+            # Explicit zeros per method keep panels at 0 instead of "No data".
+            for method in SAVINGS_METHODS:
+                by_method.setdefault(("all", method), [0.0, 0.0])
+        for window_label in _dashboard_window_labels(window_slug):
+            labels = {"cluster": cluster, "window": window_label, "namespace": scope}
+            for (type_label, method), (co2e, cost) in by_method.items():
+                DASHBOARD_SAVINGS_ACCRUED_CO2.labels(**labels, recommendation_type=type_label, method=method).set(co2e)
+                DASHBOARD_SAVINGS_ACCRUED_COST.labels(**labels, recommendation_type=type_label, method=method).set(cost)
 
 
 def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
@@ -949,72 +1072,55 @@ def update_recommendation_metrics(recommendations: Sequence[Recommendation | Rec
     logger.debug("Updated Prometheus metrics with %d recommendations.", len(recommendations))
 
 
-def update_attributed_savings_metrics(
-    cumulative_totals: dict,
-    cluster: str,
-    totals_by_method: dict | None = None,
-) -> None:
-    """Update the DB-backed cumulative savings gauges.
-
-    Called by ``refresh_metrics_from_db`` with the output of
-    ``SavingsAttributor.get_cumulative_totals()``.
+def update_attributed_savings_metrics(counters: Sequence[SavingsCounterTotal], cluster: str) -> None:
+    """Publish the ledger's monotonic counters and the measured share.
 
     Args:
-        cumulative_totals: ``{rec_type: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
-        cluster:           Cluster name label value.
-        totals_by_method:  Optional ``{method: totals}`` split used to expose the
-                           measured-vs-projected ratio gauge.
+        counters: Output of ``SavingsLedgerRepository.get_lifetime_counters()``.
+        cluster:  Cluster label value.
     """
-    _clear_gauge(SAVINGS_CO2_ATTRIBUTED)
-    _clear_gauge(SAVINGS_COST_ATTRIBUTED)
+    SAVINGS_LEDGER_COUNTERS.update(cluster, counters)
     _clear_gauge(SAVINGS_MEASURED_RATIO)
+    net: dict[str, float] = defaultdict(float)
+    for counter in counters:
+        net[counter.method] += counter.accrued_co2e_grams - counter.reversed_co2e_grams
+    measured = max(net.get(METHOD_MEASURED, 0.0), 0.0)
+    projected = max(net.get(METHOD_PROJECTED, 0.0), 0.0)
+    total = measured + projected
+    SAVINGS_MEASURED_RATIO.labels(cluster=cluster).set(measured / total if total > 0 else 0.0)
+    logger.debug("Updated savings ledger counters for cluster=%s: %d groups.", cluster, len(counters))
 
-    if totals_by_method is not None:
-        measured = totals_by_method.get("measured", {}).get("co2e_saved_grams", 0.0) or 0.0
-        prorated = totals_by_method.get("prorated", {}).get("co2e_saved_grams", 0.0) or 0.0
-        total = measured + prorated
-        SAVINGS_MEASURED_RATIO.labels(cluster=cluster).set(measured / total if total > 0 else 0.0)
 
-    if not cumulative_totals:
-        return
+def update_savings_run_rate_metrics(applied_records: Sequence[RecommendationRecord]) -> None:
+    """Publish current annual savings rates by method.
 
-    for rec_type, totals in cumulative_totals.items():
-        SAVINGS_CO2_ATTRIBUTED.labels(cluster=cluster, recommendation_type=rec_type).set(
-            totals.get("co2e_saved_grams", 0.0)
-        )
-        SAVINGS_COST_ATTRIBUTED.labels(cluster=cluster, recommendation_type=rec_type).set(
-            totals.get("cost_saved_dollars", 0.0)
-        )
-
-    logger.debug("Updated attributed savings gauges for cluster=%s: %d types.", cluster, len(cumulative_totals))
+    ``greenkube_cluster_*_saved_*_total`` (legacy) keep the projected annual
+    rate only, so recommendations that were not realized, are inconclusive or
+    are in rollback review no longer count.
+    """
+    cluster = _get_cluster_name()
+    rates = annual_rates_by_method(applied_records)
+    for gauge in (SAVINGS_RUN_RATE_CO2, SAVINGS_RUN_RATE_COST, CLUSTER_CO2_SAVED, CLUSTER_COST_SAVED):
+        _clear_gauge(gauge)
+    for method in SAVINGS_METHODS:
+        values = rates.get(method, {})
+        SAVINGS_RUN_RATE_CO2.labels(cluster=cluster, method=method).set(values.get("co2e_grams", 0.0))
+        SAVINGS_RUN_RATE_COST.labels(cluster=cluster, method=method).set(values.get("cost", 0.0))
+    projected = rates.get(METHOD_PROJECTED, {})
+    CLUSTER_CO2_SAVED.labels(cluster=cluster).set(projected.get("co2e_grams", 0.0))
+    CLUSTER_COST_SAVED.labels(cluster=cluster).set(projected.get("cost", 0.0))
 
 
 def update_realized_savings_metrics(applied_records: List[RecommendationRecord]) -> None:
-    """Update Prometheus gauges for realized (already achieved) savings.
-
-    Reads applied recommendation records and exposes cumulative CO2e and cost
-    savings, plus a count of implemented recommendations by type.
+    """Update annual savings-rate gauges and implemented counts from applied records.
 
     Args:
-        applied_records: List of RecommendationRecord objects with status='applied'.
+        applied_records: Applied recommendation records (any applied state).
     """
-    _clear_gauge(CLUSTER_CO2_SAVED)
-    _clear_gauge(CLUSTER_COST_SAVED)
     _clear_gauge(RECOMMENDATIONS_IMPLEMENTED)
+    update_savings_run_rate_metrics(applied_records)
 
     cluster = _get_cluster_name()
-
-    if not applied_records:
-        CLUSTER_CO2_SAVED.labels(cluster=cluster).set(0)
-        CLUSTER_COST_SAVED.labels(cluster=cluster).set(0)
-        return
-
-    total_co2_saved = sum(r.carbon_saved_co2e_grams or 0.0 for r in applied_records)
-    total_cost_saved = sum(r.cost_saved or 0.0 for r in applied_records)
-
-    CLUSTER_CO2_SAVED.labels(cluster=cluster).set(total_co2_saved)
-    CLUSTER_COST_SAVED.labels(cluster=cluster).set(total_cost_saved)
-
     implemented_by_type: dict[str, int] = defaultdict(int)
     implemented_by_namespace_type: dict[tuple[str, str], int] = defaultdict(int)
     for r in applied_records:
@@ -1028,43 +1134,24 @@ def update_realized_savings_metrics(applied_records: List[RecommendationRecord])
     for (namespace, rec_type), count in implemented_by_namespace_type.items():
         RECOMMENDATIONS_IMPLEMENTED.labels(cluster=cluster, namespace=namespace, type=rec_type).set(count)
 
-    logger.debug(
-        "Updated realized savings metrics: %.2f g CO2e saved, $%.2f saved, %d recommendations applied.",
-        total_co2_saved,
-        total_cost_saved,
-        len(applied_records),
-    )
+    logger.debug("Updated savings rate metrics for %d applied recommendations.", len(applied_records))
 
 
 def update_realized_savings_from_stats(stats_rows: List[dict]) -> None:
-    """Update Prometheus gauges for realized savings from pre-aggregated SQL stats.
+    """Update the implemented-recommendation counts from pre-aggregated SQL stats.
 
     Accepts the output of ``RecommendationRepository.get_applied_recommendations_stats()``
-    — one dict per (type, namespace) pair — instead of loading full recommendation
-    records.  This avoids the memory cost of fetching all applied records on every
-    Prometheus scrape.
+    — one dict per (type, namespace) pair — so a Prometheus scrape does not load
+    full recommendation records for the counts. Savings rates are published by
+    :func:`update_savings_run_rate_metrics`, which knows each record's outcome.
 
     Args:
         stats_rows: List of dicts with keys: type, namespace, count,
                     total_co2e_grams, total_cost_dollars.
     """
-    _clear_gauge(CLUSTER_CO2_SAVED)
-    _clear_gauge(CLUSTER_COST_SAVED)
     _clear_gauge(RECOMMENDATIONS_IMPLEMENTED)
 
     cluster = _get_cluster_name()
-
-    if not stats_rows:
-        CLUSTER_CO2_SAVED.labels(cluster=cluster).set(0)
-        CLUSTER_COST_SAVED.labels(cluster=cluster).set(0)
-        return
-
-    total_co2_saved = sum(r["total_co2e_grams"] for r in stats_rows)
-    total_cost_saved = sum(r["total_cost_dollars"] for r in stats_rows)
-
-    CLUSTER_CO2_SAVED.labels(cluster=cluster).set(total_co2_saved)
-    CLUSTER_COST_SAVED.labels(cluster=cluster).set(total_cost_saved)
-
     implemented_by_type: dict[str, int] = defaultdict(int)
     for r in stats_rows:
         rec_type = r["type"]
@@ -1076,13 +1163,7 @@ def update_realized_savings_from_stats(stats_rows: List[dict]) -> None:
     for rec_type, count in implemented_by_type.items():
         RECOMMENDATIONS_IMPLEMENTED.labels(cluster=cluster, namespace=DASHBOARD_NAMESPACE_ALL, type=rec_type).set(count)
 
-    total_applied = sum(int(r["count"]) for r in stats_rows)
-    logger.debug(
-        "Updated realized savings metrics: %.2f g CO2e saved, $%.2f saved, %d recommendations applied.",
-        total_co2_saved,
-        total_cost_saved,
-        total_applied,
-    )
+    logger.debug("Updated implemented recommendation counts: %d applied.", sum(implemented_by_type.values()))
 
 
 def get_metrics_output() -> bytes:
@@ -1179,59 +1260,41 @@ async def refresh_metrics_from_db(
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh recommendation metrics: %s", exc)
 
-    # --- Realized savings metrics (applied recommendations, all time) ---
+    # --- Implemented recommendation counts (applied recommendations, all time) ---
     try:
         stats = await reco_repo.get_applied_recommendations_stats()
         update_realized_savings_from_stats(stats)
     except Exception as exc:
-        logger.warning("refresh_metrics_from_db: failed to refresh realized savings metrics: %s", exc)
+        logger.warning("refresh_metrics_from_db: failed to refresh implemented recommendation metrics: %s", exc)
 
-    # --- Window-aware attributed savings (DB-backed cumulative totals) ---
+    # --- Annual savings rates by method (applied recommendations) ---
+    try:
+        applied = await reco_repo.get_applied_recommendations()
+        update_savings_run_rate_metrics(applied)
+    except Exception as exc:
+        logger.warning("refresh_metrics_from_db: failed to refresh savings rate metrics: %s", exc)
+
+    # --- Savings ledger: monotonic counters and exact dashboard windows ---
     if savings_repo is not None:
         try:
-            from ..core.savings_attributor import SavingsAttributor
+            from ..core.savings_attributor import savings_cluster_name
 
+            ledger_cluster = savings_cluster_name()
             cluster = _get_cluster_name()
-            attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
-            totals = await attributor.get_cumulative_totals()
-            by_method = await savings_repo.get_cumulative_totals(cluster_name=cluster, group_by_method=True)
-            update_attributed_savings_metrics(totals, cluster=cluster, totals_by_method=by_method)
+            counters = await savings_repo.get_lifetime_counters(ledger_cluster)
+            update_attributed_savings_metrics(counters, cluster=cluster)
             clear_dashboard_savings_metrics()
             savings_namespaces = await get_dashboard_namespaces("savings")
             for window_slug, start_time, end_time in _dashboard_window_ranges(now):
-                window_totals = await savings_repo.get_window_totals(
-                    cluster_name=cluster,
-                    start_time=start_time,
-                    end_time=end_time,
-                )
-                update_dashboard_savings_metrics(window_slug, window_totals, cluster=cluster)
-                cluster_scope_totals = await savings_repo.get_window_totals(
-                    cluster_name=cluster,
-                    start_time=start_time,
-                    end_time=end_time,
-                    namespace="",
-                )
-                update_dashboard_savings_metrics(
+                breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
+                update_dashboard_savings_from_breakdown(
                     window_slug,
-                    cluster_scope_totals,
+                    breakdown,
                     cluster=cluster,
-                    namespace=DASHBOARD_NAMESPACE_CLUSTER,
+                    namespaces=savings_namespaces,
                 )
-                for namespace in savings_namespaces:
-                    namespace_totals = await savings_repo.get_window_totals(
-                        cluster_name=cluster,
-                        start_time=start_time,
-                        end_time=end_time,
-                        namespace=namespace,
-                    )
-                    update_dashboard_savings_metrics(
-                        window_slug,
-                        namespace_totals,
-                        cluster=cluster,
-                        namespace=namespace,
-                    )
         except Exception as exc:
-            logger.warning("refresh_metrics_from_db: failed to refresh attributed savings metrics: %s", exc)
+            logger.warning("refresh_metrics_from_db: failed to refresh savings ledger metrics: %s", exc)
 
     if gitops_repository is not None:
         try:

@@ -157,6 +157,7 @@ async def _populate_database(days: int) -> dict[str, int]:
     # 4. Recommendations
     logger.info("💡 Generating optimization recommendations...")
     from greenkube.core.factory import get_recommendation_repository, get_savings_ledger_repository
+    from greenkube.core.savings_attributor import savings_cluster_name
 
     reco_repo = get_recommendation_repository()
     savings_repo = get_savings_ledger_repository()
@@ -167,9 +168,8 @@ async def _populate_database(days: int) -> dict[str, int]:
     counts["savings_ledger"] = await _backfill_demo_savings_ledger(
         reco_repo,
         savings_repo,
-        cluster_name=get_config().CLUSTER_NAME,
+        cluster_name=savings_cluster_name(),
     )
-    counts["savings_ledger_hourly"] = await savings_repo.compress_to_hourly()
 
     # 5. Compress older raw metrics into hourly buckets so aggregate_timeseries
     #    can query both the raw and hourly tables consistently across all windows.
