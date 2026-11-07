@@ -880,7 +880,11 @@
 			const response = valuesMapping
 				? await createAutomationPlan(action.recommendationIds, valuesMapping)
 				: await createAutomationPlan(action.recommendationIds);
-			if (prModal !== modal) return;
+			if (prModal !== modal) {
+				// The dialog closed while the preview was prepared: do not leave it active.
+				discardPreviewPlan(response?.plan ?? response, null);
+				return;
+			}
 			applyPlanPreview(response, feedback);
 		} catch (e) {
 			if (prModal === modal) {
@@ -1068,7 +1072,10 @@
 		planApprovalBlocked = false;
 		try {
 			const result = await previewAutomationPlanRollback(preview.planId);
-			if (prModal !== modal) return;
+			if (prModal !== modal) {
+				discardPreviewPlan(result?.plan ?? result, null);
+				return;
+			}
 			applyPlanPreview(result, 'Rollback preview ready. Review it before approving.');
 		} catch (e) {
 			if (prModal === modal) prError = planErrorMessage(e);

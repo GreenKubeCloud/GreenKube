@@ -380,6 +380,25 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 		await vi.waitFor(() => expect(api.discardAutomationPlan).toHaveBeenCalledWith('pln-1'));
 	});
 
+	it('discards a preview that arrives after the dialog was closed', async () => {
+		let resolvePlan;
+		api.createAutomationPlan.mockReturnValue(
+			new Promise((resolve) => {
+				resolvePlan = resolve;
+			})
+		);
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await screen.findByText(/Preparing preview/);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+		expect(api.discardAutomationPlan).not.toHaveBeenCalled();
+		resolvePlan(validatedPlan);
+
+		await vi.waitFor(() => expect(api.discardAutomationPlan).toHaveBeenCalledWith('pln-1'));
+		expect(screen.queryByText('Review automation plan')).not.toBeInTheDocument();
+	});
+
 	it('keeps an approved plan when the dialog closes', async () => {
 		api.approveAutomationPlan.mockResolvedValue({ ...validatedPlan, status: 'approved' });
 		render(RecommendationsPage);
