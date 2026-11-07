@@ -634,6 +634,130 @@ async def test_workload_inventory_collects_hpa_and_pdb_interaction_evidence():
     assert evidence["checked"] is True
     assert evidence["hpa_targets"][0]["target_name"] == "api"
     assert evidence["pod_disruption_budgets"][0]["max_unavailable"] == 0
+    assert evidence["vpa_checked"] is False
+
+
+class _VpaCustomObjectsApi:
+    def __init__(self, items=None, error: Exception | None = None) -> None:
+        self.items = items or []
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def list_cluster_custom_object(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return {"items": self.items}
+
+
+@pytest.mark.asyncio
+async def test_workload_inventory_collects_hpa_resource_metrics_and_vpa_update_modes():
+    """D13 / BUG-55: VPAs were never read and HPA metrics lost the scaled resource."""
+    api = _AppsV1Api(
+        {
+            "Deployment": [_list_page([_api_workload("Deployment", "api")])],
+            "StatefulSet": [_list_page([])],
+            "DaemonSet": [_list_page([])],
+        }
+    )
+    custom_objects = _VpaCustomObjectsApi(
+        [
+            {
+                "metadata": {"name": "api-vpa", "namespace": "apps"},
+                "spec": {"targetRef": {"kind": "Deployment", "name": "api"}},
+            },
+            {
+                "metadata": {"name": "other-vpa", "namespace": "apps"},
+                "spec": {"targetRef": {"kind": "Deployment", "name": "other"}, "updatePolicy": {"updateMode": "Off"}},
+            },
+        ]
+    )
+    reader = KubernetesWorkloadInventoryReader(
+        api,
+        autoscaling_v2_api=_AutoscalingApi(
+            [
+                {
+                    "metadata": {"name": "api-hpa", "namespace": "apps"},
+                    "spec": {
+                        "scaleTargetRef": {"kind": "Deployment", "name": "api"},
+                        "metrics": [
+                            {"type": "Resource", "resource": {"name": "cpu", "target": {"type": "Utilization"}}},
+                            {
+                                "type": "ContainerResource",
+                                "containerResource": {
+                                    "name": "memory",
+                                    "container": "sidecar",
+                                    "target": {"type": "AverageValue"},
+                                },
+                            },
+                            {"type": "External", "external": {"metric": {"name": "queue"}}},
+                        ],
+                    },
+                },
+                {
+                    "metadata": {"name": "default-hpa", "namespace": "apps"},
+                    "spec": {"scaleTargetRef": {"kind": "Deployment", "name": "worker"}},
+                },
+            ]
+        ),
+        policy_v1_api=_PolicyApi([]),
+        custom_objects_api=custom_objects,
+    )
+
+    resources = await reader.list_workloads()
+
+    evidence = resources[0]["_greenkube_policy_evidence"]
+    assert evidence["hpa_targets"][0]["resource_metrics"] == [
+        {"resource": "cpu", "container": None, "target_type": "Utilization"},
+        {"resource": "memory", "container": "sidecar", "target_type": "AverageValue"},
+    ]
+    assert evidence["vpa_checked"] is True
+    assert evidence["vpa_targets"] == [
+        {
+            "name": "api-vpa",
+            "namespace": "apps",
+            "target_kind": "Deployment",
+            "target_name": "api",
+            "update_mode": "Auto",
+        }
+    ]
+    assert custom_objects.calls == [
+        {"group": "autoscaling.k8s.io", "version": "v1", "plural": "verticalpodautoscalers"}
+    ]
+    from greenkube.gitops.discovery.kubernetes import _normalize_hpa
+
+    default_hpa = _normalize_hpa(
+        {
+            "metadata": {"name": "default-hpa", "namespace": "apps"},
+            "spec": {"scaleTargetRef": {"kind": "Deployment", "name": "worker"}},
+        }
+    )
+    assert default_hpa is not None
+    assert default_hpa[1]["resource_metrics"] == [{"resource": "cpu", "container": None, "target_type": "Utilization"}]
+
+
+@pytest.mark.asyncio
+async def test_missing_vpa_crd_counts_as_checked_and_other_errors_do_not():
+    class NotFound(Exception):
+        status = 404
+
+    for error, expected in ((NotFound(), True), (RuntimeError("forbidden"), False)):
+        api = _AppsV1Api(
+            {
+                "Deployment": [_list_page([_api_workload("Deployment", "api")])],
+                "StatefulSet": [_list_page([])],
+                "DaemonSet": [_list_page([])],
+            }
+        )
+        reader = KubernetesWorkloadInventoryReader(
+            api,
+            autoscaling_v2_api=_AutoscalingApi([]),
+            policy_v1_api=_PolicyApi([]),
+            custom_objects_api=_VpaCustomObjectsApi(error=error),
+        )
+        evidence = (await reader.list_workloads())[0]["_greenkube_policy_evidence"]
+        assert evidence["vpa_checked"] is expected
+        assert evidence["checked"] is True
 
 
 @pytest.mark.asyncio
@@ -664,9 +788,20 @@ async def test_discovery_attaches_live_labels_rollout_and_hpa_pdb_evidence():
                     "target_kind": "Deployment",
                     "target_name": "api",
                     "metric_types": ["Resource"],
+                    "resource_metrics": [{"resource": "cpu", "container": None, "target_type": "Utilization"}],
                 }
             ],
             "pod_disruption_budgets": [],
+            "vpa_checked": True,
+            "vpa_targets": [
+                {
+                    "name": "api-vpa",
+                    "namespace": "apps",
+                    "target_kind": "Deployment",
+                    "target_name": "api",
+                    "update_mode": "Off",
+                }
+            ],
         },
     }
 
@@ -680,7 +815,18 @@ async def test_discovery_attaches_live_labels_rollout_and_hpa_pdb_evidence():
     assert argo_source.evidence["workload_labels"] == {"app": "payments", "maintenance": "true"}
     assert argo_source.evidence["rollout_in_progress"] is True
     assert argo_source.evidence["hpa_pdb_interactions_checked"] is True
-    assert argo_source.evidence["hpa_pdb_conflict"] is True
+    # Raw facts only: the policy decides per planned resource whether the HPA conflicts (D13).
+    assert "hpa_pdb_conflict" not in argo_source.evidence
+    assert argo_source.evidence["hpa_targets"] == [
+        {
+            "name": "api-hpa",
+            "metric_types": ["Resource"],
+            "resource_metrics": [{"resource": "cpu", "container": None, "target_type": "Utilization"}],
+        }
+    ]
+    assert argo_source.evidence["pdb_conflict"] is False
+    assert argo_source.evidence["vpa_interactions_checked"] is True
+    assert argo_source.evidence["vpa_targets"] == [{"name": "api-vpa", "update_mode": "Off"}]
     assert argo_source.evidence["controller_suspended"] is False
 
 

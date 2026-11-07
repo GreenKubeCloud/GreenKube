@@ -83,6 +83,41 @@ tests:
       - matchRegex:
           path: data.GITOPS_POLICY_JSON
           pattern: '"minCoverage":0.5'
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"missingEvidence":"warn"'
+
+  - it: fails closed on missing policy evidence in the production profile
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"missingEvidence":"fail"'
+
+  - it: lets an explicit missingEvidence override the profile default
+    set:
+      profile: production
+      automation.enabled: true
+      automation.policy.missingEvidence: warn
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"missingEvidence":"warn"'
+
+  - it: rejects an unknown missingEvidence mode
+    set:
+      automation.policy.missingEvidence: ignore
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.policy.missingEvidence must be fail or warn
 
   - it: does not require the optional NET_ADMIN firewall init container by default
     set:

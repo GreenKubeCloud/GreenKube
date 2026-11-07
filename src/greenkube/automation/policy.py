@@ -7,11 +7,18 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from greenkube.gitops.contracts import AutomationErrorCode, Plan, PlanStatus, WorkloadSource
+from greenkube.gitops.contracts import (
+    AddHorizontalPodAutoscaler,
+    AutomationErrorCode,
+    Plan,
+    PlanStatus,
+    SetContainerResources,
+    WorkloadSource,
+)
 from greenkube.models.metrics import RecommendationRecord, RiskLevel
 from greenkube.storage.base_gitops_repository import AutomationPlanRecord
 
@@ -28,6 +35,9 @@ _COOLDOWN_STATUSES = frozenset(
     }
 )
 _HISTORY_STATUSES = tuple(sorted(_ACTIVE_PLAN_STATUSES | _COOLDOWN_STATUSES, key=lambda status: status.value))
+# VPA update modes in which the VPA itself writes pod requests: a conflicting writer (D13).
+_CONFLICTING_VPA_UPDATE_MODES = frozenset({"Auto", "Recreate", "InPlace", "InPlaceOrRecreate"})
+MissingEvidenceMode = Literal["fail", "warn"]
 
 
 class ChangeFreezeWindow(BaseModel):
@@ -100,6 +110,12 @@ class AutomationPolicyConfig(BaseModel):
         default=(),
         validation_alias=AliasChoices("changeFreezeWindows", "change_freeze_windows"),
     )
+    # What a live gate does when discovery could not collect its evidence (rollout,
+    # controller health, HPA/VPA/PDB): "fail" rejects, "warn" allows with a warning (D13).
+    missing_evidence: MissingEvidenceMode = Field(
+        default="warn",
+        validation_alias=AliasChoices("missingEvidence", "missing_evidence"),
+    )
 
     @field_validator("change_freeze_labels")
     @classmethod
@@ -138,6 +154,7 @@ class AutomationPolicyConfig(BaseModel):
             "cooldownMinutes": self.cooldown_minutes,
             "changeFreezeLabels": list(self.change_freeze_labels),
             "changeFreezeWindows": [window.model_dump(mode="json") for window in self.change_freeze_windows],
+            "missingEvidence": self.missing_evidence,
         }
 
 
@@ -182,6 +199,9 @@ class AutomationPolicyResult(BaseModel):
     policy: dict[str, Any]
     checks: list[PolicyCheck]
     rejections: list[PolicyRejection]
+    # Non-blocking findings, e.g. missing live evidence under missingEvidence=warn or an
+    # HPA scaling on a resource the plan does not change.
+    warnings: list[PolicyRejection] = Field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -231,6 +251,7 @@ class AutomationPolicyEvaluator:
         }
         checks: list[PolicyCheck] = []
         rejections: list[PolicyRejection] = []
+        warnings: list[PolicyRejection] = []
 
         def add_check(
             gate: str,
@@ -336,7 +357,26 @@ class AutomationPolicyEvaluator:
 
         self._evaluate_freeze_windows(now, add_check)
         self._evaluate_freeze_labels(source, add_check)
-        self._evaluate_optional_live_gates(source, records, add_check)
+
+        def add_missing_evidence(gate: str, message: str, detail: str) -> None:
+            if self.config.missing_evidence == "fail":
+                add_check(
+                    gate,
+                    PolicyCheckState.REJECTED,
+                    message,
+                    code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
+                    detail=detail,
+                )
+                return
+            add_check(gate, PolicyCheckState.NOT_AVAILABLE, f"{message} Allowed by missingEvidence=warn.")
+            add_warning(AutomationErrorCode.POLICY_EVIDENCE_MISSING, detail)
+
+        def add_warning(code: AutomationErrorCode, detail: str) -> None:
+            warning = PolicyRejection(code=code, detail=detail)
+            if warning not in warnings:
+                warnings.append(warning)
+
+        self._evaluate_optional_live_gates(source, records, add_check, add_missing_evidence, add_warning)
 
         if self.plan_repository is None:
             self._reject_missing_history(add_check)
@@ -425,6 +465,7 @@ class AutomationPolicyEvaluator:
             policy=self.config.public_values(),
             checks=checks,
             rejections=rejections,
+            warnings=warnings,
         )
 
     def _evaluate_freeze_windows(self, now: datetime, add_check) -> None:
@@ -517,6 +558,8 @@ class AutomationPolicyEvaluator:
         source: WorkloadSource,
         records: Sequence[RecommendationRecord],
         add_check,
+        add_missing_evidence,
+        add_warning,
     ) -> None:
         evidence = source.evidence
         rollout = _optional_bool(evidence, "rollout_in_progress")
@@ -539,10 +582,10 @@ class AutomationPolicyEvaluator:
                 limit=False,
             )
         else:
-            add_check(
+            add_missing_evidence(
                 "rollout_state",
-                PolicyCheckState.NOT_AVAILABLE,
                 "Live rollout status is not present in the current workload binding evidence.",
+                "Refresh GitOps discovery so the workload rollout state can be checked before planning or approval.",
             )
 
         suspended = _optional_bool(evidence, "controller_suspended")
@@ -566,38 +609,19 @@ class AutomationPolicyEvaluator:
                 limit={"suspended": False, "healthy": True},
             )
         else:
-            add_check(
+            add_missing_evidence(
                 "controller_health",
-                PolicyCheckState.NOT_AVAILABLE,
                 "Controller health and suspend state are not present in the current workload binding evidence.",
+                "Refresh GitOps discovery so the owning controller's health can be checked before planning.",
             )
 
-        interactions_checked = _optional_bool(evidence, "hpa_pdb_interactions_checked")
-        interaction_conflict = _optional_bool(evidence, "hpa_pdb_conflict")
-        if interaction_conflict is True:
-            add_check(
-                "hpa_vpa_pdb_interactions",
-                PolicyCheckState.REJECTED,
-                "Available workload evidence reports an HPA, VPA or PDB interaction conflict.",
-                observed=True,
-                limit=False,
-                code=AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
-                detail=("Resolve the reported HPA/VPA/PDB interaction before creating or approving this plan."),
-            )
-        elif interactions_checked is True or interaction_conflict is False:
-            add_check(
-                "hpa_vpa_pdb_interactions",
-                PolicyCheckState.PASSED,
-                "Available workload evidence reports no HPA/VPA/PDB interaction conflict.",
-                observed=False,
-                limit=False,
-            )
+        if "hpa_targets" in evidence or "pdb_conflict" in evidence or "vpa_targets" in evidence:
+            changes, adds_hpa = _planned_resource_changes(records)
+            self._evaluate_hpa_gate(evidence, changes, adds_hpa, add_check, add_missing_evidence, add_warning)
+            self._evaluate_vpa_gate(evidence, add_check, add_missing_evidence, add_warning)
+            self._evaluate_pdb_gate(evidence, add_check, add_missing_evidence)
         else:
-            add_check(
-                "hpa_vpa_pdb_interactions",
-                PolicyCheckState.NOT_AVAILABLE,
-                "HPA, VPA and PDB interaction evidence is not available to the plan service.",
-            )
+            self._evaluate_legacy_interaction_gate(evidence, add_check, add_missing_evidence)
 
         sample_evidence: list[dict[str, Any]] = []
         invalid_sample_ids: list[int | None] = []
@@ -664,6 +688,182 @@ class AutomationPolicyEvaluator:
                     if below_threshold
                     else None
                 ),
+            )
+
+    def _evaluate_hpa_gate(
+        self,
+        evidence: Mapping[str, Any],
+        changes: set[tuple[str, str]],
+        adds_hpa: bool,
+        add_check,
+        add_missing_evidence,
+        add_warning,
+    ) -> None:
+        """Block only when an HPA scales on a resource the plan changes (D13, BUG-55)."""
+        hpas = evidence.get("hpa_targets")
+        if evidence.get("hpa_pdb_interactions_checked") is not True or not isinstance(hpas, list):
+            add_missing_evidence(
+                "hpa_interaction",
+                "HorizontalPodAutoscaler evidence is not available for this workload.",
+                "Refresh GitOps discovery so HorizontalPodAutoscalers targeting the workload can be checked.",
+            )
+            return
+        valid_hpas = [hpa for hpa in hpas if isinstance(hpa, Mapping) and isinstance(hpa.get("name"), str)]
+        if not valid_hpas:
+            add_check(
+                "hpa_interaction",
+                PolicyCheckState.PASSED,
+                "No HorizontalPodAutoscaler targets the workload.",
+                observed=[],
+            )
+            return
+        conflicts: list[dict[str, Any]] = []
+        unaffected: list[str] = []
+        for hpa in valid_hpas:
+            name = str(hpa["name"])
+            if adds_hpa:
+                conflicts.append({"hpa": name, "reason": "the plan adds a second autoscaler"})
+                continue
+            scaled = [metric for metric in hpa.get("resource_metrics") or () if isinstance(metric, Mapping)]
+            matched = sorted(
+                {
+                    str(metric.get("resource"))
+                    for metric in scaled
+                    for container, resource in changes
+                    if str(metric.get("resource", "")).lower() == resource
+                    and (metric.get("container") in (None, "") or metric.get("container") == container)
+                }
+            )
+            if matched:
+                conflicts.append({"hpa": name, "resources": matched})
+            else:
+                unaffected.append(name)
+        observed = {
+            "hpas": [hpa["name"] for hpa in valid_hpas],
+            "planned_resources": sorted(resource for _, resource in changes),
+        }
+        if conflicts:
+            add_check(
+                "hpa_interaction",
+                PolicyCheckState.REJECTED,
+                "A HorizontalPodAutoscaler scales on a resource this plan changes.",
+                observed={**observed, "conflicts": conflicts},
+                code=AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+                detail=(
+                    "An HPA scales this workload on a resource the plan changes; changing its requests would shift "
+                    "the autoscaling target. Tune the HPA or choose a recommendation for another resource."
+                ),
+            )
+            return
+        add_check(
+            "hpa_interaction",
+            PolicyCheckState.PASSED,
+            "HorizontalPodAutoscalers target the workload but do not scale on the resources this plan changes.",
+            observed=observed,
+        )
+        add_warning(
+            AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+            f"HPA {', '.join(sorted(unaffected))} also manages this workload; it does not scale on the changed "
+            "resources, but review the replica range after the change.",
+        )
+
+    def _evaluate_vpa_gate(self, evidence: Mapping[str, Any], add_check, add_missing_evidence, add_warning) -> None:
+        """A VPA that writes requests itself is a conflicting writer for a Git change (D13)."""
+        vpas = evidence.get("vpa_targets")
+        if evidence.get("vpa_interactions_checked") is not True or not isinstance(vpas, list):
+            add_missing_evidence(
+                "vpa_interaction",
+                "VerticalPodAutoscaler evidence is not available for this workload.",
+                "Refresh GitOps discovery so VerticalPodAutoscalers targeting the workload can be checked.",
+            )
+            return
+        valid = [vpa for vpa in vpas if isinstance(vpa, Mapping) and isinstance(vpa.get("name"), str)]
+        writers = [
+            {"vpa": vpa["name"], "update_mode": vpa.get("update_mode")}
+            for vpa in valid
+            if vpa.get("update_mode") in _CONFLICTING_VPA_UPDATE_MODES
+        ]
+        if writers:
+            add_check(
+                "vpa_interaction",
+                PolicyCheckState.REJECTED,
+                "A VerticalPodAutoscaler actively writes this workload's resource requests.",
+                observed=writers,
+                limit=sorted(_CONFLICTING_VPA_UPDATE_MODES),
+                code=AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+                detail=(
+                    "A VPA in an active update mode rewrites pod requests and would override this change; set its "
+                    "updateMode to Off or remove it before creating a GitOps plan."
+                ),
+            )
+            return
+        add_check(
+            "vpa_interaction",
+            PolicyCheckState.PASSED,
+            "No VerticalPodAutoscaler actively writes this workload's requests.",
+            observed=[{"vpa": vpa["name"], "update_mode": vpa.get("update_mode")} for vpa in valid],
+        )
+        initial = sorted(str(vpa["name"]) for vpa in valid if vpa.get("update_mode") == "Initial")
+        if initial:
+            add_warning(
+                AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+                f"VPA {', '.join(initial)} sets requests when pods are created (updateMode Initial).",
+            )
+
+    def _evaluate_pdb_gate(self, evidence: Mapping[str, Any], add_check, add_missing_evidence) -> None:
+        conflict = _optional_bool(evidence, "pdb_conflict")
+        if evidence.get("hpa_pdb_interactions_checked") is not True or conflict is None:
+            add_missing_evidence(
+                "pdb_interaction",
+                "PodDisruptionBudget evidence is not available for this workload.",
+                "Refresh GitOps discovery so PodDisruptionBudgets selecting the workload can be checked.",
+            )
+        elif conflict:
+            add_check(
+                "pdb_interaction",
+                PolicyCheckState.REJECTED,
+                "A PodDisruptionBudget blocks the rolling restart this change requires.",
+                observed=True,
+                limit=False,
+                code=AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+                detail="Relax the PodDisruptionBudget (or add replicas) so the workload can roll before retrying.",
+            )
+        else:
+            add_check(
+                "pdb_interaction",
+                PolicyCheckState.PASSED,
+                "No PodDisruptionBudget blocks a rolling restart of the workload.",
+                observed=False,
+                limit=False,
+            )
+
+    def _evaluate_legacy_interaction_gate(self, evidence: Mapping[str, Any], add_check, add_missing_evidence) -> None:
+        """Bindings discovered before 0.4 carry one aggregated HPA/PDB verdict."""
+        interactions_checked = _optional_bool(evidence, "hpa_pdb_interactions_checked")
+        interaction_conflict = _optional_bool(evidence, "hpa_pdb_conflict")
+        if interaction_conflict is True:
+            add_check(
+                "hpa_vpa_pdb_interactions",
+                PolicyCheckState.REJECTED,
+                "Available workload evidence reports an HPA, VPA or PDB interaction conflict.",
+                observed=True,
+                limit=False,
+                code=AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
+                detail=("Resolve the reported HPA/VPA/PDB interaction before creating or approving this plan."),
+            )
+        elif interactions_checked is True or interaction_conflict is False:
+            add_check(
+                "hpa_vpa_pdb_interactions",
+                PolicyCheckState.PASSED,
+                "Available workload evidence reports no HPA/VPA/PDB interaction conflict.",
+                observed=False,
+                limit=False,
+            )
+        else:
+            add_missing_evidence(
+                "hpa_vpa_pdb_interactions",
+                "HPA, VPA and PDB interaction evidence is not available to the plan service.",
+                "Refresh GitOps discovery so HPA, VPA and PDB interactions can be checked before planning.",
             )
 
     def _reject_missing_history(self, add_check) -> None:
@@ -806,6 +1006,23 @@ def _label_matches(selector: str, labels: Mapping[str, str]) -> bool:
         key, expected = selector.split("=", 1)
         return labels.get(key) == expected
     return selector in labels
+
+
+def _planned_resource_changes(records: Sequence[RecommendationRecord]) -> tuple[set[tuple[str, str]], bool]:
+    """(container, resource) pairs whose requests or limits the planned action sets."""
+    changes: set[tuple[str, str]] = set()
+    adds_hpa = False
+    for record in records:
+        action = record.action
+        if action is None:
+            continue
+        for operation in action.operations:
+            if isinstance(operation, SetContainerResources):
+                for resource in {*operation.resources.requests, *operation.resources.limits}:
+                    changes.add((operation.container, resource.lower()))
+            elif isinstance(operation, AddHorizontalPodAutoscaler):
+                adds_hpa = True
+    return changes, adds_hpa
 
 
 def _optional_bool(evidence: Mapping[str, Any], key: str) -> bool | None:

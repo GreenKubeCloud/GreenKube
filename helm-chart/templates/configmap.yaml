@@ -3,6 +3,13 @@
 {{- if not (kindIs "map" .Values.automation.policy) }}
 {{- fail "automation.policy must be a map" }}
 {{- end }}
+{{- $policy := deepCopy .Values.automation.policy }}
+{{- if not (get $policy "missingEvidence") }}
+{{- $_ := set $policy "missingEvidence" (ternary "fail" "warn" (eq .Values.profile "production")) }}
+{{- end }}
+{{- if not (has (get $policy "missingEvidence") (list "fail" "warn")) }}
+{{- fail "automation.policy.missingEvidence must be fail or warn" }}
+{{- end }}
 {{- if not (kindIs "map" .Values.automation.pullRequests) }}
 {{- fail "automation.pullRequests must be a map" }}
 {{- end }}
@@ -58,7 +65,7 @@ data:
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
   GITOPS_SYNC_POLL_INTERVAL: {{ $syncPollInterval | quote }}
   GITOPS_SYNC_TIMEOUT: {{ $syncTimeout | quote }}
-  GITOPS_POLICY_JSON: {{ .Values.automation.policy | toJson | quote }}
+  GITOPS_POLICY_JSON: {{ $policy | toJson | quote }}
   GITOPS_PULL_REQUESTS_JSON: {{ .Values.automation.pullRequests | toJson | quote }}
   {{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
   GITOPS_RENDERER_URL: {{ printf "http://%s-renderer:%v" (include "greenkube.fullname" .) .Values.rendererSandbox.servicePort | quote }}
