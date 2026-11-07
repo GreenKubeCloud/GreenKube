@@ -280,3 +280,83 @@ async def test_failed_renewal_relinquishes_local_leadership():
 def test_process_identity_is_stable_for_a_host_and_process():
     assert process_identity(hostname="controller-pod", process_id=17) == "controller-pod:17"
     assert process_identity(hostname="controller-pod", process_id=17) == "controller-pod:17"
+
+
+# ---------------------------------------------------------------------------
+# Leader fencing (A14, BUG-13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fencing_token_is_the_lease_generation_and_survives_own_renewals():
+    from greenkube.core.leader_election import LeaderFence
+
+    api = _FakeCoordinationApi()
+    clock = _Clock()
+    elector = _elector(api, clock)
+    assert elector.fencing_token is None
+
+    assert await elector.try_acquire_or_renew()
+    fence = LeaderFence(elector)
+    assert fence.token == 0
+
+    clock.advance(4)
+    assert await elector.try_acquire_or_renew()
+    fence.check()  # renewing our own Lease keeps the generation
+
+
+@pytest.mark.asyncio
+async def test_fence_rejects_commit_after_local_lease_deadline():
+    from greenkube.core.leader_election import LeaderFence, LeadershipLostError
+
+    api = _FakeCoordinationApi()
+    clock = _Clock()
+    elector = _elector(api, clock)
+    assert await elector.try_acquire_or_renew()
+    fence = LeaderFence(elector)
+
+    clock.advance(11)  # past the local renew deadline: another holder may take over soon
+
+    assert not fence.valid
+    with pytest.raises(LeadershipLostError):
+        fence.check("advance watermark")
+
+
+@pytest.mark.asyncio
+async def test_fence_rejects_commit_when_another_holder_owned_the_lease_in_between():
+    from greenkube.core.leader_election import LeaderFence, LeadershipLostError
+
+    api = _FakeCoordinationApi()
+    clock = _Clock()
+    elector = _elector(api, clock)
+    assert await elector.try_acquire_or_renew()
+    fence = LeaderFence(elector)
+
+    # Another controller takes the expired Lease, then this process takes it back.
+    assert api.lease is not None
+    api.lease.spec.holder_identity = "other-controller:9"
+    api.lease.spec.lease_transitions = 1
+    api.lease.spec.renew_time = clock.current
+    clock.advance(31)
+    assert await elector.try_acquire_or_renew()
+
+    assert elector.is_leader and elector.fencing_token == 2
+    with pytest.raises(LeadershipLostError):
+        fence.check()
+
+
+@pytest.mark.asyncio
+async def test_leader_gate_scopes_a_fence_for_the_running_job():
+    from greenkube.core.leader_election import LeaderGate, current_leader_fence, leader_fence_scope
+
+    api = _FakeCoordinationApi()
+    elector = _elector(api)
+    assert await elector.try_acquire_or_renew()
+    gate = LeaderGate(elector)
+
+    assert gate() is True
+    assert not current_leader_fence().enforced
+    with leader_fence_scope(gate.fence()) as fence:
+        assert current_leader_fence() is fence
+        assert fence.enforced and fence.token == 0
+    assert not current_leader_fence().enforced

@@ -376,11 +376,19 @@ def _leader_gated_callback(
     @wraps(callback)
     async def guarded() -> None:
         if should_run():
-            await callback()
+            with _leader_fence_scope(should_run):
+                await callback()
         else:
             logger.debug("Skipping controller task %s while this process is not the Lease holder.", callback.__name__)
 
     return guarded
+
+
+def _leader_fence_scope(should_run: Callable[[], bool] | None):
+    """Give the job a LeaderFence so it can re-check the Lease before committing (A14)."""
+    from ..core.leader_election import LeaderGate, leader_fence_scope
+
+    return leader_fence_scope(should_run.fence() if isinstance(should_run, LeaderGate) else None)
 
 
 async def _run_initial_controller_task(
@@ -392,7 +400,8 @@ async def _run_initial_controller_task(
     if should_run is not None and not should_run():
         logger.info("Skipping remaining initial controller work while this process is not the Lease holder.")
         return False
-    await callback(*args, **kwargs)
+    with _leader_fence_scope(should_run):
+        await callback(*args, **kwargs)
     return True
 
 
@@ -500,8 +509,9 @@ async def _async_start(last: Optional[str]):
         else:
             await leader_election.try_acquire_or_renew()
 
-            def should_run() -> bool:
-                return leader_election.is_leader
+            from ..core.leader_election import LeaderGate
+
+            should_run = LeaderGate(leader_election)
 
             leader_election_task = asyncio.create_task(
                 leader_election.run(controller_stop_event),

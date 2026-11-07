@@ -199,6 +199,26 @@ async def test_leader_gated_controller_callback_runs_only_for_the_lease_holder()
 
 
 @pytest.mark.asyncio
+async def test_leader_gated_callback_hands_the_job_a_fence_for_the_lease_holder():
+    from greenkube.core.leader_election import LeaderGate, current_leader_fence
+
+    class _Elector:
+        is_leader = True
+        fencing_token = 7
+
+    seen = []
+
+    async def job():
+        seen.append(current_leader_fence())
+
+    guarded = start_module._leader_gated_callback(job, LeaderGate(_Elector()))  # type: ignore[arg-type]
+    await guarded()
+
+    assert seen[0].enforced and seen[0].token == 7
+    assert not current_leader_fence().enforced
+
+
+@pytest.mark.asyncio
 async def test_attribute_recommendation_savings_success():
     reco_repo = MagicMock()
     reco_repo.get_applied_recommendations = AsyncMock(return_value=["rec"])
