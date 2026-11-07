@@ -288,6 +288,9 @@ def window_rates(series: Sequence, step: int) -> WindowRates:
     components = True
     traffic_total = traffic_cover = 0.0
     for rows in _timestamp_groups(series).values():
+        # The group covers the longest row. Rows are not rescaled to it: in an hourly
+        # bucket, pods replaced during a rollout ran one after the other, so scaling
+        # each to the bucket's coverage would count the bucket's cost about twice.
         coverage = max(_coverage_seconds(m, step) for m in rows)
         if all(cost_is_trusted(m) for m in rows):
             cost_total += sum(float(m.total_cost or 0.0) for m in rows)
