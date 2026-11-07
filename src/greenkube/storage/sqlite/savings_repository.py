@@ -179,7 +179,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                 cursor = await conn.execute(
                     f"""
                     SELECT recommendation_id, MAX(period_end)
-                    FROM savings_ledger_entries
+                    FROM savings_accruals_v1
                     WHERE recommendation_id IN ({placeholders})
                     GROUP BY recommendation_id
                     """,
@@ -224,7 +224,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                     SELECT namespace, recommendation_type, measurement_method,
                            co2e_saved_grams, cost_saved_dollars,
                            {share} AS share
-                    FROM savings_ledger_entries
+                    FROM savings_accruals_v1
                     WHERE cluster_name = :cluster
                       AND superseded = 0{filters}
                 ) AS entries
@@ -262,7 +262,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                        SUM(CASE WHEN cost_saved_dollars < 0 THEN -cost_saved_dollars ELSE 0 END)
                          + SUM(CASE WHEN superseded <> 0 AND cost_saved_dollars > 0
                                     THEN cost_saved_dollars ELSE 0 END)
-                FROM savings_ledger_entries
+                FROM savings_accruals_v1
                 WHERE cluster_name = ?
                 GROUP BY recommendation_type, measurement_method
                 """,

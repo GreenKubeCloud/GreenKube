@@ -305,11 +305,11 @@ async def test_hourly_rollup_view_conserves_sums(ledger_db: LedgerDatabase):
             for i in range(12)
         ]
     )
-    assert await ledger_db.scalar("SELECT COUNT(*) FROM savings_ledger_hourly_rollup") == 1
-    assert await ledger_db.scalar("SELECT SUM(co2e_saved_grams) FROM savings_ledger_hourly_rollup") == pytest.approx(
-        12.0
-    )
-    assert await ledger_db.scalar("SELECT SUM(entry_count) FROM savings_ledger_hourly_rollup") == 12
+    assert await ledger_db.scalar("SELECT COUNT(*) FROM savings_accruals_v1_hourly_rollup") == 1
+    assert await ledger_db.scalar(
+        "SELECT SUM(co2e_saved_grams) FROM savings_accruals_v1_hourly_rollup"
+    ) == pytest.approx(12.0)
+    assert await ledger_db.scalar("SELECT SUM(entry_count) FROM savings_accruals_v1_hourly_rollup") == 12
 
 
 @pytest.mark.asyncio

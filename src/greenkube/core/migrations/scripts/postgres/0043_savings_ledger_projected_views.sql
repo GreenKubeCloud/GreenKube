@@ -1,9 +1,13 @@
 -- 0043: relabel prorated accruals as projected and add read-side ledger views
 -- (roadmap C0.4, C0.6, BUG-30, BUG-32).
--- savings_ledger_entries is the single read model of the ledger: raw accrual
+-- savings_accruals_v1 is the single read model of the ledger: raw accrual
 -- rows plus the legacy_compressed hourly rows whose raw rows no longer exist.
--- savings_ledger_hourly_rollup aggregates it per UTC hour on read, replacing
+-- savings_accruals_v1_hourly_rollup aggregates it per UTC hour on read, replacing
 -- the destructive hourly compression.
+-- Both views are scoped to the v1 ledger on purpose: the name
+-- savings_ledger_entries is reserved for the INSERT-only ledger table of the
+-- roadmap C6 design, which must be able to coexist with this read model
+-- during a dual-write period.
 
 UPDATE recommendation_savings_ledger AS ledger
 SET measurement_method = 'projected'
@@ -31,10 +35,10 @@ WHERE hourly.measurement_method = 'prorated'
 ALTER TABLE recommendation_savings_ledger ALTER COLUMN measurement_method SET DEFAULT 'projected';
 ALTER TABLE recommendation_savings_ledger_hourly ALTER COLUMN measurement_method SET DEFAULT 'projected';
 
-DROP VIEW IF EXISTS savings_ledger_hourly_rollup;
-DROP VIEW IF EXISTS savings_ledger_entries;
+DROP VIEW IF EXISTS savings_accruals_v1_hourly_rollup;
+DROP VIEW IF EXISTS savings_accruals_v1;
 
-CREATE VIEW savings_ledger_entries AS
+CREATE VIEW savings_accruals_v1 AS
 SELECT
     'raw'::TEXT AS source,
     recommendation_id,
@@ -74,7 +78,7 @@ SELECT
 FROM recommendation_savings_ledger_hourly
 WHERE legacy_compressed;
 
-CREATE VIEW savings_ledger_hourly_rollup AS
+CREATE VIEW savings_accruals_v1_hourly_rollup AS
 SELECT
     cluster_name,
     namespace,
@@ -86,7 +90,7 @@ SELECT
     SUM(cost_saved_dollars) AS cost_saved_dollars,
     COUNT(*) AS entry_count,
     BOOL_OR(legacy_compressed) AS legacy_compressed
-FROM savings_ledger_entries
+FROM savings_accruals_v1
 WHERE NOT superseded
 GROUP BY
     cluster_name,

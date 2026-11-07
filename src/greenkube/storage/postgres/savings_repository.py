@@ -164,7 +164,7 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
             rows = await conn.fetch(
                 """
                 SELECT recommendation_id, MAX(period_end) AS period_end
-                FROM savings_ledger_entries
+                FROM savings_accruals_v1
                 WHERE recommendation_id = ANY($1::INTEGER[])
                 GROUP BY recommendation_id
                 """,
@@ -214,7 +214,7 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                     SELECT namespace, recommendation_type, measurement_method,
                            co2e_saved_grams, cost_saved_dollars,
                            ({share})::DOUBLE PRECISION AS share
-                    FROM savings_ledger_entries
+                    FROM savings_accruals_v1
                     WHERE cluster_name = $1
                       AND NOT superseded{filters}
                 ) AS entries
@@ -250,7 +250,7 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                        SUM(GREATEST(-cost_saved_dollars, 0))
                          + SUM(CASE WHEN superseded THEN GREATEST(cost_saved_dollars, 0) ELSE 0 END)
                          AS reversed_cost
-                FROM savings_ledger_entries
+                FROM savings_accruals_v1
                 WHERE cluster_name = $1
                 GROUP BY recommendation_type, measurement_method
                 """,

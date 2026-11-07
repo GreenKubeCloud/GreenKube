@@ -107,7 +107,9 @@ async def test_sqlite_upgrade_flags_legacy_rows_and_keeps_totals(tmp_path, monke
             "SELECT period_start FROM recommendation_savings_ledger ORDER BY period_start"
         ).fetchall() == [("2026-10-02T10:30:00Z",), ("2026-10-02T10:35:00Z",), ("2026-10-02T10:35:00Z",)]
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
-        assert {"accrual_watermarks", "savings_ledger_entries", "savings_ledger_hourly_rollup"} <= tables
+        assert {"accrual_watermarks", "savings_accruals_v1", "savings_accruals_v1_hourly_rollup"} <= tables
+        # savings_ledger_entries is reserved for the roadmap C6 ledger table.
+        assert "savings_ledger_entries" not in tables
 
 
 @pytest.mark.asyncio
@@ -186,6 +188,13 @@ async def test_postgres_upgrade_flags_legacy_rows_and_keeps_totals(monkeypatch):
                 """,
                 schema,
             )
+            views = await conn.fetch(  # type: ignore[union-attr]
+                "SELECT table_name FROM information_schema.views WHERE table_schema = $1",
+                schema,
+            )
+        assert {"savings_accruals_v1", "savings_accruals_v1_hourly_rollup"} <= {row[0] for row in views}
+        # savings_ledger_entries is reserved for the roadmap C6 ledger table.
+        assert "savings_ledger_entries" not in {row[0] for row in views}
         assert {row[0] for row in methods} == {"projected", "measured"}
         assert [row[0] for row in flags] == [True]
         assert column_type == "double precision"

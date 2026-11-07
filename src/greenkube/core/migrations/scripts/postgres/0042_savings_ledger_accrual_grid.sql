@@ -6,7 +6,12 @@
 -- Hourly rows written by the removed compression job are kept as
 -- legacy_compressed rows. Their raw rows were deleted and part of their
 -- value may have been lost, so they are flagged rather than recomputed.
--- Raw rows that still exist are aggregated on read.
+-- Raw rows that still exist are aggregated on read. The old compression
+-- deleted the raw rows it rolled up, so the two sets are disjoint. The one
+-- exception is a crash between the INSERT and the DELETE of the old Postgres
+-- compression, which did not run in a transaction: those raw rows would be
+-- counted twice. The savings API reports a legacy_compressed diagnostic for
+-- any window that includes legacy rows.
 
 ALTER TABLE recommendation_savings_ledger ADD COLUMN IF NOT EXISTS slot_start TIMESTAMPTZ;
 

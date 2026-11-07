@@ -4,7 +4,7 @@
 The ledger is append-only: accrual rows are inserted once per recommendation,
 method and UTC slot and are never compressed, overwritten or deleted. The only
 mutation is the ``superseded`` flag set when a later outcome invalidates past
-accruals. Every read goes through the ``savings_ledger_entries`` view, which
+accruals. Every read goes through the ``savings_accruals_v1`` view, which
 also exposes the ``legacy_compressed`` hourly rows left by releases before 0.4.
 """
 
