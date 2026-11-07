@@ -1482,6 +1482,37 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     return record.plan if record is not None else None
         raise RuntimeError("could not persist the immutable pre-apply workload baseline after concurrent updates")
 
+    async def set_plan_committed_on_revision(
+        self,
+        plan_id: str,
+        revision: str,
+        *,
+        expected_digest: str | None,
+    ) -> Plan | None:
+        """Record the moved branch head a plan is committed on, separately from its base (D7)."""
+        if not isinstance(revision, str) or not revision.strip():
+            raise ValueError("committed_on_revision must be a non-blank revision")
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS NOT DISTINCT FROM ?
+                """
+                if self._postgres
+                else f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS ?
+                """,
+                (revision, plan_id, expected_digest),
+            )
+            if not updated:
+                return None
+            record = await self._get_plan_record_on_connection(connection, plan_id)
+            return record.plan if record is not None else None
+
     async def _get_plan_record_on_connection(self, connection: Any, plan_id: str) -> AutomationPlanRecord | None:
         row = await self._fetchrow(connection, "SELECT * FROM automation_plans WHERE plan_id = ?", (plan_id,))
         if row is None:

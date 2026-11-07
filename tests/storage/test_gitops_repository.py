@@ -821,6 +821,31 @@ async def test_retention_keeps_applied_plans_valid_for_reads_and_policy_history(
 
 
 @pytest.mark.asyncio
+async def test_committed_on_revision_is_recorded_separately_from_the_base_revision(gitops_store):
+    """D7: a plan committed on a moved branch head keeps its planned base revision."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+
+    assert (
+        await repository.set_plan_committed_on_revision(plan.plan_id, "c" * 40, expected_digest="sha256:" + "f" * 64)
+        is None
+    )
+    updated = await repository.set_plan_committed_on_revision(plan.plan_id, "c" * 40, expected_digest=plan.digest)
+
+    assert updated is not None
+    assert updated.committed_on_revision == "c" * 40
+    assert updated.file_plan is not None and updated.file_plan.base_revision == "base-revision"
+    assert (await repository.set_plan_status(plan.plan_id, PlanStatus.APPROVED)).committed_on_revision == "c" * 40
+    resaved = await repository.save_plan(updated)
+    assert resaved.committed_on_revision == "c" * 40
+
+
+@pytest.mark.asyncio
 async def test_retention_prunes_ignored_webhook_deliveries(gitops_store):
     """D11 / BUG-53: unrelated PR webhooks are terminal and eventually pruned."""
     repository, _, _ = gitops_store

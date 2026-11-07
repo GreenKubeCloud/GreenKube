@@ -652,7 +652,9 @@ class AutomationPlanService:
                 "only a plan with successful render validation and a matching digest can be approved",
             )
         current_revision = await self._resolve_current_revision(plan.source)
-        if current_revision.lower() != plan.file_plan.base_revision.lower():
+        if current_revision.lower() != plan.file_plan.base_revision.lower() and not await self._touched_files_unchanged(
+            plan, current_revision
+        ):
             if plan.status in _STALEABLE_STATUSES:
                 await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="source_changed")
             raise AutomationPlanError(
@@ -842,6 +844,39 @@ class AutomationPlanService:
                 f"{path!r} is missing from the immutable base revision {revision}",
             )
         return git_file
+
+    async def _touched_files_unchanged(self, plan: Plan, revision: str) -> bool:
+        """Whether every file the plan edits is byte-identical at ``revision`` (D7, BUG-49).
+
+        Unrelated commits on a busy branch then no longer stale an approved plan; only a
+        change to a touched file requires re-rendering.
+        """
+        file_plan = plan.file_plan
+        resolver = self.git_blob_resolver
+        if file_plan is None or resolver is None:
+            return False
+        for edit in file_plan.files:
+            try:
+                git_file = await resolver.get_blob_file(plan.source, edit.path, revision)
+            except AutomationPlanError:
+                raise
+            except Exception as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PROVIDER_NOT_READY,
+                    f"could not resolve Git blob metadata for {edit.path!r} at {revision}",
+                ) from exc
+            if edit.operation == "create":
+                if git_file is not None:
+                    return False
+                continue
+            if (
+                git_file is None
+                or git_file.path != edit.path
+                or edit.original_sha is None
+                or git_file.blob_sha.lower() != edit.original_sha.lower()
+            ):
+                return False
+        return True
 
     async def _resolve_current_revision(self, source: WorkloadSource) -> str:
         resolver = self.revision_resolver
