@@ -362,3 +362,25 @@ tests:
       - equal:
           path: data.CARBON_PRICE_PER_TONNE
           value: "85"
+
+  - it: should omit unset impact settings so the application defaults apply
+    set:
+      impact.realizationFactor: null
+      impact.carbonPricePerTonne: null
+    asserts:
+      - notExists:
+          path: data.IMPACT_REALIZATION_FACTOR
+      - notExists:
+          path: data.CARBON_PRICE_PER_TONNE
+
+  - it: should keep a zero realization factor and carbon price
+    set:
+      impact.realizationFactor: 0
+      impact.carbonPricePerTonne: 0
+    asserts:
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "0"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "0"

@@ -188,6 +188,10 @@ data:
   {{- end }}
   IMPACT_PRICING_CURRENCY: {{ .currency | default "USD" | quote }}
   {{- end }}
+  {{- if not (kindIs "invalid" .realizationFactor) }}
   IMPACT_REALIZATION_FACTOR: {{ .realizationFactor | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .carbonPricePerTonne) }}
   CARBON_PRICE_PER_TONNE: {{ .carbonPricePerTonne | toString | quote }}
+  {{- end }}
   {{- end }}
