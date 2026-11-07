@@ -312,7 +312,7 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `collector.metricsPort` | `9102` | `CONTROLLER_METRICS_PORT`. Port of the controller's Prometheus endpoint at `/prometheus/metrics` (collection source requests/errors, collection window duration, provenance mix of written rows, verification outcomes, GitOps sync telemetry). Served through the `<release>-controller-metrics` ClusterIP Service and scraped by a dedicated ServiceMonitor when `monitoring.serviceMonitor.enabled`. `0` disables the listener, the Service and the ServiceMonitor. |
+| `collector.metricsPort` | `9102` | `CONTROLLER_METRICS_PORT`. Port of the controller's Prometheus endpoint at `/prometheus/metrics` (also served at `/metrics`) (collection source requests/errors, collection window duration, provenance mix of written rows, verification outcomes, GitOps sync telemetry). Served through the `<release>-controller-metrics` ClusterIP Service and scraped by a dedicated ServiceMonitor when `monitoring.serviceMonitor.enabled`. `0` disables the listener, the Service and the ServiceMonitor. |
 
 The chart keeps the API key out of the controller (least privilege), so this endpoint is reachable on the pod network only and serves bounded, non-sensitive counters; enable `monitoring.networkPolicy` to restrict it to Prometheus. When an API key is present in the controller's environment, scrapes must send it as a bearer token.
 

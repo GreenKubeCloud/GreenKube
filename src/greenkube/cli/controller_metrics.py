@@ -4,7 +4,8 @@ The controller runs collection, compression, verification and GitOps sync
 observation. Their telemetry lives in the process-local control-loop registry
 (:mod:`greenkube.core.observability`), which the API process cannot see. This
 module serves that registry on ``CONTROLLER_METRICS_PORT`` (default 9102) at
-``/prometheus/metrics``.
+``/prometheus/metrics`` (the chart-wide convention) and at Prometheus' default
+``/metrics`` path (the controller serves no UI, so nothing collides with it).
 
 Access model: the Helm chart keeps the API key out of the controller (least
 privilege), so the endpoint is reachable on the pod network only (ClusterIP
@@ -30,6 +31,8 @@ from greenkube.core.observability import generate_latest_observability
 logger = logging.getLogger(__name__)
 
 CONTROLLER_METRICS_PATH = "/prometheus/metrics"
+#: Prometheus' default scrape path, served as an alias of ``CONTROLLER_METRICS_PATH``.
+CONTROLLER_METRICS_DEFAULT_PATH = "/metrics"
 STARTUP_TIMEOUT_SECONDS = 10.0
 
 
@@ -60,6 +63,7 @@ def create_controller_metrics_app() -> FastAPI:
     )
 
     @app.get(CONTROLLER_METRICS_PATH, include_in_schema=False)
+    @app.get(CONTROLLER_METRICS_DEFAULT_PATH, include_in_schema=False)
     async def prometheus_metrics() -> Response:
         return Response(
             content=generate_latest_observability(),

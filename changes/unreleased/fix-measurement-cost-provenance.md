@@ -4,7 +4,7 @@
 - OpenCost cost components `cost_cpu`, `cost_ram`, `cost_storage`, `cost_network`, `cost_lb` on pod and container rows; container rows split CPU cost by CPU share and RAM cost by memory share. (A4)
 - Container `cpu_limit` / `memory_limit` collection and persistence; native sidecars (init containers with `restartPolicy: Always`) are collected as steady-state containers (`kind="sidecar"`), classic init containers only on request (`kind="init"`). (A7, BUG-10)
 - `INTENSITY_MAX_AGE` setting (Helm `config.intensityMaxAge`, default `6h`). (A8)
-- Controller Prometheus endpoint `/prometheus/metrics` on `CONTROLLER_METRICS_PORT` (Helm `collector.metricsPort`, default `9102`), with a `<release>-controller-metrics` Service, a controller ServiceMonitor and NetworkPolicy ingress. New metrics: `greenkube_collection_source_requests_total`, `greenkube_collection_source_duration_seconds`, `greenkube_collection_window_duration_seconds`, `greenkube_metric_rows_written_total` (provenance mix). Verification telemetry recorded by the controller is now scrapeable. (A12, BUG-14)
+- Controller Prometheus endpoint `/prometheus/metrics` (alias `/metrics`) on `CONTROLLER_METRICS_PORT` (Helm `collector.metricsPort`, default `9102`), with a `<release>-controller-metrics` Service, a controller ServiceMonitor and NetworkPolicy ingress. New metrics: `greenkube_collection_source_requests_total`, `greenkube_collection_source_duration_seconds`, `greenkube_collection_window_duration_seconds`, `greenkube_metric_rows_written_total` (provenance mix). Verification telemetry recorded by the controller is now scrapeable. (A12, BUG-14)
 - `metrics_compression_watermarks` table (migration 0040). (A3)
 
 ### Changed
@@ -20,4 +20,5 @@
 - Hourly compression lost samples in every hour crossing the raw-retention boundary (non-aligned cutoff + overwrite upsert); it now compresses closed hours once, from their complete raw set, behind a watermark, and never re-reads compressed hours. (A3, BUG-02)
 - Same-named pods in different namespaces (e.g. `redis-0`) shared one OpenCost cost. (A4, BUG-04)
 - Stale carbon intensities were used without age limit and static defaults were written into the intensity history as if measured. (A8, BUG-07)
+- Intensities prefetched at the raw sample time were labelled `realtime` and could differ from the value the hourly recompute applies; the calculation now uses the classified point at the normalized lookup time. (A8)
 - The intensity recompute updated `combined_metrics` only; container rows now follow (set-based on SQLite and PostgreSQL), and PostgreSQL now refreshes `is_estimated` when a provider consolidates a value. (A9, BUG-06)

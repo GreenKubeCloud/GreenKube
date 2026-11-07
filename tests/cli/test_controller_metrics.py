@@ -74,6 +74,19 @@ def test_controller_endpoint_serves_the_pod_network_when_the_controller_has_no_a
     assert response.status_code == 200
 
 
+def test_controller_endpoint_also_answers_on_the_default_metrics_path(monkeypatch):
+    """Scrapers that assume Prometheus' default ``/metrics`` path get the same registry, with the same auth."""
+    _configure_metrics_auth(monkeypatch, api_key="controller-secret")
+    record_collection_window(1.0)
+
+    with TestClient(create_controller_metrics_app()) as client:
+        assert client.get("/metrics").status_code == 401
+        response = client.get("/metrics", headers={"Authorization": "Bearer controller-secret"})
+
+    assert response.status_code == 200
+    assert "greenkube_collection_window_duration_seconds_count" in response.text
+
+
 def test_controller_metrics_port_must_be_valid():
     with pytest.raises(ValueError):
         create_controller_metrics_server(0)
