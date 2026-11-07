@@ -210,7 +210,7 @@ class GitLabProvider(GitProvider):
 
     async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison:
         """Diff ``base_revision..head_ref`` with one direct compare call (paths only, no blob IDs)."""
-        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=base_revision)
         response = await self._request(
             "GET",
             f"/projects/{self._project(repo)}/repository/compare",

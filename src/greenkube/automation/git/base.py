@@ -216,7 +216,7 @@ def is_full_commit_sha(value: object) -> TypeGuard[str]:
 
 def git_blob_id(content: str | bytes, *, object_format: Literal["sha1", "sha256"] = "sha1") -> str:
     """Return the Git blob object ID (``git hash-object``) of UTF-8 file content."""
-    payload = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+    payload = content.encode("utf-8") if isinstance(content, str) else content
     header = b"blob " + str(len(payload)).encode("ascii") + b"\0"
     digest = hashlib.sha256 if object_format == "sha256" else hashlib.sha1
     return digest(header + payload).hexdigest()
@@ -881,7 +881,7 @@ class GitProvider(ABC):
         direct (two-dot) tree comparison and is always complete: adapters whose
         fast comparison API cannot prove completeness fall back to full trees.
         """
-        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=base_revision)
         base_tree = await self._get_tree_cached(repo, base_revision)
         head_tree = await self._get_tree_cached(repo, head_ref)
         return GitTreeComparison(
@@ -926,8 +926,8 @@ class GitProvider(ABC):
     ) -> tuple[str, str]:
         if not isinstance(repo, GitRepository) or repo.provider != self.name:
             raise GitProviderError(f"Ancestry check must target a {self.name} repository.")
-        ancestor = _validate_full_commit_sha(ancestor_sha, provider=self.name, ref=str(ancestor_sha))
-        descendant = _validate_full_commit_sha(descendant_sha, provider=self.name, ref=str(descendant_sha))
+        ancestor = _validate_full_commit_sha(ancestor_sha, provider=self.name, ref=ancestor_sha)
+        descendant = _validate_full_commit_sha(descendant_sha, provider=self.name, ref=descendant_sha)
         return ancestor.lower(), descendant.lower()
 
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:

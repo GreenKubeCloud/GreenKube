@@ -10,7 +10,7 @@ size (roadmap D5, BUG-47). Requests outside a budget are still counted.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -68,7 +68,7 @@ def _provider_label(provider: str) -> str:
 
 
 @contextmanager
-def provider_call_budget(operation: str, *, limit: int) -> Iterator[ProviderCallBudget]:
+def provider_call_budget(operation: str, *, limit: int) -> Generator[ProviderCallBudget, None, None]:
     """Charge every provider request made in this context to one bounded budget."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("provider call budget limit must be a positive integer")

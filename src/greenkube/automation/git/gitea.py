@@ -183,7 +183,7 @@ class GiteaProvider(GitProvider):
         Any other shape (several commits, merges, older Gitea without affected
         file lists) falls back to a complete paginated tree comparison.
         """
-        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=str(base_revision))
+        base_revision = _validate_full_commit_sha(base_revision, provider=self.name, ref=base_revision)
         response = await self._request(
             "GET",
             f"/repos/{repo.owner}/{repo.name}/commits",
