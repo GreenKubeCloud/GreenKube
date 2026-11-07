@@ -131,6 +131,8 @@ At the end of each scan, reconciliation compares the latest generated identities
 
 When the arbitration winner of an active recommendation (for example VPA) did not complete, a lower-priority source re-emitting the same target (for example native rightsizing) does not overwrite the last known advice, so proposals do not flap during a transient connector outage.
 
+A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and keep suppressing the native replacement for their targets, until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
+
 Connectors that degrade gracefully (return a partial list instead of raising) report an incomplete result by setting `last_collect_complete = False` on the source instance during `collect()`. The engine resets the flag to `True` before every `collect()` call, so a connector only sets it when the current call is partial.
 
 ## API Usage
