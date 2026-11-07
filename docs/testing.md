@@ -19,7 +19,7 @@ The contract currently covers:
 - node SCD Type 2 snapshots
 - recommendation lifecycle operations and savings summaries
 - dashboard summary and time-series cache upserts
-- recommendation savings ledger totals and hourly compression
+- the append-only savings ledger: idempotent accrual, watermarks, partial windows and legacy compressed rows
 
 ## SQLite
 

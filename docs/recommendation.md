@@ -36,7 +36,7 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 | `pr_open` | The PR bot opened a pull request that applies the recommendation. | `POST /api/v1/recommendations/{id}/apply-pr`. |
 | `applied` | The change landed in the cluster. Applying freezes a verification baseline. | `PATCH .../apply` (manual), apply detection (Kubernetes API), or a merged PR. |
 | `verifying` | The observation window after apply is in progress (or was extended once because of insufficient samples). | `RecommendationVerifier` lifecycle job. |
-| `verified` | Cost, carbon and health gates passed; measured savings replace the prorated estimate in the ledger. | `RecommendationVerifier` lifecycle job. |
+| `verified` | Cost, carbon and health gates passed; the ledger accrues the measured savings (method `measured`) from verification onward. | `RecommendationVerifier` lifecycle job. |
 | `rollback_review` | A health gate failed (restarts, OOM, usage above the proposed request × headroom): the change needs review and prior savings rows are superseded. | `RecommendationVerifier` lifecycle job. |
 | `reverted` | The change was rolled back and the original per-container baseline was observed again. | The rollback plan reached `synced` and apply detection confirmed the original requests. |
 | `failed` | The PR was closed without merge or the savings gate failed (record stays visible with `savings_realized=false`). | PR tracking / verification. |
@@ -118,8 +118,8 @@ All recommendation API paths are under `/api/v1`.
 | `GET` | `/recommendations/applied?namespace=` | Returns applied, verifying, verified and rollback-review records ordered by most recent application. |
 | `GET` | `/recommendations/history?start=&end=&type=&namespace=` | Returns records in a creation-time range, any status. |
 | `GET` | `/recommendations/{id}/events` | Returns the full lifecycle audit trail (actor, payload, timestamp) for a recommendation. |
-| `GET` | `/recommendations/savings?namespace=&last=` | Returns realized savings split into measured (verified) and prorated (pending verification) totals. Without `last`, it uses applied recommendation records. With `last`, it prefers the savings ledger for exact window totals and falls back to records if the ledger is unavailable. |
-| `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied, freezes the verification baseline, and records realized savings. |
+| `GET` | `/recommendations/savings?namespace=&last=` | Returns separate, never-summed blocks: `projected_annual` and `run_rate_annual` (current yearly rates of applied changes, projected vs measured), `realized_to_date` (measured ledger accruals over the `last` window, all time without it), plus `projected_to_date`, `user_declared_annual` and `user_declared_to_date`. A window starting mid-hour includes that partial hour. Answers `503` when the ledger cannot be read; it never falls back to recommendation records. The flat `total_*`, `measured_*` and `prorated_*` fields are deprecated aliases (`total_*` = realized). |
+| `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied and freezes the verification baseline. Optional `carbon_saved_co2e_grams` / `cost_saved` are *user-declared* annual savings: they must be finite and at most 10× the projection (`422` otherwise); negative values are accepted and flagged. They accrue with method `user_declared` and are never reported as measured. |
 | `PATCH` | `/recommendations/{id}/ignore` | Marks a recommendation as `ignored` and stores the reason. |
 | `DELETE` | `/recommendations/{id}/ignore` | Restores an ignored recommendation to `active`. |
 | `POST` | `/recommendations/{id}/apply-pr` | Compatibility route to the validated GitOps plan path. `dry_run=true` returns the plan diff; a normal request approves and queues that plan. |
@@ -192,16 +192,19 @@ Key recommendation metrics:
 | `greenkube_namespace_recommendation_savings_cost_dollars_total` | Projected annual cost savings by target namespace. |
 | `greenkube_top_recommendations` | Ranked active recommendations for Grafana actionable cards. It emits both CO2e and cost values for each rank and selected sort metric. |
 | `greenkube_recommendations_implemented_total` | Applied recommendation count by namespace and type. |
-| `greenkube_co2e_savings_attributed_grams_total` | Cumulative DB-backed attributed CO2e savings by recommendation type. |
-| `greenkube_cost_savings_attributed_dollars_total` | Cumulative DB-backed attributed cost savings by recommendation type. |
-| `greenkube_dashboard_savings_co2e_grams_total` | DB-backed CO2e savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
-| `greenkube_dashboard_savings_cost_dollars_total` | DB-backed cost savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
+| `greenkube_co2e_savings_attributed_grams_total` | Counter: CO2e accrued in the ledger, by recommendation type and `method` (`projected`, `measured`, `user_declared`). Never decreases. |
+| `greenkube_cost_savings_attributed_dollars_total` | Counter: cost accrued in the ledger, by recommendation type and `method`. Never decreases. |
+| `greenkube_co2e_savings_reversed_grams_total` / `greenkube_cost_savings_reversed_dollars_total` | Counters of reversals (accruals superseded by a rollback review, negative declarations). Net = attributed − reversed. |
+| `greenkube_savings_run_rate_annual_co2e_grams` / `..._cost_dollars` | Current annual savings rate of applied recommendations, by `method`. |
+| `greenkube_dashboard_savings_co2e_grams_total` | Realized (measured) CO2e savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
+| `greenkube_dashboard_savings_cost_dollars_total` | Realized (measured) cost savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
+| `greenkube_dashboard_savings_accrued_co2e_grams` / `..._cost_dollars` | Ledger accruals for fixed dashboard windows, by `method`. Never sum methods. |
 
 The Grafana dashboard uses `greenkube_top_recommendations` in the Actionable Recommendations row. Dashboard variables let users choose the ranking metric (`co2` or `cost`) and displayed recommendation count.
 
 ## Realized Savings
 
-Applying a recommendation records annual realized savings on the recommendation row. If the apply request includes explicit `carbon_saved_co2e_grams` or `cost_saved`, those values are used.
+Applying a recommendation records its annual savings estimate on the recommendation row. If the apply request includes explicit `carbon_saved_co2e_grams` or `cost_saved`, they are validated as user-declared savings (finite, at most 10× the projection, negative values flagged) and stored under `baseline.user_declared_savings`.
 
 When explicit savings are omitted:
 
@@ -213,9 +216,16 @@ Applied recommendations can later be refreshed when the same issue is observed a
 - For CPU and memory rightsizing, the current observed request updates the actual value and recalculates realized savings.
 - For non-resource recommendation types, seeing the same issue again sets realized savings back to zero, because the implementation no longer appears effective.
 
-The `SavingsAttributor` converts annual realized savings into per-period ledger rows using the collection step duration. The ledger writes one row per applied recommendation per attribution cycle when annual CO2e savings are positive; cost savings are included on those rows. Raw rows can be compressed into hourly aggregates, and API/Grafana windowed savings read both raw and hourly data.
+### Savings ledger
 
-After verification, ledger rows switch to `measurement_method='measured'` and use the verifier's measured savings; pending records keep writing prorated rows. When a recommendation enters `rollback_review`, attribution stops and all its prior rows are flagged `superseded=true` (never deleted). The API and the dashboard expose measured and prorated totals separately, and the `greenkube_savings_measured_vs_projected_ratio` gauge tracks the measured share.
+The `SavingsAttributor` turns annual savings rates into *accruals* on a fixed UTC grid of one-hour slots: `accrual = annual rate × seconds of the slot after apply ÷ seconds per year`. The slot in which a change was applied is accrued pro rata.
+
+- **Idempotent.** Rows are keyed by `(recommendation_id, measurement_method, slot_start)`. The `accrual_watermarks` table stores the end of the last accrued slot; each run accrues every complete slot after it and advances it with a compare-and-swap in the same transaction as the inserts. Restarts, retries and a second controller cannot double count, and slots missed during downtime are backfilled (up to 7 days on the first run after an upgrade, at most 168 slots per run).
+- **Append-only.** Ledger rows are never compressed, overwritten or deleted. Hourly rollups are read-side views (`savings_ledger_entries`, `savings_ledger_hourly_rollup`). Hourly rows written by the compression job of earlier releases are kept and flagged `legacy_compressed`; the savings API adds a `legacy_compressed` diagnostic when a window includes them, because part of their value was lost (BUG-32).
+- **Methods are never mixed.** `applied`/`verifying` records whose verification is pending accrue `projected` savings (or `user_declared` for declared quantities); `verified` records accrue `measured` savings. Records that are not realized, inconclusive, failed, in rollback review or reverted accrue nothing. When a recommendation enters `rollback_review`, its prior rows are flagged `superseded=true` (never deleted).
+- **Isolated failures.** Each recommendation is processed on its own; an invalid one (non-finite values, missing `applied_at`) increments `greenkube_attribution_errors_total{reason}` and never blocks the others.
+
+The API and the dashboard report realized (measured) savings separately from projected and user-declared accruals, and the `greenkube_savings_measured_vs_projected_ratio` gauge tracks the measured share of net accruals.
 
 ## Configuration
 

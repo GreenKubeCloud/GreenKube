@@ -72,10 +72,10 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 | `GET` | `/recommendations/ignored` | List ignored records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/applied` | List applied records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/history` | List records by required ISO-8601 `start`/`end`, optional `type`, and optional `namespace`. |
-| `GET` | `/recommendations/savings` | Read realized savings (`last`, `namespace`). |
+| `GET` | `/recommendations/savings` | Read `projected_annual`, `run_rate_annual` and `realized_to_date` savings blocks (`last`, `namespace`); `503` when the ledger is unavailable. |
 | `GET` | `/recommendations/{rec_id}` | Read a recommendation record. |
 | `GET` | `/recommendations/{rec_id}/events` | Read its lifecycle audit trail. |
-| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. |
+| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline; optional user-declared savings are validated (`422`) and accrued as `user_declared`. |
 | `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore a recommendation. |
 | `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. |
 | `POST` | `/recommendations/{rec_id}/apply-pr` | Compatibility endpoint that previews or queues a validated GitOps plan. |

@@ -177,11 +177,11 @@ GreenKube distinguishes several kinds of savings figures. They are never added t
 | Kind | Meaning | Status |
 |---|---|---|
 | **Projected** | Expected annual impact of a recommendation, from the evidence and the cost/carbon model | Available |
-| **Prorated** | The projection accrued over time for a change that is applied but not yet verified | Available |
+| **Projected accrual** | The projection accrued hour by hour for a change that is applied but not yet verified (labelled `prorated` before 0.4) | Available |
 | **Measured** | The before/after difference observed by verification | Available (beta) |
 | **Allocated vs billed** *(planned)* | A request cut lowers what a workload is *allocated* immediately. The cloud bill only drops when nodes are removed, so this will be measured at node-pool level and reported separately. | Planned |
 
-Every attribution cycle writes ledger rows with their method (`prorated` or `measured`). A recommendation that enters `rollback_review` has its earlier rows flagged `superseded`; they are never deleted. The API and the dashboard report measured and prorated totals separately.
+The ledger accrues savings once per UTC hour slot and recommendation, with their method (`projected`, `measured` or `user_declared`). Accrual is idempotent and backfills downtime; ledger rows are never compressed or deleted. Changes that were not realized, are inconclusive, failed, are in rollback review or were reverted accrue nothing, and a recommendation that enters `rollback_review` has its earlier rows flagged `superseded`. The API reports `projected_annual`, `run_rate_annual` and `realized_to_date` as separate blocks.
 
 *(Planned)* An append-only ledger linking each entry to its pull request, merge commit, synced revision and measurement method, with CSV export and export aligned with the FinOps FOCUS format.
 
