@@ -1,15 +1,18 @@
 """Scheduled, leader-gated recommendation scans (E1, BUG-21).
 
-The controller schedules one cluster-wide scan per interval and drains queued
-run requests exactly once, even with several controller processes.
+Acceptance: two API replicas plus one controller produce exactly one scan per
+interval, and API processes never scan.
 """
 
 import asyncio
+import importlib
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, List, Optional, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
@@ -113,6 +116,54 @@ def _controller(manager, clock, identity="controller-0", fail=False, **kwargs) -
         clock=clock,
         **kwargs,
     )
+
+
+def _patch_api_lifespan(monkeypatch):
+    """Let the real API lifespan start with a fake DB and no plan runtime."""
+    api_app = importlib.import_module("greenkube.api.app")
+    database = importlib.import_module("greenkube.core.db")
+    k8s_client = importlib.import_module("greenkube.core.k8s_client")
+
+    class _NoopManager:
+        async def connect(self):
+            return None
+
+        async def close(self):
+            return None
+
+    async def _noop():
+        return None
+
+    async def _no_plan_service(**kwargs):
+        raise RuntimeError("no providers")
+
+    monkeypatch.setattr(database, "get_db_manager", lambda: _NoopManager())
+    monkeypatch.setattr(api_app, "get_config", lambda: SimpleNamespace(AUTOMATION_ENABLED=False))
+    monkeypatch.setattr(api_app, "build_plan_api_service", _no_plan_service)
+    monkeypatch.setattr(k8s_client, "close_k8s_client", _noop)
+    return api_app
+
+
+async def test_two_api_replicas_and_one_controller_scan_exactly_once_per_interval(shared_sqlite, monkeypatch):
+    clock = Clock(T0)
+    controller = _controller(await shared_sqlite(), clock)
+    api_runs = [SQLiteOptimizationRunRepository(await shared_sqlite()) for _ in range(2)]
+    run_scan = AsyncMock(side_effect=AssertionError("API processes must never scan"))
+    monkeypatch.setattr("greenkube.core.optimization.engine.OptimizationEngine.run_scan", run_scan)
+
+    api_app = _patch_api_lifespan(monkeypatch)
+    async with api_app.lifespan(FastAPI()), api_app.lifespan(FastAPI()):
+        # Three hours of controller polling while both API replicas serve traffic.
+        while clock() < T0 + 3 * INTERVAL:
+            await controller.tick()
+            clock.advance(POLL)
+        await asyncio.sleep(0)
+
+    run_scan.assert_not_awaited()
+    assert [scan[0] for scan in CountingEngine.scans] == [T0, T0 + INTERVAL, T0 + 2 * INTERVAL]
+    assert all(scan[2] == OptimizationRunTrigger.SCHEDULED for scan in CountingEngine.scans)
+    runs = await api_runs[0].list_runs(limit=10)
+    assert [run.status for run in runs] == [OptimizationRunStatus.SUCCEEDED] * 3
 
 
 async def test_api_requests_from_both_replicas_are_deduplicated_and_run_once(shared_sqlite):

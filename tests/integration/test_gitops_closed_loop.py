@@ -1,11 +1,12 @@
 """Reliability checks for the composed recommendation/GitOps loop.
 
-The closed loop is deliberately best effort at its boundaries: a failed
-startup refresh or ledger write must not take down the API or lose the
-ability to serve health traffic.  These tests exercise those recovery
+The closed loop is deliberately best effort at its boundaries: API
+replicas never scan, and a failed ledger write must not take down the API
+or lose the ability to serve health traffic.  These tests exercise those recovery
 contracts without requiring a Kubernetes or Git provider.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,26 +36,26 @@ def _recommendation(status=RecommendationStatus.APPLIED) -> RecommendationRecord
 
 
 @pytest.mark.asyncio
-async def test_startup_refresh_failure_does_not_block_shutdown_or_health_state():
-    """A failed background refresh is isolated and resources still close."""
+async def test_api_lifespan_never_scans_and_still_closes_resources():
+    """API replicas never run recommendation scans (E1); resources still close."""
     db = MagicMock()
     db.connect = AsyncMock()
     db.close = AsyncMock()
     app = FastAPI()
+    run_scan = AsyncMock(side_effect=AssertionError("the API must not scan"))
 
     with (
         patch("greenkube.core.db.get_db_manager", return_value=db),
-        patch(
-            "greenkube.api.app.run_startup_recommendation_scan",
-            new=AsyncMock(side_effect=RuntimeError("transient provider outage")),
-        ),
+        patch("greenkube.core.optimization.engine.OptimizationEngine.run_scan", new=run_scan),
         patch("greenkube.core.k8s_client.close_k8s_client", new=AsyncMock()),
     ):
         async with lifespan(app):
             assert app.state.ready is True
-            with pytest.raises(RuntimeError, match="transient provider outage"):
-                await app.state._startup_tasks[0]
+            await asyncio.sleep(0)
+            for task in app.state._startup_tasks:
+                assert "recommendation" not in task.get_name()
 
+    run_scan.assert_not_awaited()
     assert app.state.ready is False
     db.connect.assert_awaited_once()
     db.close.assert_awaited_once()

@@ -3,46 +3,47 @@
 API routes for the recommendation lifecycle.
 
 Endpoints:
-  GET  /recommendations            - Live recommendations (runs the optimization engine, upserts DB)
-  GET  /recommendations/active     - Current active recommendations from DB
-    GET  /recommendations/top        - Ranked actionable recommendations by projected savings
+  GET  /recommendations            - Current active recommendations from DB
+  GET  /recommendations/active     - Current active recommendations from DB (filterable)
+  GET  /recommendations/top        - Ranked actionable recommendations by projected savings
   GET  /recommendations/ignored    - All permanently ignored recommendations
   GET  /recommendations/history    - Historical records filtered by time range
   GET  /recommendations/savings    - Aggregate CO2 and cost savings from applied recs
   PATCH /recommendations/{id}/apply  - Mark a recommendation as applied
   PATCH /recommendations/{id}/ignore - Permanently ignore a recommendation
   DELETE /recommendations/{id}/ignore - Un-ignore a recommendation (restore to active)
+
+GET endpoints never run the optimizer and never write recommendations. The
+deprecated ``refresh=true`` parameter only queues an optimization run for the
+controller and returns its id in the ``X-GreenKube-Run-Id`` header; use
+``POST /api/v1/optimization/runs`` instead.
 """
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from greenkube.api.dependencies import (
-    get_combined_metrics_repository,
-    get_node_repository,
+    get_authenticated_actor,
     get_recommendation_repository,
     get_savings_ledger_repository,
     validate_namespace,
 )
-from greenkube.api.metrics_endpoint import update_recommendation_metrics
+from greenkube.api.routers.optimization import enqueue_refresh, get_optimization_run_repository
 from greenkube.core.config import get_config
-from greenkube.core.optimization.context_builder import RecommendationScanLimitError
-from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.recommendation_ranking import rank_recommendations
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
-    Recommendation,
     RecommendationEvent,
     RecommendationRecord,
     RecommendationSavingsSummary,
     TopRecommendation,
 )
-from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
+from greenkube.storage.base_repository import RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 from greenkube.utils.date_utils import parse_duration
 
@@ -139,87 +140,47 @@ def _summary_from_savings_totals(
     )
 
 
-_ACTIVE_REFRESH_TASKS: dict[str, asyncio.Task[list[Recommendation]]] = {}
-
-
-async def _generate_and_persist_recommendations(
-    namespace: Optional[str],
-    repo: CombinedMetricsRepository,
-    node_repo: NodeRepository,
-    reco_repo: RecommendationRepository,
-) -> list[Recommendation]:
-    """Run one coalesced optimization scan for a namespace scope."""
-    key = namespace or "*"
-    loop = asyncio.get_running_loop()
-    active = _ACTIVE_REFRESH_TASKS.get(key)
-    if active is not None and not active.done() and active.get_loop() is loop:
-        return await asyncio.shield(active)
-
-    task = loop.create_task(_run_recommendation_refresh(namespace, repo, node_repo, reco_repo))
-    _ACTIVE_REFRESH_TASKS[key] = task
-    try:
-        return await asyncio.shield(task)
-    finally:
-        if _ACTIVE_REFRESH_TASKS.get(key) is task:
-            _ACTIVE_REFRESH_TASKS.pop(key, None)
-
-
-async def _run_recommendation_refresh(
-    namespace: Optional[str],
-    repo: CombinedMetricsRepository,
-    node_repo: NodeRepository,
-    reco_repo: RecommendationRepository,
-) -> list[Recommendation]:
-    engine = OptimizationEngine()
-    try:
-        recommendations = await engine.refresh(repo, node_repo, reco_repo, namespace=namespace)
-    except RecommendationScanLimitError as exc:
-        logger.error("Recommendation scan exceeded its configured metric-row bound: %s", exc)
-        return []
-    update_recommendation_metrics(recommendations)
-    return recommendations
+_REFRESH_DESCRIPTION = (
+    "Deprecated: queue an optimization run for the controller (see POST /optimization/runs) and return "
+    "its id in the X-GreenKube-Run-Id header. The response always contains the current data."
+)
 
 
 @router.get("/recommendations", response_model=List[RecommendationRecord])
 async def list_recommendations(
-    background_tasks: BackgroundTasks,
+    response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
-    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
-    node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
-    refresh: bool = Query(False, description="Refresh asynchronously before the next read."),
+    run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    actor: str = Depends(get_authenticated_actor),
+    refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
 ):
-    """Read active recommendations without running analyzers in the request."""
-    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    """Read active recommendations; never runs analyzers or writes recommendations."""
     if refresh:
-        background_tasks.add_task(_generate_and_persist_recommendations, namespace, repo, node_repo, reco_repo)
-    elif not records:
-        # Preserve the legacy endpoint's first-read behavior while keeping
-        # populated reads read-only; callers needing explicit refresh can use
-        # the query parameter.
-        records = await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
-    return records
+        await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
+    return await reco_repo.get_active_recommendations(namespace=namespace)
 
 
 @router.get("/recommendations/active", response_model=List[RecommendationRecord])
 async def list_active_recommendations(
-    background_tasks: BackgroundTasks,
+    response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
-    refresh: bool = Query(False, description="Refresh recommendations before returning active records."),
+    refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
     source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, karpenter)."),
     risk_level: Optional[str] = Query(None, description="Filter by risk level (low, medium, high)."),
     capability: Optional[str] = Query(None, description="Filter by optimization capability."),
-    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
-    node_repo: NodeRepository = Depends(get_node_repository),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
-    """Return active recommendations and optionally refresh them after the response.
+    """Return active recommendations from the database.
 
-    By default this endpoint reads directly from the DB. Pass ``refresh=true``
-    to schedule the optimizer without holding the request open.
+    Ordered by ranking score, then projected cost savings (highest first).
+    ``refresh=true`` only queues a controller run; it never blocks or writes
+    recommendations in the request.
     """
     if refresh:
-        background_tasks.add_task(_generate_and_persist_recommendations, namespace, repo, node_repo, reco_repo)
+        await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
 
     records = await reco_repo.get_active_recommendations(namespace=namespace)
     return _filter_records(records, source, risk_level, capability)
@@ -227,6 +188,7 @@ async def list_active_recommendations(
 
 @router.get("/recommendations/top", response_model=List[TopRecommendation])
 async def list_top_recommendations(
+    response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
     limit: int = Query(5, ge=1, le=50, description="Number of recommendations to return."),
     metric: Literal["co2", "cost"] = Query("co2", description="Savings metric used for ranking."),
@@ -237,10 +199,10 @@ async def list_top_recommendations(
             "When omitted, ranking uses projected savings only."
         ),
     ),
-    refresh: bool = Query(False, description="Refresh recommendations before ranking active records."),
-    repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
-    node_repo: NodeRepository = Depends(get_node_repository),
+    refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Return the highest-impact active recommendations.
 
@@ -249,10 +211,7 @@ async def list_top_recommendations(
     rank by the multi-criteria score (impact, confidence, risk, effort).
     """
     if refresh:
-        try:
-            await _generate_and_persist_recommendations(namespace, repo, node_repo, reco_repo)
-        except Exception as e:
-            logger.error("Failed to refresh top recommendations: %s", e)
+        await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
 
     if profile:
         records = await reco_repo.get_active_recommendations(namespace=namespace)

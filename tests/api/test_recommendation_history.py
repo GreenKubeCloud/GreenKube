@@ -92,10 +92,14 @@ class TestRecommendationHistoryEndpoint:
 
 
 class TestRecommendationsPersistence:
-    """Tests that recommendations are persisted when generated."""
+    """Scans persist and reconcile; reads never write (E1, BUG-21)."""
 
-    def test_recommendations_are_saved_on_generation(self, client, mock_combined_metrics_repo, mock_reco_repo):
-        """Generating recommendations should also persist them via upsert."""
+    async def test_recommendations_are_saved_on_generation(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
+        """A scan persists generated recommendations via upsert and reconciles the active set."""
+        from greenkube.core.optimization.engine import OptimizationEngine
+
         zombie_metric = CombinedMetric(
             pod_name="zombie-pod",
             namespace="default",
@@ -108,36 +112,18 @@ class TestRecommendationsPersistence:
             duration_seconds=300,
         )
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
-        response = client.get("/api/v1/recommendations")
-        assert response.status_code == 200
-        data = response.json()
+
+        data = await OptimizationEngine().refresh(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
+
         assert len(data) >= 1
-        # The upsert_recommendations method should have been called
         mock_reco_repo.upsert_recommendations.assert_called_once()
         saved_records = mock_reco_repo.upsert_recommendations.call_args[0][0]
         assert len(saved_records) >= 1
         assert all(isinstance(r, RecommendationRecord) for r in saved_records)
         mock_reco_repo.reconcile_active_recommendations.assert_called_once()
 
-    def test_active_endpoint_refreshes_recommendations_when_requested(
-        self,
-        client,
-        mock_combined_metrics_repo,
-        mock_reco_repo,
-    ):
-        """The active endpoint should refresh/reconcile before returning when requested by the UI."""
-        metric = CombinedMetric(
-            pod_name="api-7f9c5d9f6d-a1b2c",
-            namespace="prod",
-            total_cost=0.05,
-            co2e_grams=1.0,
-            joules=100.0,
-            cpu_request=1000,
-            memory_request=512 * 1024 * 1024,
-            cpu_usage_millicores=20,
-            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-            duration_seconds=300,
-        )
+    def test_active_endpoint_reads_without_writing(self, client, mock_combined_metrics_repo, mock_reco_repo):
+        """The active endpoint returns persisted records and never runs the optimizer."""
         active_record = RecommendationRecord(
             scope="workload",
             pod_name="api",
@@ -146,26 +132,28 @@ class TestRecommendationsPersistence:
             status=RecommendationStatus.ACTIVE,
             description="Deployment 'api' is oversized",
         )
-        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[metric])
         mock_reco_repo.get_active_recommendations = AsyncMock(return_value=[active_record])
 
-        response = client.get("/api/v1/recommendations/active", params={"namespace": "prod", "refresh": "true"})
+        response = client.get("/api/v1/recommendations/active", params={"namespace": "prod"})
 
         assert response.status_code == 200
         data = response.json()
         assert data[0]["scope"] == "workload"
         assert data[0]["pod_name"] == "api"
-        mock_reco_repo.upsert_recommendations.assert_called_once()
-        mock_reco_repo.reconcile_active_recommendations.assert_called_once()
-        mock_reco_repo.get_active_recommendations.assert_called_with(namespace="prod")
+        mock_reco_repo.upsert_recommendations.assert_not_called()
+        mock_reco_repo.reconcile_active_recommendations.assert_not_called()
+        mock_combined_metrics_repo.read_combined_metrics.assert_not_called()
+        mock_reco_repo.get_active_recommendations.assert_called_once_with(namespace="prod")
 
-    def test_metrics_from_deleted_namespaces_are_excluded_from_recommendations(
+    async def test_metrics_from_deleted_namespaces_are_excluded_from_recommendations(
         self,
-        client,
         mock_combined_metrics_repo,
+        mock_node_repo,
         mock_reco_repo,
     ):
         """Metrics for a deleted Kubernetes namespace must not produce or keep active recommendations."""
+        from greenkube.core.optimization.engine import OptimizationEngine
+
         # The DB still holds historical data from the now-deleted namespace.
         deleted_ns_metric = CombinedMetric(
             pod_name="api-7f9c5d9f6d-a1b2c",
@@ -186,9 +174,8 @@ class TestRecommendationsPersistence:
             "greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
             new=AsyncMock(return_value={"greenkube", "default"}),
         ):
-            response = client.get("/api/v1/recommendations/active", params={"refresh": "true"})
+            await OptimizationEngine().refresh(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
-        assert response.status_code == 200
         # All metrics were filtered out → reconcile is called with an empty list,
         # which will mark the greenkube-db-testing rows as stale.
         mock_reco_repo.reconcile_active_recommendations.assert_called_once()

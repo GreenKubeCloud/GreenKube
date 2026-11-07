@@ -7,11 +7,18 @@ from unittest.mock import AsyncMock
 import pytest
 
 from greenkube.core.config import get_config
+from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.models.metrics import RecommendationRecord, RecommendationSavingsSummary, RecommendationType
 
 
+async def _scan(combined_repo, node_repo, reco_repo, namespace=None) -> list[dict]:
+    """Run one controller-style scan (the API itself never scans, E1) and serialize its output."""
+    recommendations = await OptimizationEngine().refresh(combined_repo, node_repo, reco_repo, namespace=namespace)
+    return [RecommendationRecord.from_recommendation(rec).model_dump(mode="json") for rec in recommendations]
+
+
 class TestRecommendationsEndpoint:
-    """Tests for GET /api/v1/recommendations."""
+    """Tests for GET /api/v1/recommendations and the scans that populate it."""
 
     def test_recommendations_returns_200(self, client):
         """Should return 200 even with no data."""
@@ -24,7 +31,7 @@ class TestRecommendationsEndpoint:
         data = response.json()
         assert data == []
 
-    def test_recommendations_with_zombie_pod(self, client, mock_combined_metrics_repo):
+    async def test_recommendations_with_zombie_pod(self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo):
         """Should detect a zombie pod (cost > threshold, energy < threshold)."""
         from datetime import datetime, timezone
 
@@ -42,12 +49,13 @@ class TestRecommendationsEndpoint:
             duration_seconds=300,
         )
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
-        response = client.get("/api/v1/recommendations")
-        data = response.json()
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
         assert len(data) >= 1
         assert any(r["type"] == "ZOMBIE_POD" for r in data)
 
-    def test_recommendation_potential_savings_are_annualized(self, client, mock_combined_metrics_repo):
+    async def test_recommendation_potential_savings_are_annualized(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
         """Potential savings returned by the API should be annual projections from the lookback window."""
         from greenkube.models.metrics import CombinedMetric
 
@@ -64,15 +72,16 @@ class TestRecommendationsEndpoint:
         )
         mock_combined_metrics_repo.read_combined_metrics_smart = AsyncMock(return_value=[zombie_metric])
 
-        response = client.get("/api/v1/recommendations")
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
-        assert response.status_code == 200
-        zombie_rec = next(r for r in response.json() if r["type"] == "ZOMBIE_POD")
+        zombie_rec = next(r for r in data if r["type"] == "ZOMBIE_POD")
         annualization_factor = 365 / get_config().RECOMMENDATION_LOOKBACK_DAYS
         assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
         assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(0.02 * annualization_factor)
 
-    def test_recommendations_filter_by_namespace(self, client, mock_combined_metrics_repo):
+    async def test_recommendations_filter_by_namespace(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
         """Should filter recommendations by namespace."""
         from datetime import datetime, timezone
 
@@ -103,11 +112,13 @@ class TestRecommendationsEndpoint:
             ),
         ]
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=metrics)
-        response = client.get("/api/v1/recommendations?namespace=team-a")
-        data = response.json()
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, namespace="team-a")
+        assert data
         assert all(r["namespace"] == "team-a" for r in data)
 
-    def test_recommendations_contain_expected_fields(self, client, mock_combined_metrics_repo):
+    async def test_recommendations_contain_expected_fields(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
         """Each recommendation should contain expected fields."""
         from greenkube.models.metrics import CombinedMetric
 
@@ -123,15 +134,14 @@ class TestRecommendationsEndpoint:
             duration_seconds=300,
         )
         mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie])
-        response = client.get("/api/v1/recommendations")
-        data = response.json()
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
         if data:
             rec = data[0]
             for field in ["pod_name", "namespace", "type", "description"]:
                 assert field in rec, f"Missing field: {field}"
 
-    def test_recommendations_include_orphaned_persistent_volumes(
-        self, client, mock_combined_metrics_repo, mock_pv_collector
+    async def test_recommendations_include_orphaned_persistent_volumes(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_pv_collector
     ):
         """Orphaned PVs collected from the cluster should surface as recommendations."""
         from greenkube.collectors.pv_collector import OrphanedPV
@@ -160,10 +170,9 @@ class TestRecommendationsEndpoint:
             )
         ]
 
-        response = client.get("/api/v1/recommendations")
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
-        assert response.status_code == 200
-        pv_recs = [r for r in response.json() if r["type"] == "ORPHANED_PERSISTENT_VOLUME"]
+        pv_recs = [r for r in data if r["type"] == "ORPHANED_PERSISTENT_VOLUME"]
         assert len(pv_recs) == 1
         assert pv_recs[0]["pod_name"] == "pvc-dead"
         assert pv_recs[0]["scope"] == "cluster"
@@ -171,8 +180,8 @@ class TestRecommendationsEndpoint:
         assert pv_recs[0]["potential_savings_cost"] == pytest.approx(120.0)
         assert pv_recs[0]["potential_savings_co2e_grams"] is None
 
-    def test_recommendations_include_orphaned_load_balancers(
-        self, client, mock_combined_metrics_repo, mock_lb_collector
+    async def test_recommendations_include_orphaned_load_balancers(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, mock_lb_collector
     ):
         """Orphaned LoadBalancer Services collected from the cluster should surface as recommendations."""
         from greenkube.collectors.lb_collector import OrphanedLoadBalancer
@@ -199,10 +208,9 @@ class TestRecommendationsEndpoint:
             )
         ]
 
-        response = client.get("/api/v1/recommendations")
+        data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
-        assert response.status_code == 200
-        lb_recs = [r for r in response.json() if r["type"] == "ORPHANED_LOAD_BALANCER"]
+        lb_recs = [r for r in data if r["type"] == "ORPHANED_LOAD_BALANCER"]
         assert len(lb_recs) == 1
         assert lb_recs[0]["pod_name"] == "dead-lb"
         assert lb_recs[0]["namespace"] == "legacy"
