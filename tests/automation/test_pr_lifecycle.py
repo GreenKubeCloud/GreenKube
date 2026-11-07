@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from greenkube.automation.git.base import PullRequestInfo
+from greenkube.automation.git.base import GitRepository, PullRequestInfo, normalize_pull_request
 from greenkube.automation.pr_lifecycle import (
     PullRequestLifecycleOutcome,
     PullRequestLifecyclePlan,
@@ -593,3 +595,82 @@ async def test_poll_reconciliation_ignores_currently_open_pr_without_mutation():
     assert repository.pull_request_updates == []
     assert repository.plan_updates == []
     assert repository.action_updates == []
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "github"
+
+
+def _github_closed_unmerged_payload() -> dict:
+    """A GitHub ``pull_request`` webhook for a request closed without merging (BUG-45).
+
+    GitHub keeps the test-merge ``merge_commit_sha`` on such requests.
+    """
+    return json.loads((FIXTURES / "pull_request_closed_unmerged.webhook.json").read_text())
+
+
+def _github_closed_unmerged_state() -> PullRequestInfo:
+    """The REST ``GET /pulls/42`` body of the same request (identical schema)."""
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+    return normalize_pull_request(pull_request, repo=GitRepository(provider="github", owner="acme", name="platform"))
+
+
+def test_github_closed_unmerged_fixture_keeps_a_test_merge_sha():
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+
+    assert pull_request["merged"] is False and pull_request["merged_at"] is None
+    assert isinstance(pull_request["merge_commit_sha"], str)
+    state = _github_closed_unmerged_state()
+    assert state.merged is False
+    assert state.merge_commit_sha is None
+
+
+@pytest.mark.asyncio
+async def test_bug_45_webhook_for_pr_closed_without_merge_closes_the_plan():
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_github_closed_unmerged_state())
+    reconciler = _reconciler(repository, provider)
+    pull_request = _github_closed_unmerged_payload()["pull_request"]
+    # The event exactly as webhooks produced it before the fix: merged=false, test-merge SHA present.
+    event = PullRequestEvent(
+        provider_id=PROVIDER_ID,
+        delivery_id="delivery-closed-unmerged",
+        repo=REPO,
+        number=PR_NUMBER,
+        action="closed",
+        merged=False,
+        merge_commit_sha=pull_request["merge_commit_sha"],
+        occurred_at=CLOSED_AT,
+    )
+
+    result = await reconciler.reconcile(event, newly_deduplicated=True)
+
+    assert result.outcome is PullRequestLifecycleOutcome.CLOSED
+    assert repository.plans[PLAN_ID].status is PlanStatus.CLOSED
+    assert repository.plan_updates == [(PLAN_ID, PlanStatus.CLOSED)]
+    assert repository.action_updates == [([1001, 1002], ActionStatus.CLOSED)]
+    assert all(record.status == "closed" for record in repository.records)
+    assert all(record.merge_commit_sha is None for record in repository.records)
+    assert all(record.closed_at == datetime(2026, 10, 21, 12, 45, tzinfo=timezone.utc) for record in repository.records)
+
+
+@pytest.mark.asyncio
+async def test_bug_45_polled_pr_closed_without_merge_closes_the_plan():
+    repository = MemoryLifecycleRepository()
+    raw_state = _github_closed_unmerged_state()
+    # Provider adapters that predate normalization still expose the raw test-merge SHA.
+    provider = MemoryGitProvider(
+        PullRequestInfo(
+            number=raw_state.number,
+            url=raw_state.url,
+            status=raw_state.status,
+            merged=False,
+            raw=raw_state.raw,
+        )
+    )
+    reconciler = _reconciler(repository, provider)
+
+    result = await reconciler.reconcile_polled(PROVIDER_ID, REPO, PR_NUMBER)
+
+    assert result.outcome is PullRequestLifecycleOutcome.CLOSED
+    assert repository.plans[PLAN_ID].status is PlanStatus.CLOSED
+    assert all(record.merge_commit_sha is None for record in repository.records)
