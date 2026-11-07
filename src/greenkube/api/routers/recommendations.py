@@ -33,15 +33,17 @@ from greenkube.core.config import get_config
 from greenkube.core.optimization.context_builder import RecommendationScanLimitError
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.recommendation_ranking import rank_recommendations
+from greenkube.core.savings_attributor import record_user_declared_savings, validate_user_declared_savings
+from greenkube.core.savings_report import assemble_savings_report
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
     Recommendation,
     RecommendationEvent,
     RecommendationRecord,
-    RecommendationSavingsSummary,
     TopRecommendation,
 )
+from greenkube.models.savings import SavingsReport
 from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 from greenkube.utils.date_utils import parse_duration
@@ -95,48 +97,6 @@ def _filter_records(
     if capability:
         result = [r for r in result if _enum_value(r.capability) == capability]
     return result
-
-
-def _summary_from_savings_totals(
-    totals_by_type: dict[str, dict[str, float]],
-    applied_count: int,
-    namespace: Optional[str],
-    totals_by_method: Optional[dict[str, dict[str, float]]] = None,
-) -> RecommendationSavingsSummary:
-    """Build an API savings summary from ledger totals grouped by recommendation type."""
-    total_carbon = sum(values.get("co2e_saved_grams", 0.0) for values in totals_by_type.values())
-    total_cost = sum(values.get("cost_saved_dollars", 0.0) for values in totals_by_type.values())
-    namespace_breakdown = []
-    if namespace is not None:
-        namespace_breakdown.append(
-            {
-                "namespace": namespace,
-                "carbon_saved_co2e_grams": total_carbon,
-                "cost_saved": total_cost,
-                "count": applied_count,
-            }
-        )
-
-    measured = (totals_by_method or {}).get("measured", {})
-    prorated = (totals_by_method or {}).get("prorated", {})
-    measured_carbon = measured.get("co2e_saved_grams", 0.0)
-    measured_cost = measured.get("cost_saved_dollars", 0.0)
-    if totals_by_method:
-        prorated_carbon = prorated.get("co2e_saved_grams", 0.0)
-        prorated_cost = prorated.get("cost_saved_dollars", 0.0)
-    else:
-        prorated_carbon, prorated_cost = total_carbon, total_cost
-
-    return RecommendationSavingsSummary(
-        total_carbon_saved_co2e_grams=total_carbon,
-        total_cost_saved=total_cost,
-        applied_count=applied_count,
-        namespace_breakdown=namespace_breakdown,
-        measured_carbon_saved_co2e_grams=measured_carbon,
-        measured_cost_saved=measured_cost,
-        prorated_carbon_saved_co2e_grams=prorated_carbon,
-        prorated_cost_saved=prorated_cost,
-    )
 
 
 _ACTIVE_REFRESH_TASKS: dict[str, asyncio.Task[list[Recommendation]]] = {}
@@ -312,46 +272,42 @@ async def list_applied_recommendations(
     return await reco_repo.get_applied_recommendations(namespace=namespace)
 
 
-@router.get("/recommendations/savings", response_model=RecommendationSavingsSummary)
+@router.get("/recommendations/savings", response_model=SavingsReport)
 async def get_savings_summary(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '24h', '7d', '30d', 'ytd')."),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     savings_repo: SavingsLedgerRepository = Depends(get_savings_ledger_repository),
 ):
-    """Return aggregate CO2e and cost savings from all applied recommendations.
+    """Return projected, measured and realized savings as separate blocks.
 
-    This is GreenKube's core value metric: the total environmental and financial
-    impact of the optimizations that have been implemented.
+    ``projected_annual`` and ``run_rate_annual`` are current yearly rates;
+    ``realized_to_date`` sums measured ledger accruals over the ``last`` window
+    (all time when omitted). Projected and user-declared accruals are reported
+    in their own blocks and never added to realized figures. The endpoint
+    answers 503 instead of falling back when the ledger cannot be read.
     """
     start, end = _get_optional_time_range(last)
-    record_summary = await reco_repo.get_savings_summary(namespace=namespace, start=start, end=end)
-
-    if start is None or end is None:
-        return record_summary
-
+    try:
+        applied = await reco_repo.get_applied_recommendations(namespace=namespace)
+    except Exception as exc:
+        logger.error("Could not load applied recommendations for the savings report: %s", exc)
+        raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
     try:
         cluster_name = _get_savings_cluster_name()
-        totals = await savings_repo.get_window_totals(
-            cluster_name=cluster_name,
-            start_time=start,
-            end_time=end,
-            namespace=namespace,
-        )
-
-        if totals:
-            by_method = await savings_repo.get_window_totals(
-                cluster_name=cluster_name,
-                start_time=start,
-                end_time=end,
-                namespace=namespace,
-                group_by_method=True,
-            )
-            return _summary_from_savings_totals(totals, record_summary.applied_count, namespace, by_method)
+        breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
+        legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end)
     except Exception as exc:
-        logger.warning("Could not load savings ledger summary: %s. Falling back to recommendation records.", exc)
-
-    return record_summary
+        logger.error("Could not read the savings ledger: %s", exc)
+        raise HTTPException(status_code=503, detail="Savings ledger unavailable.") from exc
+    return assemble_savings_report(
+        applied,
+        breakdown,
+        namespace=namespace,
+        start=start,
+        end=end,
+        legacy_compressed=legacy,
+    )
 
 
 @router.get("/recommendations/{rec_id}", response_model=RecommendationRecord)
@@ -389,8 +345,9 @@ async def apply_recommendation(
     from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 
     lifecycle = RecommendationLifecycle(reco_repo)
+    declared = await _validate_declared_savings(rec_id, request, reco_repo)
     try:
-        return await lifecycle.apply(
+        applied = await lifecycle.apply(
             rec_id,
             actual_cpu=request.actual_cpu_request_millicores,
             actual_memory=request.actual_memory_request_bytes,
@@ -401,6 +358,26 @@ async def apply_recommendation(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    if declared is not None:
+        applied = await record_user_declared_savings(reco_repo, applied, declared)
+    return applied
+
+
+async def _validate_declared_savings(rec_id: int, request: ApplyRecommendationRequest, reco_repo):
+    """Validate user-declared savings (C0.8): finite, within 10x the projection, signed but flagged."""
+    if request.carbon_saved_co2e_grams is None and request.cost_saved is None:
+        return None
+    record = await reco_repo.get_recommendation_by_id(rec_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
+    try:
+        return validate_user_declared_savings(
+            record,
+            co2e_grams_per_year=request.carbon_saved_co2e_grams,
+            cost_per_year=request.cost_saved,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/recommendations/{rec_id}/events", response_model=List[RecommendationEvent])

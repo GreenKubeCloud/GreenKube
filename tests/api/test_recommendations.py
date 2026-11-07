@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from greenkube.core.config import get_config
-from greenkube.models.metrics import RecommendationRecord, RecommendationSavingsSummary, RecommendationType
+from greenkube.models.metrics import RecommendationRecord, RecommendationType
+from greenkube.models.savings import SavingsAccrualTotal
 
 
 class TestRecommendationsEndpoint:
@@ -211,90 +212,143 @@ class TestRecommendationsEndpoint:
         assert lb_recs[0]["potential_savings_cost"] == pytest.approx(216.0)
         assert lb_recs[0]["potential_savings_co2e_grams"] is None
 
-    def test_savings_summary_passes_last_time_window_to_repository(self, client, mock_reco_repo):
-        """Savings should be filtered by the selected dashboard time window."""
-        mock_reco_repo.get_savings_summary = AsyncMock(
-            return_value=RecommendationSavingsSummary(
-                total_carbon_saved_co2e_grams=42,
-                total_cost_saved=1.5,
-                applied_count=2,
-            )
-        )
-
+    def test_savings_report_passes_window_and_namespace_to_ledger(self, client, mock_reco_repo, mock_savings_repo):
+        """The ledger is read for the selected dashboard window, including its partial first hour."""
         response = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d")
 
         assert response.status_code == 200
-        assert mock_reco_repo.get_savings_summary.await_args is not None
-        kwargs = mock_reco_repo.get_savings_summary.await_args.kwargs
-        assert kwargs["namespace"] == "prod"
-        assert kwargs["start"] < kwargs["end"]
-        assert kwargs["start"].tzinfo is not None
-        assert kwargs["end"].tzinfo is not None
+        mock_reco_repo.get_applied_recommendations.assert_awaited_once_with(namespace="prod")
+        args = mock_savings_repo.get_accrual_breakdown.await_args
+        assert args is not None
+        cluster, start, end = args.args
+        assert cluster == "default"
+        assert args.kwargs["namespace"] == "prod"
+        assert start < end and start.tzinfo is not None and end.tzinfo is not None
+        data = response.json()
+        assert data["realized_to_date"]["start"] is not None
+        assert data["realized_to_date"]["method"] == "measured"
 
-    def test_savings_summary_supports_ytd_window(self, client, mock_reco_repo):
+    def test_savings_report_supports_ytd_window(self, client, mock_savings_repo):
         """YTD should resolve to January 1st of the current UTC year."""
-        mock_reco_repo.get_savings_summary = AsyncMock(return_value=RecommendationSavingsSummary())
-
         response = client.get("/api/v1/recommendations/savings?last=ytd")
 
         assert response.status_code == 200
-        assert mock_reco_repo.get_savings_summary.await_args is not None
-        start = mock_reco_repo.get_savings_summary.await_args.kwargs["start"]
-        assert start.month == 1
-        assert start.day == 1
-        assert start.hour == 0
+        start = mock_savings_repo.get_accrual_breakdown.await_args.args[1]
+        assert (start.month, start.day, start.hour) == (1, 1, 0)
         assert start.tzinfo is not None
 
-    def test_savings_summary_uses_ledger_for_selected_window(self, client, mock_reco_repo, mock_savings_repo):
-        """Savings windows should count ongoing ledger rows, not only recommendations applied in the window."""
-        totals_by_type = {"RIGHTSIZING_CPU": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
-        totals_by_method = {"prorated": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 1.5}}
-
-        async def _window_totals(*args, group_by_method=False, **kwargs):
-            return totals_by_method if group_by_method else totals_by_type
-
-        mock_savings_repo.get_window_totals = AsyncMock(side_effect=_window_totals)
-        mock_reco_repo.get_savings_summary = AsyncMock(
-            return_value=RecommendationSavingsSummary(
-                total_carbon_saved_co2e_grams=0.0,
-                total_cost_saved=0.0,
-                applied_count=1,
-            )
-        )
-
-        response = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d")
+    def test_savings_report_without_window_reads_all_accruals(self, client, mock_savings_repo):
+        response = client.get("/api/v1/recommendations/savings")
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["total_carbon_saved_co2e_grams"] == 42.0
-        assert data["total_cost_saved"] == 1.5
-        assert data["applied_count"] == 1
+        assert mock_savings_repo.get_accrual_breakdown.await_args.args[1:] == (None, None)
+        assert response.json()["window_start"] is None
+
+    def test_savings_report_never_mixes_projected_and_measured(self, client, mock_reco_repo, mock_savings_repo):
+        """C0.14 / BUG-40: three separate blocks; projected accruals never count as realized."""
+        mock_reco_repo.get_applied_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=1,
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="pending",
+                    status="applied",
+                    verification_status="pending",
+                    carbon_saved_co2e_grams=1000.0,
+                    cost_saved=100.0,
+                ),
+                RecommendationRecord(
+                    id=2,
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="verified",
+                    status="verified",
+                    verification_status="passed",
+                    carbon_saved_co2e_grams=900.0,
+                    cost_saved=90.0,
+                    measured_co2e_saved_grams=500.0,
+                    measured_cost_saved=50.0,
+                ),
+                RecommendationRecord(
+                    id=3,
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="not realized",
+                    status="applied",
+                    verification_status="failed",
+                    carbon_saved_co2e_grams=700.0,
+                    cost_saved=70.0,
+                ),
+                RecommendationRecord(
+                    id=4,
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="rollback",
+                    status="rollback_review",
+                    carbon_saved_co2e_grams=300.0,
+                    cost_saved=30.0,
+                ),
+            ]
+        )
+        mock_savings_repo.get_accrual_breakdown = AsyncMock(
+            return_value=[
+                SavingsAccrualTotal(
+                    namespace="prod", recommendation_type="RIGHTSIZING_CPU", method="projected", co2e_saved_grams=42.0
+                ),
+                SavingsAccrualTotal(
+                    namespace="prod",
+                    recommendation_type="RIGHTSIZING_CPU",
+                    method="measured",
+                    co2e_saved_grams=8.0,
+                    cost_saved_dollars=0.8,
+                ),
+                SavingsAccrualTotal(
+                    namespace="prod",
+                    recommendation_type="RIGHTSIZING_CPU",
+                    method="user_declared",
+                    co2e_saved_grams=-2.0,
+                ),
+            ]
+        )
+
+        data = client.get("/api/v1/recommendations/savings?namespace=prod&last=7d").json()
+
+        projected = data["projected_annual"]
+        assert (projected["method"], projected["basis"]) == ("projected", "annual_rate")
+        assert (projected["co2e_grams"], projected["cost"], projected["recommendation_count"]) == (1000.0, 100.0, 1)
+        assert (data["run_rate_annual"]["co2e_grams"], data["run_rate_annual"]["recommendation_count"]) == (500.0, 1)
+        assert data["realized_to_date"]["co2e_grams"] == 8.0
+        assert data["projected_to_date"]["co2e_grams"] == 42.0
+        assert data["user_declared_to_date"]["co2e_grams"] == -2.0
+        assert (data["applied_count"], data["verified_count"]) == (4, 1)
+        # Deprecated aliases keep the 0.3 UI working without mixing methods.
+        assert data["total_carbon_saved_co2e_grams"] == 8.0
+        assert data["measured_carbon_saved_co2e_grams"] == 8.0
         assert data["prorated_carbon_saved_co2e_grams"] == 42.0
-        assert data["measured_carbon_saved_co2e_grams"] == 0.0
-        assert mock_savings_repo.get_window_totals.await_count == 2
+        assert data["total_cost_saved"] == 0.8
+        assert data["diagnostics"] == []
 
-    def test_savings_summary_without_window_uses_repository_summary(self, client, mock_reco_repo, mock_savings_repo):
-        """Unbounded summaries should keep repository fallback semantics and namespace filtering."""
-        mock_savings_repo.get_cumulative_totals = AsyncMock(
-            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 999.0, "cost_saved_dollars": 99.0}}
-        )
-        mock_reco_repo.get_savings_summary = AsyncMock(
-            return_value=RecommendationSavingsSummary(
-                total_carbon_saved_co2e_grams=12.0,
-                total_cost_saved=1.2,
-                applied_count=2,
-            )
-        )
+    def test_savings_report_flags_legacy_compressed_rows(self, client, mock_savings_repo):
+        mock_savings_repo.has_legacy_compressed_rows = AsyncMock(return_value=True)
 
-        response = client.get("/api/v1/recommendations/savings?namespace=prod")
+        data = client.get("/api/v1/recommendations/savings?last=30d").json()
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["total_carbon_saved_co2e_grams"] == 12.0
-        assert data["total_cost_saved"] == 1.2
-        assert data["applied_count"] == 2
-        mock_savings_repo.get_cumulative_totals.assert_not_awaited()
-        mock_savings_repo.get_window_totals.assert_not_awaited()
+        assert any(item.startswith("legacy_compressed") for item in data["diagnostics"])
+
+    def test_savings_report_returns_503_when_ledger_is_unreadable(self, client, mock_savings_repo):
+        """BUG-42: no silent fallback to recommendation records."""
+        mock_savings_repo.get_accrual_breakdown = AsyncMock(side_effect=RuntimeError("database is locked"))
+
+        response = client.get("/api/v1/recommendations/savings?last=7d")
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Savings ledger unavailable."
+
+    def test_savings_report_returns_503_when_records_are_unreadable(self, client, mock_reco_repo):
+        mock_reco_repo.get_applied_recommendations = AsyncMock(side_effect=RuntimeError("down"))
+
+        assert client.get("/api/v1/recommendations/savings").status_code == 503
 
     def test_top_recommendations_defaults_to_co2_savings(self, client, mock_reco_repo):
         """The actionable endpoint should return ranked recommendation DTOs by projected CO2 savings."""

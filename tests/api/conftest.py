@@ -188,6 +188,9 @@ def mock_savings_repo():
     repo = AsyncMock()
     repo.get_cumulative_totals = AsyncMock(return_value={})
     repo.get_window_totals = AsyncMock(return_value={})
+    repo.get_accrual_breakdown = AsyncMock(return_value=[])
+    repo.get_lifetime_counters = AsyncMock(return_value=[])
+    repo.has_legacy_compressed_rows = AsyncMock(return_value=False)
     return repo
 
 
