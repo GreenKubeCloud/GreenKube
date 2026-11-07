@@ -1,0 +1,29 @@
+# Patterns to ignore when building packages.
+# A pattern without a leading "/" matches at any depth, so anchor chart-root
+# directories: "tests/" would also drop templates/tests (the `helm test` Pod).
+
+# helm-unittest suites are development-only.
+/tests/
+
+# VCS and editor files
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.project
+.idea/
+*.tmproj
+.vscode/
+
+# Python bytecode next to files/ scripts
+__pycache__/
+*.pyc
