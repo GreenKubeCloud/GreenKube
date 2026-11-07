@@ -121,10 +121,11 @@ production:
         successThreshold: 1
     controller:
       replicas: 1
+      # The controller runs recommendation scans (E1); keep scan memory headroom.
       resources:
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
         requests:
           cpu: 100m
           memory: 128Mi
@@ -506,13 +507,14 @@ secrets:
 
 # Pod resource requests and limits
 # -- Collector/scheduler container resources
-# This container runs periodic data collection (Prometheus, OpenCost, K8s API)
-# and writes to the database. Memory usage is proportional to the number of
-# pods in the cluster. For clusters with >200 pods, consider increasing limits.
+# This container runs periodic data collection (Prometheus, OpenCost, K8s API),
+# writes to the database and runs the scheduled recommendation scans. Memory
+# usage is proportional to the number of pods in the cluster. For clusters
+# with >200 pods, consider increasing limits.
 resources:
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
   requests:
     cpu: 100m
     memory: 128Mi
@@ -569,8 +571,7 @@ tests:
 
 # -- API container resources
 # This container serves the FastAPI REST API and the SPA frontend.
-# The API also materializes container-aware recommendation inputs during
-# refreshes; give the default lookback enough headroom for normal clusters.
+# Recommendation scans run in the controller; the API only queues them.
 apiResources:
   limits:
     cpu: 250m

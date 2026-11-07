@@ -182,8 +182,8 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `image.tag` | chart app version | Image tag. Must be a tag, not a `sha256:` digest. |
 | `image.digest` | `""` | Pin the exact image with `sha256:<64 hex>`; takes precedence over `image.tag`. |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
-| `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API builds recommendation inputs during refresh, so keep memory headroom. |
-| `resources` | 100m/128Mi requests, 500m/512Mi limits | Collector/worker resources. Memory grows with the number of pods. |
+| `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API only queues recommendation scans; it never runs them. |
+| `resources` | 100m/128Mi requests, 500m/1Gi limits | Collector/controller resources. This container runs the scheduled recommendation scans; memory grows with the number of pods. |
 | `tmp.sizeLimit` | `768Mi` | Scratch space for snapshots and renderer streaming. |
 
 #### Runtime configuration
