@@ -133,7 +133,7 @@ The bot resolves workload sources from Argo CD and Flux discovery, not from mand
 1. GreenKube discovers the Git source through Argo CD or Flux and persists a generation-bound workload binding.
 2. The plan API accepts recommendation IDs only, snapshots the authorized Git revision, and validates the source and rendered diff for raw YAML/JSON, Kustomize, and the supported Helm subsets.
 3. Approval binds to the exact preview digest. A durable idempotent worker creates one commit and PR per plan; duplicate requests reuse the same plan operation.
-4. After the PR merges, the controller observes the exact Argo CD/Flux revision and workload readiness. Apply detection compares the post-baseline workload identity and per-container requests; verification attributes measured savings only after its health and evidence gates pass.
+4. After the PR merges, the controller observes the Argo CD/Flux revision (the landed commit or a later commit that contains it) and workload readiness. Apply detection compares the post-baseline workload identity and per-container requests; verification attributes measured savings only after its health and evidence gates pass.
 
 Example lifecycle calls:
 

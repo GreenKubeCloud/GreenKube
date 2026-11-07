@@ -246,6 +246,9 @@ the finite values described below.
 | `greenkube_gitops_sync_outcomes_total` | Counter; `outcome` (`synced`, `pending`, `failed`, `timeout`, `skipped`, `error`) | Bounded controller-sync observation outcomes |
 | `greenkube_gitops_sync_timeouts_total` | Counter; no labels | Plans that reached the configured sync timeout |
 | `greenkube_gitops_sync_lag_seconds` | Histogram; no labels | Delay from PR merge to terminal sync observation |
+| `greenkube_git_provider_requests_total` | Counter; `provider` (`github`, `gitlab`, `gitea`, `other`), `operation` (`plan_apply`, `plan_rollback`, `plan_unknown`, `sync_ancestry`, `unscoped`) | HTTP requests sent to Git provider APIs, retries included |
+| `greenkube_git_provider_operation_calls` | Histogram; `operation` | Provider requests made by one budgeted operation (a plan apply, a rollback, one sync ancestry check) |
+| `greenkube_git_provider_budget_exhausted_total` | Counter; `operation` | Operations stopped because they reached their provider call budget |
 
 These values are process-local. In production worker mode, the dedicated
 automation worker also serves `/prometheus/metrics` on

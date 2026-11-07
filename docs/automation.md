@@ -33,7 +33,7 @@ Components:
 | Renderer sandbox | Renders Helm/Kustomize plans from a bounded repository snapshot without database or provider credentials. |
 | Plan service | Resolves recommendation IDs to server-side actions, validates the source and rendered diff, and stores an expiring preview. |
 | Plan worker | Executes approved operations, creates commits and PRs, polls linked PRs, and reconciles terminal states. Runs inline in `standalone` or as a dedicated Deployment in `production`. |
-| Controller runtime | Observes the exact Argo CD/Flux revision and readiness after merge, then gates apply detection and verification. |
+| Controller runtime | Observes the Argo CD/Flux revision and readiness after merge (the landed commit or a descendant of it), then gates apply detection and verification. |
 | Webhook endpoint | Accepts signed GitHub/Gitea/GitLab delivery events. Polling remains the recovery path. |
 
 ## Prerequisites
@@ -175,9 +175,10 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 3. Raw YAML/JSON, Kustomize, and the supported Helm layouts are validated. Any unrelated rendered change fails the plan.
 4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, validation state, and an expiry.
 5. Approval must present that exact digest. A changed source or stale digest returns `409` and requires a new preview.
-6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates.
-7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. The controller observes the exact Argo CD/Flux source revision and readiness; a confirmed plan moves to `synced`, while a timeout moves it to `sync_failed`. A plan never jumps directly to `applied`.
-8. Apply detection requires a synced plan and an exact per-container request match. Verification then uses the normal post-apply health and savings gates.
+6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates. Opening a PR costs a bounded number of provider calls that does not depend on repository size (see [Provider API cost](#provider-api-cost)).
+7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. GreenKube records the commit that landed on the base branch: the merge commit, or for GitLab merges without one the squash commit, or the merge request head for fast-forward projects (the plan's audit reason is `pull_request_merged`, `pull_request_merged_squash_commit` or `pull_request_merged_fast_forward_head`). A PR closed without merging moves the plan to `closed`; GitHub's leftover test-merge SHA is ignored.
+8. The controller observes the Argo CD/Flux source revision and readiness. The plan moves to `synced` when the healthy controller runs the landed commit (`sync_confirmed`) or a later commit that contains it, for example after another PR or an image write-back landed first (`sync_confirmed_descendant`). Ancestry is asked once per commit pair through the provider's compare API and cached. A revision that does not contain the landed commit stays pending with `revision_not_descendant` (or `ancestry_unavailable` while the provider cannot answer) until it does, or until the timeout moves the plan to `sync_failed`. A plan never jumps directly to `applied`.
+9. Apply detection requires a synced plan and an exact per-container request match on the live workload, so a later commit that reverted the change never counts as applied. Verification then uses the normal post-apply health and savings gates.
 
 Plan statuses: `draft`, `validated`, `approved`, `applying`, `pr_open`, `merged`, `synced`, `applied`, `sync_failed`, `closed`, `stale`, `failed`, `needs_mapping`, `ambiguous`, `rejected`, `superseded`.
 
@@ -219,6 +220,18 @@ automation:
 - Gitea supports labels and reviewers; draft PRs and team reviewers are not supported.
 
 Provider capabilities are checked before a branch or commit is created. Missing capabilities surface as a typed `provider_capability_missing`-style error.
+
+## Provider API cost
+
+Opening a PR never lists or downloads the whole repository. The worker compares the plan branch with the plan's immutable base commit and reads only the planned paths:
+
+| Provider | Branch-state check | Commit |
+|---|---|---|
+| GitHub | One recursive tree read per ref (`GET /git/trees/{ref}?recursive=1`); the base tree is cached for the operation and blob IDs are compared. | Git Data API: one tree (new file contents inline) → one commit → one fast-forward-only ref update. |
+| GitLab | One direct compare (`GET /repository/compare?straight=true`) plus the blob IDs of the planned paths. | One native multi-action commit pinned to `start_sha`. |
+| Gitea | One commit read with its affected files (`GET /commits?sha=…&files=true`) plus the blob IDs of the planned paths; other branch shapes fall back to a paginated tree comparison. | One `POST /contents` on a throwaway branch, then a compare-and-swap branch update. |
+
+A typical plan opens its PR in about 12–14 provider calls, whatever the repository size (a 5,000-file repository is covered by the test suite). Every plan operation also runs under a provider call budget of 200 HTTP requests, retries included: an operation that would exceed it stops before the next request and fails with `provider-call-budget-exceeded`, so a pathological repository cannot exhaust the provider rate limit. Calls are exported as `greenkube_git_provider_requests_total`, `greenkube_git_provider_operation_calls` and `greenkube_git_provider_budget_exhausted_total`.
 
 ## Rollback
 
@@ -283,6 +296,7 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 - Remote Helm/Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, chart dependencies, and unmanaged post-renderers fail closed.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
+- Descendant sync confirmation needs a provider ancestry API: GitHub compare, GitLab merge base, or a Gitea release that serves `GET /repos/{owner}/{repo}/compare/{basehead}`. Without it, a controller that already runs a later commit stays pending (`ancestry_unavailable`) until the sync timeout.
 - Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options.
 - If the CNI does not enforce NetworkPolicy, keep the renderer disabled unless you have independently validated an equivalent egress boundary.
 
