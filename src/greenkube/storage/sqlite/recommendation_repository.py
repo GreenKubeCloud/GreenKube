@@ -35,6 +35,12 @@ from greenkube.utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
 
+#: Default order of active lists (E2, BUG-20): ranking score, then projected
+#: cost savings, NULLs last on both backends, then a stable id tie-break.
+ACTIVE_ORDER_BY = (
+    "ranking_score IS NULL, ranking_score DESC, potential_savings_cost IS NULL, potential_savings_cost DESC, id ASC"
+)
+
 #: Columns that lifecycle services may update through ``update_recommendation_fields``.
 MUTABLE_COLUMNS: frozenset = frozenset(
     {
@@ -405,7 +411,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 params.append(namespace)
 
             where = " AND ".join(conditions)
-            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY priority DESC, created_at DESC"
+            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY {ACTIVE_ORDER_BY}"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
             return [row_to_record(r) for r in rows]

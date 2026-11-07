@@ -33,6 +33,10 @@ from ..sqlite.recommendation_repository import MUTABLE_COLUMNS
 
 logger = logging.getLogger(__name__)
 
+#: Default order of active lists (E2, BUG-20): ranking score, then projected
+#: cost savings, NULLs last on both backends, then a stable id tie-break.
+ACTIVE_ORDER_BY = "ranking_score DESC NULLS LAST, potential_savings_cost DESC NULLS LAST, id ASC"
+
 
 def _encode_value(value):
     """Encodes a Python value for an asyncpg bind parameter."""
@@ -353,7 +357,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 params.append(namespace)
 
             where = " AND ".join(conditions)
-            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY priority DESC, created_at DESC"
+            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY {ACTIVE_ORDER_BY}"
             rows = await conn.fetch(query, *params)
             return [row_to_record(r) for r in rows]
 
