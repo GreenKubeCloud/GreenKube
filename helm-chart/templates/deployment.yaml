@@ -113,6 +113,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+          {{- if gt (int (include "greenkube.controllerMetricsPort" .)) 0 }}
+          ports:
+            - name: controller-metrics
+              containerPort: {{ include "greenkube.controllerMetricsPort" . }}
+              protocol: TCP
+          {{- end }}
                 
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

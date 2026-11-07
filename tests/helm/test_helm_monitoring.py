@@ -37,13 +37,24 @@ def find_manifest(docs: list[dict], kind: str, name_contains: str = "") -> dict 
     return None
 
 
+def api_service_monitor(docs: list[dict]) -> dict | None:
+    """Return the API ServiceMonitor (the controller and worker have their own)."""
+    for doc in docs:
+        if doc.get("kind") != "ServiceMonitor":
+            continue
+        labels = doc.get("spec", {}).get("selector", {}).get("matchLabels", {})
+        if labels.get("app.kubernetes.io/component") == "api":
+            return doc
+    return None
+
+
 class TestDefaultValues:
     """Tests that default values produce a working install without Prometheus Operator."""
 
     def test_servicemonitor_disabled_by_default(self):
         """ServiceMonitor must be disabled by default so fresh installs don't require CRDs."""
         docs = helm_template()
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm is None, "ServiceMonitor should NOT be created with default values"
 
     def test_networkpolicy_disabled_by_default(self):
@@ -108,47 +119,47 @@ class TestServiceMonitor:
 
     def test_servicemonitor_created_when_enabled(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm is not None, "ServiceMonitor should be created when enabled"
 
     def test_servicemonitor_not_created_when_disabled(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=false"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm is None, "ServiceMonitor should not be created when disabled"
 
     def test_servicemonitor_namespace_is_monitoring(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm["metadata"]["namespace"] == "monitoring"  # type: ignore[index]
 
     def test_servicemonitor_has_kube_prometheus_label(self):
         """ServiceMonitor must have the label that the Prometheus Operator selects on."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm["metadata"]["labels"]["app.kubernetes.io/part-of"] == "kube-prometheus"  # type: ignore[index]
 
     def test_servicemonitor_targets_greenkube_namespace(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         ns_selector = sm["spec"]["namespaceSelector"]["matchNames"]  # type: ignore[index]
         assert "greenkube" in ns_selector
 
     def test_servicemonitor_selects_api_service(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         labels = sm["spec"]["selector"]["matchLabels"]  # type: ignore[index]
         assert labels.get("app.kubernetes.io/component") == "api"
         assert labels.get("app.kubernetes.io/name") == "greenkube"
 
     def test_servicemonitor_endpoint_path(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         ep = sm["spec"]["endpoints"][0]  # type: ignore[index]
         assert ep["path"] == "/prometheus/metrics"
 
     def test_servicemonitor_endpoint_port(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         ep = sm["spec"]["endpoints"][0]  # type: ignore[index]
         assert ep["port"] == "http"
 
@@ -159,7 +170,7 @@ class TestServiceMonitor:
                 "monitoring.serviceMonitor.interval=60s",
             ]
         )
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm["spec"]["endpoints"][0]["interval"] == "60s"  # type: ignore[index]
 
     def test_servicemonitor_custom_namespace(self):
@@ -169,21 +180,21 @@ class TestServiceMonitor:
                 "monitoring.serviceMonitor.namespace=custom-monitoring",
             ]
         )
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         assert sm["metadata"]["namespace"] == "custom-monitoring"  # type: ignore[index]
 
     def test_servicemonitor_has_metric_relabelings(self):
         """ServiceMonitor must restore exported_namespace/exported_pod labels so that
         Grafana sees the real K8s namespace of the measured pod, not greenkube."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         assert len(relabelings) >= 4, "ServiceMonitor should have at least 4 metricRelabelings"
 
     def test_servicemonitor_relabeling_restores_namespace(self):
         """exported_namespace must be copied back to namespace."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         ns_rule = next(
             (r for r in relabelings if r.get("targetLabel") == "namespace"),
@@ -195,7 +206,7 @@ class TestServiceMonitor:
     def test_servicemonitor_relabeling_restores_pod(self):
         """exported_pod must be copied back to pod."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = find_manifest(docs, "ServiceMonitor")
+        sm = api_service_monitor(docs)
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
         pod_rule = next(
             (r for r in relabelings if r.get("targetLabel") == "pod"),

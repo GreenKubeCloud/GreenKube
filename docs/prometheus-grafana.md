@@ -51,7 +51,7 @@ helm upgrade greenkube greenkube/greenkube \
 
 The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on the configured interval. It restores the exported `cluster`, `region`, `namespace`, and `pod` labels that Prometheus would otherwise rename because of scrape-target labels.
 
-When NetworkPolicy is enabled, the chart covers standalone app/worker pods and production API/controller/worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
+When NetworkPolicy is enabled, the chart covers standalone app/worker pods and production API/controller/worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API, controller or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
 
 When `secrets.apiKey` or `secrets.existingSecret` is configured, the chart adds bearer-token authentication to the `ServiceMonitor`. The referenced Secret must be available in `monitoring.serviceMonitor.namespace` and contain the `GREENKUBE_API_KEY` key. If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
 
@@ -259,6 +259,30 @@ the API's `GREENKUBE_API_KEY` bearer authentication behavior. Configure
 `secrets.apiKey` or `secrets.existingSecret` so Prometheus uses the same bearer
 credential. The CLI enables its listener only when
 `GREENKUBE_WORKER_METRICS_PORT` is set; the production chart sets it.
+
+### Controller metrics endpoint
+
+The controller (`greenkube start`: collection, compression, verification,
+GitOps sync observation) serves its own process-local registry at
+`/prometheus/metrics` on `CONTROLLER_METRICS_PORT` (Helm
+`collector.metricsPort`, default `9102`; `0` disables it). The chart renders a
+`<release>-controller-metrics` ClusterIP Service and, with
+`monitoring.serviceMonitor.enabled=true`, a dedicated controller
+ServiceMonitor. Verification outcomes recorded by the controller are now
+scrapeable (they used to live in a process without an endpoint).
+
+The chart keeps the API key out of the controller (least privilege): the
+endpoint is reachable on the pod network only, serves bounded, non-sensitive
+counters, and is restricted to Prometheus when `monitoring.networkPolicy` is
+enabled. If an API key is set in the controller's environment, scrapes must
+send it as a bearer token.
+
+| Metric | Type and labels | Description |
+|---|---|---|
+| `greenkube_collection_source_requests_total` | Counter; `source` (`prometheus`, `opencost`, `electricity_maps`, `wattnet`, `kubernetes`, `other`), `outcome` (`success`, `empty`, `error`, `skipped`) | Requests to measurement sources |
+| `greenkube_collection_source_duration_seconds` | Histogram; `source` | Measurement source request duration |
+| `greenkube_collection_window_duration_seconds` | Histogram; no labels | Wall-clock duration of one collection window (collect, assemble, write) |
+| `greenkube_metric_rows_written_total` | Counter; `scope` (`pod`, `container`), `dimension` (`cost`, `usage`, `power`, `intensity`), `source` (provenance value, `mixed` or `unset`) | Provenance mix of written metric rows |
 
 ---
 

@@ -78,6 +78,8 @@ data:
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
+  INTENSITY_MAX_AGE: {{ .Values.config.intensityMaxAge | default "6h" | quote }}
+  CONTROLLER_METRICS_PORT: {{ include "greenkube.controllerMetricsPort" . | quote }}
   DEFAULT_PUE: {{ .Values.config.defaults.pue | quote }}
   {{- if .Values.config.defaultZone }}
   DEFAULT_ZONE: {{ .Values.config.defaultZone | quote }}

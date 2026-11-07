@@ -1,0 +1,19 @@
+{{- if gt (int (include "greenkube.controllerMetricsPort" .)) 0 }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "greenkube.fullname" . }}-controller-metrics
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller-metrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: controller-metrics
+      port: {{ include "greenkube.controllerMetricsPort" . }}
+      targetPort: controller-metrics
+      protocol: TCP
+  selector:
+    {{- include "greenkube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ if eq .Values.profile "production" }}controller{{ else }}app{{ end }}
+{{- end }}

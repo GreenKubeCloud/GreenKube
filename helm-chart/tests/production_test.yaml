@@ -74,8 +74,9 @@ tests:
         exists:
           path: spec.template.spec.containers[0].ports[0]
       - documentIndex: 1
-        notExists:
-          path: spec.template.spec.containers[0].ports
+        equal:
+          path: spec.template.spec.containers[0].ports[0].name
+          value: controller-metrics
       - documentIndex: 1
         equal:
           path: spec.template.spec.containers[0].livenessProbe.exec.command[0]

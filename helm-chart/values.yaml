@@ -186,9 +186,14 @@ initContainer:
     tag: '1.37'
     pullPolicy: IfNotPresent
 
-# Probes for the collector process. The collector has no HTTP listener, so
+# Probes for the collector process. The collector has no HTTP API, so
 # these process-heartbeat probes verify that its PID is still alive.
 collector:
+  # Port of the controller's authenticated Prometheus endpoint
+  # (/prometheus/metrics): collection health, provenance mix and verification
+  # telemetry. Exposed through the <release>-controller-metrics Service and,
+  # when monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it.
+  metricsPort: 9102
   livenessProbe:
     enabled: true
     initialDelaySeconds: 15
@@ -239,6 +244,9 @@ config:
                   # Used when an individual node's zone and region cannot be mapped.
                   # Leave empty to rely on mapped node zones.
   defaultIntensity: 500.0 # gCO2e/kWh, global fallback when no zone-specific intensity is available
+  # Maximum age of a stored grid carbon intensity. Older values are stale: the
+  # zone default is used instead and rows are tagged intensity_source=zone_default.
+  intensityMaxAge: 6h
   # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
   # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
   # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
