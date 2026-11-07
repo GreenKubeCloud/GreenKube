@@ -7,15 +7,72 @@
  */
 
 const BASE = '/api/v1';
-let apiToken = '';
 
-/** Set a request-scoped bearer token without persisting it in browser storage. */
-export function setApiToken(token) {
-	apiToken = typeof token === 'string' ? token : '';
+/**
+ * sessionStorage key holding the API key for the current browser tab.
+ *
+ * Stopgap until server-side sessions (F14): the key survives reloads of the
+ * same tab and is forgotten when the tab closes. It is never written to
+ * localStorage, which would keep a long-lived admin credential on disk.
+ */
+export const API_TOKEN_STORAGE_KEY = 'greenkube.apiKey';
+
+/** Window event dispatched when the API rejects the current credentials. */
+export const AUTH_REQUIRED_EVENT = 'greenkube-auth-required';
+
+function sessionStore() {
+	try {
+		return typeof window !== 'undefined' ? window.sessionStorage ?? null : null;
+	} catch {
+		// Accessing sessionStorage throws when site data is blocked.
+		return null;
+	}
 }
 
+function readStoredToken() {
+	try {
+		const value = sessionStore()?.getItem(API_TOKEN_STORAGE_KEY);
+		return typeof value === 'string' ? value : '';
+	} catch {
+		return '';
+	}
+}
+
+function writeStoredToken(token) {
+	try {
+		const storage = sessionStore();
+		if (!storage) return;
+		if (token) storage.setItem(API_TOKEN_STORAGE_KEY, token);
+		else storage.removeItem(API_TOKEN_STORAGE_KEY);
+	} catch {
+		// Storage can be full, disabled or blocked: keep the in-memory key.
+	}
+}
+
+let apiToken = readStoredToken();
+
+/** Set the bearer token for this tab: kept in memory and in sessionStorage. */
+export function setApiToken(token) {
+	apiToken = typeof token === 'string' ? token.trim() : '';
+	writeStoredToken(apiToken);
+}
+
+/** Forget the bearer token (sign out, or rejected by the API). */
 export function clearApiToken() {
 	apiToken = '';
+	writeStoredToken('');
+}
+
+/** Reload the token persisted for this tab, e.g. after a page reload. */
+export function restoreApiToken() {
+	const stored = readStoredToken();
+	if (stored) apiToken = stored;
+	return apiToken;
+}
+
+/** Whether a bearer token is configured for this tab. */
+export function hasApiToken() {
+	return Boolean(apiToken);
 }
 
 export class ApiError extends Error {
@@ -48,10 +105,19 @@ function addSearchParam(url, key, value) {
 	}
 }
 
-function requestOptions(options = {}) {
+function requestOptions(options = {}, token = apiToken) {
 	const headers = { ...(options.headers || {}) };
-	if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+	if (token) headers.Authorization = `Bearer ${token}`;
 	return { ...options, headers, credentials: 'include' };
+}
+
+function jsonOptions(method, body, options = {}) {
+	return {
+		...options,
+		method,
+		headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+		body: JSON.stringify(body)
+	};
 }
 
 function errorDetails(body, status) {
@@ -70,21 +136,46 @@ function errorDetails(body, status) {
 	};
 }
 
-async function request(path, params = {}, options = {}) {
+function notifyAuthRequired() {
+	if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+	try {
+		window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+	} catch {
+		// A missing CustomEvent implementation must not hide the API error.
+	}
+}
+
+/**
+ * Send one API request and return the raw Response.
+ *
+ * Every helper goes through here so that a 401 always clears the rejected
+ * key and opens the authentication dialog, whatever the HTTP method.
+ */
+async function send(path, params = {}, options = {}) {
 	const url = new URL(path, window.location.origin);
 	Object.entries(params).forEach(([k, v]) => {
 		addSearchParam(url, k, v);
 	});
 
-	const res = await fetch(url.toString(), requestOptions(options));
+	const token = apiToken;
+	const res = await fetch(url.toString(), requestOptions(options, token));
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		const details = errorDetails(body, res.status);
-		if (res.status === 401 && typeof window !== 'undefined') {
-			window.dispatchEvent(new CustomEvent('greenkube-auth-required'));
+		if (res.status === 401) {
+			// Only forget the key this request used: a newer key entered while
+			// the request was in flight must survive a stale rejection.
+			if (token && apiToken === token) clearApiToken();
+			notifyAuthRequired();
 		}
 		throw new ApiError(details.message, { status: res.status, ...details });
 	}
+	return res;
+}
+
+async function request(path, params = {}, options = {}) {
+	const res = await send(path, params, options);
+	if (res.status === 204) return null;
 	return res.json();
 }
 
@@ -119,17 +210,7 @@ export function getServiceHealth(serviceName, force = false) {
  * @returns {Promise<Object>}
  */
 export async function updateServiceConfig(config) {
-	const url = new URL(`${BASE}/config/services`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(config)
-	}));
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		const details = errorDetails(body, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
+	const res = await send(`${BASE}/config/services`, {}, jsonOptions('POST', config));
 	const data = await res.json();
 	Object.defineProperty(data, 'configurationAcknowledgement', {
 		value: {
@@ -239,9 +320,26 @@ export function getRecommendations({ namespace } = {}) {
 	return request(`${BASE}/recommendations`, { namespace });
 }
 
-/** @returns {Promise<Object[]>} */
-export function getActiveRecommendations({ namespace, refresh } = {}) {
-	return request(`${BASE}/recommendations/active`, { namespace, refresh });
+/**
+ * Active recommendations in server order (ranking score first).
+ *
+ * The UI never passes `refresh`: a scan is requested explicitly through
+ * {@link requestOptimizationRun} so page loads stay read-only (BUG-25).
+ * @param {Object} opts
+ * @param {string} [opts.namespace]
+ * @param {string} [opts.source] — greenkube | vpa | karpenter | …
+ * @param {string} [opts.risk_level] — low | medium | high
+ * @param {string} [opts.capability] — e.g. cpu_rightsizing
+ * @param {boolean} [opts.refresh] — deprecated server-side scan trigger
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getActiveRecommendations({ namespace, source, risk_level, capability, refresh, signal } = {}) {
+	return request(
+		`${BASE}/recommendations/active`,
+		{ namespace, source, risk_level, capability, refresh: refresh || undefined },
+		{ signal }
+	);
 }
 
 /**
@@ -253,8 +351,12 @@ export function getActiveRecommendations({ namespace, refresh } = {}) {
  * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
  * @returns {Promise<Object[]>}
  */
-export function getTopRecommendations({ namespace, limit, metric, profile, refresh } = {}) {
-	return request(`${BASE}/recommendations/top`, { namespace, limit, metric, profile, refresh });
+export function getTopRecommendations({ namespace, limit, metric, profile, refresh, signal } = {}) {
+	return request(
+		`${BASE}/recommendations/top`,
+		{ namespace, limit, metric, profile, refresh: refresh || undefined },
+		{ signal }
+	);
 }
 
 /**
@@ -266,24 +368,35 @@ export function getRecommendation(id) {
 	return request(`${BASE}/recommendations/${id}`);
 }
 
-/** @returns {Promise<Object[]>} */
-export function getIgnoredRecommendations() {
-	return request(`${BASE}/recommendations/ignored`);
+/**
+ * @param {Object} [opts]
+ * @param {string} [opts.namespace]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getIgnoredRecommendations({ namespace, signal } = {}) {
+	return request(`${BASE}/recommendations/ignored`, { namespace }, { signal });
 }
 
-/** @returns {Promise<Object[]>} */
-export function getAppliedRecommendations() {
-	return request(`${BASE}/recommendations/applied`);
+/**
+ * @param {Object} [opts]
+ * @param {string} [opts.namespace]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<Object[]>}
+ */
+export function getAppliedRecommendations({ namespace, signal } = {}) {
+	return request(`${BASE}/recommendations/applied`, { namespace }, { signal });
 }
 
 /**
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {string} [opts.last]
+ * @param {AbortSignal} [opts.signal]
  * @returns {Promise<Object>}
  */
-export function getRecommendationSavings({ namespace, last } = {}) {
-	return request(`${BASE}/recommendations/savings`, { namespace, last });
+export function getRecommendationSavings({ namespace, last, signal } = {}) {
+	return request(`${BASE}/recommendations/savings`, { namespace, last }, { signal });
 }
 
 /**
@@ -291,19 +404,8 @@ export function getRecommendationSavings({ namespace, last } = {}) {
  * @param {{ carbon_saved_co2e_grams?: number, cost_saved?: number }} [body]
  * @returns {Promise<Object>}
  */
-export async function applyRecommendation(id, body = {}) {
-	const url = new URL(`${BASE}/recommendations/${id}/apply`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	}));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function applyRecommendation(id, body = {}) {
+	return request(`${BASE}/recommendations/${id}/apply`, {}, jsonOptions('PATCH', body));
 }
 
 /**
@@ -311,34 +413,50 @@ export async function applyRecommendation(id, body = {}) {
  * @param {{ reason: ?string }} body
  * @returns {Promise<Object>}
  */
-export async function ignoreRecommendation(id, body) {
-	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	}));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function ignoreRecommendation(id, body) {
+	return request(`${BASE}/recommendations/${id}/ignore`, {}, jsonOptions('PATCH', body));
 }
 
 /**
  * @param {number} id
  * @returns {Promise<Object>}
  */
-export async function unignoreRecommendation(id) {
-	const url = new URL(`${BASE}/recommendations/${id}/ignore`, window.location.origin);
-	const res = await fetch(url.toString(), requestOptions({ method: 'DELETE' }));
-	if (!res.ok) {
-		const b = await res.json().catch(() => ({}));
-		const details = errorDetails(b, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function unignoreRecommendation(id) {
+	return request(`${BASE}/recommendations/${id}/ignore`, {}, { method: 'DELETE' });
+}
+
+/**
+ * Ask the controller for a recommendation scan (E1). The server deduplicates
+ * while a run is pending and answers 202 `{run_id, status}`. Older servers
+ * answer 404/405; callers then fall back to plain reads.
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{run_id: number, status: string}>}
+ */
+export function requestOptimizationRun({ signal } = {}) {
+	return request(`${BASE}/optimization/runs`, {}, jsonOptions('POST', {}, { signal }));
+}
+
+/**
+ * Status of one recommendation scan run.
+ * @param {number|string} runId
+ * @param {{signal?: AbortSignal}} [opts]
+ * @returns {Promise<{run_id: number, status: 'queued'|'running'|'succeeded'|'failed',
+ *   requested_at?: string, started_at?: string, completed_at?: string,
+ *   recommendation_count?: number, error?: string}>}
+ */
+export function getOptimizationRun(runId, { signal } = {}) {
+	return request(`${BASE}/optimization/runs/${encodeURIComponent(runId)}`, {}, { signal });
+}
+
+/**
+ * Most recent recommendation scan runs, newest first.
+ * @param {{limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<Object[]>}
+ */
+export async function listOptimizationRuns({ limit, signal } = {}) {
+	const data = await request(`${BASE}/optimization/runs`, { limit }, { signal });
+	if (Array.isArray(data)) return data;
+	return Array.isArray(data?.items) ? data.items : Array.isArray(data?.runs) ? data.runs : [];
 }
 
 /**
@@ -402,6 +520,30 @@ export function cancelAutomationPlan(planId) {
 }
 
 /**
+ * Discard an unapproved (DRAFT/VALIDATED) preview so that previewing the same
+ * workload again does not hit WORKLOAD_PLAN_ALREADY_EXISTS (D6, BUG-48).
+ *
+ * `DELETE /automation/plans/{id}` answers 204 and marks the plan SUPERSEDED.
+ * A server without that route answers 405; the plan is then invalidated
+ * through the older cancel endpoint, which marks it STALE.
+ * @param {string} planId
+ * @returns {Promise<{discarded: boolean, status: number|null}>}
+ */
+export async function discardAutomationPlan(planId) {
+	const path = `${BASE}/automation/plans/${encodeURIComponent(planId)}`;
+	try {
+		await request(path, {}, { method: 'DELETE' });
+		return { discarded: true, status: 204 };
+	} catch (error) {
+		if (error instanceof ApiError && error.status === 405) {
+			await cancelAutomationPlan(planId);
+			return { discarded: true, status: 405 };
+		}
+		throw error;
+	}
+}
+
+/**
  * Create or retrieve the persisted rollback preview for a synced plan.
  * @param {string} planId
  * @returns {Promise<Object>}
@@ -420,8 +562,9 @@ export function getRecommendationPullRequests(id) {
 	return request(`${BASE}/recommendations/${id}/pull-requests`);
 }
 
-export function getOpenPullRequests() {
-	return request(`${BASE}/automation/pull-requests`);
+/** Pending or open pull requests (cluster-wide: the API has no namespace filter). */
+export function getOpenPullRequests({ signal } = {}) {
+	return request(`${BASE}/automation/pull-requests`, {}, { signal });
 }
 
 /**
@@ -433,8 +576,8 @@ export function getRecommendationEvents(id) {
 }
 
 /** @returns {Promise<Object>} */
-export function getAutomationStatus() {
-	return request(`${BASE}/automation/status`);
+export function getAutomationStatus({ signal } = {}) {
+	return request(`${BASE}/automation/status`, {}, { signal });
 }
 
 /** @returns {Promise<Object>} */
@@ -589,27 +732,13 @@ export function getDashboardTimeseries({ windowSlug, namespace, signal } = {}) {
  * @param {string} [opts.namespace]
  * @returns {Promise<{detail: string}>}
  */
-export async function refreshDashboardSummary({ namespace } = {}) {
-	const url = new URL(`${BASE}/metrics/dashboard-summary/refresh`, window.location.origin);
-	if (namespace) url.searchParams.set('namespace', namespace);
-	const res = await fetch(url.toString(), requestOptions({ method: 'POST' }));
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		const details = errorDetails(body, res.status);
-		throw new ApiError(details.message, { status: res.status, ...details });
-	}
-	return res.json();
+export function refreshDashboardSummary({ namespace } = {}) {
+	return request(`${BASE}/metrics/dashboard-summary/refresh`, { namespace }, { method: 'POST' });
 }
 
 /** Download a report with credentials/headers that anchor navigation cannot send. */
 export async function downloadReport(params = {}) {
-	const url = new URL(`${BASE}/report/export`, window.location.origin);
-	Object.entries(params).forEach(([key, value]) => addSearchParam(url, key, value));
-	const res = await fetch(url.toString(), requestOptions());
-	if (!res.ok) {
-		const body = await res.json().catch(() => ({}));
-		throw new Error(body.detail || `API error ${res.status}`);
-	}
+	const res = await send(`${BASE}/report/export`, params);
 	const blob = await res.blob();
 	const disposition = res.headers.get('Content-Disposition') || '';
 	const filename = disposition.match(/filename="?([^"]+)"?/)?.[1]
