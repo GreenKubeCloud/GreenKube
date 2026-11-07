@@ -12,6 +12,7 @@ from greenkube.gitops.contracts import (
     ControllerKind,
     FileEdit,
     FilePlan,
+    FilePlanSummary,
     Plan,
     PlanStatus,
     PreApplyWorkloadBaseline,
@@ -19,6 +20,7 @@ from greenkube.gitops.contracts import (
     RendererKind,
     ValidationResult,
     WorkloadSource,
+    diff_stats,
 )
 from greenkube.storage.base_gitops_repository import (
     AutomationPlanRecord,
@@ -202,48 +204,28 @@ def row_to_automation_plan_record(
         raise ValueError("plan recommendation links do not match its action contract")
     resolved_recommendation_ids = action.recommendation_ids
     file_plan: FilePlan | None = None
+    file_plan_summary: FilePlanSummary | None = None
     file_digest = _get(row, "digest")
-    if (
-        file_rows
-        and _get(row, "base_revision")
-        and _get(row, "renderer")
-        and _get(row, "validation") is not None
-        and file_digest
-    ):
-        validation = ValidationResult.model_validate(json_value(_get(row, "validation"), {}))
-        edits = [
-            FileEdit(
-                path=str(_get(file_row, "path", "")),
-                operation=_get(file_row, "operation"),
-                original_sha=_get(file_row, "original_sha"),
-                content=_get(file_row, "content"),
-            )
-            for file_row in file_rows
-        ]
-        file_plan = FilePlan(
-            plan_id=str(_get(row, "plan_id", "")),
-            files=edits,
-            diff=str(_get(row, "diff", "")),
-            rendered_diff=str(_get(row, "rendered_diff", "")),
-            base_revision=str(_get(row, "base_revision", "")),
-            source_revision=_get(row, "source_revision"),
-            renderer=RendererKind(_get(row, "renderer")),
-            validation=validation,
-            warnings=json_value(_get(row, "warnings"), []),
-            digest=str(file_digest),
-        )
+    has_render_validation = _has_render_validation(row)
+    if file_rows and has_render_validation:
+        file_plan = file_plan_from_rows(row, file_rows)
+    elif has_render_validation:
+        # Retention pruned the file contents: keep the plan valid and readable (D2, BUG-44).
+        file_plan_summary = _pruned_file_plan_summary(row)
     plan = Plan(
         plan_id=str(_get(row, "plan_id", "")),
         recommendation_ids=resolved_recommendation_ids,
         source=source,
         action=action,
         file_plan=file_plan,
+        file_plan_summary=file_plan_summary,
         status=PlanStatus(_get(row, "status", PlanStatus.DRAFT.value)),
         digest=file_digest,
         change_set_id=_get(row, "change_set_id"),
         rollback_of_plan_id=_get(row, "rollback_of_plan_id"),
         policy_result=policy_result,
         pre_apply_baseline=baseline,
+        committed_on_revision=_get(row, "committed_on_revision") or None,
         created_at=datetime_value(_get(row, "created_at")) or datetime.now(timezone.utc),
         expires_at=datetime_value(_get(row, "expires_at")),
     )
@@ -252,6 +234,78 @@ def row_to_automation_plan_record(
         policy_result=policy_result,
         updated_at=datetime_value(_get(row, "updated_at")),
     )
+
+
+def _has_render_validation(row: Any) -> bool:
+    return bool(
+        _get(row, "base_revision")
+        and _get(row, "renderer")
+        and _get(row, "validation") is not None
+        and _get(row, "digest")
+    )
+
+
+def file_plan_from_rows(row: Any, file_rows: list[Any]) -> FilePlan:
+    """Rebuild a persisted FilePlan from its plan row and ordered file rows."""
+    return FilePlan(
+        plan_id=str(_get(row, "plan_id", "")),
+        files=[
+            FileEdit(
+                path=str(_get(file_row, "path", "")),
+                operation=_get(file_row, "operation"),
+                original_sha=_get(file_row, "original_sha"),
+                content=_get(file_row, "content"),
+            )
+            for file_row in file_rows
+        ],
+        diff=str(_get(row, "diff", "")),
+        rendered_diff=str(_get(row, "rendered_diff", "")),
+        base_revision=str(_get(row, "base_revision", "")),
+        source_revision=_get(row, "source_revision"),
+        renderer=RendererKind(_get(row, "renderer")),
+        validation=ValidationResult.model_validate(json_value(_get(row, "validation"), {})),
+        warnings=json_value(_get(row, "warnings"), []),
+        digest=str(_get(row, "digest", "")),
+    )
+
+
+def pruned_file_plan_summary_payload(row: Any, file_rows: list[Any], *, pruned_at: datetime) -> dict[str, Any] | None:
+    """Return the JSON summary retention stores before deleting a plan's file contents."""
+    if not file_rows or not _has_render_validation(row):
+        return None
+    try:
+        file_plan = file_plan_from_rows(row, file_rows)
+    except (TypeError, ValueError, ValidationError):
+        return None
+    return FilePlanSummary.from_file_plan(file_plan, pruned_at=pruned_at).model_dump(mode="json")
+
+
+def _pruned_file_plan_summary(row: Any) -> FilePlanSummary | None:
+    plan_id = str(_get(row, "plan_id", ""))
+    digest = str(_get(row, "digest", ""))
+    stored = json_value(_get(row, "file_plan_summary"))
+    if isinstance(stored, dict):
+        try:
+            summary = FilePlanSummary.model_validate(stored)
+        except ValidationError:
+            summary = None
+        if summary is not None and summary.plan_id == plan_id and summary.digest == digest:
+            return summary
+    # Plans pruned before summaries existed lost their file list; rebuild what the row still holds.
+    try:
+        return FilePlanSummary(
+            plan_id=plan_id,
+            files=[],
+            base_revision=str(_get(row, "base_revision", "")),
+            source_revision=_get(row, "source_revision"),
+            renderer=RendererKind(_get(row, "renderer")),
+            validation=ValidationResult.model_validate(json_value(_get(row, "validation"), {})),
+            warnings=json_value(_get(row, "warnings"), []),
+            digest=digest,
+            diff_stats=diff_stats(_get(row, "diff")) if _get(row, "diff") else None,
+        )
+    except (TypeError, ValueError, ValidationError):
+        return None
 
 
 def row_to_webhook_delivery(row: Any) -> WebhookDelivery:

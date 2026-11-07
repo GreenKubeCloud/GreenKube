@@ -47,6 +47,7 @@ from greenkube.storage.gitops_mapper import (
     datetime_value,
     json_text,
     json_value,
+    pruned_file_plan_summary_payload,
     row_to_automation_plan_record,
     row_to_gitops_provider,
     row_to_webhook_delivery,
@@ -56,6 +57,8 @@ from greenkube.storage.gitops_mapper import (
     row_to_workload_source,
 )
 from greenkube.storage.unit_of_work import UnitOfWork
+
+_PRUNE_BATCH_SIZE = 100
 
 
 class _BindingGenerationConflict(RuntimeError):
@@ -1268,11 +1271,14 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
     ) -> Plan:
         actor = _validated_audit_actor(actor)
         file_plan = plan.file_plan
+        file_summary = plan.file_plan_summary
         if file_plan is not None and plan.digest is not None and plan.digest != file_plan.digest:
             raise ValueError("plan digest must match its file plan digest")
-        digest = plan.digest if plan.digest is not None else (file_plan.digest if file_plan is not None else None)
-        validation = file_plan.validation.model_dump(mode="json") if file_plan is not None else {}
-        warnings = file_plan.warnings if file_plan is not None else []
+        rendered = file_plan if file_plan is not None else file_summary
+        digest = plan.digest if plan.digest is not None else (rendered.digest if rendered is not None else None)
+        validation = rendered.validation.model_dump(mode="json") if rendered is not None else {}
+        warnings = rendered.warnings if rendered is not None else []
+        summary_json = json_text(file_summary.model_dump(mode="json")) if file_summary is not None else None
         safe_source = plan.source.model_copy(update={"repo_url": sanitize_repository_url(plan.source.repo_url)})
         source_snapshot = safe_source.model_dump(mode="json")
         action_json = plan.action.model_dump(mode="json")
@@ -1297,6 +1303,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 validation = excluded.validation,
                 warnings = excluded.warnings,
                 policy_result = excluded.policy_result,
+                file_plan_summary = excluded.file_plan_summary,
+                committed_on_revision = excluded.committed_on_revision,
                 status = excluded.status,
                 expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at
@@ -1335,8 +1343,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 INSERT INTO automation_plans
                     (plan_id, source_id, provider_id, source_snapshot, action_json, change_set_id,
                      rollback_of_plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
-                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at,
+                     file_plan_summary, committed_on_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 {conflict_clause}
                 """,
                 (
@@ -1347,9 +1356,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     json_text(action_json),
                     plan.change_set_id,
                     plan.rollback_of_plan_id,
-                    file_plan.base_revision if file_plan is not None else None,
-                    file_plan.source_revision if file_plan is not None else None,
-                    file_plan.renderer.value if file_plan is not None else None,
+                    rendered.base_revision if rendered is not None else None,
+                    rendered.source_revision if rendered is not None else None,
+                    rendered.renderer.value if rendered is not None else None,
                     file_plan.diff if file_plan is not None else None,
                     file_plan.rendered_diff if file_plan is not None else None,
                     digest,
@@ -1360,8 +1369,10 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     self._db_datetime(plan.expires_at),
                     self._db_datetime(plan.created_at),
                     self._db_datetime(now),
+                    summary_json,
+                    plan.committed_on_revision,
                 ),
-                json_positions=(4, 5, 14, 15, 16),
+                json_positions=(4, 5, 14, 15, 16, 21),
             )
             if not insert_only or inserted:
                 await self._execute(
@@ -1566,6 +1577,12 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             return plans
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
+        """Prune expired rendered file contents and terminal outbox rows.
+
+        Plan rows, their recommendation links and the ``recommendation_events`` audit
+        trail are never deleted. Pruned plans keep a content-free ``file_plan_summary``
+        so they remain valid ``Plan`` objects (D2, BUG-44).
+        """
         if cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("automation history cutoff must be timezone-aware")
         terminal_statuses = (
@@ -1577,21 +1594,15 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             PlanStatus.SUPERSEDED.value,
             PlanStatus.SYNC_FAILED.value,
         )
-        placeholders = ", ".join("?" for _ in terminal_statuses)
         updated_before = "updated_at < ?" if self._postgres else "julianday(updated_at) < julianday(?)"
         processed_before = "processed_at < ?" if self._postgres else "julianday(processed_at) < julianday(?)"
         cutoff_value = self._db_datetime(cutoff)
         async with self._transaction() as connection:
-            plan_files = await self._execute(
+            plan_files = await self._summarize_and_prune_plan_files(
                 connection,
-                f"""
-                DELETE FROM automation_plan_files
-                WHERE plan_id IN (
-                    SELECT plan_id FROM automation_plans
-                    WHERE status IN ({placeholders}) AND {updated_before}
-                )
-                """,
-                (*terminal_statuses, cutoff_value),
+                terminal_statuses=terminal_statuses,
+                updated_before=updated_before,
+                cutoff_value=cutoff_value,
             )
             operations = await self._execute(
                 connection,
@@ -1605,14 +1616,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 connection,
                 f"""
                 DELETE FROM webhook_deliveries
-                WHERE status IN ('processed', 'rejected') AND processed_at IS NOT NULL
+                WHERE status IN ('processed', 'rejected', 'ignored') AND processed_at IS NOT NULL
                   AND {processed_before}
                 """,
-                (cutoff_value,),
-            )
-            recommendation_events = await self._execute(
-                connection,
-                f"DELETE FROM recommendation_events WHERE {updated_before.replace('updated_at', 'created_at')}",
                 (cutoff_value,),
             )
             binding_events = await self._execute(
@@ -1624,9 +1630,61 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             "plan_files": plan_files,
             "operations": operations,
             "webhooks": webhooks,
-            "recommendation_events": recommendation_events,
             "binding_events": binding_events,
         }
+
+    async def _summarize_and_prune_plan_files(
+        self,
+        connection: Any,
+        *,
+        terminal_statuses: Sequence[str],
+        updated_before: str,
+        cutoff_value: Any,
+    ) -> int:
+        placeholders = ", ".join("?" for _ in terminal_statuses)
+        plan_rows = await self._fetch(
+            connection,
+            f"""
+            SELECT plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
+                   digest, validation, warnings
+            FROM automation_plans
+            WHERE status IN ({placeholders}) AND {updated_before}
+              AND EXISTS (SELECT 1 FROM automation_plan_files f WHERE f.plan_id = automation_plans.plan_id)
+            ORDER BY plan_id
+            """,
+            (*terminal_statuses, cutoff_value),
+        )
+        pruned_at = datetime.now(timezone.utc)
+        deleted = 0
+        for start in range(0, len(plan_rows), _PRUNE_BATCH_SIZE):
+            batch = plan_rows[start : start + _PRUNE_BATCH_SIZE]
+            plan_ids = [str(row["plan_id"]) for row in batch]
+            batch_placeholders = ", ".join("?" for _ in plan_ids)
+            file_rows = await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({batch_placeholders}) ORDER BY plan_id, id",
+                plan_ids,
+            )
+            files_by_plan: dict[str, list[Any]] = {}
+            for file_row in file_rows:
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for row in batch:
+                plan_id = str(row["plan_id"])
+                summary = pruned_file_plan_summary_payload(row, files_by_plan.get(plan_id, []), pruned_at=pruned_at)
+                if summary is not None:
+                    # updated_at is deliberately preserved: it is the plan's last lifecycle activity.
+                    await self._execute(
+                        connection,
+                        "UPDATE automation_plans SET file_plan_summary = ? WHERE plan_id = ?",
+                        (json_text(summary), plan_id),
+                        json_positions=(1,),
+                    )
+            deleted += await self._execute(
+                connection,
+                f"DELETE FROM automation_plan_files WHERE plan_id IN ({batch_placeholders})",
+                plan_ids,
+            )
+        return deleted
 
     async def set_plan_status(
         self,

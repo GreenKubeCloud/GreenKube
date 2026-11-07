@@ -21,6 +21,7 @@ from greenkube.gitops.contracts import (
     ControllerKind,
     FileEdit,
     FilePlan,
+    FilePlanSummary,
     Operation,
     Plan,
     PlanStatus,
@@ -584,6 +585,26 @@ def test_get_plan_returns_safe_projection_and_404_for_missing_plan(plan_api):
     assert "renderer_config" not in found.text
     assert missing.status_code == 404
     assert missing.json()["code"] == "plan_not_found"
+
+
+def test_get_plan_projects_a_plan_whose_files_were_pruned(plan_api):
+    """D2 / BUG-44: a pruned APPLIED plan must stay readable (previously HTTP 500)."""
+    client, _, repository, _, _ = plan_api
+    live = _plan(status=PlanStatus.APPLIED)
+    assert live.file_plan is not None
+    summary = FilePlanSummary.from_file_plan(live.file_plan, pruned_at=_NOW)
+    repository.plans["plan-1"] = live.model_copy(update={"file_plan": None, "file_plan_summary": summary})
+
+    response = client.get("/api/v1/automation/plans/plan-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "applied"
+    assert body["source"]["base_revision"] == _BASE_REVISION
+    assert body["files"] == [{"path": "apps/payments/deployment.yaml", "operation": "update", "original_sha": "b" * 40}]
+    assert body["validation"]["passed"] is True
+    assert body["diff"] is None
+    assert _SECRET not in response.text
 
 
 def test_rollback_preview_returns_a_persisted_inverse_plan_link(plan_api):

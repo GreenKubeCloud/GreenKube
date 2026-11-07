@@ -731,13 +731,125 @@ async def test_automation_history_retention_prunes_terminal_payloads_but_keeps_p
         "plan_files": 3,
         "operations": 1,
         "webhooks": 1,
-        "recommendation_events": 1,
         "binding_events": 1,
     }
     retained = await repository.get_plan(plan.plan_id)
     assert retained is not None
     assert retained.status is PlanStatus.FAILED
     assert retained.file_plan is None
+    assert retained.file_plan_summary is not None
+    assert [entry.path for entry in retained.file_plan_summary.files] == [
+        "apps/api/deployment.yaml",
+        "apps/api/values.yaml",
+        "apps/api/legacy.yaml",
+    ]
+    async with manager.connection_scope() as connection:
+        events = await repository._fetch(connection, "SELECT COUNT(*) AS total FROM recommendation_events", ())
+    # The recommendation audit trail is never pruned (D2, BUG-44).
+    assert int(events[0]["total"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_retention_keeps_applied_plans_valid_for_reads_and_policy_history(gitops_store):
+    """Regression for BUG-44: prune_check.py showed pruned APPLIED plans failed Plan validation."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=120)
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    for status in (PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED):
+        assert await repository.set_plan_status(plan.plan_id, status) is not None
+    assert await repository.set_plan_status(plan.plan_id, PlanStatus.SYNCED) is not None
+    assert await repository.set_plan_status(plan.plan_id, PlanStatus.APPLIED) is not None
+    async with repository._transaction() as connection:
+        await repository._execute(
+            connection,
+            "UPDATE automation_plans SET updated_at = ? WHERE plan_id = ?",
+            (repository._db_datetime(old), plan.plan_id),
+        )
+    async with manager.connection_scope() as connection:
+        events_before = await repository._fetch(
+            connection,
+            "SELECT COUNT(*) AS total FROM recommendation_events WHERE recommendation_id IN (9101, 9102)",
+            (),
+        )
+    assert int(events_before[0]["total"]) > 0
+
+    pruned = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+
+    assert pruned["plan_files"] == 3
+    retained = await repository.get_plan(plan.plan_id)
+    assert retained is not None
+    assert retained.status is PlanStatus.APPLIED
+    assert retained.file_plan is None
+    summary = retained.file_plan_summary
+    assert summary is not None
+    assert summary.digest == plan.digest
+    assert summary.base_revision == "base-revision"
+    assert summary.validation.passed
+    assert summary.pruned_at is not None
+    assert summary.files[1].original_sha == "original-values-sha"
+    assert summary.files[1].content_digest is not None and summary.files[1].content_digest.startswith("sha256:")
+    assert summary.files[2].content_digest is None
+    record = await repository.get_plan_record(plan.plan_id)
+    assert record is not None and record.updated_at is not None
+    assert record.updated_at < now - timedelta(days=100)
+
+    history = await repository.list_plans_for_workload(
+        cluster="cluster-a",
+        namespace="production",
+        workload_kind="Deployment",
+        workload_name="api",
+    )
+    assert [item.plan_id for item in history] == [plan.plan_id]
+    async with manager.connection_scope() as connection:
+        events_after = await repository._fetch(
+            connection,
+            "SELECT COUNT(*) AS total FROM recommendation_events WHERE recommendation_id IN (9101, 9102)",
+            (),
+        )
+    assert events_after[0]["total"] == events_before[0]["total"]
+
+    # A second pass is idempotent and keeps the stored summary.
+    again = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+    assert again["plan_files"] == 0
+    assert (await repository.get_plan(plan.plan_id)).file_plan_summary == summary
+
+
+@pytest.mark.asyncio
+async def test_plans_pruned_without_a_summary_are_still_readable(gitops_store):
+    """Installs pruned by 0.3.x lost their file rows and have no stored summary."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    for status in (
+        PlanStatus.APPROVED,
+        PlanStatus.APPLYING,
+        PlanStatus.PR_OPEN,
+        PlanStatus.MERGED,
+        PlanStatus.SYNCED,
+        PlanStatus.SYNC_FAILED,
+    ):
+        assert await repository.set_plan_status(plan.plan_id, status) is not None
+    async with repository._transaction() as connection:
+        await repository._execute(connection, "DELETE FROM automation_plan_files WHERE plan_id = ?", (plan.plan_id,))
+
+    retained = await repository.get_plan(plan.plan_id)
+    assert retained is not None
+    assert retained.status is PlanStatus.SYNC_FAILED
+    assert retained.file_plan is None
+    assert retained.file_plan_summary is not None
+    assert retained.file_plan_summary.files == []
+    assert retained.file_plan_summary.digest == plan.digest
+    assert retained.base_revision == "base-revision"
 
 
 @pytest.mark.asyncio

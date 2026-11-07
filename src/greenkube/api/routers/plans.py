@@ -216,7 +216,9 @@ async def cancel_automation_plan(
 
 def _plan_response(plan: Plan, operation: Operation | None = None) -> AutomationPlanResponse:
     file_plan = plan.file_plan
-    validation = file_plan.validation if file_plan is not None else None
+    # Retention may have pruned file contents; the summary keeps paths and validation (D2).
+    rendered = file_plan if file_plan is not None else plan.file_plan_summary
+    validation = rendered.validation if rendered is not None else None
     return AutomationPlanResponse(
         plan_id=plan.plan_id,
         recommendation_ids=plan.recommendation_ids,
@@ -230,7 +232,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
             controller=f"{plan.source.controller_kind.value}/{plan.source.controller_name}",
             repo=_safe_repository_url(plan.source.repo_url),
             base_branch=plan.source.ref,
-            base_revision=file_plan.base_revision if file_plan is not None else None,
+            base_revision=rendered.base_revision if rendered is not None else None,
             path=plan.source.path,
             renderer=plan.source.renderer,
         ),
@@ -240,9 +242,9 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
                 operation=edit.operation,
                 original_sha=edit.original_sha,
             )
-            for edit in file_plan.files
+            for edit in rendered.files
         ]
-        if file_plan is not None
+        if rendered is not None
         else [],
         diff=file_plan.diff if file_plan is not None else None,
         rendered_diff=file_plan.rendered_diff if file_plan is not None else None,
