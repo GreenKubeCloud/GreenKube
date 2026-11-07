@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
 from greenkube.automation.git.base import GitCommitRequest, GitCommitResult, GitConflictError, GitFile, GitRepository
 from greenkube.automation.plan_worker import plan_branch_name
-from greenkube.gitops.contracts import ActionStatus, OperationStatus, Plan, PlanStatus
-from greenkube.models.metrics import PullRequestRecord, PullRequestStatus
+from greenkube.automation.rollback import inverse_plan_id
+from greenkube.gitops.contracts import (
+    ActionStatus,
+    OperationStatus,
+    Plan,
+    PlanStatus,
+    PreApplyWorkloadBaseline,
+)
+from greenkube.models.metrics import (
+    PullRequestRecord,
+    PullRequestStatus,
+    RecommendationRecord,
+    RecommendationStatus,
+    RecommendationType,
+)
 from tests.automation.test_plan_worker import (  # pyrefly: ignore[missing-import]
     BASE_CONTENT,
     BASE_REVISION,
     MANIFEST_PATH,
     NEW_CONTENT,
     NEW_PATH,
+    PLAN_DIGEST,
     UPDATED_CONTENT,
     FakeGitProvider,
     FakePlanRepository,
@@ -152,6 +167,98 @@ async def test_a_file_the_plan_creates_appearing_upstream_requires_a_replan():
 
     assert provider.branch_creations == []
     assert plans.plans["plan-1"].status is PlanStatus.STALE
+
+
+def _rollback_on_moved_head() -> tuple[Plan, Plan]:
+    """A synced original plan and its approved rollback, rendered on ``BASE_REVISION``."""
+    template = _plan()
+    assert template.file_plan is not None
+    original = _plan(status=PlanStatus.SYNCED).model_copy(
+        update={
+            "plan_id": "original-plan",
+            "pre_apply_baseline": PreApplyWorkloadBaseline(
+                workload_uid="uid-api-1",
+                generation=7,
+                observed_generation=7,
+                container_requests={"api": {"cpu_millicores": 1000, "memory_bytes": 128 * 1024 * 1024}},
+            ),
+        }
+    )
+    rollback_id = inverse_plan_id(original.plan_id, PLAN_DIGEST, template.file_plan.base_revision)
+    rollback = template.model_copy(
+        update={
+            "plan_id": rollback_id,
+            "file_plan": template.file_plan.model_copy(update={"plan_id": rollback_id}),
+            "rollback_of_plan_id": original.plan_id,
+            "pre_apply_baseline": PreApplyWorkloadBaseline(
+                workload_uid="uid-api-1",
+                generation=8,
+                observed_generation=8,
+                container_requests={"api": {"cpu_millicores": 300, "memory_bytes": 128 * 1024 * 1024}},
+            ),
+        }
+    )
+    return original, rollback
+
+
+@pytest.mark.asyncio
+async def test_rollback_plan_on_a_moved_head_with_unchanged_files_opens_its_pull_request():
+    """D7 must hold for rollback plans: their identity is derived from the planned base, not the moved head."""
+    original, rollback = _rollback_on_moved_head()
+    template_lease = _operation_lease()
+    lease = replace(
+        template_lease,
+        operation=template_lease.operation.model_copy(
+            update={"plan_id": rollback.plan_id, "idempotency_key": f"plan:{rollback.plan_id}:{PLAN_DIGEST}"}
+        ),
+    )
+    provider = MovedHeadProvider()
+    worker, operations, _, pull_requests, _ = _worker(
+        plan=rollback, provider=provider, revision=MOVED_HEAD, leases=(lease,)
+    )
+    plans = RecordingPlanRepository(rollback)
+    plans.plans[original.plan_id] = original
+    worker.plans = plans
+    provider.plan_repository = plans
+    recommendations = {
+        recommendation_id: RecommendationRecord(
+            id=recommendation_id,
+            pod_name="api",
+            container_name="api",
+            namespace=rollback.action.target.namespace,
+            type=RecommendationType.RIGHTSIZING_CPU,
+            description="Roll back the CPU request change.",
+            scope="workload",
+            status=RecommendationStatus.ROLLBACK_REVIEW,
+            owner_kind=rollback.action.target.kind,
+            owner_name=rollback.action.target.name,
+            action=rollback.action,
+        )
+        for recommendation_id in rollback.recommendation_ids
+    }
+
+    class RecommendationReader:
+        async def get_recommendation_by_id(self, recommendation_id: int):
+            return recommendations.get(recommendation_id)
+
+    worker.recommendation_repository = cast(Any, RecommendationReader())
+
+    assert await worker.process_once("worker-1")
+
+    assert operations.failures == []
+    persisted = plans.plans[rollback.plan_id]
+    assert persisted.status is PlanStatus.PR_OPEN
+    assert persisted.committed_on_revision == MOVED_HEAD
+    assert persisted.file_plan is not None and persisted.file_plan.base_revision == BASE_REVISION
+    assert plans.committed_on == [MOVED_HEAD]
+    assert len(provider.commit_requests) == 1
+    assert provider.commit_requests[0].base_revision == MOVED_HEAD
+    assert provider.commit_requests[0].message.startswith("Rollback GreenKube plan original-plan")
+    assert {record.pr_number for record in pull_requests.records} == {17}
+    # The PR body names the planned base and the moved head the commit was made on.
+    body = provider.pull_request_bodies[0]
+    assert f"`main` / `{BASE_REVISION}`" in body
+    assert f"Committed on moved head: `{MOVED_HEAD}`" in body
 
 
 @pytest.mark.asyncio

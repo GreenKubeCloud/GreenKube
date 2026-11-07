@@ -513,6 +513,24 @@ class PlanWorker:
                 plan = updated
         return plan.model_copy(update={"committed_on_revision": revision})
 
+    async def _planned_base_revision(self, plan: Plan) -> str | None:
+        """Return the revision the plan was rendered on, even for the in-memory moved-head view (D7).
+
+        ``_plan_on_committed_revision`` rewrites ``file_plan.base_revision`` to the moved head so the
+        branch and commit are created on it; identities derived from the base (rollback plan IDs)
+        and provenance must keep using the persisted planned base.
+        """
+        file_plan = plan.file_plan
+        if file_plan is None:
+            return None
+        committed = plan.committed_on_revision
+        if committed is None or committed.lower() != file_plan.base_revision.lower():
+            return file_plan.base_revision
+        persisted = await self.plans.get_plan(plan.plan_id)
+        if persisted is None or persisted.digest != plan.digest or persisted.file_plan is None:
+            return None
+        return persisted.file_plan.base_revision
+
     async def _validate_current_binding(self, plan: Plan) -> None:
         if self.binding_reader is None:
             return
@@ -807,6 +825,7 @@ class PlanWorker:
                 plan_status=PlanStatus.STALE,
             )
         original = await self.plans.get_plan(rollback_of_plan_id)
+        planned_base_revision = await self._planned_base_revision(plan)
         if (
             original is None
             or original.plan_id != rollback_of_plan_id
@@ -819,7 +838,8 @@ class PlanWorker:
             or set(original.recommendation_ids) != set(plan.recommendation_ids)
             or original.action != plan.action
             or not same_rollback_source(original.source, plan.source)
-            or plan.plan_id != inverse_plan_id(original.plan_id, original.digest, plan.file_plan.base_revision)
+            or planned_base_revision is None
+            or plan.plan_id != inverse_plan_id(original.plan_id, original.digest, planned_base_revision)
         ):
             raise PlanWorkerError(
                 "Rollback link no longer matches a synced original plan.",
@@ -968,6 +988,7 @@ class PlanWorker:
         await self._heartbeat(execution, force=True)
         await self._validate_rollback_review(plan)
         recommendations, missing_recommendation_ids = await self._recommendation_records_for_pr(plan)
+        planned_base_revision = await self._planned_base_revision(plan)
         try:
             pull_request = await provider.create_pull_request(
                 target.repository,
@@ -980,6 +1001,7 @@ class PlanWorker:
                     target.repository,
                     recommendations,
                     missing_recommendation_ids,
+                    planned_base_revision=planned_base_revision,
                 ),
                 options=self.pull_request_options,
             )
@@ -1617,10 +1639,14 @@ def _pull_request_body(
     repository: GitRepository,
     recommendations: Sequence[RecommendationRecord],
     missing_recommendation_ids: Sequence[int] = (),
+    *,
+    planned_base_revision: str | None = None,
 ) -> str:
     file_plan = plan.file_plan
     if file_plan is None:
         raise PlanWorkerError("A pull request requires a persisted, render-validated file plan.")
+    base_revision = planned_base_revision or file_plan.base_revision
+    committed_on_revision = plan.committed_on_revision
 
     title = "Automated GitOps rollback" if plan.rollback_of_plan_id is not None else "Automated GitOps change"
     lines = [
@@ -1637,15 +1663,24 @@ def _pull_request_body(
         ),
         f"- Renderer: `{plan.source.renderer.value}`",
         f"- Source path: `{plan.source.path}`",
-        f"- Base branch/revision: `{plan.source.ref}` / `{file_plan.base_revision}`",
-        f"- Plan branch: `{branch}`",
-        f"- Validation: `{'passed' if file_plan.validation.passed else 'failed'}`",
+        f"- Base branch/revision: `{plan.source.ref}` / `{base_revision}`",
     ]
+    if committed_on_revision is not None and committed_on_revision.lower() != base_revision.lower():
+        lines.append(
+            f"- Committed on moved head: `{committed_on_revision}` (every file this plan touches is unchanged "
+            "since the planned base revision)"
+        )
+    lines.extend(
+        (
+            f"- Plan branch: `{branch}`",
+            f"- Validation: `{'passed' if file_plan.validation.passed else 'failed'}`",
+        )
+    )
     if plan.source.source_revision:
         lines.append(f"- Observed controller revision: `{plan.source.source_revision}`")
-        if _revision_identity(plan.source.source_revision) != _revision_identity(file_plan.base_revision):
+        if _revision_identity(plan.source.source_revision) != _revision_identity(base_revision):
             lines.append(
-                f"- Revision drift: this plan targets branch head `{file_plan.base_revision}`, while the controller "
+                f"- Revision drift: this plan targets branch head `{base_revision}`, while the controller "
                 f"reports `{plan.source.source_revision}`; refresh discovery or sync before approval if the live "
                 "revision is required."
             )
