@@ -49,21 +49,23 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 
 Recommendation scans run **only in the controller** (`greenkube start`), behind the controller Lease, never in API replicas:
 
-- The `recommendation_scan` job polls every 15 seconds. When no cluster-wide scan was requested within `RECOMMENDATION_SCAN_INTERVAL` (default `1h`), it queues a `scheduled` run; then it claims and executes queued runs, oldest first. The first cycle runs after the controller's initial collection.
+- The `recommendation_scan` job polls every 15 seconds. When no cluster-wide scan was requested within `RECOMMENDATION_SCAN_INTERVAL` (default `1h`), it queues a `scheduled` run; then it claims and executes queued runs, oldest first.
+- The poll stays idle until the controller has finished its initial work (collection, node analysis, lifecycle). That work ends with one cluster-wide scan that always runs, even when a scan from the previous pod still covers the interval, so the first scan after a (re)start sees the freshly collected data. In leader mode this happens when the controller first acquires the Lease.
 - Every scan is an **optimization run** (`optimization_runs` table): `queued` → `running` → `succeeded` or `failed`. Queuing and claiming are single conditional SQL statements, so two API replicas plus one controller (or a Lease hand-over between controllers) produce exactly one scheduled scan per interval, and each queued run executes once.
 - `POST /api/v1/optimization/runs` queues an on-demand run and returns `202 {"run_id", "status": "queued"}`. While a run is still queued for the same scope, its id is returned instead of queuing a duplicate; a queued cluster-wide run also covers namespaced requests. Poll `GET /api/v1/optimization/runs/{run_id}` until the status is terminal, then reload the recommendations.
-- `refresh=true` on the recommendation GET endpoints is **deprecated**: it only queues a run (as above) and returns the current data with the run id in the `X-GreenKube-Run-Id` response header. GET endpoints never run analyzers or write recommendations.
-- A run left `running` for more than 30 minutes (for example because its controller crashed) is marked `failed` by the next cycle.
+- `refresh=true` on the recommendation GET endpoints is **deprecated**: it returns the current data with a run id in the `X-GreenKube-Run-Id` response header. When a run covering the scope (the same namespace, or cluster-wide) is queued, running, or finished within the last 5 minutes, that run's id is returned; otherwise a `refresh` run is queued. Repeated page loads therefore do not chain scans. GET endpoints never run analyzers or write recommendations.
+- A run left `running` for more than 30 minutes (for example because its controller crashed) is marked `failed` by the next cycle. If its controller finishes it later, the `failed` outcome is kept.
+- Succeeded and failed runs older than 30 days are deleted when the next cluster-wide run is queued.
 - If no controller is running, queued runs stay `queued`.
 
 Each finished run records:
 
 | Field | Meaning |
 |---|---|
-| `recommendation_count` | Recommendations produced by the run. |
+| `recommendation_count` | Recommendations written by the run (an incomplete source's last known advice that was kept instead of a lower-priority replacement is not counted). |
 | `sources` | Per-source health: `succeeded`, `incomplete`, `failed` (with `error`, e.g. `timeout`) or `unavailable`, plus the number of recommendations and the duration. |
 | `failed_source_count` | Sources that failed or returned a partial result. A run with some failed sources is still `succeeded` (degraded, with `error` naming them); it is `failed` only when every attempted source failed, or when loading metrics or persisting failed. |
-| `new_count`, `changed_count`, `resolved_count`, `unchanged_count` | Diff against the active set before the run. *Changed* means the proposal changed (winning source, current or recommended requests, schedule, node); projected-savings drift alone is not a change. *Resolved* recommendations became `stale`. |
+| `new_count`, `changed_count`, `resolved_count`, `unchanged_count` | Diff against the active set of the scanned scope just before the run (for a namespaced run, that namespace only; cluster-scoped output of such a run is not counted). *Changed* means the proposal changed (winning source, current or recommended requests, schedule, node); projected-savings drift alone is not a change. *Resolved* recommendations became `stale`. |
 | `diff` | Up to 100 fingerprints per list (`new`, `changed`, `resolved`), with `truncated` when a list was longer. |
 
 ## Generation Flow
@@ -129,7 +131,7 @@ At the end of each scan, reconciliation compares the latest generated identities
 
 When the arbitration winner of an active recommendation (for example VPA) did not complete, a lower-priority source re-emitting the same target (for example native rightsizing) does not overwrite the last known advice, so proposals do not flap during a transient connector outage.
 
-Connectors that degrade gracefully (return a partial list instead of raising) can set `last_collect_complete = False` on the source instance after `collect()` to report an incomplete result.
+Connectors that degrade gracefully (return a partial list instead of raising) report an incomplete result by setting `last_collect_complete = False` on the source instance during `collect()`. The engine resets the flag to `True` before every `collect()` call, so a connector only sets it when the current call is partial.
 
 ## API Usage
 
@@ -156,7 +158,7 @@ All recommendation API paths are under `/api/v1`.
 | `GET` | `/recommendations/{id}/pull-requests` | Lists the pull-request attempts and their status for a recommendation. |
 | `GET` | `/automation/status` | Reports secret-free automation readiness, worker heartbeat, queue depth, discovery freshness, renderer configuration, and provider capability/preflight state. |
 
-`refresh=true` is still accepted on `/recommendations`, `/recommendations/active` and `/recommendations/top` but is deprecated: it queues a run and returns the current data with an `X-GreenKube-Run-Id` header.
+`refresh=true` is still accepted on `/recommendations`, `/recommendations/active` and `/recommendations/top` but is deprecated: it returns the current data with an `X-GreenKube-Run-Id` header naming a run that covers the scope (a pending run or one finished within 5 minutes is reused; otherwise a run is queued).
 
 ### GitOps plan and PR workflow
 
@@ -212,7 +214,7 @@ The `/recommendations` page currently provides:
 
 ## Prometheus And Grafana
 
-`/prometheus/metrics` refreshes recommendation gauges from the database on scrape, so API restarts do not empty dashboards. The API does not scan at startup; the controller's first scan cycle runs after its initial collection.
+`/prometheus/metrics` refreshes recommendation gauges from the database on scrape, so API restarts do not empty dashboards. The API does not scan at startup; the controller scans once right after its initial collection.
 
 Key recommendation metrics:
 

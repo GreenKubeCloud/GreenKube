@@ -113,7 +113,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Measured savings required to pass the cost gate. |
 | `config.recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
-| `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). On-demand scans are queued with `POST /api/v1/optimization/runs`. |
+| `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). The controller also scans once right after its initial collection. On-demand scans are queued with `POST /api/v1/optimization/runs`. |
 
 ### GitOps automation (`automation`)
 
@@ -387,7 +387,7 @@ production:
 
 API, controller, and worker resources/probes keep their chart defaults unless you override them.
 
-Only the Lease holder runs controller jobs, GitOps discovery, and sync observation. The API ServiceAccount has read-only Kubernetes permissions for health and inventory endpoints. The automation worker must remain at one replica because the database queue provides the execution lease; the chart rejects other replica counts.
+Only the Lease holder runs controller jobs (including recommendation scans), GitOps discovery, and sync observation. Because scans run in the controller, its default memory limit is 1Gi. The API ServiceAccount has read-only Kubernetes permissions for health and inventory endpoints. The automation worker must remain at one replica because the database queue provides the execution lease; the chart rejects other replica counts.
 
 For production, create the API key and database credentials in a Kubernetes Secret and set `secrets.existingSecret`. When the bundled PostgreSQL is enabled, that Secret must contain `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`; when it is disabled, `DB_CONNECTION_STRING` is still required. See the [Installation guide](installation.md#production-api-key-handling).
 

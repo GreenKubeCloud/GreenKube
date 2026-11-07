@@ -64,7 +64,7 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 
 ### Recommendations and automation
 
-Recommendation GET endpoints never run analyzers and never write. Scans run in the leader controller every `RECOMMENDATION_SCAN_INTERVAL`, or on demand through `POST /optimization/runs`. The `refresh=true` query parameter on `/recommendations`, `/recommendations/active` and `/recommendations/top` is deprecated: it only queues a run and returns the current data with the run id in the `X-GreenKube-Run-Id` response header (exposed to CORS clients). Poll `GET /optimization/runs/{run_id}` and reload when the run is terminal.
+Recommendation GET endpoints never run analyzers and never write. Scans run in the leader controller every `RECOMMENDATION_SCAN_INTERVAL`, or on demand through `POST /optimization/runs`. The `refresh=true` query parameter on `/recommendations`, `/recommendations/active` and `/recommendations/top` is deprecated: it returns the current data with a run id in the `X-GreenKube-Run-Id` response header (exposed to CORS clients). A run covering the scope that is queued, running or finished within the last 5 minutes is reused; otherwise a run is queued. Poll `GET /optimization/runs/{run_id}` and reload when the run is terminal. Runs are kept for 30 days.
 
 | Method | Path | Description |
 |---|---|---|
