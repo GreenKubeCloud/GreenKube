@@ -113,6 +113,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Measured savings required to pass the cost gate. |
 | `config.recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
+| `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). On-demand scans are queued with `POST /api/v1/optimization/runs`. |
 
 ### GitOps automation (`automation`)
 
