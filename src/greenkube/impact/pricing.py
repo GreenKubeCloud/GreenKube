@@ -7,7 +7,9 @@ Prices are resolved per node by :class:`UnitPriceResolver`, first tier wins:
    metric rows, written by OpenCost/Kubecost collection), divided by the
    reserved core-hours and GiB-hours of the same rows.
 2. **PricingCatalog**: bundled on-demand list price of the node's instance type
-   in its region, apportioned to CPU and RAM with the OpenCost ratio.
+   in its region, apportioned to CPU and RAM with the OpenCost ratio. Only
+   catalogs in the configured currency are used: GreenKube never converts
+   currencies, so a EUR catalog does not price a USD cluster.
 3. **CustomRates**: per core-hour / GiB-hour rates from configuration, or the
    OpenCost default custom pricing when none are configured.
 
@@ -26,7 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-from greenkube.impact.types import BYTES_PER_GIB, CostSource, UnitPrices
+from greenkube.impact.types import BYTES_PER_GIB, CostSource, UnitPrices, parse_cost_source
 
 logger = logging.getLogger(__name__)
 
@@ -315,17 +317,14 @@ class ObservedRates:
         """Both resources must be observed with positive prices, otherwise fall through."""
         if self.cpu_core_hours <= 0 or self.ram_gib_hours <= 0 or self.cpu_cost <= 0 or self.ram_cost <= 0:
             return None
-        source_name = max(self.sources.items(), key=lambda item: item[1])[0] if self.sources else "opencost"
-        try:
-            source = CostSource(source_name)
-        except ValueError:
-            source = CostSource.OPENCOST
+        source_name = max(self.sources.items(), key=lambda item: item[1])[0] if self.sources else None
+        source, unknown_label = parse_cost_source(source_name)
         return UnitPrices(
             cpu_core_hour=self.cpu_cost / self.cpu_core_hours,
             ram_gib_hour=self.ram_cost / self.ram_gib_hours,
             currency=currency,
             source=source,
-            detail="observed",
+            detail=f"observed:{unknown_label}" if unknown_label else "observed",
         )
 
 
@@ -359,6 +358,15 @@ class UnitPriceResolver:
                 return observed
 
         entry = self.catalog.lookup(provider, region, instance_type)
+        if entry is not None and entry.currency.upper() != self.custom_rates.currency:
+            logger.debug(
+                "Skipping %s catalog price for %s: currency %s differs from IMPACT_PRICING_CURRENCY %s",
+                entry.provider,
+                instance_type,
+                entry.currency,
+                self.custom_rates.currency,
+            )
+            entry = None
         if entry is not None:
             entry_vcpus = entry.vcpus or vcpus
             entry_memory = entry.memory_gib or memory_gib

@@ -132,6 +132,29 @@ class TestUnitPriceResolver:
         prices = self._resolver().resolve(node_name="n1", provider="aws", region="mars-1", instance_type="m5.large")
         assert prices.source == CostSource.CUSTOM_RATE
 
+    def test_catalog_in_another_currency_is_skipped(self):
+        """Prices are never mixed across currencies: a EUR catalog does not price a USD cluster."""
+        eur_catalog = {**CATALOG, "provider": "scaleway", "currency": "EUR", "regions": {"*": {"pro2-s": [0.2, 2, 8]}}}
+
+        def resolve(currency):
+            resolver = UnitPriceResolver(
+                catalog=PricingCatalog(documents={"scaleway": eur_catalog}),
+                custom_rates=CustomRates.from_config(Config(IMPACT_PRICING_CURRENCY=currency)),
+            )
+            return resolver.resolve(node_name="n1", provider="scaleway", region="fr-par", instance_type="pro2-s")
+
+        usd = resolve("USD")
+        assert (usd.source, usd.currency) == (CostSource.CUSTOM_RATE, "USD")
+        eur = resolve("EUR")
+        assert (eur.source, eur.currency, eur.detail) == (CostSource.PRICING_CATALOG, "EUR", "scaleway/*/pro2-s")
+
+    def test_unknown_observed_source_label_is_kept_in_the_detail(self):
+        observed = ObservedRates()
+        observed.add(cost_cpu=0.2, cost_ram=0.05, cpu_reserved_cores=2, mem_reserved_gib=5, hours=1, source="mixed")
+        prices = observed.unit_prices("USD")
+        assert prices is not None
+        assert (prices.source, prices.detail) == (CostSource.OPENCOST, "observed:mixed")
+
     def test_partial_or_negative_observed_costs_fall_through(self):
         observed = ObservedRates()
         observed.add(cost_cpu=-1.0, cost_ram=0.05, cpu_reserved_cores=2, mem_reserved_gib=5, hours=1, source=None)
