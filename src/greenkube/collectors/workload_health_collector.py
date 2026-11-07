@@ -7,11 +7,16 @@ over the window length:
 
 * OOM kills: containers whose ``kube_pod_container_status_last_terminated_reason``
   reported ``OOMKilled`` during the window (kube-state-metrics).
-* Readiness: average of ``kube_pod_status_ready{condition="true"}`` over the
-  window, across the observed pods (kube-state-metrics).
+* Readiness: share of ``kube_pod_status_ready{condition="true"}`` samples that
+  were ready over the window, across the observed pods, so each pod weighs its
+  lifetime in the window (kube-state-metrics).
 * CPU throttling: ``increase(container_cpu_cfs_throttled_periods_total)`` /
-  ``increase(container_cpu_cfs_periods_total)`` (cAdvisor). The series only
+  ``increase(container_cpu_cfs_periods_total)`` (cAdvisor), over the workload's
+  containers (never the pod cgroup or the pause container). The series only
   exist for containers with a CPU limit.
+
+Queries go to ``/api/v1/query``, falling back to ``/prometheus/api/v1/query``
+like the PrometheusCollector.
 
 A signal that cannot be read is returned as ``None`` so the matching gate is
 reported ``not_available`` instead of silently passing.
@@ -36,6 +41,9 @@ logger = logging.getLogger(__name__)
 MAX_EXPLICIT_PODS = 200
 
 QueryFunction = Callable[[str, datetime], Awaitable[Optional[List[dict[str, Any]]]]]
+
+#: Instant-query API paths, in the order the PrometheusCollector tries them.
+_QUERY_PATHS = ("/api/v1/query", "/prometheus/api/v1/query")
 
 _OWNER_POD_PATTERNS = {
     "Deployment": r"{name}-[a-z0-9]{{6,10}}-[a-z0-9]{{5}}",
@@ -93,6 +101,8 @@ class WorkloadHealthCollector:
         self._settings = settings
         self._query_override = query
         self._client: Optional[httpx.AsyncClient] = None
+        #: Query API path that answered last; tried first from then on.
+        self._query_path: Optional[str] = None
 
     @property
     def settings(self):
@@ -126,6 +136,10 @@ class WorkloadHealthCollector:
         end = ensure_utc(end)
         window = _duration((end - ensure_utc(start)).total_seconds())
         container_matcher = f', container="{_label_value(container_name)}"' if container_name else ""
+        # cAdvisor also exports the pod-level cgroup (container="") and the pause
+        # container (container="POD"); summing them with the workload's containers
+        # would count the same CFS periods twice.
+        cadvisor_matcher = container_matcher or ', container!="", container!="POD"'
 
         # Read presence over the window: pods replaced before its end still have series.
         ksm_present = _scalar(
@@ -141,21 +155,21 @@ class WorkloadHealthCollector:
             )
             if oom is not None:
                 observation.oom_kill_count = int(_scalar(oom) or 0)
-            readiness = await self._query(
-                f'avg(avg_over_time(kube_pod_status_ready{{{selector}, condition="true"}}[{window}]))',
-                end,
-            )
+            # Ready samples over present samples across all pods: weighted by pod time, so a
+            # short-lived HPA or rollout pod counts for its lifetime, not for 1/N of the ratio.
+            ready = f'kube_pod_status_ready{{{selector}, condition="true"}}[{window}]'
+            readiness = await self._query(f"sum(sum_over_time({ready})) / sum(count_over_time({ready}))", end)
             observation.readiness_ratio = _scalar(readiness)
 
         throttled = _scalar(
             await self._query(
-                f"sum(increase(container_cpu_cfs_throttled_periods_total{{{selector}{container_matcher}}}[{window}]))",
+                f"sum(increase(container_cpu_cfs_throttled_periods_total{{{selector}{cadvisor_matcher}}}[{window}]))",
                 end,
             )
         )
         periods = _scalar(
             await self._query(
-                f"sum(increase(container_cpu_cfs_periods_total{{{selector}{container_matcher}}}[{window}]))",
+                f"sum(increase(container_cpu_cfs_periods_total{{{selector}{cadvisor_matcher}}}[{window}]))",
                 end,
             )
         )
@@ -181,17 +195,32 @@ class WorkloadHealthCollector:
         password = getattr(settings, "PROMETHEUS_PASSWORD", None)
         auth = (username, password) if username and password else None
         client = await self._get_client(bool(getattr(settings, "PROMETHEUS_VERIFY_CERTS", True)))
-        try:
-            response = await client.get(
-                f"{base}/api/v1/query",
-                params={"query": promql, "time": f"{ensure_utc(at).timestamp():.3f}"},
-                headers=headers,
-                auth=auth,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("Health query failed against Prometheus: %s", exc)
+        # Same API paths as the PrometheusCollector: some installs serve it behind /prometheus.
+        paths = [self._query_path] if self._query_path else list(_QUERY_PATHS)
+        payload: Any = None
+        last_error: Optional[Exception] = None
+        for path in paths:
+            try:
+                response = await client.get(
+                    f"{base}{path}",
+                    params={"query": promql, "time": f"{ensure_utc(at).timestamp():.3f}"},
+                    headers=headers,
+                    auth=auth,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc
+                payload = None
+                continue
+            if not isinstance(payload, dict):
+                last_error = ValueError("Prometheus answered with a non-object payload")
+                payload = None
+                continue
+            self._query_path = path
+            break
+        if payload is None:
+            logger.warning("Health query failed against Prometheus: %s", last_error)
             return None
         if payload.get("status") != "success":
             logger.warning("Prometheus rejected a health query: %s", payload.get("error", "unknown error"))

@@ -10,6 +10,8 @@ from greenkube.core.config import Config
 
 END = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
 START = END - timedelta(hours=72)
+#: Time-weighted readiness: ready samples over present samples, across all pods.
+READINESS = "sum(sum_over_time(kube_pod_status_ready"
 
 
 def _vector(value):
@@ -50,7 +52,7 @@ async def test_all_signals_are_read_over_the_window():
         {
             "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": _vector(1),
-            "avg(avg_over_time(kube_pod_status_ready": _vector(0.995),
+            READINESS: _vector(0.995),
             "cfs_throttled_periods_total": _vector(30),
             "cfs_periods_total": _vector(1000),
         }
@@ -72,12 +74,41 @@ async def test_all_signals_are_read_over_the_window():
     assert presence.endswith("[259200s]))")
 
 
+async def test_readiness_is_weighted_by_pod_time_not_by_pod():
+    _, prometheus = await _collect({"count(max_over_time(kube_pod_status_ready": _vector(2)})
+
+    readiness = next(query for query in prometheus.queries if query.startswith(READINESS))
+    # A short-lived HPA pod that spent a minute starting weighs its lifetime, not 1/N of the ratio.
+    assert readiness == (
+        'sum(sum_over_time(kube_pod_status_ready{namespace="prod", pod=~"api\\\\-app\\\\-a|api\\\\-app\\\\-b", '
+        'condition="true"}[259200s])) / sum(count_over_time(kube_pod_status_ready{namespace="prod", '
+        'pod=~"api\\\\-app\\\\-a|api\\\\-app\\\\-b", condition="true"}[259200s]))'
+    )
+
+
+async def test_workload_throttling_excludes_pod_cgroup_and_pause_series():
+    _, prometheus = await _collect({"count(max_over_time(kube_pod_status_ready": _vector(2)}, container_name=None)
+
+    throttling = [query for query in prometheus.queries if "cfs" in query]
+    assert len(throttling) == 2
+    for query in throttling:
+        # The pod-level cgroup (container="") and the pause container would double-count periods.
+        assert 'container!=""' in query and 'container!="POD"' in query
+
+
+async def test_container_throttling_selects_the_container():
+    _, prometheus = await _collect({"count(max_over_time(kube_pod_status_ready": _vector(2)})
+
+    for query in (query for query in prometheus.queries if "cfs" in query):
+        assert 'container="app"' in query and 'container!=""' not in query
+
+
 async def test_no_oom_series_with_kube_state_metrics_means_zero_kills():
     observation, _ = await _collect(
         {
             "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": [],
-            "avg(avg_over_time(kube_pod_status_ready": _vector(1),
+            READINESS: _vector(1),
         }
     )
 
@@ -100,7 +131,7 @@ async def test_failed_queries_are_not_reported_as_healthy():
         {
             "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": None,
-            "avg(avg_over_time(kube_pod_status_ready": None,
+            READINESS: None,
             "cfs_throttled_periods_total": None,
         }
     )
@@ -147,6 +178,46 @@ async def test_http_query_uses_the_configured_prometheus(monkeypatch):
     assert seen["url"].startswith("http://prometheus:9090/api/v1/query?")
     assert f"time={END.timestamp():.3f}" in seen["url"]
     assert seen["auth"] == "Bearer token"
+
+
+async def test_http_query_falls_back_to_the_prometheus_path_prefix():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/prometheus/api/v1/query":
+            return httpx.Response(200, json={"status": "success", "data": {"result": _vector(1)}})
+        return httpx.Response(404, text="not found")
+
+    collector = WorkloadHealthCollector(Config(PROMETHEUS_URL="http://gateway:8080"))
+    collector._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        first = await collector._query("up", END)
+        second = await collector._query("up", END)
+    finally:
+        await collector.close()
+
+    assert first == second == _vector(1)
+    # The working path is remembered: the next query goes straight to it.
+    assert seen == ["/api/v1/query", "/prometheus/api/v1/query", "/prometheus/api/v1/query"]
+
+
+async def test_http_query_rejected_by_prometheus_is_not_available():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"status": "error", "error": "parse error"})
+
+    collector = WorkloadHealthCollector(Config(PROMETHEUS_URL="http://prometheus:9090"))
+    collector._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await collector._query("up(", END)
+    finally:
+        await collector.close()
+
+    assert result is None
+    assert seen == ["/api/v1/query"]
 
 
 async def test_unconfigured_prometheus_makes_every_signal_unavailable():
