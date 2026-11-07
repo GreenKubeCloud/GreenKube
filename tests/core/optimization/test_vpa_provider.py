@@ -73,11 +73,13 @@ class TestVpaSource:
         assert cpu.container_name == "api"
         assert cpu.current_cpu_request_millicores == 1000
         assert cpu.recommended_cpu_request_millicores == 300
-        # 0.7 core released for one 5-minute sample, annualized over the 7-day
-        # window and priced at the OpenCost default CPU rate.
-        released_core_hours = 0.7 * (300 / 3600) * (365 / 7)
-        assert cpu.potential_savings_cost == pytest.approx(released_core_hours * 0.031611)
+        # 0.7 of the 1-core reservation is released for one 5-minute sample,
+        # annualized over the 7-day window. The row's OpenCost total (1.0) is
+        # apportioned to CPU and RAM with the OpenCost default rate weights.
+        cpu_share = 0.031611 / (0.031611 + 0.004237)
+        assert cpu.potential_savings_cost == pytest.approx(1.0 * cpu_share * 0.7 * (365 / 7))
         assert cpu.impact is not None
+        assert cpu.impact["assumptions"]["unit_prices"][0]["detail"] == "observed_total_apportioned"
         assert cpu.impact["cost_breakdown_annual"]["ram"] == 0.0
         memory = by_type[RecommendationType.RIGHTSIZING_MEMORY]
         assert memory.impact is not None

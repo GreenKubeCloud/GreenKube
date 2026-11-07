@@ -38,6 +38,22 @@ class CostSource(StrEnum):
     NONE = "none"
 
 
+def parse_cost_source(raw: Optional[str]) -> Tuple[CostSource, Optional[str]]:
+    """Maps a stored ``cost_source`` label to a :class:`CostSource`.
+
+    Observed costs are written by OpenCost/Kubecost collection, so a missing
+    label means ``opencost``. A label outside the enum (e.g. ``mixed`` on
+    hourly aggregates) also maps to ``opencost`` and is returned as the second
+    value, so callers can record it instead of hiding it.
+    """
+    if not raw:
+        return CostSource.OPENCOST, None
+    try:
+        return CostSource(raw), None
+    except ValueError:
+        return CostSource.OPENCOST, str(raw)
+
+
 class PowerSource(StrEnum):
     """Where a node power profile comes from (values match roadmap A11)."""
 

@@ -76,7 +76,19 @@ def _baseline(samples, window_hours=24.0):
     )
 
 
-def _sample(cpu_req, cpu_use, mem_req, mem_use, hours=1.0, node="n1", pue=None, intensity=None):
+def _sample(
+    cpu_req,
+    cpu_use,
+    mem_req,
+    mem_use,
+    hours=1.0,
+    node="n1",
+    pue=None,
+    intensity=None,
+    cost_total=None,
+    cost_cpu=None,
+    cost_ram=None,
+):
     return ResourceSample(
         ref=WorkloadRef("c", "ns", "Deployment", "api", "api"),
         hours=hours,
@@ -87,6 +99,9 @@ def _sample(cpu_req, cpu_use, mem_req, mem_use, hours=1.0, node="n1", pue=None, 
         node=node,
         pue=pue,
         grid_intensity_g_per_kwh=intensity,
+        observed_cost_total=cost_total,
+        observed_cost_cpu=cost_cpu,
+        observed_cost_ram=cost_ram,
     )
 
 
@@ -116,16 +131,38 @@ class TestContainerRequestProperties:
         _, pool = _profile(realization=rng.uniform(0, 1))
         cpu_req = rng.uniform(0.05, 4)
         mem_req = rng.uniform(0.05, 16)
-        samples = [
-            _sample(
-                cpu_req,
-                rng.choice([None, rng.uniform(0, 2 * cpu_req)]),
-                mem_req,
-                rng.choice([None, rng.uniform(0, 2 * mem_req)]),
-                hours=rng.choice([1 / 12, 1.0]),
+
+        def observed_costs(hours):
+            # Rows without cost, OpenCost totals only (dev rows), and totals
+            # with a CPU/RAM split (possibly partial or larger than the total).
+            # Totals range from far below to far above the modeled node prices.
+            shape = rng.choice(["none", "total", "split", "partial"])
+            if shape == "none":
+                return {}
+            total = hours * rng.uniform(1e-4, 1.0) * rng.choice([0.001, 0.05, 1.0])
+            if shape == "total":
+                return {"cost_total": total}
+            if shape == "split":
+                return {
+                    "cost_total": total,
+                    "cost_cpu": total * rng.uniform(0, 1.2),
+                    "cost_ram": total * rng.uniform(0, 0.5),
+                }
+            return {"cost_total": total, rng.choice(["cost_cpu", "cost_ram"]): total * rng.uniform(0, 1)}
+
+        samples = []
+        for _ in range(rng.randint(1, 30)):
+            hours = rng.choice([1 / 12, 1.0])
+            samples.append(
+                _sample(
+                    cpu_req,
+                    rng.choice([None, rng.uniform(0, 2 * cpu_req)]),
+                    mem_req,
+                    rng.choice([None, rng.uniform(0, 2 * mem_req)]),
+                    hours=hours,
+                    **observed_costs(hours),
+                )
             )
-            for _ in range(rng.randint(1, 30))
-        ]
         baseline = _baseline(samples, window_hours=rng.choice([24.0, 168.0]))
         change = ContainerResourceChange(
             cpu_request_cores=(cpu_req, cpu_req * rng.uniform(0, 1)),
@@ -173,6 +210,77 @@ class TestContainerRequestProperties:
         assert delta.co2e_allocated_annual_g == pytest.approx(expected_allocated)
         assert delta.co2e_expected_annual_g == pytest.approx(expected_allocated * 0.6)
         assert delta.expected_billable_cost_annual == pytest.approx(delta.allocated_cost_annual * 0.6)
+
+    def test_observed_component_costs_price_the_released_reservation(self):
+        """Observed tier, per sample: price = observed CPU (RAM) cost / reserved core-hours (GiB-hours)."""
+        _, pool = _profile()
+        samples = [_sample(2, 0.1, 8, 1, cost_total=0.12, cost_cpu=0.08, cost_ram=0.03)]
+        delta = MODEL.project(
+            _baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(2, 0.5), mem_request_gib=(8, 2)), pool
+        )
+        assert delta.cost_breakdown_annual.cpu == pytest.approx(0.08 * 1.5 / 2 * HOURS_PER_YEAR)
+        assert delta.cost_breakdown_annual.ram == pytest.approx(0.03 * 6 / 8 * HOURS_PER_YEAR)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert (prices["source"], prices["detail"]) == ("opencost", "observed_components")
+        assert prices["cpu_core_hour"] == pytest.approx(0.04)
+        assert prices["ram_gib_hour"] == pytest.approx(0.03 / 8)
+        assert delta.confidence == pytest.approx(0.9)
+
+    def test_observed_total_is_apportioned_with_node_price_weights(self):
+        """Rows with only an OpenCost total: the total is split by the modeled CPU/RAM weights."""
+        node, pool = _profile()
+        samples = [_sample(2, 0.1, 8, 1, cost_total=0.5)]
+        delta = MODEL.project(
+            _baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(2, 0.5), mem_request_gib=(8, 2)), pool
+        )
+        cpu_weight = 2 * node.prices.cpu_core_hour
+        ram_weight = 8 * node.prices.ram_gib_hour
+        cpu_cost = 0.5 * cpu_weight / (cpu_weight + ram_weight)
+        ram_cost = 0.5 - cpu_cost
+        assert delta.cost_breakdown_annual.cpu == pytest.approx(cpu_cost * 1.5 / 2 * HOURS_PER_YEAR)
+        assert delta.cost_breakdown_annual.ram == pytest.approx(ram_cost * 6 / 8 * HOURS_PER_YEAR)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert (prices["source"], prices["detail"]) == ("opencost", "observed_total_apportioned")
+        assert delta.assumptions["observed_cost_sources"] == {"opencost": 1}
+
+    def test_unknown_observed_cost_source_is_recorded(self):
+        _, pool = _profile()
+        sample = replace(_sample(2, 0.1, 8, 1, cost_total=0.5), observed_cost_source="mixed")
+        delta = MODEL.project(_baseline([sample], 1.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        assert delta.assumptions["observed_cost_sources"] == {"mixed": 1}
+        assert delta.assumptions["unit_prices"][0]["source"] == "opencost"
+
+    def test_observed_costs_carry_the_configured_currency(self):
+        """An observed (OpenCost) cost is in the configured currency, not the node's catalog currency."""
+        node, pool = _profile()
+        eur_node = replace(node, prices=replace(node.prices, currency="EUR"))
+        pool = replace(pool, nodes={"n1": eur_node}, default_node=eur_node)
+        observed = MODEL.project(_baseline([_sample(2, 0.1, 8, 1, cost_total=0.5)], 1.0), WorkloadDeletion(), pool)
+        modeled = MODEL.project(_baseline([_sample(2, 0.1, 8, 1)], 1.0), WorkloadDeletion(), pool)
+        assert observed.currency == "USD"
+        assert modeled.currency == "EUR"
+
+    def test_reservations_larger_than_the_node_are_capped_at_the_node(self):
+        """A 4-core reservation on a 1-core profile never holds more than the whole node's idle and embodied."""
+        node, pool = _profile(cores=1.0)
+        samples = [_sample(4, 0.1, 0, None)]
+        deletion = MODEL.project(_baseline(samples, 1.0), WorkloadDeletion(), pool)
+        idle_g_per_hour = node.idle_watts / 1000 * node.pue * node.grid_intensity_g_per_kwh
+        assert deletion.co2e_breakdown_annual_g.idle_operational == pytest.approx(idle_g_per_hour * HOURS_PER_YEAR)
+        assert deletion.co2e_breakdown_annual_g.embodied == pytest.approx(node.embodied_g_per_hour * HOURS_PER_YEAR)
+
+        cut = MODEL.project(_baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(4, 0.5)), pool)
+        # Only the reservation below the node size moves: from the whole node to half of it.
+        assert cut.co2e_breakdown_annual_g.embodied == pytest.approx(0.5 * node.embodied_g_per_hour * HOURS_PER_YEAR)
+        # Cost and released capacity are per reserved core and are not capped.
+        assert cut.capacity_released.cpu_core_hours == pytest.approx(3.5 * HOURS_PER_YEAR)
+
+    def test_samples_without_observed_cost_keep_node_prices(self):
+        node, pool = _profile()
+        samples = [_sample(2, 0.1, 8, 1)]
+        delta = MODEL.project(_baseline(samples, 1.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        assert delta.cost_breakdown_annual.cpu == pytest.approx(node.prices.cpu_core_hour * HOURS_PER_YEAR)
+        assert delta.assumptions["unit_prices"] == [node.prices.to_dict()]
 
     def test_usage_above_target_limits_released_reservation(self):
         """Reservation is max(request, usage): a target below usage releases only down to usage."""
@@ -316,7 +424,7 @@ class TestBug15:
         assert _savings(cpu) <= 0.008 * len(rows) * HOURS_PER_YEAR
         assert _impact(cpu)["assumptions"]["unit_prices"][0]["source"] == "opencost"
 
-    def test_catalog_prices_are_used_without_observed_component_costs(self):
+    def test_catalog_prices_are_used_without_observed_costs(self):
         node = NodeInfo(
             name="n1",
             instance_type="m5.large",
@@ -332,8 +440,9 @@ class TestBug15:
             "columns": ["hourly", "vcpu", "memory_gib"],
             "regions": {"eu-west-3": {"m5.large": [0.112, 2, 8]}},
         }
+        # No OpenCost: rows carry DEFAULT_COST (0), so nothing is observed.
         context = OptimizationContext(
-            config=Config(), metrics=_container_rows(), node_infos=[node], analysis_window_seconds=3600.0
+            config=Config(), metrics=_container_rows(total_cost=0.0), node_infos=[node], analysis_window_seconds=3600.0
         )
         projector = ImpactProjector(
             Config(),
@@ -351,6 +460,74 @@ class TestBug15:
         assert prices["source"] == "pricing_catalog"
         assert prices["detail"] == "aws/eu-west-3/m5.large"
         assert delta.cost_breakdown_annual.cpu == pytest.approx(0.9 * 1.0 * HOURS_PER_YEAR * prices["cpu_core_hour"])
+
+
+def _opencost_rows(per_row_cost: float, count: int = 12) -> List[CombinedMetric]:
+    """Rows as written on dev with OpenCost: a per-container ``total_cost`` and no component split."""
+    return [
+        CombinedMetric(
+            pod_name="api-7f9c5d9f6d-a1b2c",
+            namespace="prod",
+            owner_kind="Deployment",
+            owner_name="api",
+            container_name="api",
+            node="n1",
+            cpu_request=4000,
+            cpu_usage_millicores=50,
+            memory_request=8 * GIB,
+            memory_usage_bytes=64 * MIB,
+            total_cost=per_row_cost,
+            co2e_grams=5.0,
+            grid_intensity=300.0,
+            pue=1.2,
+            timestamp=START + timedelta(minutes=5 * index),
+            duration_seconds=300,
+        )
+        for index in range(count)
+    ]
+
+
+class TestBug15OpenCostTotalOnly:
+    """BUG-15 on the rows that exist today: OpenCost ``total_cost`` without ``cost_cpu``/``cost_ram``."""
+
+    @pytest.mark.parametrize("per_row_cost", [0.0005, 0.001, 0.013])
+    def test_rightsizing_never_exceeds_the_observed_container_cost(self, per_row_cost):
+        rows = _opencost_rows(per_row_cost)
+        config = Config()
+        context = OptimizationContext(config=config, metrics=rows, analysis_window_seconds=3600.0)
+        recs = [
+            *CpuRightsizingAnalyzer(config).analyze(context),
+            *MemoryRightsizingAnalyzer(config).analyze(context),
+        ]
+        assert {rec.type for rec in recs} == {RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY}
+
+        projector = ImpactProjector.for_context(context)
+        deletion = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api", "api"), rows)
+        observed_annual = sum(row.total_cost for row in rows) * HOURS_PER_YEAR  # 12 x 5 min = the 1 h window
+        projected = sum(_savings(rec) for rec in recs)
+
+        assert deletion.allocated_cost_annual == pytest.approx(observed_annual)
+        assert projected <= observed_annual + 1e-9
+        assert projected <= deletion.allocated_cost_annual + 1e-9
+        for rec in recs:
+            (prices,) = _impact(rec)["assumptions"]["unit_prices"]
+            assert (prices["source"], prices["detail"]) == ("opencost", "observed_total_apportioned")
+            assert _impact(rec)["currency"] == "USD"
+
+    def test_cpu_and_memory_cuts_split_the_observed_total(self):
+        """The two cuts are additive shares of one total, apportioned with OpenCost's CPU/RAM weights."""
+        rows = _opencost_rows(0.01)
+        recs = {rec.type: rec for rec in _analyze(rows)}
+        cpu = recs[RecommendationType.RIGHTSIZING_CPU]
+        memory = recs[RecommendationType.RIGHTSIZING_MEMORY]
+
+        cpu_weight = 4 * 0.031611
+        ram_weight = 8 * 0.004237
+        annual = 0.01 * len(rows) * HOURS_PER_YEAR
+        cpu_released = (4000 - (cpu.recommended_cpu_request_millicores or 0)) / 4000
+        mem_released = (8 * GIB - (memory.recommended_memory_request_bytes or 0)) / (8 * GIB)
+        assert _savings(cpu) == pytest.approx(annual * cpu_weight / (cpu_weight + ram_weight) * cpu_released)
+        assert _savings(memory) == pytest.approx(annual * ram_weight / (cpu_weight + ram_weight) * mem_released)
 
 
 class TestBug16:

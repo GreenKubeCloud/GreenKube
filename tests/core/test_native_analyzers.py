@@ -377,11 +377,14 @@ class TestRightsizingCPU:
 
         assert cpu_rec.recommended_cpu_request_millicores == recommender.min_cpu_millicores
         # The released reservation is current - floored target, observed for one
-        # 5-minute sample and annualized over that span; priced at the OpenCost
-        # default CPU rate since the row carries no per-resource cost.
+        # 5-minute sample and annualized over that span. It is priced from the
+        # row's observed total (100 per 5 minutes), apportioned to CPU and RAM
+        # (0.1 core, 0.5 GiB reserved) with the OpenCost default rate weights.
         released_core_hours = (100 - recommender.min_cpu_millicores) / 1000 * 8760
         assert cpu_rec.impact["capacity_released"]["cpu_core_hours"] == pytest.approx(released_core_hours)
-        assert cpu_rec.potential_savings_cost == pytest.approx(released_core_hours * 0.031611)
+        cpu_share = 0.1 * 0.031611 / (0.1 * 0.031611 + 0.5 * 0.004237)
+        released_ratio = (100 - recommender.min_cpu_millicores) / 100
+        assert cpu_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * cpu_share * released_ratio)
         assert cpu_rec.impact["cost_breakdown_annual"]["ram"] == 0.0
 
     def test_deployment_pods_are_grouped_as_one_workload(self, recommender):
@@ -560,7 +563,10 @@ class TestRightsizingMemory:
         assert mem_rec.recommended_memory_request_bytes == recommender.min_memory_bytes
         released_gib_hours = (32 * mib - recommender.min_memory_bytes) / 1024**3 * 8760
         assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(released_gib_hours)
-        assert mem_rec.potential_savings_cost == pytest.approx(released_gib_hours * 0.004237)
+        # RAM share of the observed total (1 core and 32 MiB reserved).
+        ram_share = (32 / 1024 * 0.004237) / (1.0 * 0.031611 + 32 / 1024 * 0.004237)
+        released_ratio = (32 * mib - recommender.min_memory_bytes) / (32 * mib)
+        assert mem_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * ram_share * released_ratio)
         assert mem_rec.impact["cost_breakdown_annual"]["cpu"] == 0.0
         # Memory power is not modeled yet (roadmap B5): a memory cut releases no CO2e.
         assert mem_rec.potential_savings_co2e_grams == 0.0
@@ -604,7 +610,13 @@ class TestRightsizingMemory:
 
         expected_gib_hours = released_gib * observed_hours * annualization_factor
         assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(expected_gib_hours)
-        assert mem_rec.potential_savings_cost == pytest.approx(expected_gib_hours * 0.004237)
+        # The RAM share of the observed total (1 core and 0.25 GiB reserved),
+        # times the released fraction of the request, annualized.
+        ram_share = (0.25 * 0.004237) / (1.0 * 0.031611 + 0.25 * 0.004237)
+        released_ratio = released_gib / 0.25
+        assert mem_rec.potential_savings_cost == pytest.approx(
+            2 * 0.001 * ram_share * released_ratio * annualization_factor
+        )
         assert mem_rec.potential_savings_co2e_grams == 0.0
 
 

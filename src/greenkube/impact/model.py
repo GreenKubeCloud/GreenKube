@@ -36,6 +36,7 @@ from greenkube.impact.types import (
     WorkloadBaseline,
     WorkloadDeletion,
     carbon_value,
+    parse_cost_source,
 )
 
 #: Confidence in a unit price, by cost tier (documented in the methodology).
@@ -49,6 +50,16 @@ PRICE_CONFIDENCE = {
 
 #: Confidence of the OpenCost default rates (a generic price, not this cluster's).
 DEFAULT_RATE_CONFIDENCE = 0.5
+
+#: Ceiling on the confidence of prices apportioned from an observed total: the
+#: CPU/RAM split is modeled, and the total may include storage or network cost.
+APPORTIONED_CONFIDENCE = 0.8
+
+#: ``detail`` of observed prices taken from a sample's CPU and RAM cost split.
+OBSERVED_COMPONENTS = "observed_components"
+
+#: ``detail`` of observed prices apportioned from a sample's total cost.
+OBSERVED_TOTAL_APPORTIONED = "observed_total_apportioned"
 
 #: Unit prices listed in ``assumptions`` are capped to keep payloads small.
 MAX_LISTED_PRICES = 10
@@ -75,6 +86,119 @@ def price_confidence(node: NodeImpactProfile) -> float:
     return PRICE_CONFIDENCE.get(node.prices.source, DEFAULT_RATE_CONFIDENCE)
 
 
+@dataclass(frozen=True)
+class SamplePrices:
+    """Price of one reserved core-hour and one reserved GiB-hour for one sample.
+
+    ``observed`` prices come from the sample's own allocated cost (the observed
+    tier of the cost chain); otherwise they are the node's unit prices.
+    """
+
+    cpu_reserved_core_hour: float
+    ram_reserved_gib_hour: float
+    source: CostSource
+    detail: str
+    currency: str
+    confidence: float
+    observed: bool
+    #: ``cost_source`` label that is not a known :class:`CostSource` (kept for provenance).
+    raw_source: Optional[str] = None
+
+
+def observed_cost_breakdown(sample: ResourceSample) -> Optional[CostBreakdown]:
+    """Observed allocated cost of a sample, split by component, or None when unknown.
+
+    Components the source did not split go to ``other``. A split larger than the
+    total is scaled down to the total, which is trusted.
+    """
+    total = sample.observed_cost_total
+    if total is None or total <= 0:
+        return None
+    components = {
+        "cpu": max(sample.observed_cost_cpu or 0.0, 0.0),
+        "ram": max(sample.observed_cost_ram or 0.0, 0.0),
+        "storage": max(sample.observed_cost_storage or 0.0, 0.0),
+        "network": max(sample.observed_cost_network or 0.0, 0.0),
+        "lb": max(sample.observed_cost_lb or 0.0, 0.0),
+    }
+    split = sum(components.values())
+    if split > total:
+        components = {name: value * total / split for name, value in components.items()}
+        split = total
+    return CostBreakdown(other=max(total - split, 0.0), **components)
+
+
+def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str) -> SamplePrices:
+    """Prices of a sample's CPU and RAM reservation, anchored to its observed cost.
+
+    1. The sample has an observed CPU and RAM cost: each price is that cost
+       divided by the sample's reserved core-hours (GiB-hours).
+    2. The sample has only an observed total (OpenCost ``totalCost`` today):
+       the unsplit total is apportioned to the resources without an observed
+       cost, weighted by their modeled cost at the node's unit prices.
+    3. No observed cost: the node's unit prices (catalog or custom rates).
+
+    Under 1 and 2 the CPU and RAM cost of a sample never exceeds its observed
+    total, so request cuts can never claim more than the container is charged
+    (BUG-15). ``currency`` labels observed prices (the configured currency).
+    """
+    hours = max(sample.hours, 0.0)
+    cpu_quantity = sample.cpu_reserved_cores * hours
+    mem_quantity = sample.mem_reserved_gib * hours
+    node_cpu = node.cpu_price_per_reserved_core_hour
+    node_ram = node.ram_price_per_reserved_gib_hour
+    observed = observed_cost_breakdown(sample)
+    if observed is None:
+        return SamplePrices(
+            cpu_reserved_core_hour=node_cpu,
+            ram_reserved_gib_hour=node_ram,
+            source=node.prices.source,
+            detail=node.prices.detail,
+            currency=node.prices.currency,
+            confidence=price_confidence(node),
+            observed=False,
+        )
+
+    cpu_known = sample.observed_cost_cpu is not None
+    ram_known = sample.observed_cost_ram is not None
+    cpu_cost = observed.cpu if cpu_known else 0.0
+    ram_cost = observed.ram if ram_known else 0.0
+    source, raw_source = parse_cost_source(sample.observed_cost_source)
+    confidence = PRICE_CONFIDENCE.get(source, DEFAULT_RATE_CONFIDENCE)
+    detail = OBSERVED_COMPONENTS
+    if not (cpu_known and ram_known):
+        # OpenCost apportioning: split what the source left unsplit by the
+        # modeled cost of each resource at the node's unit prices.
+        cpu_weight = 0.0 if cpu_known else cpu_quantity * node_cpu
+        ram_weight = 0.0 if ram_known else mem_quantity * node_ram
+        weight = cpu_weight + ram_weight
+        if weight > 0:
+            cpu_cost += observed.other * cpu_weight / weight
+            ram_cost += observed.other * ram_weight / weight
+        detail = OBSERVED_TOTAL_APPORTIONED
+        confidence = min(confidence, APPORTIONED_CONFIDENCE)
+    return SamplePrices(
+        cpu_reserved_core_hour=cpu_cost / cpu_quantity if cpu_quantity > 0 else 0.0,
+        ram_reserved_gib_hour=ram_cost / mem_quantity if mem_quantity > 0 else 0.0,
+        source=source,
+        detail=detail,
+        currency=currency,
+        confidence=confidence,
+        observed=True,
+        raw_source=raw_source,
+    )
+
+
+@dataclass
+class _PriceTally:
+    """Observed prices of one tier, aggregated over the samples they priced."""
+
+    cpu_cost: float = 0.0
+    cpu_core_hours: float = 0.0
+    ram_cost: float = 0.0
+    ram_gib_hours: float = 0.0
+
+
 @dataclass
 class _Accumulator:
     """Window totals of a projection before annualization."""
@@ -89,15 +213,65 @@ class _Accumulator:
     pue_weighted: float = 0.0
     intensity_weighted: float = 0.0
     nodes: Dict[str, NodeImpactProfile] = field(default_factory=dict)
+    #: Nodes whose unit prices priced part of the projection.
+    priced_nodes: Dict[str, NodeImpactProfile] = field(default_factory=dict)
+    #: Observed prices, keyed by (source, detail, currency).
+    observed_prices: Dict[Tuple[str, str, str], _PriceTally] = field(default_factory=dict)
+    currencies: set = field(default_factory=set)
     observed_cost_sources: Counter = field(default_factory=Counter)
 
-    def track(self, node: NodeImpactProfile, sample: ResourceSample, pue: float, intensity: float) -> None:
+    def track(
+        self,
+        node: NodeImpactProfile,
+        sample: ResourceSample,
+        pue: float,
+        intensity: float,
+        prices: SamplePrices,
+    ) -> None:
+        """Records a sample's environment and the prices that priced it."""
         self.nodes.setdefault(node.name, node)
         weight = max(sample.hours, 0.0)
         self.weight_hours += weight
-        self.confidence_weighted += price_confidence(node) * weight
+        self.confidence_weighted += prices.confidence * weight
         self.pue_weighted += pue * weight
         self.intensity_weighted += intensity * weight
+        self.currencies.add(prices.currency)
+        if not prices.observed:
+            self.priced_nodes.setdefault(node.name, node)
+            return
+        self.observed_cost_sources[prices.raw_source or prices.source.value] += 1
+        tally = self.observed_prices.setdefault((prices.source.value, prices.detail, prices.currency), _PriceTally())
+        cpu_quantity = sample.cpu_reserved_cores * weight
+        mem_quantity = sample.mem_reserved_gib * weight
+        tally.cpu_cost += prices.cpu_reserved_core_hour * cpu_quantity
+        tally.cpu_core_hours += cpu_quantity
+        tally.ram_cost += prices.ram_reserved_gib_hour * mem_quantity
+        tally.ram_gib_hours += mem_quantity
+
+    def track_node(self, node: NodeImpactProfile, hours: float) -> None:
+        """Records a whole node priced at its unit prices (node-pool changes)."""
+        self.nodes.setdefault(node.name, node)
+        self.priced_nodes.setdefault(node.name, node)
+        self.currencies.add(node.prices.currency)
+        self.weight_hours += hours
+        self.confidence_weighted += price_confidence(node) * hours
+        self.pue_weighted += node.pue * hours
+        self.intensity_weighted += node.grid_intensity_g_per_kwh * hours
+
+    def listed_prices(self) -> List[Dict[str, Any]]:
+        """Distinct unit prices used by a projection, for the PR body and the API."""
+        listed: List[Dict[str, Any]] = []
+        for (source, detail, currency), tally in sorted(self.observed_prices.items()):
+            listed.append(
+                {
+                    "cpu_core_hour": tally.cpu_cost / tally.cpu_core_hours if tally.cpu_core_hours > 0 else 0.0,
+                    "ram_gib_hour": tally.ram_cost / tally.ram_gib_hours if tally.ram_gib_hours > 0 else 0.0,
+                    "currency": currency,
+                    "source": source,
+                    "detail": detail,
+                }
+            )
+        return (listed + _listed_prices(self.priced_nodes))[:MAX_LISTED_PRICES]
 
     def add_cost(self, cost: CostBreakdown) -> None:
         self.cost = self.cost + cost
@@ -156,14 +330,17 @@ class ReservationAwareImpactModel:
         for sample in baseline.samples:
             node = pool.node_for(sample.node)
             pue, intensity = _sample_environment(sample, node)
-            acc.track(node, sample, pue, intensity)
+            prices = sample_prices(sample, node, pool.currency)
+            acc.track(node, sample, pue, intensity, prices)
             hours = max(sample.hours, 0.0)
             acc.replica_hours += hours
 
             cpu_released = 0.0
+            cpu_share_released = 0.0
             if change.cpu_request_cores is not None:
                 current, proposed = change.cpu_request_cores
                 cpu_released = _released(current, proposed, sample.cpu_usage_cores)
+                cpu_share_released = _released(current, proposed, sample.cpu_usage_cores, node.allocatable_cpu)
             mem_released = 0.0
             if change.mem_request_gib is not None:
                 current, proposed = change.mem_request_gib
@@ -173,16 +350,17 @@ class ReservationAwareImpactModel:
             acc.mem_gib_hours += mem_released * hours
             acc.add_cost(
                 CostBreakdown(
-                    cpu=cpu_released * hours * node.cpu_price_per_reserved_core_hour,
-                    ram=mem_released * hours * node.ram_price_per_reserved_gib_hour,
+                    cpu=cpu_released * hours * prices.cpu_reserved_core_hour,
+                    ram=mem_released * hours * prices.ram_reserved_gib_hour,
                 )
             )
             # Request cuts do not change usage, so dynamic power is unchanged:
             # only the reservation-allocated idle power and embodied share move.
-            idle_kwh = cpu_released * hours * node.idle_watts_per_reserved_core / 1000.0
+            # A reservation never holds more than the whole node's idle power.
+            idle_kwh = cpu_share_released * hours * node.idle_watts_per_reserved_core / 1000.0
             acc.add_co2e(
                 idle=idle_kwh * pue * intensity,
-                embodied=cpu_released * hours * node.embodied_g_per_reserved_core_hour,
+                embodied=cpu_share_released * hours * node.embodied_g_per_reserved_core_hour,
             )
 
         delta = self._finalize(
@@ -218,7 +396,8 @@ class ReservationAwareImpactModel:
         for sample in samples:
             node = pool.node_for(sample.node)
             pue, intensity = _sample_environment(sample, node)
-            acc.track(node, sample, pue, intensity)
+            prices = sample_prices(sample, node, pool.currency)
+            acc.track(node, sample, pue, intensity, prices)
             hours = max(sample.hours, 0.0)
             acc.replica_hours += hours
 
@@ -226,15 +405,18 @@ class ReservationAwareImpactModel:
             mem_reserved = sample.mem_reserved_gib
             acc.cpu_core_hours += cpu_reserved * hours
             acc.mem_gib_hours += mem_reserved * hours
-            acc.add_cost(_sample_allocated_cost(sample, node, acc))
+            acc.add_cost(_sample_allocated_cost(sample, prices))
 
-            used = max(sample.cpu_usage_cores or 0.0, 0.0)
-            idle_kwh = cpu_reserved * hours * node.idle_watts_per_reserved_core / 1000.0
+            # Shares are capped at the node: one workload never holds more than
+            # the whole node's idle power, dynamic power or embodied emissions.
+            cpu_share = _capped(cpu_reserved, node.allocatable_cpu)
+            used = _capped(max(sample.cpu_usage_cores or 0.0, 0.0), node.cpu_capacity_cores)
+            idle_kwh = cpu_share * hours * node.idle_watts_per_reserved_core / 1000.0
             dynamic_kwh = used * hours * node.dynamic_watts_per_used_core / 1000.0
             acc.add_co2e(
                 idle=idle_kwh * pue * intensity,
                 dynamic=dynamic_kwh * pue * intensity,
-                embodied=cpu_reserved * hours * node.embodied_g_per_reserved_core_hour,
+                embodied=cpu_share * hours * node.embodied_g_per_reserved_core_hour,
             )
 
         return self._finalize(
@@ -296,11 +478,7 @@ class ReservationAwareImpactModel:
             node = pool.nodes[name]
             hours = float(HOURS_PER_YEAR)
             node_hours += hours
-            acc.nodes.setdefault(node.name, node)
-            acc.weight_hours += hours
-            acc.confidence_weighted += price_confidence(node) * hours
-            acc.pue_weighted += node.pue * hours
-            acc.intensity_weighted += node.grid_intensity_g_per_kwh * hours
+            acc.track_node(node, hours)
             acc.cpu_core_hours += node.cpu_capacity_cores * hours
             acc.mem_gib_hours += node.mem_capacity_gib * hours
             acc.add_cost(
@@ -356,14 +534,14 @@ class ReservationAwareImpactModel:
         expected_cost = cost.total * realization
         expected_co2e = co2e.total * realization
         confidence = acc.confidence_weighted / acc.weight_hours if acc.weight_hours > 0 else 0.0
-        currencies = sorted({node.prices.currency for node in acc.nodes.values()}) or [pool.currency]
+        currencies = sorted(acc.currencies) or [pool.currency]
         currency = currencies[0] if len(currencies) == 1 else "mixed"
 
         assumptions: Dict[str, Any] = {
             "allocation_policy": "reservation_aware",
             "window_hours": window_hours,
             "annualization_factor": factor,
-            "unit_prices": _listed_prices(acc.nodes),
+            "unit_prices": acc.listed_prices(),
             "realization_factor_source": realization_source or pool.realization_source,
             "co2e_basis": co2e_basis,
         }
@@ -411,10 +589,21 @@ def _utc_hour(timestamp: datetime) -> int:
     return timestamp.hour
 
 
-def _released(current: float, proposed: float, usage: Optional[float]) -> float:
-    """Reservation released by moving a request, under ``max(request, usage)`` reservation."""
+def _capped(value: float, ceiling: float) -> float:
+    """``value`` limited to ``ceiling`` when the ceiling is known (positive)."""
+    return min(value, ceiling) if ceiling > 0 else value
+
+
+def _released(current: float, proposed: float, usage: Optional[float], ceiling: float = 0.0) -> float:
+    """Reservation released by moving a request, under ``max(request, usage)`` reservation.
+
+    With a positive ``ceiling`` (the node's allocatable capacity) both
+    reservations are capped at it first, which bounds the released node share.
+    """
     used = max(usage or 0.0, 0.0)
-    return max(current, used, 0.0) - max(proposed, used, 0.0)
+    before = _capped(max(current, used, 0.0), ceiling)
+    after = _capped(max(proposed, used, 0.0), ceiling)
+    return before - after
 
 
 def _sample_environment(sample: ResourceSample, node: NodeImpactProfile) -> Tuple[float, float]:
@@ -428,28 +617,15 @@ def _sample_environment(sample: ResourceSample, node: NodeImpactProfile) -> Tupl
     return pue, intensity
 
 
-def _sample_allocated_cost(sample: ResourceSample, node: NodeImpactProfile, acc: _Accumulator) -> CostBreakdown:
+def _sample_allocated_cost(sample: ResourceSample, prices: SamplePrices) -> CostBreakdown:
     """Current allocated cost of a sample: observed when known, otherwise modeled."""
-    total = sample.observed_cost_total
-    if total is not None and total > 0:
-        acc.observed_cost_sources[sample.observed_cost_source or CostSource.OPENCOST.value] += 1
-        components = {
-            "cpu": max(sample.observed_cost_cpu or 0.0, 0.0),
-            "ram": max(sample.observed_cost_ram or 0.0, 0.0),
-            "storage": max(sample.observed_cost_storage or 0.0, 0.0),
-            "network": max(sample.observed_cost_network or 0.0, 0.0),
-            "lb": max(sample.observed_cost_lb or 0.0, 0.0),
-        }
-        split = sum(components.values())
-        if split > total:
-            # Inconsistent split: trust the total and scale the components down.
-            components = {name: value * total / split for name, value in components.items()}
-            split = total
-        return CostBreakdown(other=total - split, **components)
+    observed = observed_cost_breakdown(sample) if prices.observed else None
+    if observed is not None:
+        return observed
     hours = max(sample.hours, 0.0)
     return CostBreakdown(
-        cpu=sample.cpu_reserved_cores * hours * node.cpu_price_per_reserved_core_hour,
-        ram=sample.mem_reserved_gib * hours * node.ram_price_per_reserved_gib_hour,
+        cpu=sample.cpu_reserved_cores * hours * prices.cpu_reserved_core_hour,
+        ram=sample.mem_reserved_gib * hours * prices.ram_reserved_gib_hour,
     )
 
 
