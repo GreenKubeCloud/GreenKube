@@ -73,9 +73,11 @@ async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_m
         assert kwargs == {"connect_db": False}
         return service
 
-    async def run_worker(*, queue: str, plan_worker):
+    async def run_worker(*, queue: str, plan_worker, heartbeat=None):
         assert queue == "plans"
         assert plan_worker is worker
+        assert callable(heartbeat)
+        heartbeat()
         started.set()
         try:
             await asyncio.Event().wait()
@@ -91,6 +93,8 @@ async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_m
         await asyncio.wait_for(started.wait(), timeout=1)
         assert app.state.automation_plan_service is service
         assert len(app.state._startup_tasks) == 2
+        supervisor = app.state.automation_loop_supervisor
+        assert supervisor is not None and supervisor.health.ready()
 
     assert cancelled.is_set()
 

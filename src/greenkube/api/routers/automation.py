@@ -159,6 +159,7 @@ async def list_open_pull_requests(
 
 @router.get("/automation/status")
 async def automation_status(
+    http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
     repository: GitOpsRepository = Depends(get_gitops_binding_repository),
 ):
@@ -213,6 +214,10 @@ async def automation_status(
     if backlog is not None and backlog.latest_worker_heartbeat_timestamp > 0:
         latest_heartbeat = datetime.fromtimestamp(backlog.latest_worker_heartbeat_timestamp, tz=timezone.utc)
         worker_healthy = now - latest_heartbeat <= WORKER_STALE_AFTER
+    supervisor = getattr(http_request.app.state, "automation_loop_supervisor", None)
+    inline_loop = supervisor.health.snapshot(now) if supervisor is not None else None
+    if inline_loop is not None and not inline_loop["ready"]:
+        worker_healthy = False
     discovery_age = None
     if coverage is not None and coverage.last_refresh is not None:
         discovery_age = max(0.0, (now - _aware_utc(coverage.last_refresh)).total_seconds())
@@ -243,6 +248,8 @@ async def automation_status(
             "heartbeat_at": latest_heartbeat,
             "count": backlog.worker_count if backlog is not None else None,
             "stale": backlog.stale_workers if backlog is not None else None,
+            # In-process loop supervision: state, heartbeat age, restarts, last error code (D9).
+            "inline_loop": inline_loop,
         },
         "queue": queue,
         "plans": (

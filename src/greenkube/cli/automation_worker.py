@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, cast
 
@@ -17,6 +18,7 @@ from greenkube.automation.plan_runtime import PlanProvidersNotConfiguredError, c
 from greenkube.automation.plan_worker import PlanWorker
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.pr_polling_runtime import PollablePullRequestRepository, PullRequestPollingRuntime
+from greenkube.automation.supervision import backoff_delay, error_code
 from greenkube.cli.worker_metrics import EmbeddedMetricsServer, create_worker_metrics_server
 from greenkube.core.observability import (
     record_automation_failure,
@@ -33,6 +35,7 @@ WORKER_HEARTBEAT_RETENTION_DAYS = 7
 WEBHOOK_OUTBOX_BATCH_SIZE = 10
 WEBHOOK_PROCESSING_LEASE_SECONDS = 300
 PENDING_PULL_REQUEST_RECOVERY_GRACE_SECONDS = 900
+WORKER_ITERATION_MAX_BACKOFF_SECONDS = 60.0
 
 
 class _WorkerMaintenanceRepository(Protocol):
@@ -108,11 +111,12 @@ async def run_worker(
     queue: str = "plans",
     plan_worker: PlanWorker | None = None,
     metrics_port: int | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> None:
     if queue != "plans":
         raise ValueError("queue must be 'plans'; annotation-based operations are no longer supported.")
     if metrics_port is None:
-        await _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker)
+        await _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker, heartbeat=heartbeat)
         return
     if type(metrics_port) is not int or not 1 <= metrics_port <= 65_535:
         raise ValueError("metrics_port must be an integer between 1 and 65535.")
@@ -123,7 +127,7 @@ async def run_worker(
     try:
         await _wait_for_worker_metrics_server(metrics_server, metrics_task)
         worker_task = asyncio.create_task(
-            _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker),
+            _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker, heartbeat=heartbeat),
             name="automation-worker-loop",
         )
         done, _ = await asyncio.wait(
@@ -161,7 +165,9 @@ async def _run_worker_loop(
     once: bool = False,
     *,
     plan_worker: PlanWorker | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> None:
+    beat = heartbeat or _no_heartbeat
     if plan_worker is None:
         try:
             plan_worker = (await create_plan_runtime()).worker
@@ -170,76 +176,154 @@ async def _run_worker_loop(
             if once:
                 return
             while True:
+                beat()
                 await asyncio.sleep(poll_seconds)
     if plan_worker is None:
         return
 
     worker_id = str(uuid.uuid4())
-    worker_repository = getattr(plan_worker, "plans", None)
-    if worker_repository is not None:
-        await cast(_WorkerMaintenanceRepository, worker_repository).prune_worker_heartbeats(
-            cutoff=datetime.now(timezone.utc) - timedelta(days=WORKER_HEARTBEAT_RETENTION_DAYS)
-        )
-    pull_request_repository = getattr(plan_worker, "pull_request_repository", None)
-    if pull_request_repository is not None:
-        quarantined = await cast(
-            _PendingPullRequestRecoveryRepository,
-            pull_request_repository,
-        ).reconcile_open_pull_requests(
-            stale_before=datetime.now(timezone.utc) - timedelta(seconds=PENDING_PULL_REQUEST_RECOVERY_GRACE_SECONDS),
-            limit=MAX_PULL_REQUEST_POLL_BATCH_SIZE,
-        )
-        if quarantined:
-            logger.warning(
-                "Quarantined %d stale pending pull-request attempts without plan/provider/PR references.",
-                quarantined,
-            )
+    await _run_startup_maintenance(plan_worker, once=once)
 
-    poller_task: asyncio.Task[None] | None = None
-    poller_stop_event = asyncio.Event()
+    poller: _PullRequestPollerSupervisor | None = None
     if not once:
-        poller = _create_pr_polling_runtime(plan_worker)
-        poller_task = asyncio.create_task(
-            poller.run(poller_stop_event),
-            name="gitops-pr-polling",
-        )
+        poller = _PullRequestPollerSupervisor(plan_worker)
+        poller.start()
 
     set_automation_worker_up(True)
+    consecutive_failures = 0
     try:
         while True:
             record_automation_worker_heartbeat(datetime.now(timezone.utc).timestamp())
-            if poller_task is not None and poller_task.done():
-                await _ensure_pr_poller_running(poller_task)
-            webhook_processed = await _process_pending_webhook_deliveries(plan_worker)
-            processed = await process_once(worker_id=worker_id, plan_worker=plan_worker)
-            if poller_task is not None and poller_task.done():
-                await _ensure_pr_poller_running(poller_task)
+            beat()
+            if poller is not None:
+                poller.restart_if_needed()
+            try:
+                webhook_processed = await _process_pending_webhook_deliveries(plan_worker)
+                processed = await process_once(worker_id=worker_id, plan_worker=plan_worker)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if once:
+                    raise
+                # One failed iteration (database hiccup, provider outage, bug in one operation)
+                # must never end the queue loop (D9, BUG-51).
+                consecutive_failures += 1
+                delay = backoff_delay(
+                    consecutive_failures,
+                    initial=min(max(poll_seconds, 0.1), WORKER_ITERATION_MAX_BACKOFF_SECONDS),
+                    maximum=WORKER_ITERATION_MAX_BACKOFF_SECONDS,
+                )
+                logger.error(
+                    "Automation worker iteration failed; retrying in %.1fs. "
+                    "error_code=%s error_type=%s consecutive_failures=%d",
+                    delay,
+                    error_code(exc),
+                    type(exc).__name__,
+                    consecutive_failures,
+                )
+                record_automation_failure("worker")
+                await asyncio.sleep(delay)
+                continue
+            consecutive_failures = 0
             if once:
                 await _create_branch_cleanup_runtime(plan_worker).cleanup_once()
                 return
             if not processed and not webhook_processed:
-                if poller_task is None:
-                    await asyncio.sleep(poll_seconds)
-                else:
-                    try:
-                        await asyncio.wait_for(asyncio.shield(poller_task), timeout=poll_seconds)
-                    except TimeoutError:
-                        pass
-                    else:
-                        await _ensure_pr_poller_running(poller_task)
+                await asyncio.sleep(poll_seconds)
     finally:
         set_automation_worker_up(False)
-        if poller_task is not None:
-            poller_stop_event.set()
-            poller_task.cancel()
-            poller_result = (await asyncio.gather(poller_task, return_exceptions=True))[0]
-            if isinstance(poller_result, Exception):
-                raise poller_result
+        if poller is not None:
+            await poller.stop()
 
 
-async def _ensure_pr_poller_running(poller_task: asyncio.Task[None]) -> None:
-    await poller_task
-    raise RuntimeError("Git provider pull-request polling runtime stopped unexpectedly.")
+def _no_heartbeat() -> None:
+    return None
+
+
+async def _run_startup_maintenance(plan_worker: PlanWorker, *, once: bool) -> None:
+    try:
+        worker_repository = getattr(plan_worker, "plans", None)
+        if worker_repository is not None:
+            await cast(_WorkerMaintenanceRepository, worker_repository).prune_worker_heartbeats(
+                cutoff=datetime.now(timezone.utc) - timedelta(days=WORKER_HEARTBEAT_RETENTION_DAYS)
+            )
+        pull_request_repository = getattr(plan_worker, "pull_request_repository", None)
+        if pull_request_repository is not None:
+            quarantined = await cast(
+                _PendingPullRequestRecoveryRepository,
+                pull_request_repository,
+            ).reconcile_open_pull_requests(
+                stale_before=datetime.now(timezone.utc)
+                - timedelta(seconds=PENDING_PULL_REQUEST_RECOVERY_GRACE_SECONDS),
+                limit=MAX_PULL_REQUEST_POLL_BATCH_SIZE,
+            )
+            if quarantined:
+                logger.warning(
+                    "Quarantined %d stale pending pull-request attempts without plan/provider/PR references.",
+                    quarantined,
+                )
+    except Exception as exc:
+        if once:
+            raise
+        logger.error(
+            "Automation worker startup maintenance failed; continuing. error_code=%s error_type=%s",
+            error_code(exc),
+            type(exc).__name__,
+        )
+        record_automation_failure("worker")
+
+
+class _PullRequestPollerSupervisor:
+    """Keep the PR polling runtime alive next to the queue loop, restarting it with backoff."""
+
+    def __init__(self, plan_worker: PlanWorker) -> None:
+        self._plan_worker = plan_worker
+        self._stop_event = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._started_at: float | None = None
+        self._failures = 0
+        self._restart_at: float | None = None
+
+    def start(self) -> None:
+        try:
+            runtime = _create_pr_polling_runtime(self._plan_worker)
+        except Exception as exc:
+            self._schedule_restart("pr_poller_start_failed", exc)
+            return
+        self._started_at = time.monotonic()
+        self._task = asyncio.create_task(runtime.run(self._stop_event), name="gitops-pr-polling")
+
+    def restart_if_needed(self) -> None:
+        task = self._task
+        if task is not None and task.done():
+            self._task = None
+            error = None if task.cancelled() else task.exception()
+            self._schedule_restart("pr_poller_stopped", error)
+        if self._task is None and self._restart_at is not None and time.monotonic() >= self._restart_at:
+            self._restart_at = None
+            self.start()
+
+    def _schedule_restart(self, default_code: str, error: BaseException | None) -> None:
+        if self._started_at is not None and time.monotonic() - self._started_at > WORKER_ITERATION_MAX_BACKOFF_SECONDS:
+            self._failures = 0
+        self._failures += 1
+        delay = backoff_delay(self._failures, maximum=WORKER_ITERATION_MAX_BACKOFF_SECONDS)
+        self._restart_at = time.monotonic() + delay
+        logger.error(
+            "Git provider pull-request polling runtime stopped; restarting in %.1fs. error_code=%s error_type=%s",
+            delay,
+            error_code(error) if error is not None else default_code,
+            type(error).__name__ if error is not None else "None",
+        )
+        record_automation_failure("polling")
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def _create_pr_polling_runtime(plan_worker: PlanWorker) -> PullRequestPollingRuntime:
