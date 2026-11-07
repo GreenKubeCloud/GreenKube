@@ -7,11 +7,15 @@ import logging
 import math
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from functools import partial
+from typing import TYPE_CHECKING, Any, Protocol
 
+from greenkube.automation.git.base import GitProviderCapability, GitProviderError
+from greenkube.automation.git.budget import DEFAULT_SYNC_ANCESTRY_PROVIDER_CALL_BUDGET, provider_call_budget
 from greenkube.core.leader_election import DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS
 from greenkube.core.observability import (
     record_automation_failure,
@@ -19,10 +23,13 @@ from greenkube.core.observability import (
     record_sync_outcome,
     record_sync_timeout,
 )
-from greenkube.gitops.contracts import ActionStatus, Plan, PlanStatus
+from greenkube.gitops.contracts import ActionStatus, Plan, PlanStatus, WorkloadSource
 from greenkube.gitops.sync import GitOpsSyncReason, GitOpsSyncStatus, observe_gitops_sync
 from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
+
+if TYPE_CHECKING:
+    from greenkube.automation.plan_worker import PlanProviderResolver
 
 DEFAULT_GITOPS_SYNC_POLL_INTERVAL_SECONDS = 30
 MIN_GITOPS_SYNC_POLL_INTERVAL_SECONDS = 10
@@ -33,9 +40,73 @@ MAX_GITOPS_SYNC_TIMEOUT_SECONDS = 86_400
 DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS = 30
 GITOPS_SYNC_POLL_INTERVAL_ENV = "GITOPS_SYNC_POLL_INTERVAL"
 GITOPS_SYNC_TIMEOUT_ENV = "GITOPS_SYNC_TIMEOUT"
+DEFAULT_ANCESTRY_CACHE_SIZE = 1024
 _COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 
 logger = logging.getLogger(__name__)
+
+
+class GitAncestryChecker(Protocol):
+    """Answer whether one commit of a workload's repository descends from another."""
+
+    async def is_ancestor(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None: ...
+
+
+class ProviderAncestryChecker:
+    """Ask the workload's authorized Git provider about commit ancestry (D1).
+
+    Ancestry between two immutable commits never changes, so definitive answers
+    (positive and negative) are cached; ``None`` (unknown commit, provider
+    error, unsupported adapter) is never cached and is retried next poll.
+    """
+
+    def __init__(
+        self,
+        provider_resolver: PlanProviderResolver,
+        *,
+        cache_size: int = DEFAULT_ANCESTRY_CACHE_SIZE,
+        call_budget: int = DEFAULT_SYNC_ANCESTRY_PROVIDER_CALL_BUDGET,
+    ) -> None:
+        if type(cache_size) is not int or cache_size <= 0:
+            raise ValueError("cache_size must be a positive integer.")
+        self.provider_resolver = provider_resolver
+        self.cache_size = cache_size
+        self.call_budget = call_budget
+        self._cache: OrderedDict[tuple[str, str, str, str], bool] = OrderedDict()
+
+    async def is_ancestor(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        if _COMMIT_SHA.fullmatch(ancestor_sha) is None or _COMMIT_SHA.fullmatch(descendant_sha) is None:
+            return None
+        key = (source.provider_id, source.repo_url, ancestor_sha.lower(), descendant_sha.lower())
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
+        try:
+            with provider_call_budget("sync_ancestry", limit=self.call_budget):
+                answer = await self._ask_provider(source, key[2], key[3])
+        except (GitProviderError, RuntimeError) as error:
+            logger.warning("Commit ancestry lookup failed for a merged plan (%s).", type(error).__name__)
+            return None
+        if answer is not None:
+            self._cache[key] = answer
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+        return answer
+
+    async def _ask_provider(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        target = await self.provider_resolver.resolve(source)
+        provider: Any = target.provider
+        try:
+            if not provider.supports(GitProviderCapability.COMMIT_ANCESTRY):
+                return None
+            answer = await provider.is_ancestor(target.repository, ancestor_sha, descendant_sha)
+            return answer if isinstance(answer, bool) else None
+        finally:
+            try:
+                await provider.close()
+            except Exception:
+                pass
 
 
 class SyncPullRequestRepository(Protocol):
@@ -121,6 +192,7 @@ class GitOpsSyncRuntime:
         sync_timeout_seconds: int = DEFAULT_GITOPS_SYNC_TIMEOUT_SECONDS,
         sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
         clock: Callable[[], datetime] | None = None,
+        ancestry_checker: GitAncestryChecker | None = None,
     ) -> None:
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_PULL_REQUEST_POLL_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_PULL_REQUEST_POLL_BATCH_SIZE}.")
@@ -141,6 +213,7 @@ class GitOpsSyncRuntime:
         self.sync_timeout_seconds = sync_timeout_seconds
         self.sync_retry_backoff_seconds = sync_retry_backoff_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.ancestry_checker = ancestry_checker
         self._after_id: int | None = None
         self._poll_lock = asyncio.Lock()
 
@@ -274,9 +347,19 @@ class GitOpsSyncRuntime:
             await self._mark_failed(record, plan, recommendation_ids, merge_sha, now, "sync_timeout")
             return "timeout"
 
-        result = await observe_gitops_sync(plan.source, merge_sha, self.custom_objects_api)
+        ancestry = (
+            partial(self.ancestry_checker.is_ancestor, plan.source) if self.ancestry_checker is not None else None
+        )
+        result = await observe_gitops_sync(plan.source, merge_sha, self.custom_objects_api, ancestry=ancestry)
         if result.status is GitOpsSyncStatus.SYNCED:
-            await self._mark_synced(record, plan, recommendation_ids, merge_sha, now)
+            await self._mark_synced(
+                record,
+                plan,
+                recommendation_ids,
+                result.observed_revision or merge_sha,
+                now,
+                reason=result.reason,
+            )
             return "synced"
         if retry_after_timeout:
             await self._defer_timeout_retry(record, recommendation_ids, now)
@@ -309,8 +392,10 @@ class GitOpsSyncRuntime:
         record: PullRequestRecord,
         plan: Plan,
         recommendation_ids: list[int],
-        merge_sha: str,
+        synced_revision: str,
         observed_at: datetime,
+        *,
+        reason: GitOpsSyncReason = GitOpsSyncReason.SYNC_CONFIRMED,
     ) -> None:
         action_updates: list[int] = []
         recovering_timeout = plan.status is PlanStatus.SYNC_FAILED and record.sync_error_code == "sync_timeout"
@@ -331,6 +416,7 @@ class GitOpsSyncRuntime:
                 expected_statuses=(plan.status,),
                 expected_digest=plan.digest,
                 actor="gitops-sync-observer",
+                reason_code=reason.value,
             )
             if updated_plan is None or updated_plan.status is not PlanStatus.SYNCED:
                 raise RuntimeError("merged plan did not transition to synced")
@@ -352,7 +438,7 @@ class GitOpsSyncRuntime:
             linked_records,
             {
                 "sync_status": "synced",
-                "sync_revision": merge_sha,
+                "sync_revision": synced_revision,
                 "sync_observed_at": observed_at,
                 "sync_error_code": None,
             },
@@ -518,8 +604,20 @@ def create_gitops_sync_runtime(
     interval_seconds: int | float | None = None,
     sync_timeout_seconds: int | None = None,
     sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
+    ancestry_checker: GitAncestryChecker | None = None,
+    provider_resolver: PlanProviderResolver | None = None,
 ) -> GitOpsSyncRuntime:
-    """Compose periodic sync observation using a lazy, shared Kubernetes API client."""
+    """Compose periodic sync observation using a lazy, shared Kubernetes API client.
+
+    Ancestry checks use ``ancestry_checker``, else ``provider_resolver``, else
+    an authorized provider registry built from ``plan_repository`` when it
+    stores provider configurations (the production GitOps repository).
+    """
+    if ancestry_checker is None:
+        if provider_resolver is None:
+            provider_resolver = _default_provider_resolver(plan_repository)
+        if provider_resolver is not None:
+            ancestry_checker = ProviderAncestryChecker(provider_resolver)
     return GitOpsSyncRuntime(
         pull_request_repository,
         plan_repository,
@@ -530,7 +628,21 @@ def create_gitops_sync_runtime(
             parse_gitops_sync_timeout_seconds() if sync_timeout_seconds is None else sync_timeout_seconds
         ),
         sync_retry_backoff_seconds=sync_retry_backoff_seconds,
+        ancestry_checker=ancestry_checker,
     )
+
+
+def _default_provider_resolver(plan_repository: object) -> PlanProviderResolver | None:
+    """Mirror the plan runtime's authorized provider resolution (mounted Secret tokens)."""
+    from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
+    from greenkube.automation.git.registry import GitProviderRegistry
+    from greenkube.automation.plan_worker import RegistryPlanProviderResolver
+    from greenkube.storage.base_gitops_repository import GitOpsProviderRepository
+
+    if not isinstance(plan_repository, GitOpsProviderRepository):
+        return None
+    registry = GitProviderRegistry(plan_repository, MountedSecretFileResolver())
+    return RegistryPlanProviderResolver(plan_repository, registry)
 
 
 class _LazyCustomObjectsApi:

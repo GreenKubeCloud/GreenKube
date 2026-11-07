@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, WorkloadSource
+
+logger = logging.getLogger(__name__)
+
+#: ``(ancestor_sha, descendant_sha) -> True | False | None`` (``None``: unknown).
+AncestryCheck = Callable[[str, str], Awaitable[bool | None]]
 
 _FULL_COMMIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.IGNORECASE)
 _SHA1_COMPONENT = re.compile(r"^.+@sha1:([0-9a-f]{40})\Z", re.IGNORECASE)
@@ -55,6 +61,7 @@ class GitOpsSyncReason(StrEnum):
     """Stable reason codes that never include controller response contents."""
 
     SYNC_CONFIRMED = "sync_confirmed"
+    SYNC_CONFIRMED_DESCENDANT = "sync_confirmed_descendant"
     RECONCILIATION_PENDING = "reconciliation_pending"
     CONTROLLER_FAILED = "controller_failed"
     CONTROLLER_NOT_FOUND = "controller_not_found"
@@ -67,6 +74,8 @@ class GitOpsSyncReason(StrEnum):
     UNSUPPORTED_CONTROLLER = "unsupported_controller"
     REVISION_UNAVAILABLE = "revision_unavailable"
     REVISION_MISMATCH = "revision_mismatch"
+    REVISION_NOT_DESCENDANT = "revision_not_descendant"
+    ANCESTRY_UNAVAILABLE = "ancestry_unavailable"
     INVALID_RESPONSE = "invalid_response"
     RESPONSE_TOO_LARGE = "response_too_large"
     RESPONSE_TRUNCATED = "response_truncated"
@@ -74,16 +83,23 @@ class GitOpsSyncReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GitOpsSyncResult:
-    """Typed, payload-free result for a single GitOps sync observation."""
+    """Typed, payload-free result for a single GitOps sync observation.
+
+    ``observed_revision`` is the normalized full commit SHA the controller
+    reported, when it reported one.
+    """
 
     status: GitOpsSyncStatus
     reason: GitOpsSyncReason
+    observed_revision: str | None = None
 
 
 async def observe_gitops_sync(
     source: WorkloadSource,
     merge_commit_sha: str,
     custom_objects_api: Any,
+    *,
+    ancestry: AncestryCheck | None = None,
 ) -> GitOpsSyncResult:
     """Observe whether the source's exact GitOps controller applied ``merge_commit_sha``.
 
@@ -93,7 +109,34 @@ async def observe_gitops_sync(
     HelmRelease sync is verified against its GitRepository artifact revision,
     not the chart version in ``lastAttemptedRevision``. HTTP 404 is unavailable;
     permission, timeout, and other API failures propagate so callers can retry.
+
+    A healthy controller whose revision differs from the merge commit is only
+    confirmed through ``ancestry`` (D1): when the observed revision descends
+    from the merge commit, later commits (another PR, Renovate, image
+    write-back) landed on top of it and the result is ``SYNCED`` with reason
+    ``SYNC_CONFIRMED_DESCENDANT``. Whether the deployed workload still carries
+    the planned values is then proven from live state by apply detection.
     """
+    result = await _observe_gitops_sync(source, merge_commit_sha, custom_objects_api)
+    if ancestry is None or result.reason is not GitOpsSyncReason.REVISION_MISMATCH or result.observed_revision is None:
+        return result
+    try:
+        descends = await ancestry(merge_commit_sha.lower(), result.observed_revision)
+    except Exception as error:
+        logger.warning("GitOps sync ancestry check failed (%s).", type(error).__name__)
+        descends = None
+    if descends is True:
+        return replace(result, status=GitOpsSyncStatus.SYNCED, reason=GitOpsSyncReason.SYNC_CONFIRMED_DESCENDANT)
+    if descends is False:
+        return replace(result, reason=GitOpsSyncReason.REVISION_NOT_DESCENDANT)
+    return replace(result, reason=GitOpsSyncReason.ANCESTRY_UNAVAILABLE)
+
+
+async def _observe_gitops_sync(
+    source: WorkloadSource,
+    merge_commit_sha: str,
+    custom_objects_api: Any,
+) -> GitOpsSyncResult:
     if not isinstance(source, WorkloadSource):
         raise TypeError("source must be a WorkloadSource")
     if not isinstance(merge_commit_sha, str) or _FULL_COMMIT_SHA.fullmatch(merge_commit_sha) is None:
@@ -642,8 +685,8 @@ def _compare_revision(revision: str | None, merge_commit_sha: str) -> GitOpsSync
     if observed_sha is None:
         return _result(GitOpsSyncStatus.UNAVAILABLE, GitOpsSyncReason.REVISION_UNAVAILABLE)
     if observed_sha != merge_commit_sha:
-        return _result(GitOpsSyncStatus.MISMATCHED, GitOpsSyncReason.REVISION_MISMATCH)
-    return _result(GitOpsSyncStatus.SYNCED, GitOpsSyncReason.SYNC_CONFIRMED)
+        return GitOpsSyncResult(GitOpsSyncStatus.MISMATCHED, GitOpsSyncReason.REVISION_MISMATCH, observed_sha)
+    return GitOpsSyncResult(GitOpsSyncStatus.SYNCED, GitOpsSyncReason.SYNC_CONFIRMED, observed_sha)
 
 
 def _revision_commit_sha(revision: str | None) -> str | None:
