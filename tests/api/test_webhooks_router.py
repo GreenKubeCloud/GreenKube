@@ -1,5 +1,6 @@
 """HTTP boundary tests for provider pull-request webhooks."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -424,9 +425,20 @@ def test_open_webhook_is_marked_terminal_without_lifecycle_runtime(webhook_clien
     assert response.json()["lifecycle"] == "ignored"
 
 
-def test_unlinked_webhook_remains_retryable(webhook_client):
+@pytest.mark.parametrize("action", ["closed", "opened"])
+def test_unlinked_webhook_is_terminally_ignored(webhook_client, action):
+    """D11 / BUG-53: PRs GreenKube does not know were retried forever with 503."""
     client, app, _ = webhook_client
-    app.state.webhook_processing_service = _RecordingWebhookService(_processing_result(action="closed"))
+    repository = _MemoryWebhookDeliveryRepository()
+    service = _RecordingWebhookService(_processing_result(action=action))
+    service.delivery_repository = repository
+    app.state.webhook_processing_service = service
+    event = service.result.event
+    assert event is not None
+    asyncio.run(repository.record_webhook_delivery(event))
+    asyncio.run(
+        repository.claim_webhook_delivery(event.provider_id, event.delivery_id, stale_before=datetime.now(timezone.utc))
+    )
 
     async def reconcile(event, *, newly_deduplicated):
         return SimpleNamespace(outcome=SimpleNamespace(value="unlinked"))
@@ -435,8 +447,16 @@ def test_unlinked_webhook_remains_retryable(webhook_client):
 
     response = client.post("/api/v1/webhooks/provider-main", content=b"{}")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "webhook_lifecycle_unavailable"
+    assert response.status_code == 202
+    assert response.json()["status"] == "ignored"
+    assert response.json()["lifecycle"] == "unlinked"
+    stored = repository.deliveries[(event.provider_id, event.delivery_id)]
+    assert stored.status == "ignored"
+    assert stored.processed_at is not None
+    assert stored.error_code == "pull_request_unlinked"
+    assert stored not in asyncio.run(
+        repository.list_pending_webhook_deliveries(limit=10, stale_before=datetime.now(timezone.utc))
+    )
 
 
 @pytest.mark.parametrize(

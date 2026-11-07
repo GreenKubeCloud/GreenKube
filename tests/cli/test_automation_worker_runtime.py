@@ -97,7 +97,15 @@ async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
+@pytest.mark.parametrize(
+    ("outcome", "expected_status", "expected_error"),
+    [
+        ("merged", "processed", None),
+        # D11 / BUG-53: unknown pull requests become terminal instead of retrying forever.
+        ("unlinked", "ignored", "pull_request_unlinked"),
+    ],
+)
+async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch, outcome, expected_status, expected_error):
     event = PullRequestEvent(
         provider_id="provider-main",
         delivery_id="delivery-1",
@@ -171,7 +179,7 @@ async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
             self.calls += 1
             assert received_event == event
             assert newly_deduplicated is True
-            return SimpleNamespace(outcome=SimpleNamespace(value="merged"))
+            return SimpleNamespace(outcome=SimpleNamespace(value=outcome))
 
     outbox = Outbox()
     worker = SimpleNamespace(plans=outbox)
@@ -179,8 +187,11 @@ async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
     monkeypatch.setattr(automation_worker, "create_pull_request_lifecycle_reconciler", lambda _: lifecycle)
 
     assert await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
-    assert outbox.delivery.status == "processed"
+    assert outbox.delivery.status == expected_status
+    assert outbox.delivery.error_code == expected_error
+    assert outbox.delivery.processed_at is not None
     assert lifecycle.calls == 1
+    assert not await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
 
 
 @pytest.mark.asyncio

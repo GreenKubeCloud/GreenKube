@@ -325,7 +325,8 @@ async def _process_pending_webhook_deliveries(plan_worker: PlanWorker) -> bool:
 
         outcome = getattr(getattr(result, "outcome", None), "value", None)
         if outcome == "unlinked":
-            status, error_code = "retryable", "pull_request_unlinked"
+            # Unknown pull requests are terminal and pruned by retention (D11, BUG-53).
+            status, error_code = "ignored", "pull_request_unlinked"
         elif outcome == "mismatched":
             status, error_code = "rejected", "pull_request_mismatched"
         elif isinstance(outcome, str):
@@ -336,7 +337,7 @@ async def _process_pending_webhook_deliveries(plan_worker: PlanWorker) -> bool:
             event.provider_id,
             event.delivery_id,
             status=status,
-            processed_at=now if status in {"processed", "rejected"} else None,
+            processed_at=now if status in {"processed", "rejected", "ignored"} else None,
             error_code=error_code,
             expected_statuses=("processing",),
         )

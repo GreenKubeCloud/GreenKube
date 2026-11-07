@@ -821,6 +821,55 @@ async def test_retention_keeps_applied_plans_valid_for_reads_and_policy_history(
 
 
 @pytest.mark.asyncio
+async def test_retention_prunes_ignored_webhook_deliveries(gitops_store):
+    """D11 / BUG-53: unrelated PR webhooks are terminal and eventually pruned."""
+    repository, _, _ = gitops_store
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=100)
+    events = [
+        PullRequestEvent(
+            provider_id="provider-github",
+            delivery_id=f"delivery-{index}",
+            repo="acme/unrelated",
+            number=7 + index,
+            action="closed",
+            occurred_at=old,
+        )
+        for index in range(3)
+    ]
+    for event in events:
+        await repository.record_webhook_delivery(event)
+        assert await repository.claim_webhook_delivery(event.provider_id, event.delivery_id, stale_before=now)
+    await repository.update_webhook_delivery(
+        "provider-github",
+        "delivery-0",
+        status="ignored",
+        processed_at=old,
+        error_code="pull_request_unlinked",
+        expected_statuses=("processing",),
+    )
+    await repository.update_webhook_delivery(
+        "provider-github",
+        "delivery-1",
+        status="ignored",
+        processed_at=now,
+        error_code="pull_request_unlinked",
+        expected_statuses=("processing",),
+    )
+
+    pending = await repository.list_pending_webhook_deliveries(limit=10, stale_before=now + timedelta(minutes=5))
+    assert {delivery.delivery_id for delivery in pending} == {"delivery-2"}
+    summary = await repository.get_automation_backlog_summary(stale_before=now - timedelta(minutes=5))
+    assert summary.pending_webhooks == 1
+
+    pruned = await repository.prune_automation_history(cutoff=now - timedelta(days=90))
+
+    assert pruned["webhooks"] == 1
+    assert await repository.get_webhook_delivery("provider-github", "delivery-0") is None
+    assert (await repository.get_webhook_delivery("provider-github", "delivery-1")).status == "ignored"
+
+
+@pytest.mark.asyncio
 async def test_plans_pruned_without_a_summary_are_still_readable(gitops_store):
     """Installs pruned by 0.3.x lost their file rows and have no stored summary."""
     repository, manager, backend = gitops_store
