@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "provider": "aws",
+  "currency": "USD",
+  "price_type": "on_demand",
+  "operating_system": "linux",
+  "columns": ["hourly", "vcpu", "memory_gib"],
+  "source": null,
+  "generated_at": null,
+  "generator": "scripts/generate_pricing_catalog.py",
+  "regions": {}
+}
