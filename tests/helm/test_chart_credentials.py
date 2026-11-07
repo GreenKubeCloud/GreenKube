@@ -178,4 +178,9 @@ def test_bootstrap_job_runs_the_tested_script_verbatim():
     script = (CHART_PATH / "files" / "credentials_bootstrap.py").read_text(encoding="utf-8")
     assert container["command"] == ["python", "-I", "-B", "-c"]
     assert container["args"] == [script]
-    assert container["image"] == "greenkube/greenkube:0.3.1"
+    # The hook runs in the application image; the tag follows values.image.tag
+    # (rewritten by scripts/sync_version.py at release), so never hardcode it.
+    values = yaml.safe_load((CHART_PATH / "values.yaml").read_text(encoding="utf-8"))
+    app_image = _get(docs, "Deployment", "greenkube")["spec"]["template"]["spec"]["containers"][0]["image"]
+    assert container["image"] == app_image
+    assert container["image"] == f"{values['image']['repository']}:{values['image']['tag']}"
