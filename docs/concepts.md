@@ -166,7 +166,7 @@ Each applied change gets **one fixed-horizon measurement**:
 
 The outcome is `verified` (realized), `rollback_review` (a health check failed), or `applied` with the saving `not_realized` or `inconclusive`. Request rightsizing changes what a workload *reserves*, not what it *uses*: its usage-based CO2e difference is reported but never claimed.
 
-Every decision is stored as an immutable measurement. A `not_realized` or `inconclusive` change is never re-tested automatically; `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement that supersedes the previous one. An operator can dismiss a false-positive `rollback_review` with a reason, which returns the change to `applied` and measures it again.
+Every decision is stored as an immutable measurement. A `not_realized` or `inconclusive` change is never re-tested automatically; `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement that supersedes the previous one. An operator can dismiss a false-positive `rollback_review` with a reason, which returns the change to `applied` and measures it again. The CPU and memory records of one change stay one attribution group through both actions, so together they never claim the workload's saving twice.
 
 > Verification is in **beta**. The measurement method is being reworked to use counterfactual baselines, confidence intervals and per-change provenance.
 

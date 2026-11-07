@@ -114,7 +114,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Projection accuracy below which a realized saving is flagged in the measurement notes. Reported only: the projection is not a gate. |
 | `config.recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | Per-pod p95 usage ceiling vs the applied per-pod request. |
 | `config.recommendations.verification.maxRestartDelta` | `VERIFICATION_MAX_RESTART_DELTA` | `0` | Maximum sum of per-pod restart increases during the window. |
-| `config.recommendations.verification.minReadiness` | `VERIFICATION_MIN_READINESS` | `0.99` | Minimum average pod readiness (`kube_pod_status_ready`, kube-state-metrics). Reported `not_available` when the series is missing. |
+| `config.recommendations.verification.minReadiness` | `VERIFICATION_MIN_READINESS` | `0.99` | Minimum pod readiness over the window: ready samples of `kube_pod_status_ready` (kube-state-metrics) over all samples of the observed pods, so each pod weighs its lifetime. Reported `not_available` when the series is missing. |
 | `config.recommendations.verification.maxThrottleRatio` | `VERIFICATION_MAX_THROTTLE_RATIO` | `0.05` | Maximum CPU throttling ratio (`container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`). Reported `not_available` for containers without a CPU limit. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
 

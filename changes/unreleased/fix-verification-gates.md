@@ -11,8 +11,10 @@
 - **Projection is reported, not gated:** a change is realized when the measured saving clears a 2% noise floor of the baseline rate. `VERIFICATION_MIN_SAVINGS_RATIO` now only flags a realized saving far below its projection.
 - **Rightsizing never claims CO2e:** the usage-based CO2e delta of a request change is kept in the measurement as `not_claimed`; `measured_co2e_saved_grams` is 0.
 - **Trusted rows by provenance (C0.3, BUG-29):** cost rows are selected by `cost_source` (`opencost`, `kubecost`, `pricing_catalog`, finite non-negative cost; delegated to the shared A11 provenance helpers when installed) when present, otherwise by `total_cost > 0` and `is_estimated = false`; rates divide by covered time. Container-scoped changes are measured on trusted container rows, or on their workload when container rows carry no trusted cost.
-- **Attribution groups (C0.10, BUG-36):** CPU and memory records on the same container applied by the same plan are measured once; the cost delta is split by `cost_cpu`/`cost_ram`, or by projected share without components.
-- **State machine (C0.11, BUG-37):** `PATCH /recommendations/{id}/apply` accepts only `active` and `pr_open` records (`409` otherwise); `active → verified` is no longer allowed; every transition is a compare-and-swap written in the same transaction as its event.
+- **Attribution groups (C0.10, BUG-36):** CPU and memory records on the same container applied by the same plan (whatever the delay between their detections), or without a plan within 15 minutes, are measured once; the cost delta is split by `cost_cpu`/`cost_ram`, or by projected share without components. Membership is recorded (`baseline.attribution_group_ids`, `group_recommendation_ids`) and does not depend on the measurement window; each share is computed against every member still in effect. Re-measurement and rollback-review dismissal act on the whole group with one new window.
+- **State machine (C0.11, BUG-37):** `PATCH /recommendations/{id}/apply` accepts only `active` and `pr_open` records (`409` otherwise); `active → verified` is no longer allowed; every transition, including ignore, unignore and TTL expiry, is a compare-and-swap written in the same transaction as its event. `PATCH /recommendations/{id}/ignore` accepts only `active`, `stale`, `expired` (or already `ignored`) records and `DELETE /recommendations/{id}/ignore` only `ignored` ones (`409` otherwise).
+- **Health signals:** readiness is the share of ready `kube_pod_status_ready` samples across the observed pods (weighted by pod lifetime, so short-lived autoscaled pods no longer drag it down); workload-scope throttling excludes the pod cgroup and pause-container series; health queries fall back to `/prometheus/api/v1/query` like the Prometheus collector.
+- **Verification passes:** a decision persisted before a crash is replayed from its stored measurement instead of being observed again; `greenkube_verification_outcomes_total` is incremented after the transition is written, so a replay is counted once; metric reads are shared by the groups measured over the same window in one pass.
 - **Verification metrics:** `greenkube_verification_health_gate_failures_total` is labelled by gate name instead of free-text reasons.
 - The SQLite migration runner keeps trigger bodies (`BEGIN ...; END;`) in one statement.
 
@@ -22,6 +24,8 @@
 - **Container-scoped (GitOps) changes were never measurable (C0.3, BUG-29).**
 - **Retest-until-pass (C0.5, BUG-31):** `not_realized` changes are no longer re-evaluated every few hours with a growing window.
 - **OOM, readiness and throttling gates were inert in production (C0.9, BUG-35).**
-- **CPU and memory records each claimed the whole workload delta (C0.10, BUG-36).**
+- **CPU and memory records each claimed the whole workload delta (C0.10, BUG-36),** including when the two records were re-measured or dismissed at different times, only one of them was re-measured, or apply detection saw them more than 15 minutes apart.
+- **A blank rollback-review dismissal reason returned `500` (C0.11):** whitespace-only reasons are rejected with `422`; reasons are stored trimmed.
+- **Ignore and unignore bypassed the state machine (C0.11, BUG-37):** an applied, verifying or verified change could be ignored, and unignore restored any status to `active`.
 - **`mark_inconclusive` wrote a `verified` event and deleted the measured input (C0.11, C0.13, BUG-37).**
 - **`applied_at` was the detection time and the baseline `captured_at` was "now" (C0.12, BUG-38).**
