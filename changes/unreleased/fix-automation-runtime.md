@@ -9,10 +9,10 @@
 
 ### Changed
 - **Preview supersede (D6):** previewing the same workload again supersedes its draft or validated plans instead of returning `409 WORKLOAD_PLAN_ALREADY_EXISTS` for 30 minutes (BUG-48).
-- **Moved branch heads (D7):** approval and the worker accept a branch head that moved after planning when every touched file is unchanged; the commit is created on the moved head. Only a change to a touched file requires a new preview (BUG-49).
+- **Moved branch heads (D7):** approval and the worker accept a branch head that moved after planning when every touched file is unchanged; the commit is created on the moved head. This includes rollback plans, whose identity stays bound to the planned base revision; the pull-request body lists both the planned base and the moved head. Only a change to a touched file requires a new preview (BUG-49).
 - **HPA gate per resource (D13):** an HPA blocks only the resource it scales on. A CPU-utilization HPA no longer blocks memory-only changes; a `ContainerResource` metric blocks only its container (BUG-55).
 - **Readiness (D9):** `GET /api/v1/health` returns `503` (`degraded`) and automation status reports `ready: false` while the inline worker loop is down or its heartbeat is stale (BUG-51).
-- **Unrelated pull-request webhooks (D11):** verified events for pull requests that GreenKube does not track are stored with the terminal status `ignored`, answered with `202`, never retried, and pruned by retention (BUG-53).
+- **Unrelated pull-request webhooks (D11):** verified events for pull requests that GreenKube does not track are stored with the terminal status `ignored`, answered with `202`, never retried, counted as `greenkube_webhook_deliveries_total{status="ignored"}` instead of `error`, and pruned by retention (BUG-53).
 - **Query shapes (D15):** migration `0044` adds indexes for plan listings by status, source and workload identity, re-creates the sync-queue partial index to match its query, and tracks branch-cleanup completion on pull-request rows. Plan listings hydrate files and recommendation links in batched queries and accept a `limit`; the expiry sweep reads only due plans in bounded batches; policy cooldowns read workload history in one query (BUG-57).
 
 ### Fixed
