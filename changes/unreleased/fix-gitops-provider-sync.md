@@ -2,7 +2,7 @@
 
 - Git providers expose `compare_trees`, `get_blob_ids`, `get_tree` and `is_ancestor` (GitHub compare, GitLab merge base, Gitea compare) plus the `commit_ancestry` capability (D1, D5).
 - Per-operation Git provider call budget (200 requests per plan operation) and the metrics `greenkube_git_provider_requests_total`, `greenkube_git_provider_operation_calls` and `greenkube_git_provider_budget_exhausted_total` (D5, BUG-47).
-- Sync reasons `sync_confirmed_descendant`, `revision_not_descendant` and `ancestry_unavailable` (D1).
+- Sync reasons `sync_confirmed_descendant`, `revision_behind_merge`, `revision_not_descendant`, `ancestry_unavailable`, `planned_change_not_present` and `planned_change_unverified` (D1).
 
 ### Changed
 
@@ -13,7 +13,8 @@
 
 ### Fixed
 
-- A controller that runs a later commit containing the merge (another PR, Renovate, image write-back) now confirms sync instead of failing with `revision_mismatch`/`sync_timeout`, so apply detection and savings run (D1, BUG-43).
+- A controller that runs a later commit containing the merge (another PR, Renovate, image write-back) now confirms sync instead of failing with `revision_mismatch`/`sync_timeout`, so apply detection and savings run. The later commit must still carry the planned values in the planned files (blob IDs, then a structural YAML/JSON comparison only for files a later commit edited), so a revert or overwrite never leaves a plan stuck in `synced` and never revives a superseded `sync_failed` plan; such timed-out plans are retired with `planned_change_not_present` instead of being re-checked forever (D1, BUG-43).
 - GitHub PRs closed without merging no longer keep their plan in `pr_open` forever because of GitHub's leftover test-merge SHA (D3, BUG-45).
 - GitLab fast-forward and squash merges use the squash commit or the merge request head instead of failing sync with `merge_commit_sha_missing` (D4, BUG-46).
 - Gitea branch creation reports a missing base branch instead of silently succeeding.
+- A deleted or missing plan branch is reported as a branch mismatch that asks for a re-plan again, instead of a provider error from the new tree comparison (D5).
