@@ -38,6 +38,9 @@ CATALOG_PROVIDERS = ("aws", "gcp", "azure", "ovh", "scaleway")
 #: Supported catalog schema version.
 CATALOG_SCHEMA_VERSION = 1
 
+#: Catalog region key for prices that apply to every region of a provider.
+ANY_REGION = "*"
+
 #: Provider aliases seen in node metadata.
 _PROVIDER_ALIASES = {"google": "gcp", "gke": "gcp", "eks": "aws", "aks": "azure", "ovhcloud": "ovh"}
 
@@ -127,8 +130,9 @@ class PricingCatalog:
          "columns": ["hourly", "vcpu", "memory_gib"],
          "regions": {"eu-west-3": {"m5.large": [0.112, 2, 8.0]}}}
 
-    A provider file with an empty ``regions`` map is valid: the resolver then
-    falls through to custom rates.
+    The ``"*"`` region holds prices valid in every region of the provider and
+    is used when no region-specific entry exists. A provider file with an empty
+    ``regions`` map is valid: the resolver then falls through to custom rates.
     """
 
     def __init__(self, data_dir: Path = PRICING_DATA_DIR, documents: Optional[Mapping[str, Mapping]] = None):
@@ -173,9 +177,16 @@ class PricingCatalog:
     ) -> Optional[CatalogEntry]:
         """Returns the list price of an instance type in a region, if bundled."""
         provider_key = normalize_provider(provider)
-        if not provider_key or provider_key not in CATALOG_PROVIDERS or not region or not instance_type:
+        if not provider_key or provider_key not in CATALOG_PROVIDERS or not instance_type:
             return None
-        return self._index(provider_key).get((region.strip().lower(), instance_type.strip().lower()))
+        index = self._index(provider_key)
+        instance_key = instance_type.strip().lower()
+        if region:
+            entry = index.get((region.strip().lower(), instance_key))
+            if entry is not None:
+                return entry
+        # "*" holds prices that apply to every region of a provider (e.g. OVHcloud).
+        return index.get((ANY_REGION, instance_key))
 
     def size(self, provider: str) -> int:
         """Number of (region, instance type) entries bundled for a provider."""
