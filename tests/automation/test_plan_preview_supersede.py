@@ -18,7 +18,7 @@ from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, WorkloadBinding
 from greenkube.storage.sqlite.gitops_repository import SQLiteGitOpsRepository
-from tests.automation.test_plan_service import (
+from tests.automation.test_plan_service import (  # pyrefly: ignore[missing-import]
     BASE_REVISION,
     NOW,
     FakeGitBlobResolver,

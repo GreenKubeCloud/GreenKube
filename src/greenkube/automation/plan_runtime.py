@@ -639,7 +639,7 @@ class RuntimePlanService:
         statuses = sorted(SUPERSEDABLE_PREVIEW_STATUSES, key=lambda status: status.value)
         try:
             if callable(reader):
-                plans = await reader(
+                plans = await cast(Any, reader)(
                     cluster=source.cluster,
                     namespace=source.namespace,
                     workload_kind=source.workload_kind,

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -737,7 +737,7 @@ class AutomationPlanService:
         ordered_statuses = sorted(statuses, key=lambda status: status.value)
         reader = getattr(self.repository, "list_plans_for_workload", None)
         if callable(reader):
-            plans = await reader(
+            plans = await cast(Any, reader)(
                 cluster=source.cluster,
                 namespace=source.namespace,
                 workload_kind=source.workload_kind,

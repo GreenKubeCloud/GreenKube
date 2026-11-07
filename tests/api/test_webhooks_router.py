@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -431,8 +431,9 @@ def test_unlinked_webhook_is_terminally_ignored(webhook_client, action):
     client, app, _ = webhook_client
     repository = _MemoryWebhookDeliveryRepository()
     service = _RecordingWebhookService(_processing_result(action=action))
-    service.delivery_repository = repository
+    cast(Any, service).delivery_repository = repository
     app.state.webhook_processing_service = service
+    assert service.result is not None
     event = service.result.event
     assert event is not None
     asyncio.run(repository.record_webhook_delivery(event))
