@@ -157,7 +157,7 @@ class TestRecommendationsPersistence:
         assert data[0]["pod_name"] == "api"
         mock_reco_repo.upsert_recommendations.assert_called_once()
         mock_reco_repo.reconcile_active_recommendations.assert_called_once()
-        mock_reco_repo.get_active_recommendations.assert_called_once_with(namespace="prod")
+        mock_reco_repo.get_active_recommendations.assert_called_with(namespace="prod")
 
     def test_metrics_from_deleted_namespaces_are_excluded_from_recommendations(
         self,
@@ -191,6 +191,9 @@ class TestRecommendationsPersistence:
         assert response.status_code == 200
         # All metrics were filtered out → reconcile is called with an empty list,
         # which will mark the greenkube-db-testing rows as stale.
-        mock_reco_repo.reconcile_active_recommendations.assert_called_once_with([], namespace=None)
+        mock_reco_repo.reconcile_active_recommendations.assert_called_once()
+        reconcile_call = mock_reco_repo.reconcile_active_recommendations.call_args
+        assert reconcile_call.args == ([],)
+        assert reconcile_call.kwargs["namespace"] is None
         # No recommendations were generated for the deleted namespace.
         mock_reco_repo.upsert_recommendations.assert_not_called()

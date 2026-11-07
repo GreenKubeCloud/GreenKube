@@ -88,7 +88,9 @@ class TestRefreshAndPersist:
         reco_repo.upsert_recommendations.assert_awaited_once()
         records = reco_repo.upsert_recommendations.call_args[0][0]
         assert records[0].pod_name == "pod"
-        reco_repo.reconcile_active_recommendations.assert_awaited_once_with(records, namespace="ns")
+        reco_repo.reconcile_active_recommendations.assert_awaited_once_with(
+            records, namespace="ns", incomplete_sources=[]
+        )
 
     async def test_refresh_without_recommendations_only_reconciles(self):
         engine = OptimizationEngine(sources=[FakeSource([])])
@@ -98,7 +100,7 @@ class TestRefreshAndPersist:
         await engine.refresh(AsyncMock(), AsyncMock(), reco_repo, namespace=None)
 
         reco_repo.upsert_recommendations.assert_not_awaited()
-        reco_repo.reconcile_active_recommendations.assert_awaited_once_with([], namespace=None)
+        reco_repo.reconcile_active_recommendations.assert_awaited_once_with([], namespace=None, incomplete_sources=[])
 
     async def test_persist_swallows_repository_errors(self):
         engine = OptimizationEngine(sources=[])

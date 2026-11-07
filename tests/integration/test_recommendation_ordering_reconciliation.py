@@ -1,8 +1,10 @@
-"""Default active ordering on SQLite and PostgreSQL.
+"""Default active ordering and per-source reconciliation on SQLite and PostgreSQL.
 
 Regression tests for BUG-20 (E2): active lists were sorted ``priority DESC`` on
-a text column (medium, low, high) instead of by ranking and savings.
-PostgreSQL cases run when ``GREENKUBE_TEST_POSTGRES_DSN`` is set.
+a text column (medium, low, high) instead of by ranking and savings. And for
+BUG-22 (E8): reconciliation must never stale a recommendation supported by a
+source that did not complete. PostgreSQL cases run when
+``GREENKUBE_TEST_POSTGRES_DSN`` is set.
 """
 
 import os
@@ -128,3 +130,48 @@ async def test_active_list_breaks_full_ties_by_id(backend):
 
     ids = [record.id for record in active]
     assert ids == sorted(ids)
+
+
+# --------------------------------------------------------------------------- #
+# Per-source reconciliation (E8, BUG-22)                                       #
+# --------------------------------------------------------------------------- #
+
+
+async def test_reconcile_never_stales_recommendations_of_incomplete_sources(backend):
+    repo = backend.recommendations()
+    await repo.upsert_recommendations(
+        [
+            _record("vpa-only", source="vpa", sources=["vpa"]),
+            _record("vpa-and-native", source="vpa", sources=["vpa", "greenkube"]),
+            _record("native-only", source="greenkube", sources=["greenkube"]),
+            _record("karpenter-only", source="karpenter", sources=["karpenter"]),
+            _record("still-emitted", source="greenkube", sources=["greenkube"]),
+        ]
+    )
+    emitted = [_record("still-emitted")]
+
+    stale_count = await repo.reconcile_active_recommendations(emitted, incomplete_sources=["vpa"])
+
+    active = {record.pod_name for record in await repo.get_active_recommendations()}
+    assert stale_count == 2
+    assert active == {"vpa-only", "vpa-and-native", "still-emitted"}
+
+
+async def test_reconcile_uses_primary_source_for_legacy_rows_without_provenance(backend):
+    repo = backend.recommendations()
+    await repo.upsert_recommendations([_record("legacy-vpa", source="vpa", sources=[])])
+    async with backend.managers[0].connection_scope() as conn:
+        await conn.execute("UPDATE recommendation_history SET sources = NULL")
+        if backend.name == "sqlite":
+            await conn.commit()
+
+    assert await repo.reconcile_active_recommendations([], incomplete_sources=["vpa"]) == 0
+    assert await repo.reconcile_active_recommendations([], incomplete_sources=[]) == 1
+
+
+async def test_reconcile_without_incomplete_sources_keeps_previous_behavior(backend):
+    repo = backend.recommendations()
+    await repo.upsert_recommendations([_record("a"), _record("b", namespace="other")])
+
+    assert await repo.reconcile_active_recommendations([], namespace="prod") == 1
+    assert [record.pod_name for record in await repo.get_active_recommendations()] == ["b"]
