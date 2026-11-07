@@ -104,6 +104,9 @@ def _settings(**overrides):
     return bootstrap.Settings(**values)
 
 
+LEGACY_DSN = "postgresql://greenkube:pw@greenkube-postgres:5432/greenkube"
+
+
 def _legacy_secret(**data: str) -> dict:
     """A Secret as written by chart 0.3.x (lookup + randAlphaNum hook)."""
     return {
@@ -190,6 +193,45 @@ def test_adds_only_missing_keys_and_reuses_the_existing_password():
     assert _plain(api.stored)["ELECTRICITY_MAPS_TOKEN"] == "token"
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [{"postgres_user": "app"}, {"postgres_database": "carbon"}, {"postgres_host": "other-postgres"}],
+    ids=["user", "database", "host"],
+)
+def test_rebuilds_a_stale_connection_string_from_the_stored_password(overrides):
+    # 0.3.x re-rendered DB_CONNECTION_STRING on every upgrade; the bootstrap keeps
+    # that derived key in sync with the current values but never touches the password.
+    legacy = _legacy_secret(
+        GREENKUBE_API_KEY="key",
+        POSTGRES_PASSWORD="kept",
+        DB_CONNECTION_STRING="postgresql://greenkube:kept@greenkube-postgres:5432/greenkube",
+    )
+    api = FakeApi(secret=legacy, pvcs={"data-greenkube-postgres-0"})
+    settings = _settings(**overrides)
+
+    message = bootstrap.ensure_credentials(api, settings)
+
+    ((_, patch),) = api.writes()
+    assert set(patch["data"]) == {"DB_CONNECTION_STRING"}
+    assert message == "Updated Secret greenkube: DB_CONNECTION_STRING"
+    data = _plain(api.stored)
+    assert data["POSTGRES_PASSWORD"] == "kept"
+    assert data["GREENKUBE_API_KEY"] == "key"
+    assert data["DB_CONNECTION_STRING"] == bootstrap.connection_string(settings, "kept")
+    # The next sync finds nothing to change.
+    assert "nothing to do" in bootstrap.ensure_credentials(api, settings)
+    assert len(api.writes()) == 1
+
+
+def test_connection_string_is_left_alone_when_the_password_is_supplied():
+    legacy = _legacy_secret(GREENKUBE_API_KEY="key", DB_CONNECTION_STRING="custom")
+    api = FakeApi(secret=legacy)
+
+    bootstrap.ensure_credentials(api, _settings(generate_postgres_password=False))
+
+    assert api.writes() == []
+
+
 @pytest.mark.parametrize("secret", [None, _legacy_secret(GREENKUBE_API_KEY="key")], ids=["absent", "no-password"])
 def test_refuses_a_new_password_for_a_retained_postgres_volume(secret):
     api = FakeApi(secret=secret, pvcs={"data-greenkube-postgres-0"})
@@ -230,7 +272,11 @@ def test_creates_an_empty_secret_when_every_credential_is_supplied():
 
 
 def test_a_concurrent_create_is_resolved_without_overwriting():
-    winner = _legacy_secret(GREENKUBE_API_KEY="winner", POSTGRES_PASSWORD="winner-pw", DB_CONNECTION_STRING="dsn")
+    winner = _legacy_secret(
+        GREENKUBE_API_KEY="winner",
+        POSTGRES_PASSWORD="winner-pw",
+        DB_CONNECTION_STRING="postgresql://greenkube:winner-pw@greenkube-postgres:5432/greenkube",
+    )
     api = FakeApi()
     api.create_conflicts = 1
     api.on_create_conflict = winner
@@ -242,7 +288,7 @@ def test_a_concurrent_create_is_resolved_without_overwriting():
 
 
 def test_a_concurrent_patch_is_retried_with_the_new_resource_version():
-    api = FakeApi(secret=_legacy_secret(POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING="dsn"))
+    api = FakeApi(secret=_legacy_secret(POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING=LEGACY_DSN))
     api.patch_conflicts = 1
 
     bootstrap.ensure_credentials(api, _settings())
@@ -253,7 +299,7 @@ def test_a_concurrent_patch_is_retried_with_the_new_resource_version():
 
 
 def test_gives_up_after_repeated_conflicts():
-    api = FakeApi(secret=_legacy_secret(POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING="dsn"))
+    api = FakeApi(secret=_legacy_secret(POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING=LEGACY_DSN))
     api.patch_conflicts = 10
 
     with pytest.raises(bootstrap.BootstrapError, match="concurrently"):

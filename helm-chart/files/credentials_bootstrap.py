@@ -6,6 +6,10 @@ absent and only ever adds missing keys afterwards, so running it on every
 upgrade or sync never rotates a credential. Rendering the chart therefore stays
 a pure function of the values (roadmap N1, BUG-58).
 
+DB_CONNECTION_STRING is derived, not generated: like chart 0.3.x, which
+re-rendered it on every upgrade, it is rebuilt from the stored password when the
+PostgreSQL user, database, host or port in the values change.
+
 Generated keys:
   GREENKUBE_API_KEY                         when secrets.apiKey is empty;
   POSTGRES_PASSWORD, DB_CONNECTION_STRING   for the bundled PostgreSQL when
@@ -125,7 +129,12 @@ def missing_credentials(
     pvc_exists: Callable[[], bool],
     token: Callable[[int], str] = generate_token,
 ) -> dict[str, str]:
-    """Return the keys to add to ``current``. Existing values are never replaced."""
+    """Return the keys to write to ``current``.
+
+    Generated credentials are only added, never replaced. The derived
+    DB_CONNECTION_STRING is rewritten when it no longer matches the stored
+    password and the current PostgreSQL settings.
+    """
     additions: dict[str, str] = {}
     if settings.generate_api_key and not current.get(API_KEY):
         additions[API_KEY] = token(API_KEY_LENGTH)
@@ -136,8 +145,9 @@ def missing_credentials(
                 raise BootstrapError(_retained_volume_message(settings))
             password = token(POSTGRES_PASSWORD_LENGTH)
             additions[POSTGRES_PASSWORD] = password
-        if POSTGRES_PASSWORD in additions or not current.get(DB_CONNECTION_STRING):
-            additions[DB_CONNECTION_STRING] = connection_string(settings, password)
+        expected = connection_string(settings, password)
+        if current.get(DB_CONNECTION_STRING) != expected:
+            additions[DB_CONNECTION_STRING] = expected
     return additions
 
 
@@ -217,7 +227,7 @@ def ensure_credentials(
             if resource_version:
                 patch["metadata"] = {"resourceVersion": resource_version}
             api.patch_secret(settings.secret_name, patch)
-            return f"Added missing keys to Secret {settings.secret_name}: {', '.join(sorted(additions))}"
+            return f"Updated Secret {settings.secret_name}: {', '.join(sorted(additions))}"
         except ConflictError:
             continue
     raise BootstrapError(f"Secret {settings.secret_name} kept changing concurrently; retry the upgrade")
