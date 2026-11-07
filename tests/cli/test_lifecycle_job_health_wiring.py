@@ -17,7 +17,8 @@ async def test_lifecycle_job_wires_health_collector_and_measurement_store():
             return []
 
     repo = MagicMock()
-    repo.expire_recommendations = AsyncMock(return_value=[])
+    # Expiry reads the active recommendations and expires each one with a compare-and-swap.
+    repo.get_recommendations_by_statuses = AsyncMock(return_value=[])
     detector = MagicMock()
     detector.detect = AsyncMock(return_value=[])
     close = AsyncMock()

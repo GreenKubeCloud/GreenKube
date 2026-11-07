@@ -17,7 +17,11 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
-from greenkube.core.optimization.lifecycle import RecommendationConflictError, RecommendationLifecycle
+from greenkube.core.optimization.lifecycle import (
+    RecommendationConflictError,
+    RecommendationLifecycle,
+    RecommendationTransitionError,
+)
 from greenkube.core.optimization.verifier import RecommendationVerifier
 from greenkube.models.measurement import (
     MeasurementOutcome,
@@ -260,6 +264,44 @@ async def test_verification_cycle_persists_and_remeasures_on_real_repositories(d
     assert baseline["measured_ledger_input"]["measurement_id"] == history[1].measurement_id
     event_types = [event.event_type for event in await repo.get_events(record.id)]  # type: ignore[arg-type]
     assert event_types[-3:] == ["not_realized", "remeasure_requested", "verified"]
+
+
+async def _stored_by_pod(repo) -> dict[str, RecommendationRecord]:
+    stored = await repo.get_recommendations_by_statuses([status.value for status in RecommendationStatus])
+    return {record.pod_name: record for record in stored}
+
+
+async def test_ignore_unignore_and_expiry_are_compare_and_swaps_with_their_events(database):
+    repo = _recommendation_repo(database)
+    now = datetime.now(timezone.utc)
+    await repo.save_recommendations(
+        [
+            _record(now, pod_name="old", status=RecommendationStatus.ACTIVE, expires_at=now - WINDOW).model_copy(
+                update={"applied_at": None, "verification_status": None, "application_method": None}
+            ),
+            _record(now, pod_name="landed", owner_name="landed", verification_status="pending"),
+        ]
+    )
+    records = await _stored_by_pod(repo)
+    old_id, landed_id = records["old"].id, records["landed"].id
+    assert old_id is not None and landed_id is not None
+    lifecycle = RecommendationLifecycle(repo)
+
+    expired = await lifecycle.expire()
+    assert [record.id for record in expired] == [old_id]
+    ignored = await lifecycle.ignore(old_id, reason="kept warm")
+    restored = await lifecycle.unignore(old_id)
+
+    assert ignored.status is RecommendationStatus.IGNORED and ignored.ignored_reason == "kept warm"
+    assert restored.status is RecommendationStatus.ACTIVE and restored.ignored_reason is None
+    assert [event.event_type for event in await repo.get_events(old_id)] == ["expired", "ignored", "unignored"]
+    with pytest.raises(RecommendationTransitionError):
+        await lifecycle.ignore(landed_id, reason="noise")
+    with pytest.raises(RecommendationTransitionError):
+        await lifecycle.unignore(landed_id)
+    landed = await repo.get_recommendation_by_id(landed_id)
+    assert landed is not None and landed.status is RecommendationStatus.APPLIED
+    assert await repo.get_events(landed_id) == []
 
 
 async def test_remeasured_attribution_group_claims_the_delta_once(database):

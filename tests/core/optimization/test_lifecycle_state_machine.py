@@ -200,6 +200,102 @@ class TestTransitions:
         assert (await repo.get_events(_id(record)))[-1].event_type == "regressed"
 
 
+class TestIgnoreAndExpire:
+    @pytest.mark.parametrize(
+        "status",
+        [
+            RecommendationStatus.PR_OPEN,
+            RecommendationStatus.APPLIED,
+            RecommendationStatus.VERIFYING,
+            RecommendationStatus.VERIFIED,
+            RecommendationStatus.ROLLBACK_REVIEW,
+            RecommendationStatus.REVERTED,
+        ],
+    )
+    async def test_a_change_in_flight_or_in_the_cluster_cannot_be_ignored(self, repo, status):
+        record = await _saved(repo, status=status, applied_at=datetime.now(timezone.utc))
+
+        with pytest.raises(RecommendationTransitionError):
+            await RecommendationLifecycle(repo).ignore(_id(record), reason="noise")
+
+        assert (await repo.get_recommendation_by_id(_id(record))).status is status
+        assert await repo.get_events(_id(record)) == []
+
+    @pytest.mark.parametrize(
+        "status", [RecommendationStatus.ACTIVE, RecommendationStatus.STALE, RecommendationStatus.EXPIRED]
+    )
+    async def test_ignore_and_unignore_are_atomic_with_their_events(self, repo, status):
+        record = await _saved(repo, status=status)
+        lifecycle = RecommendationLifecycle(repo)
+
+        ignored = await lifecycle.ignore(_id(record), reason="kept warm on purpose")
+        assert ignored.status is RecommendationStatus.IGNORED
+        assert ignored.ignored_reason == "kept warm on purpose"
+        assert ignored.ignored_at is not None
+
+        restored = await lifecycle.unignore(_id(record))
+        assert restored.status is RecommendationStatus.ACTIVE
+        assert restored.ignored_reason is None and restored.ignored_at is None
+        events = await repo.get_events(_id(record))
+        assert [event.event_type for event in events] == ["ignored", "unignored"]
+        assert _payload(events[0])["reason"] == "kept warm on purpose"
+
+    async def test_only_ignored_records_can_be_unignored(self, repo):
+        record = await _saved(repo, status=RecommendationStatus.APPLIED, applied_at=datetime.now(timezone.utc))
+
+        with pytest.raises(RecommendationTransitionError):
+            await RecommendationLifecycle(repo).unignore(_id(record))
+
+        assert (await repo.get_recommendation_by_id(_id(record))).status is RecommendationStatus.APPLIED
+
+    async def test_expiry_is_written_with_its_event(self, repo):
+        record = await _saved(repo, expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+
+        class NoSeparateEvents:
+            """An event written outside the status update's transaction fails here."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            async def record_event(self, event):
+                raise RuntimeError("separate event write")
+
+        expired = await RecommendationLifecycle(NoSeparateEvents(repo)).expire()  # pyrefly: ignore[bad-argument-type]
+
+        assert [item.id for item in expired] == [_id(record)]
+        assert (await repo.get_recommendation_by_id(_id(record))).status is RecommendationStatus.EXPIRED
+        assert [event.event_type for event in await repo.get_events(_id(record))] == ["expired"]
+
+    async def test_expiry_does_not_overwrite_a_concurrent_transition(self, repo):
+        record = await _saved(repo, expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+        stale = record.model_copy()
+        await RecommendationLifecycle(repo).apply(_id(record), actual_cpu=300)
+
+        class StaleRead:
+            """Serves the snapshot read before the record was applied."""
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            async def get_recommendations_by_statuses(self, statuses, namespace=None):
+                return [stale]
+
+            async def get_recommendation_by_id(self, rec_id):
+                return stale
+
+        expired = await RecommendationLifecycle(StaleRead(repo)).expire()  # pyrefly: ignore[bad-argument-type]
+
+        assert expired == []
+        assert (await repo.get_recommendation_by_id(_id(record))).status is RecommendationStatus.APPLIED
+        assert [event.event_type for event in await repo.get_events(_id(record))] == ["applied"]
+
+
 class TestRemeasure:
     @pytest.mark.parametrize("verification_status", ["failed", "inconclusive"])
     async def test_remeasure_starts_a_new_fixed_window(self, repo, verification_status):

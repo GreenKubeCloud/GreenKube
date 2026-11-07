@@ -181,3 +181,46 @@ class TestDismissRollbackReview:
         )
 
         assert response.status_code == 409
+
+
+class TestIgnoreGuard:
+    async def test_an_applied_change_cannot_be_ignored(self, client, reco_repo):
+        rec_id = await _saved(
+            reco_repo,
+            status=RecommendationStatus.APPLIED,
+            applied_at=datetime.now(timezone.utc) - timedelta(days=1),
+            verification_status="pending",
+        )
+
+        response = client.patch(f"/api/v1/recommendations/{rec_id}/ignore", json={"reason": "noise"})
+
+        assert response.status_code == 409
+        record = await reco_repo.get_recommendation_by_id(rec_id)
+        assert record is not None and record.status is RecommendationStatus.APPLIED
+
+    async def test_unignore_does_not_reactivate_an_applied_change(self, client, reco_repo):
+        rec_id = await _saved(
+            reco_repo,
+            status=RecommendationStatus.VERIFIED,
+            applied_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+
+        assert client.delete(f"/api/v1/recommendations/{rec_id}/ignore").status_code == 409
+        record = await reco_repo.get_recommendation_by_id(rec_id)
+        assert record is not None and record.status is RecommendationStatus.VERIFIED
+
+    async def test_active_recommendation_round_trip(self, client, reco_repo):
+        rec_id = await _saved(reco_repo)
+
+        ignored = client.patch(f"/api/v1/recommendations/{rec_id}/ignore", json={"reason": "kept warm"})
+        restored = client.delete(f"/api/v1/recommendations/{rec_id}/ignore")
+
+        assert ignored.status_code == 200 and ignored.json()["status"] == "ignored"
+        assert restored.status_code == 200 and restored.json()["status"] == "active"
+        events = await reco_repo.get_events(rec_id)
+        assert [event.event_type for event in events] == ["ignored", "unignored"]
+        assert events[0].actor == "user"
+
+    async def test_unknown_recommendation_is_404(self, client):
+        assert client.patch("/api/v1/recommendations/9999/ignore", json={"reason": "x"}).status_code == 404
+        assert client.delete("/api/v1/recommendations/9999/ignore").status_code == 404

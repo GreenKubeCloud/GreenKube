@@ -63,7 +63,22 @@ _ALLOWED_TRANSITIONS = {
         RecommendationStatus.APPLIED.value,
     },
     RecommendationStatus.IGNORED.value: {RecommendationStatus.ACTIVE.value},
+    # Nothing of a stale or expired recommendation is in the cluster or in flight.
+    RecommendationStatus.STALE.value: {RecommendationStatus.IGNORED.value},
+    RecommendationStatus.EXPIRED.value: {RecommendationStatus.IGNORED.value},
 }
+
+#: Statuses an operator may ignore (C0.11). An open PR or an applied change is
+#: refused: ignoring it would orphan the change and its measurement. Ignoring
+#: an ignored recommendation again only updates its reason.
+IGNORABLE_STATUSES = frozenset(
+    {
+        RecommendationStatus.ACTIVE.value,
+        RecommendationStatus.STALE.value,
+        RecommendationStatus.EXPIRED.value,
+        RecommendationStatus.IGNORED.value,
+    }
+)
 
 #: Statuses PATCH /apply accepts (C0.11): re-applying any other status would
 #: overwrite the verification baseline of a change that already landed.
@@ -371,17 +386,78 @@ class RecommendationLifecycle:
         return _plan_status_event_time(events, "approved", plan_id)
 
     async def expire(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
-        """Marks TTL-elapsed active recommendations as expired and records events."""
-        expired = await self.repo.expire_recommendations(now=now)
-        for record in expired:
-            if record.id is None:
+        """Marks TTL-elapsed active recommendations as expired and records events.
+
+        Each expiry is a compare-and-swap from ``active``, written with its
+        event in one transaction (C0.11): a recommendation applied, opened as a
+        PR or ignored meanwhile is left alone.
+        """
+        if not hasattr(self.repo, "transition_and_record_event"):
+            expired = await self.repo.expire_recommendations(now=now)
+            for record in expired:
+                if record.id is None:
+                    continue
+                await self.record_event(
+                    record.id,
+                    RecommendationEventType.EXPIRED,
+                    payload={"expires_at": _iso(record.expires_at)},
+                )
+            return expired
+
+        reference = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        active = await self.repo.get_recommendations_by_statuses([RecommendationStatus.ACTIVE.value])
+        expired = []
+        for record in active or []:
+            if record.id is None or record.expires_at is None or ensure_utc(record.expires_at) >= reference:
                 continue
-            await self.record_event(
-                record.id,
-                RecommendationEventType.EXPIRED,
-                payload={"expires_at": _iso(record.expires_at)},
-            )
+            try:
+                expired.append(
+                    await self.transition(
+                        record.id,
+                        RecommendationStatus.EXPIRED,
+                        event_type=RecommendationEventType.EXPIRED,
+                        updates={"updated_at": reference},
+                        payload={"expires_at": _iso(record.expires_at)},
+                        expected_statuses=(RecommendationStatus.ACTIVE,),
+                    )
+                )
+            except RecommendationTransitionError as exc:
+                logger.info("Recommendation %s changed before it could expire: %s", record.id, exc)
         return expired
+
+    async def ignore(
+        self,
+        rec_id: int,
+        *,
+        reason: Optional[str] = None,
+        actor: str = "user",
+    ) -> RecommendationRecord:
+        """Permanently ignore a recommendation (compare-and-swap with its event, C0.11).
+
+        Only recommendations with nothing in flight or in the cluster
+        (:data:`IGNORABLE_STATUSES`) can be ignored.
+        """
+        now = datetime.now(timezone.utc)
+        return await self.transition(
+            rec_id,
+            RecommendationStatus.IGNORED,
+            event_type=RecommendationEventType.IGNORED,
+            updates={"ignored_at": now, "ignored_reason": reason, "updated_at": now},
+            actor=actor,
+            payload={"reason": reason},
+            expected_statuses=IGNORABLE_STATUSES,
+        )
+
+    async def unignore(self, rec_id: int, *, actor: str = "user") -> RecommendationRecord:
+        """Restore an ignored recommendation to ``active`` (only from ``ignored``, C0.11)."""
+        return await self.transition(
+            rec_id,
+            RecommendationStatus.ACTIVE,
+            event_type=RecommendationEventType.UNIGNORED,
+            updates={"ignored_at": None, "ignored_reason": None},
+            actor=actor,
+            expected_statuses=(RecommendationStatus.IGNORED,),
+        )
 
     async def mark_verification_started(self, rec_id: int) -> RecommendationRecord:
         return await self.transition(

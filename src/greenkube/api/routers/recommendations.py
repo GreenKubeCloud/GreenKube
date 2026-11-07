@@ -503,14 +503,13 @@ async def ignore_recommendation(
     Typical use case: a pod cannot support HPA due to a RWO PVC, or a namespace
     intentionally runs at low utilization (e.g., a staging environment).
     """
-    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
     try:
-        record = await reco_repo.ignore_recommendation(rec_id, request)
-        await RecommendationLifecycle(reco_repo).record_event(
-            rec_id, "ignored", actor="user", payload={"reason": request.reason}
-        )
-        return record
+        # Compare-and-swap with its event; an open PR or an applied change is refused (409).
+        return await RecommendationLifecycle(reco_repo).ignore(rec_id, reason=request.reason, actor="user")
+    except RecommendationTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -525,11 +524,12 @@ async def unignore_recommendation(
     Useful when circumstances change (e.g., the PVC is migrated to RWX) or when a
     recommendation was accidentally ignored.
     """
-    from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+    from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
     try:
-        record = await reco_repo.unignore_recommendation(rec_id)
-        await RecommendationLifecycle(reco_repo).record_event(rec_id, "unignored", actor="user")
-        return record
+        # Only an ignored recommendation is restored; any other status is a 409.
+        return await RecommendationLifecycle(reco_repo).unignore(rec_id, actor="user")
+    except RecommendationTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
