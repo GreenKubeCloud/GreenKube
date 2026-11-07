@@ -1,6 +1,6 @@
 # Recommendation Lifecycle
 
-> **Note:** The recommendation component is a multi-source optimization engine. The plan, pull-request, sync, and rollback workflow is documented in [GitOps automation](automation.md); this page documents recommendation generation, lifecycle, and savings.
+> **Note:** Recommendations are the input to the GreenKube loop: aggregate → decide → deliver as a pull request → prove → ledger (see [Concepts](concepts.md)). This page documents recommendation generation, lifecycle, verification and savings. The plan, pull-request, sync and rollback workflow is documented in [GitOps automation](automation.md).
 
 This page describes how GreenKube recommendations are generated, stored, shown, and turned into measured impact. It reflects the current code paths in `src/greenkube/core/optimization/`, `src/greenkube/models/metrics.py`, `src/greenkube/api/routers/recommendations.py`, the SQLite/PostgreSQL recommendation repositories, and the frontend recommendations page.
 
@@ -49,7 +49,7 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
 2. `OptimizationEngine.refresh()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers. This loading logic is shared by API recommendation requests and the startup scan.
-3. Enabled **sources** run over the context. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The optional VPA source reads recommendation-mode VPAs.
+3. Enabled **sources** run over the context. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
 4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
 5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with the multi-criteria ranking profile.
 6. Recommended CPU and memory requests are floored to configured minimums.
@@ -59,7 +59,7 @@ The API and frontend are the only consumers of the engine; there is no CLI repor
 
 ## Sources, Evidence And Ranking
 
-**Sources.** Each recommendation carries `source` (`greenkube`, `vpa`, `karpenter`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` provenance list and a `capability` (used for arbitration). Enable the VPA connector with `RECOMMENDATION_VPA_ENABLED=true`; source precedence is controlled by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`).
+**Sources.** Each recommendation carries `source` (`greenkube`, `vpa`, `karpenter`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` provenance list and a `capability` (used for arbitration). The VPA and Karpenter connectors are enabled by default (`RECOMMENDATION_VPA_ENABLED`, `RECOMMENDATION_KARPENTER_ENABLED`) and skip cleanly when their CRDs are absent; source precedence is controlled by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`).
 
 **Evidence.** Every recommendation embeds a `RecommendationEvidence` block: observation window and coverage, current vs proposed requests, CPU/memory distribution (avg, p50, p90, p95, p99, max), restart count, expected savings and method, confidence with factors, risk level with factors, rollback conditions, a `patch` action plan and `expires_at`. Retrieve the full block from `GET /api/v1/recommendations/{id}`; it is also rendered in the dashboard's evidence panel.
 

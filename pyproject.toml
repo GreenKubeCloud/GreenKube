@@ -11,28 +11,33 @@ version = "0.3.1"
 authors = [
   { name = "Hugo Lelievre", email = "hugo.lelievre@greenkube.cloud" },
 ]
-description = "Open-source FinGreenOps platform for Kubernetes - measure CO2e emissions, energy usage, cloud costs, and get optimization recommendations."
+description = "Open-source Kubernetes optimization loop: aggregate recommendations (GreenKube, VPA, Goldilocks, Karpenter), deliver them as GitOps pull requests, and measure the cost and CO2e savings each change realizes."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"
 keywords = [
     "kubernetes",
+    "k8s",
+    "optimization",
+    "rightsizing",
+    "gitops",
+    "argocd",
+    "flux",
+    "pull-request",
+    "vpa",
+    "karpenter",
+    "finops",
+    "cloud-cost",
+    "greenops",
     "carbon",
     "co2",
-    "sustainability",
-    "finops",
-    "greenops",
-    "fingreenops",
     "carbon-footprint",
-    "cloud-cost",
-    "prometheus",
-    "energy",
-    "k8s",
-    "devops",
-    "sre",
+    "sustainability",
     "green-software",
-    "carbon-monitoring",
-    "cloud-sustainability",
+    "prometheus",
+    "opencost",
+    "sre",
+    "devops",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

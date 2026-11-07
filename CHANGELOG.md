@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Renderer firewall option:** `rendererSandbox.egressFirewall.privilegedInitContainer` supports clusters that require a privileged init container to configure the sandbox egress firewall.
 - **Helm configuration rollouts:** API and automation Deployments now restart when the generated ConfigMap changes; in worker mode, the production API receives the automation settings needed to report readiness.
 
+### Changed
+- **Positioning and documentation:** GreenKube is now presented as an optimization loop: aggregate recommendations, deliver them as GitOps pull requests, prove the savings.
+  - The README is rewritten around that loop, with a "What works today" table and an explicit beta label on savings verification.
+  - New `docs/concepts.md` defines the shared vocabulary: sources, recommendations, bindings, plans, sync, apply detection, verification, ledger.
+  - The package, Helm chart, architecture, recommendation and contributing descriptions are aligned with the new positioning.
+  - `docs/recommendation.md` now states that the VPA and Karpenter connectors are enabled by default.
+  - New `docs/roadmap.md`: positioning, 17 prioritized categories with implementation specifications, a defect register and milestones. The plan includes one install topology (no profiles), GitOps automation that activates itself, and persistent sign-in.
+
 ### Fixed
 - **Automation worker heartbeat recovery:** Idle workers refresh their heartbeat and clear expired lease state without overwriting an active lease.
 

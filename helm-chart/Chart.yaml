@@ -1,11 +1,11 @@
 apiVersion: v2
 name: greenkube
 description: >-
-  GreenKube is an open-source FinGreenOps platform for Kubernetes. Measure,
-  analyze, and optimize the estimated carbon footprint and cloud costs of
-  your workloads. Provides estimated CO₂e metrics, energy estimation, cost
-  optimization recommendations, Grafana dashboard, and a REST API — deployable
-  in minutes with a single Helm install.
+  GreenKube is an open-source Kubernetes optimization loop. It aggregates
+  recommendations (GreenKube analyzers, VPA, Goldilocks, Karpenter), ranks them
+  by impact and risk, delivers them as reviewable GitOps pull requests for
+  Argo CD and Flux, verifies the sync, and measures the cost and CO₂e savings
+  each change realizes.
 type: application
 icon: 
   https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
@@ -13,20 +13,21 @@ version: 0.3.1
 appVersion: 0.3.1
 keywords:
 - greenkube
+- kubernetes
+- optimization
+- rightsizing
+- gitops
+- argocd
+- flux
+- vpa
+- karpenter
 - finops
-- greenops
-- fingreenops
+- cloud-cost
 - carbon
 - co2
 - sustainability
-- kubernetes
-- monitoring
-- energy
-- carbon-footprint
-- cloud-cost
-- prometheus
-- grafana
 - opencost
+- prometheus
 home: https://greenkube.cloud
 sources:
 - https://github.com/GreenKubeCloud/GreenKube

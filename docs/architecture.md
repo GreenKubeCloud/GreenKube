@@ -1,6 +1,15 @@
 # GreenKube Architecture
 
-This document describes the current technical architecture of GreenKube, a lightweight platform for estimating, reporting, and optimizing the carbon footprint and cost of Kubernetes workloads.
+This document describes the current technical architecture of GreenKube. GreenKube is an optimization loop for Kubernetes: it aggregates recommendations from several sources, ranks them, delivers them as GitOps pull requests, verifies that Argo CD or Flux synced them, and measures the cost and CO₂e savings they realize.
+
+The architecture has four parts:
+
+- **Measurement layer:** collectors, the processor and storage. It produces per-workload usage, cost, energy and CO₂e, which feed both the recommendation evidence and the before/after comparison used for verification.
+- **Optimization engine:** sources, analyzers, arbitration, evidence and ranking.
+- **GitOps automation:** discovery, bindings, plans, the renderer sandbox, the worker, and sync.
+- **Verification and savings ledger.**
+
+See [Concepts](concepts.md) for the vocabulary used here.
 
 ## Architecture Diagram
 
