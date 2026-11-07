@@ -16,7 +16,7 @@ from greenkube.core.db import db_manager
 from greenkube.core.optimization import verifier as verifier_module
 from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 from greenkube.core.optimization.verifier import RecommendationVerifier, attribution_groups, window_rates
-from greenkube.models.measurement import MeasurementOutcome, QuantityOutcome
+from greenkube.models.measurement import MeasurementOutcome, QuantityOutcome, SavingsMeasurement
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.measurement_repository import SavingsMeasurementRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
@@ -483,3 +483,82 @@ class TestOutcomes:
         assert history[1].supersedes_measurement_id == history[0].measurement_id
         # The counterfactual still ends at the change.
         assert history[1].windows["baseline"]["end"] == applied_at.isoformat()
+
+
+class TestPassHardening:
+    async def test_a_decision_persisted_before_a_crash_is_replayed_not_re_observed(self, repo, measurements):
+        now, applied_at = _timeline()
+        await repo.save_recommendations([_record(applied_at)])
+        record_id = rec_id((await _all(repo))[0])
+        after = {"start": applied_at.isoformat(), "end": (applied_at + WINDOW).isoformat()}
+        decided = SavingsMeasurement(
+            measurement_id="decided-before-crash",
+            recommendation_id=record_id,
+            group_id="group-1",
+            group_recommendation_ids=[record_id],
+            windows={"baseline": {"start": (applied_at - WINDOW).isoformat(), "end": after["start"]}, "after": after},
+            outcome=MeasurementOutcome.NOT_REALIZED,
+            reasons=["measured cost change is -1.00/yr (no saving)"],
+        ).with_evidence_digest()
+        await measurements.insert(decided)
+
+        # No metrics at all: observing again would extend the window instead of replaying.
+        updated = await _verifier(repo, WindowedMetricsRepo()).verify_due()
+
+        assert [(record.status, record.verification_status) for record in updated] == [
+            (RecommendationStatus.APPLIED, "failed")
+        ]
+        assert baseline_of(updated[0])["latest_measurement_id"] == "decided-before-crash"
+        assert [item.measurement_id for item in await measurements.list_for_recommendation(record_id)] == [
+            "decided-before-crash"
+        ]
+        events = [event.event_type for event in await repo.get_events(record_id)]
+        assert "verification_started" not in events
+        assert events[-1] == "not_realized"
+
+    async def test_outcome_metric_is_counted_once_the_transition_is_written(self, repo, monkeypatch):
+        now, applied_at = _timeline()
+        await repo.save_recommendations([_record(applied_at)])
+        metrics = WindowedMetricsRepo(
+            rows(applied_at - WINDOW, applied_at, cost=0.01) + rows(applied_at, now, cost=0.008)
+        )
+        counted: list[str] = []
+        monkeypatch.setattr(
+            "greenkube.core.observability.record_verification",
+            lambda outcome, failed_gates: counted.append(outcome),
+        )
+        verifier = _verifier(repo, metrics)
+        mark_verified = verifier.lifecycle.mark_verified
+
+        async def crash(*args, **kwargs):
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(verifier.lifecycle, "mark_verified", crash)
+        assert await verifier.verify_due() == []
+        assert counted == []
+
+        monkeypatch.setattr(verifier.lifecycle, "mark_verified", mark_verified)
+        updated = await verifier.verify_due()
+
+        assert [record.status for record in updated] == [RecommendationStatus.VERIFIED]
+        assert counted == ["verified"]
+
+    async def test_groups_measured_over_one_window_share_their_reads(self, repo):
+        now, applied_at = _timeline()
+        await repo.save_recommendations(
+            [_record(applied_at, container_name="app"), _record(applied_at, container_name="sidecar")]
+        )
+        pods = rows(applied_at - WINDOW, applied_at, cost=0.02) + rows(applied_at, now, cost=0.016)
+        containers = [
+            row
+            for name in ("app", "sidecar")
+            for row in rows(applied_at - WINDOW, applied_at, cost=0.01, container=name)
+            + rows(applied_at, now, cost=0.008, container=name)
+        ]
+        metrics = WindowedMetricsRepo(pods, containers)
+
+        updated = await _verifier(repo, metrics).verify_due()
+
+        assert [record.status for record in updated] == [RecommendationStatus.VERIFIED] * 2
+        # Two container-scoped groups, one window: container and pod rows are read once per window.
+        assert len(metrics.reads) == len(set(metrics.reads)) == 4

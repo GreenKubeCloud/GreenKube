@@ -578,6 +578,8 @@ class RecommendationVerifier:
         self.health_collector = health_collector
         self.measurement_repo = measurement_repo if measurement_repo is not None else _default_repo(lifecycle)
         self._clock = clock
+        #: Metric reads shared by the groups of one ``verify_due`` pass.
+        self._read_cache: Optional[Dict[tuple, Any]] = None
 
     def _now(self) -> datetime:
         return ensure_utc(self._clock()) if self._clock is not None else datetime.now(timezone.utc)
@@ -607,18 +609,22 @@ class RecommendationVerifier:
         ]
         now = self._now()
         updated: List[RecommendationRecord] = []
-        for group in attribution_groups(candidates):
-            due = [record for record in group if _awaiting(record)]
-            if not due:
-                continue
-            try:
-                updated.extend(await self._verify_group(due, now, attribution=group))
-            except Exception as exc:
-                logger.warning(
-                    "Verification failed for recommendation(s) %s: %s",
-                    ", ".join(str(record.id) for record in due),
-                    exc,
-                )
+        self._read_cache = {}
+        try:
+            for group in attribution_groups(candidates):
+                due = [record for record in group if _awaiting(record)]
+                if not due:
+                    continue
+                try:
+                    updated.extend(await self._verify_group(due, now, attribution=group))
+                except Exception as exc:
+                    logger.warning(
+                        "Verification failed for recommendation(s) %s: %s",
+                        ", ".join(str(record.id) for record in due),
+                        exc,
+                    )
+        finally:
+            self._read_cache = None
         return updated
 
     # ------------------------------------------------------------------
@@ -676,6 +682,23 @@ class RecommendationVerifier:
         if now < windows.after_end + grace:
             return []
 
+        # A decision persisted before a crash is replayed, never re-observed (C0.13).
+        replayed: List[RecommendationRecord] = []
+        remaining: List[RecommendationRecord] = []
+        for record in group:
+            stored = await self._decided_measurement(record)
+            if stored is None:
+                remaining.append(record)
+                continue
+            baseline = _baseline_dict(record)
+            previous = [
+                str(item) for item in baseline.get("measurement_ids") or [] if str(item) != stored.measurement_id
+            ]
+            replayed.append(await self._apply(record, stored, baseline, previous))
+        if not remaining:
+            return replayed
+        group = remaining
+
         observation = await self._observe(group, windows)
         gates = self._health_gates(group, observation)
         failed = [gate for gate in gates if gate.status is HealthGateStatus.FAILED]
@@ -684,7 +707,7 @@ class RecommendationVerifier:
         if failed:
             decisions = [self._decide(record, attribution, observation, failed, min_samples) for record in group]
         elif observation.sample_steps < min_samples:
-            return await self._extend_or_close(
+            return replayed + await self._extend_or_close(
                 group,
                 attribution,
                 windows,
@@ -698,7 +721,7 @@ class RecommendationVerifier:
             decisions = [self._decide(record, attribution, observation, failed, min_samples) for record in group]
             if any(decision.outcome is MeasurementOutcome.INCONCLUSIVE for decision in decisions):
                 trusted = min(observation.before.cost_steps, observation.after.cost_steps)
-                return await self._extend_or_close(
+                return replayed + await self._extend_or_close(
                     group,
                     attribution,
                     windows,
@@ -710,10 +733,17 @@ class RecommendationVerifier:
                 )
 
         group_id = uuid.uuid4().hex
-        return [
+        return replayed + [
             await self._conclude(record, decision, attribution, group_id, windows, observation, gates, now)
             for record, decision in zip(group, decisions)
         ]
+
+    async def _decided_measurement(self, record: RecommendationRecord) -> Optional[SavingsMeasurement]:
+        """The measurement already decided for the record's current cycle, if any."""
+        if self.measurement_repo is None or record.id is None:
+            return None
+        sequence = int(_baseline_dict(record).get("measurement_sequence") or 1)
+        return await self.measurement_repo.get_for_cycle(record.id, sequence)
 
     async def _extend_or_close(
         self,
@@ -773,32 +803,47 @@ class RecommendationVerifier:
     # ------------------------------------------------------------------
 
     async def _read_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
-        """Reads the metric series of a recommendation target (container rows for container targets)."""
+        """Reads the metric series of a recommendation target (container rows for container targets).
+
+        Within one ``verify_due`` pass the namespace-wide reads are shared by
+        every group measured over the same window (e.g. the containers of one
+        rollout).
+        """
         if not record.namespace:
             return []
-        try:
-            if record.container_name is not None:
-                if not record.container_name or record.container_name.strip() != record.container_name:
-                    return []
-                if not isinstance(self.combined_repo, ContainerMetricsRepository):
-                    logger.warning(
-                        "Container-scoped verification is unavailable for recommendation %s: "
-                        "repository has no container metrics reader.",
-                        record.id,
+        container = record.container_name is not None
+        if container:
+            if not record.container_name or record.container_name.strip() != record.container_name:
+                return []
+            if not isinstance(self.combined_repo, ContainerMetricsRepository):
+                logger.warning(
+                    "Container-scoped verification is unavailable for recommendation %s: "
+                    "repository has no container metrics reader.",
+                    record.id,
+                )
+                return []
+        key = ("container" if container else "pod", record.namespace, start, end)
+        # A degenerate (empty) window is never shared: it stands for no data, not for a range.
+        cache = self._read_cache if start < end else None
+        metrics = cache.get(key) if cache is not None else None
+        if metrics is None:
+            try:
+                if container:
+                    repo = cast(ContainerMetricsRepository, self.combined_repo)
+                    metrics = await repo.read_container_metrics_smart(
+                        start_time=start,
+                        end_time=end,
+                        namespace=record.namespace,
                     )
-                    return []
-                metrics = await self.combined_repo.read_container_metrics_smart(
-                    start_time=start,
-                    end_time=end,
-                    namespace=record.namespace,
-                )
-            else:
-                metrics = await self.combined_repo.read_combined_metrics_smart(
-                    start_time=start, end_time=end, namespace=record.namespace
-                )
-        except Exception as exc:
-            logger.warning("Could not read metrics for verification of %s: %s", record.id, exc)
-            return []
+                else:
+                    metrics = await self.combined_repo.read_combined_metrics_smart(
+                        start_time=start, end_time=end, namespace=record.namespace
+                    )
+            except Exception as exc:
+                logger.warning("Could not read metrics for verification of %s: %s", record.id, exc)
+                return []
+            if cache is not None:
+                cache[key] = metrics
         return _series_for_record(record, metrics)
 
     async def _read_pod_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
@@ -1195,12 +1240,25 @@ class RecommendationVerifier:
         if missing:
             logger.info("Verification of %s: health signals not available: %s", record.id, ", ".join(missing))
 
-        from greenkube.core.observability import record_verification
-
-        record_verification(_OUTCOME_LABELS[stored.outcome], failed_gates)
         measured_cost = _measured_value(cost, stored.outcome)
         measured_co2e = _measured_value(co2e, stored.outcome)
-        rec_id = record.id
+        updated = await self._transition(record.id, stored, updated_baseline, details, measured_cost, measured_co2e)
+
+        from greenkube.core.observability import record_verification
+
+        # Counted once the transition is written, so a replayed decision is not counted twice.
+        record_verification(_OUTCOME_LABELS[stored.outcome], failed_gates)
+        return updated
+
+    async def _transition(
+        self,
+        rec_id: int,
+        stored: SavingsMeasurement,
+        updated_baseline: dict,
+        details: dict,
+        measured_cost: Optional[float],
+        measured_co2e: Optional[float],
+    ) -> RecommendationRecord:
         window_start = ensure_utc(stored.windows["after"]["start"])
         window_end = ensure_utc(stored.windows["after"]["end"])
         if stored.outcome is MeasurementOutcome.ROLLBACK_REVIEW:
