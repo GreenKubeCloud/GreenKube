@@ -887,6 +887,12 @@ class RuntimePlanService:
         return rollback_plan
 
     async def _validate_rollback_source_plan(self, plan: Plan) -> None:
+        if plan.file_plan is None and plan.file_plan_summary is not None:
+            raise AutomationPlanError(
+                AutomationErrorCode.ROLLBACK_UNSUPPORTED,
+                "original plan's rendered file contents were removed by retention; preview a new change "
+                "with the desired resources instead of a rollback",
+            )
         if (
             plan.status not in {PlanStatus.SYNCED, PlanStatus.APPLIED}
             or plan.file_plan is None

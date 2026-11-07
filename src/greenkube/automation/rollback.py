@@ -493,6 +493,11 @@ def _validate_original_plan(plan: Plan) -> FilePlan:
         raise RollbackConflictError("original plan must be a validated persisted Plan")
     file_plan = plan.file_plan
     if file_plan is None:
+        if plan.file_plan_summary is not None:
+            raise UnsupportedRollbackError(
+                "original plan's rendered file contents were removed by retention; preview a new change "
+                "with the desired resources instead of a rollback"
+            )
         raise UnsupportedRollbackError("original plan has no file plan to invert")
     if plan.digest is None or plan.digest != file_plan.digest:
         raise RollbackConflictError("original plan digest does not match its persisted file plan")

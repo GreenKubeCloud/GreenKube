@@ -287,7 +287,7 @@ A periodic reconciler fails an `applying` plan when its operation is terminal an
 
 A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days:
 
-- A pruned plan keeps a compact `file_plan_summary`: paths, original blob SHAs, content digests, diff statistics, validation and digest. `GET /api/v1/automation/plans/{plan_id}` and the workload's policy history keep working.
+- A pruned plan keeps a compact `file_plan_summary`: paths, original blob SHAs, content digests, diff statistics, validation and digest. `GET /api/v1/automation/plans/{plan_id}` and the workload's policy history keep working. A pruned plan can no longer be rolled back automatically, because its file contents are gone; the rollback preview explains this, and a new preview with the desired resources replaces it.
 - Plan metadata, PR records and recommendation audit events (`recommendation_events`) are never deleted.
 - Webhook deliveries for pull requests that GreenKube does not track are stored as `ignored` and answered with `202`. They are never retried, and retention prunes them.
 
