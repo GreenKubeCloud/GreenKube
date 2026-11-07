@@ -424,7 +424,7 @@ If the installation is served under a sub-path, set `config.rootPath` (for examp
 
 - **Bundled PostgreSQL (default):** Simplest. Persistence is enabled by default with a 10 GiB volume. Set a fixed `postgres.auth.password` only when you manage the Secret yourself; otherwise the chart preserves a generated password across upgrades.
 - **External PostgreSQL:** Set `postgres.enabled=false`. With the chart-managed Secret, provide `secrets.dbConnectionString`; with `secrets.existingSecret`, put `DB_CONNECTION_STRING` in that Secret. Tune `config.db.sslMode`, `config.db.poolMinSize`, `config.db.poolMaxSize`, and `config.db.statementTimeoutMs`.
-- **SQLite:** Acceptable for development only. If you use it, enable `config.persistence.enabled` so the database survives pod restarts.
+- **SQLite:** Acceptable for development only. If you use it, enable `config.persistence.enabled` so the database survives pod restarts. Outside the image (local runs), the Python `sqlite3` library must be SQLite 3.35 or later: the optimization run queue claims runs with `UPDATE ... RETURNING`. The GreenKube image ships 3.40.
 
 ## Optional: GitOps automation
 

@@ -491,8 +491,8 @@ The REST API is started by the separate `greenkube-api` entry point (`greenkube.
 
 #### **Grafana Integration**
 - **Dashboard:** `dashboards/greenkube-grafana.json`
-- **Data source:** Prometheus scraping `/prometheus/metrics`
-- **Helm resources:** `ServiceMonitor`, `NetworkPolicy`, Prometheus RBAC
+- **Data source:** Prometheus scraping `/prometheus/metrics` on the API (dashboard gauges) and on the controller's own listener (port `9102`: recommendation-scan, verification and collection control-loop metrics, recorded where that work runs)
+- **Helm resources:** `ServiceMonitor` (API, controller, and production worker), `NetworkPolicy`, Prometheus RBAC
 - **Panels:** KPIs, time-series (CO₂e, cost, energy), namespace breakdown, top pods, node utilization, grid intensity, recommendations
 
 ## Data Flow
@@ -718,6 +718,7 @@ helm-chart/
     ├── deployment.yaml        # Standalone collector + API
     ├── production-deployments.yaml # API, controller, automation worker
     ├── api-service.yaml       # API/UI ClusterIP Service
+    ├── controller-metrics-*.yaml # Controller metrics Service and ServiceMonitor
     ├── automation-worker.yaml # Standalone worker mode
     ├── configmap.yaml         # Non-secret config
     ├── secret.yaml            # Tokens and credentials

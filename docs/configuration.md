@@ -320,12 +320,16 @@ monitoring:
     enabled: false       # Set to true if using the Prometheus Operator (kube-prometheus-stack)
     namespace: monitoring
     interval: 30s
+  controllerMetrics:
+    port: 9102           # Controller /prometheus/metrics listener (GREENKUBE_CONTROLLER_METRICS_PORT)
   networkPolicy:
     enabled: false       # Restrict selected components to explicit ingress and egress rules
     prometheusNamespace: monitoring
     additionalIngress: []
     additionalEgress: [] # Add narrow rules for external DB, Git provider, or Kubernetes API endpoints.
 ```
+
+`controllerMetrics.port` is the controller's own authenticated `/prometheus/metrics` listener. Recommendation scans and verification run in the controller, so their metrics (`greenkube_optimization_runs_total`, `greenkube_last_successful_optimization_run_timestamp_seconds`, `greenkube_verification_outcomes_total`, ...) are served there, not by the API. The chart sets `GREENKUBE_CONTROLLER_METRICS_PORT` on the controller container (unset, the CLI starts no listener), always renders the ClusterIP Service `<release>-controller-metrics`, and adds a controller ServiceMonitor when `serviceMonitor.enabled` is true. Scrapes use the same `GREENKUBE_API_KEY` bearer token as the API. In the standalone profile the port must differ from `config.api.port` because both containers share the pod network.
 
 `prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 

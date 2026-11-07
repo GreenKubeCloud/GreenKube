@@ -201,6 +201,36 @@ These metrics are process-local. The API's `/prometheus/metrics` endpoint
 includes the registry of the API process serving the scrape; it does not
 aggregate registries from separate controller or automation pods.
 
+Recommendation scans and verification run in the **controller** (the
+`greenkube start` process), so the optimization-run and verification metrics
+below are recorded there and served by the controller's own listener:
+`/prometheus/metrics` on port `9102` (Helm `monitoring.controllerMetrics.port`,
+environment `GREENKUBE_CONTROLLER_METRICS_PORT`). The API endpoint does not
+report them. The chart always renders the internal ClusterIP Service
+`<release>-controller-metrics`; with `monitoring.serviceMonitor.enabled=true`
+it also renders a controller ServiceMonitor next to the API one. The listener
+uses the API's `GREENKUBE_API_KEY` bearer authentication (the key is projected
+into the controller for this purpose), and the optional NetworkPolicy admits
+Prometheus on that port. Without the Prometheus Operator, add a scrape job for
+the controller Service with the same bearer token:
+
+```yaml
+- job_name: greenkube-controller
+  metrics_path: /prometheus/metrics
+  authorization:
+    type: Bearer
+    credentials: <GREENKUBE_API_KEY>
+  static_configs:
+    - targets: ["greenkube-controller-metrics.greenkube.svc:9102"]
+```
+
+Every controller replica serves its registry, but only the Lease holder
+scans: aggregate counters with `sum()` and the last-success timestamp with
+`max()` (standbys report `0`). A run in which only some sources failed still
+ends `succeeded`; the failed sources are counted in
+`greenkube_optimization_analyzer_failures_total` and listed in the run's
+`sources` (`GET /api/v1/optimization/runs/{run_id}`).
+
 | Metric | Type and labels | Description |
 |---|---|---|
 | `greenkube_optimization_runs_total` | Counter; `status` | Completed optimization runs, with status `succeeded` or `failed` |
@@ -210,6 +240,9 @@ aggregate registries from separate controller or automation pods.
 | `greenkube_verification_outcomes_total` | Counter; `outcome` | Verification outcomes, including rollback reviews |
 | `greenkube_verification_health_gate_failures_total` | Counter; `gate` | Verification health-gate failures |
 | `greenkube_last_successful_optimization_run_timestamp_seconds` | Gauge; no labels | Unix timestamp of the last fully successful optimization run |
+| `greenkube_recommendation_scan_window_seconds` | Gauge; no labels | Lookback window used by the latest recommendation scan |
+| `greenkube_recommendation_scan_metric_rows` | Gauge; no labels | Metric rows materialized by the latest recommendation scan |
+| `greenkube_recommendation_scan_resident_memory_bytes` | Gauge; no labels | Controller peak resident memory when the latest scan was built |
 
 ### GitOps and PR-bot lifecycle metrics
 
