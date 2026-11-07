@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 #: Upper bound of hours aggregated in one transaction.
 MAX_HOURS_PER_TRANSACTION = 24
+#: Raw rows are refreshed by the carbon-intensity recompute for this many hours
+#: (``CARBON_RECOMPUTE_WINDOW_HOURS`` in ``cli/start.py``). Compressed hours are
+#: never re-read, so a shorter compression age freezes their hourly carbon
+#: figures before the recompute has consolidated them.
+CARBON_RECOMPUTE_HORIZON_HOURS = 24
 
 _SQLITE_HOUR = "strftime('%Y-%m-%dT%H:00:00Z', {column})"
 _POSTGRES_HOUR = "(date_trunc('hour', {column} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
@@ -182,6 +187,9 @@ CollectionWatermarkProvider = Callable[[], Awaitable[Optional[datetime]]]
 class MetricsCompressor:
     """Compresses raw metrics into hourly aggregates and manages retention."""
 
+    #: The short-compression-age warning is logged once per process.
+    _short_age_warned = False
+
     def __init__(
         self,
         db_manager,
@@ -214,6 +222,7 @@ class MetricsCompressor:
             hourly_rows_pruned.
         """
         now = now or self._now()
+        self._warn_if_compression_precedes_recompute()
         stats = {
             "hours_compressed": 0,
             "rows_compressed": 0,
@@ -260,6 +269,20 @@ class MetricsCompressor:
     @staticmethod
     def _now() -> datetime:
         return datetime.now(timezone.utc)
+
+    def _warn_if_compression_precedes_recompute(self) -> None:
+        age = self._config.METRICS_COMPRESSION_AGE_HOURS
+        if age >= CARBON_RECOMPUTE_HORIZON_HOURS or MetricsCompressor._short_age_warned:
+            return
+        MetricsCompressor._short_age_warned = True
+        logger.warning(
+            "METRICS_COMPRESSION_AGE_HOURS=%d is below the %dh carbon-intensity recompute window: "
+            "hours compressed before their intensity is consolidated keep their provisional or "
+            "default carbon figures. Use %d or more.",
+            age,
+            CARBON_RECOMPUTE_HORIZON_HOURS,
+            CARBON_RECOMPUTE_HORIZON_HOURS,
+        )
 
     async def _compression_limit(self, now: datetime) -> datetime:
         """Exclusive end of the closed hours that may be compressed."""

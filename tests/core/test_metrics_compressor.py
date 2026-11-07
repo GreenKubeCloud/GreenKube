@@ -525,3 +525,34 @@ class TestPostgresCompressionBranches:
         assert _status_count("") == 0
         assert _status_count(None) == 0
         assert _status_count("INSERT 0 7") == 7
+
+
+@pytest.mark.asyncio
+async def test_short_compression_age_warns_once_about_the_carbon_recompute(db, caplog, monkeypatch):
+    """Compressed hours are never re-read: an age below the 24h carbon recompute window freezes hourly carbon."""
+    import logging
+
+    from greenkube.core.config import Config
+
+    monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
+    cfg = Config()
+    cfg.METRICS_COMPRESSION_AGE_HOURS = 6
+    compressor = MetricsCompressor(db_manager=db, config=cfg)
+
+    with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
+        await compressor.run()
+        await compressor.run()
+
+    warnings = [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_compression_age_does_not_warn(db, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
+    with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
+        await MetricsCompressor(db_manager=db).run()
+
+    assert not [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]

@@ -264,6 +264,8 @@ config:
   # --- Metrics Retention & Compression ---
   # Age threshold (hours) after which raw 5-min metrics are compressed
   # into hourly aggregates. Aligns with Electricity Maps hourly granularity.
+  # Keep it >= 24: the carbon-intensity recompute only refreshes raw rows of
+  # the last 24 hours, and compressed hours are never re-read.
   metricsCompressionAgeHours: 24
   # Maximum number of days to retain raw (uncompressed) 5-min metrics.
   # Older raw rows are deleted after compression. Set -1 to disable deletion.
