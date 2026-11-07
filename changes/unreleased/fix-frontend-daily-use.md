@@ -1,11 +1,11 @@
 ### Added
 - **Recommendation filters and ranking on cards (K2):** The recommendations page filters by namespace, source, risk level and capability through the existing `GET /recommendations/active` query parameters (the Ignored tab applies the same filters). Each card shows its ranking score and top contributing factor, with the full factor breakdown on hover.
-- **Rescan with run tracking (K9, E1):** A **Rescan** button requests a scan with `POST /optimization/runs`, polls the run and reloads the results when it completes. A page opened while a scan is running follows that run and reloads on completion. Servers without the runs API fall back to plain reads.
+- **Rescan with run tracking (K9, E1):** A **Rescan** button requests a scan with `POST /optimization/runs`, polls the run and reloads the results when it completes. When the server also offers the optional run list (`GET /optimization/runs?limit=1`), a page opened while a scan is running follows that run and reloads on completion; a missing list never disables Rescan. Only a `404`/`405` from `POST /optimization/runs` makes the button fall back to plain reads.
 - **Sign out (F13):** A **Sign out** button in the sidebar forgets the API key for the current tab.
 
 ### Changed
 - **Truthful sort options (K2, BUG-20):** The default order is labelled **Ranking score (default)** and keeps the server order. **Projected cost savings** and **Projected CO₂e savings** are explicit sorts; ranking profiles are labelled as profiles and show their own scores.
-- **Plan previews are discarded on close (D6, BUG-48):** Closing the dialog of an unapproved preview calls `DELETE /automation/plans/{id}` (older servers: `POST /automation/plans/{id}/cancel`). A `409 WORKLOAD_PLAN_ALREADY_EXISTS` now explains what blocks the preview and when to retry.
+- **Plan previews are discarded on close (D6, BUG-48):** Closing the dialog of an unapproved preview calls `DELETE /automation/plans/{id}`. A plan whose approval was requested is never discarded, even when the dialog closes while the approval is in flight, and there is no fallback to the cancel endpoint (which also cancels approved plans). A `409 WORKLOAD_PLAN_ALREADY_EXISTS` now explains what blocks the preview and when to retry.
 - **Connectivity popup:** Its dismissal is remembered for the browser tab session instead of reappearing on every reload (K9).
 
 ### Fixed
