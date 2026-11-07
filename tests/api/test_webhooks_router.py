@@ -445,12 +445,24 @@ def test_unlinked_webhook_is_terminally_ignored(webhook_client, action):
         return SimpleNamespace(outcome=SimpleNamespace(value="unlinked"))
 
     app.state.pull_request_lifecycle_reconciler = SimpleNamespace(reconcile=reconcile)
+    from greenkube.core.observability import REGISTRY
+
+    def sample(name: str, labels: dict[str, str]) -> float:
+        return REGISTRY.get_sample_value(name, labels) or 0.0
+
+    ignored_before = sample("greenkube_webhook_deliveries_total", {"status": "ignored"})
+    error_before = sample("greenkube_webhook_deliveries_total", {"status": "error"})
+    failures_before = sample("greenkube_automation_failures_total", {"reason": "webhook"})
 
     response = client.post("/api/v1/webhooks/provider-main", content=b"{}")
 
     assert response.status_code == 202
     assert response.json()["status"] == "ignored"
     assert response.json()["lifecycle"] == "unlinked"
+    # Counted as ignored, never as an error or an automation failure.
+    assert sample("greenkube_webhook_deliveries_total", {"status": "ignored"}) == ignored_before + 1
+    assert sample("greenkube_webhook_deliveries_total", {"status": "error"}) == error_before
+    assert sample("greenkube_automation_failures_total", {"reason": "webhook"}) == failures_before
     stored = repository.deliveries[(event.provider_id, event.delivery_id)]
     assert stored.status == "ignored"
     assert stored.processed_at is not None
