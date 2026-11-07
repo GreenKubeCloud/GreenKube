@@ -179,19 +179,15 @@ class HistoricalRangeProcessor:
         )
 
     async def _collect_cpu(self, chunk: CollectionWindow):
-        """Container CPU series; falls back to the pod cgroup series (counted once)."""
+        """Container CPU series, or the pod cgroup series (counted once) when no container series exist.
+
+        A query error fails the window instead of degrading to the fallback, so a
+        transient outage never stores a window without its container breakdown.
+        """
         try:
             results = await self._query_range(chunk, self._promql.container_cpu_usage())
             if results:
                 return results
-        except Exception as error:
-            logger.warning(
-                "Container CPU range query failed for %s -> %s (%s); trying the pod cgroup series.",
-                chunk.start,
-                chunk.end,
-                error,
-            )
-        try:
             return await self._query_range(chunk, self._promql.pod_cgroup_cpu_usage())
         except Exception as error:
             raise RangeCollectionError(

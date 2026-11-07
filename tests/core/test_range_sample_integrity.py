@@ -260,3 +260,18 @@ async def test_unresolvable_node_uses_default_profile_and_is_reported(make_proce
     assert pod.node is None
     assert any("DEFAULT_INSTANCE_PROFILE" in reason for reason in pod.estimation_reasons)
     assert collection_telemetry.UNKNOWN_POWER_PROFILE_NODES._value.get() == 1
+
+
+@pytest.mark.asyncio
+async def test_container_cpu_query_error_fails_the_window_instead_of_degrading(make_processor):
+    from greenkube.core.historical_range_processor import RangeCollectionError
+
+    prom = FakePrometheus()
+    prom.add("container_cpu_usage_seconds_total", {**POD_LABELS, "container": "app"}, 0.2)
+    prom.add("container_cpu_usage_seconds_total", POD_LABELS, 0.2)
+    prom.fail_queries_containing = ('container_cpu_usage_seconds_total{container!=""',)
+    processor = await make_processor(prom)
+
+    with pytest.raises(RangeCollectionError):
+        await processor.run_range(BASE, BASE + STEP)
+    assert not any('container=""' in query for query, *_ in prom.queries)
