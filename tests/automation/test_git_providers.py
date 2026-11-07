@@ -1841,3 +1841,62 @@ async def test_portable_tree_fallback_compares_listed_files_by_blob_identity():
     assert provider.reads == 3
     with pytest.raises(GitProviderCapabilityError):
         await provider.is_ancestor(repo, ANCESTOR, DESCENDANT)
+
+
+HEAD_SHA = "e" * 40
+SQUASH_SHA = "5" * 40
+MERGE_COMMIT_SHA = "f" * 40
+
+
+def _gitlab_merged_request(**overrides):
+    payload = {
+        "iid": 7,
+        "web_url": "https://gitlab.com/acme/manifests/-/merge_requests/7",
+        "state": "merged",
+        "merged_at": "2026-10-21T12:30:00Z",
+        "source_branch": "greenkube/plan/branch",
+        "target_branch": "main",
+        "sha": HEAD_SHA,
+        "merge_commit_sha": None,
+        "squash_commit_sha": None,
+        "squash": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("overrides", "merge_method", "expected_sha", "expected_source", "project_reads"),
+    [
+        (
+            {"merge_commit_sha": MERGE_COMMIT_SHA, "squash_commit_sha": SQUASH_SHA},
+            None,
+            MERGE_COMMIT_SHA,
+            "merge_commit",
+            0,
+        ),
+        ({"squash_commit_sha": SQUASH_SHA, "squash": True}, None, SQUASH_SHA, "squash_commit", 0),
+        ({}, "ff", HEAD_SHA, "fast_forward_head", 1),
+        ({}, "merge", None, None, 1),
+        ({"squash": True}, "ff", None, None, 0),
+        ({"state": "closed", "merged_at": None, "merge_commit_sha": MERGE_COMMIT_SHA}, None, None, None, 0),
+    ],
+    ids=["merge-commit", "squash", "fast-forward", "missing-merge-commit", "squash-without-sha", "closed"],
+)
+@pytest.mark.asyncio
+@respx.mock
+async def test_bug_46_gitlab_resolves_the_landed_commit_of_squash_and_fast_forward_merges(
+    overrides, merge_method, expected_sha, expected_source, project_reads
+):
+    api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests"
+    respx.get(f"{api}/merge_requests/7").mock(return_value=Response(200, json=_gitlab_merged_request(**overrides)))
+    project_route = respx.get(api).mock(return_value=Response(200, json={"merge_method": merge_method}))
+    provider = GitLabProvider("token")
+    repo = GitRepository(provider="gitlab", owner="acme", name="manifests")
+
+    pull_request = await provider.get_pull_request(repo, 7)
+
+    assert pull_request.merge_commit_sha == expected_sha
+    assert pull_request.merge_commit_source == expected_source
+    assert project_route.call_count == project_reads
+    await provider.close()

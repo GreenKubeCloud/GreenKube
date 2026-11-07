@@ -73,6 +73,7 @@ class MemoryLifecycleRepository:
         self.plan_lookups: list[str] = []
         self.pull_request_updates: list[tuple[int, dict[str, object]]] = []
         self.plan_updates: list[tuple[str, PlanStatus]] = []
+        self.reason_codes: list[str | None] = []
         self.action_updates: list[tuple[list[int], ActionStatus]] = []
 
     async def get_pull_request_by_provider_reference(
@@ -135,6 +136,7 @@ class MemoryLifecycleRepository:
         if plan is None:
             return None
         self.plan_updates.append((plan_id, status))
+        self.reason_codes.append(reason_code)
         plan.status = status
         return plan
 
@@ -674,3 +676,78 @@ async def test_bug_45_polled_pr_closed_without_merge_closes_the_plan():
     assert result.outcome is PullRequestLifecycleOutcome.CLOSED
     assert repository.plans[PLAN_ID].status is PlanStatus.CLOSED
     assert all(record.merge_commit_sha is None for record in repository.records)
+
+
+FAST_FORWARD_HEAD = "e" * 40
+SQUASH_COMMIT = "5" * 40
+
+
+def _gitlab_merged_state(landed_sha: str | None, source: str | None) -> PullRequestInfo:
+    """GitLab merge request merged without a merge commit, as the adapter normalizes it."""
+    raw: dict[str, object] = {
+        "iid": PR_NUMBER,
+        "state": "merged",
+        "merged_at": MERGED_AT.isoformat(),
+        "merge_commit_sha": None,
+        "squash_commit_sha": SQUASH_COMMIT if source == "squash_commit" else None,
+        "sha": FAST_FORWARD_HEAD,
+    }
+    return PullRequestInfo(
+        number=PR_NUMBER,
+        url=f"https://gitlab.com/{REPO}/-/merge_requests/{PR_NUMBER}",
+        status="merged",
+        merged=True,
+        raw=raw,
+        merge_commit_sha=landed_sha,
+        merge_commit_source=source,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("landed_sha", "source", "reason_code"),
+    [
+        (FAST_FORWARD_HEAD, "fast_forward_head", "pull_request_merged_fast_forward_head"),
+        (SQUASH_COMMIT, "squash_commit", "pull_request_merged_squash_commit"),
+    ],
+)
+async def test_bug_46_gitlab_merge_without_merge_commit_moves_to_merged_and_records_the_source(
+    landed_sha, source, reason_code
+):
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_gitlab_merged_state(landed_sha, source))
+    reconciler = _reconciler(repository, provider)
+    # GitLab webhooks of fast-forward and squash merges carry no merge commit SHA.
+    event = _event(merged=True).model_copy(update={"merge_commit_sha": None})
+
+    result = await reconciler.reconcile(event, newly_deduplicated=True)
+
+    assert result.outcome is PullRequestLifecycleOutcome.MERGED
+    assert repository.plans[PLAN_ID].status is PlanStatus.MERGED
+    assert repository.reason_codes == [reason_code]
+    assert all(record.merge_commit_sha == landed_sha for record in repository.records)
+    assert all(record.sync_status is None for record in repository.records)
+    assert set(repository.action_statuses.values()) == {ActionStatus.MERGED}
+
+
+@pytest.mark.asyncio
+async def test_polled_gitlab_fast_forward_merge_uses_the_landed_head_commit():
+    repository = MemoryLifecycleRepository()
+    provider = MemoryGitProvider(_gitlab_merged_state(FAST_FORWARD_HEAD, "fast_forward_head"))
+    reconciler = _reconciler(repository, provider)
+
+    result = await reconciler.reconcile_polled(PROVIDER_ID, REPO, PR_NUMBER)
+
+    assert result.outcome is PullRequestLifecycleOutcome.MERGED
+    assert repository.reason_codes == ["pull_request_merged_fast_forward_head"]
+    assert all(record.merge_commit_sha == FAST_FORWARD_HEAD for record in repository.records)
+
+
+@pytest.mark.asyncio
+async def test_merge_commit_reason_code_is_unchanged_for_regular_merges():
+    repository = MemoryLifecycleRepository()
+    reconciler = _reconciler(repository, MemoryGitProvider(_provider_state(merged=True)))
+
+    await reconciler.reconcile(_event(merged=True), newly_deduplicated=True)
+
+    assert repository.reason_codes == ["pull_request_merged"]
