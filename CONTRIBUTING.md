@@ -107,7 +107,7 @@ git merge --no-ff dev -m "chore: merge dev into main for release ${RELEASE_VERSI
 
 The script will:
 1. Bump the version in `pyproject.toml` and all synced files (`Chart.yaml`, `values.yaml`, `__init__.py`, …)
-2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[<version>]` header
+2. Move the `[Unreleased]` section in `CHANGELOG.md` to a dated `[<version>]` header and regenerate the Helm chart's Artifact Hub changes list from it (`scripts/artifacthub_changes.py`)
 3. Commit everything as `chore: release v<version>`
 4. Create an annotated git tag `v<version>`
 
@@ -118,9 +118,9 @@ git push origin main --tags
 ```
 
 Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
-- Runs the full test + lint suite (gate)
-- Builds and pushes `greenkube/greenkube:<version>` + `:latest` to Docker Hub
-- Packages and publishes the Helm chart to GitHub Pages
+- Runs the full test + lint suite, the 80% coverage gate, the Helm checks and the frontend tests and build (gates)
+- Builds and pushes `greenkube/greenkube:<version>` to Docker Hub, plus `:latest` when the tag is the highest release
+- Regenerates the chart's `artifacthub.io/changes` from the CHANGELOG, then packages and publishes the Helm chart to GitHub Pages
 - Creates a GitHub Release with the changelog notes extracted automatically
 
 ### Docker Tag Summary
@@ -130,7 +130,7 @@ Pushing the `vX.Y.Z` tag triggers the `release.yml` workflow which:
 | `dev-<sha>` | Every push to `dev` | Staging / testing latest dev work |
 | `dev-latest` | Every push to `dev` | Stable pointer to latest dev |
 | `<version>` | Push of `v<version>` tag | Pinned production image |
-| `latest` | Push of any vX.Y.Z tag | Latest stable release |
+| `latest` | Push of the highest vX.Y.Z tag | Latest stable release |
 
 ### Code Style
 

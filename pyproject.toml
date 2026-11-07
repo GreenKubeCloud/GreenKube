@@ -158,8 +158,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Fail if total coverage drops below this percentage
-fail_under = 70
+# Fail if total coverage drops below this percentage (enforced by pytest-cov in CI)
+fail_under = 80
 show_missing = true
 skip_covered = false
 

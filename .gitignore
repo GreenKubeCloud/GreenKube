@@ -234,3 +234,6 @@ current_task.md
 docs/ga-qualification.md
 scripts/leads/
 openapi-wattnet.json
+
+# Generated coverage reports
+coverage.json
