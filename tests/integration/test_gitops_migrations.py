@@ -796,7 +796,7 @@ async def test_legacy_automation_state_backfill_and_quarantine_are_idempotent(tm
         await runner._execute_sql(connection, migration_sql)
         await runner._record_migration(connection, 34, "legacy_automation_state")
         await connection.commit()
-        assert await runner.run(connection) == 3
+        assert await runner.run(connection) == len([v for v, _, _ in runner._discover_scripts() if v > 34])
         assert await runner.run(connection) == 0
 
     with sqlite3.connect(db_file) as connection:
