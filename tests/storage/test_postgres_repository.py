@@ -176,11 +176,14 @@ async def test_recompute_carbon_with_latest_intensities(combined_repository, con
         end,  # type: ignore[arg-type]  # SQL path ignores the carbon repo
     )
 
-    assert result == 7
-    connection_mock.fetchval.assert_awaited_once()
-    query, params = connection_mock.fetchval.await_args.args[0], connection_mock.fetchval.await_args.args[1:]
-    assert "UPDATE combined_metrics" in query
-    assert "carbon_intensity_history" in query
+    # One set-based UPDATE for pod rows and one for container rows (A9, BUG-06).
+    assert result == 14
+    assert connection_mock.fetchval.await_count == 2
+    queries = [call.args[0] for call in connection_mock.fetchval.await_args_list]
+    assert "UPDATE combined_metrics" in queries[0]
+    assert "UPDATE container_metrics" in queries[1]
+    assert all("carbon_intensity_history" in query for query in queries)
+    params = connection_mock.fetchval.await_args.args[1:]
     assert params[1] == start
     assert params[2] == end
 
@@ -198,7 +201,7 @@ async def test_recompute_carbon_with_namespace(combined_repository, connection_m
         namespace="target-ns",  # type: ignore[arg-type]
     )
 
-    assert result == 2
+    assert result == 4
     query, params = connection_mock.fetchval.await_args.args[0], connection_mock.fetchval.await_args.args[1:]
-    assert "cm.namespace = $4" in query
-    assert params[3] == "target-ns"
+    assert "t.namespace = $6" in query
+    assert params[5] == "target-ns"
