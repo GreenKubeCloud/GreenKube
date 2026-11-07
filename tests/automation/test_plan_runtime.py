@@ -313,6 +313,14 @@ async def test_production_composition_shares_typed_repositories_and_authorized_s
     )
     assert runtime.plan_service.worker is runtime.worker
     assert isinstance(runtime.plan_service._plan_service.planner, RawManifestPlanner)
+    # D14 / BUG-54: Kustomize rollback is wired to the planner's sandboxed renderer.
+    from greenkube.automation.rollback import KustomizeRollbackRenderer
+    from greenkube.gitops.renderers.sandbox import SandboxRunner
+
+    rollback_renderer = runtime.plan_service._rollback_renderer
+    assert isinstance(rollback_renderer, KustomizeRollbackRenderer)
+    assert rollback_renderer._renderer is runtime.plan_service._plan_service.kustomize_planner.renderer
+    assert isinstance(rollback_renderer._renderer._runner, SandboxRunner)
     assert runtime.plan_service._plan_service.operation_enqueuer is operations
     assert gitops.allowlists["github-main"] == {"acme/gitops", "acme/platform"}
 
@@ -1368,6 +1376,17 @@ spec:
         await unconfigured_service.prepare_rollback(original_plan.plan_id)
     assert error.value.code is AutomationErrorCode.ROLLBACK_UNSUPPORTED
     assert snapshot_resolver.calls == 0
+
+    # A plan service with a Kustomize planner supplies the exact adapter itself (D14).
+    from greenkube.automation.plan_runtime import kustomize_rollback_renderer
+    from greenkube.automation.rollback import KustomizeRollbackRenderer
+    from greenkube.gitops.planning.kustomize import KustomizePlanner
+
+    planner_backed = SimpleNamespace(planners={RendererKind.KUSTOMIZE: KustomizePlanner()})
+    derived = kustomize_rollback_renderer(planner_backed)
+    assert isinstance(derived, KustomizeRollbackRenderer)
+    assert derived._renderer is planner_backed.planners[RendererKind.KUSTOMIZE].renderer
+    assert kustomize_rollback_renderer(SimpleNamespace(planners={})) is None
 
     service = RuntimePlanService(
         recommendation_repository=cast(Any, Recommendations()),

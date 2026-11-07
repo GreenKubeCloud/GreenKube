@@ -57,6 +57,7 @@ from greenkube.automation.rollback import (
     ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY,
     FluxHelmReleaseRollbackRenderer,
     HelmValuesRollbackRenderer,
+    KustomizeRollbackRenderer,
     RollbackConflictError,
     RollbackPlanError,
     RollbackRenderer,
@@ -89,6 +90,7 @@ from greenkube.gitops.contracts import (
 from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanner
+from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.snapshots import (
     RepositorySnapshot,
     SnapshotError,
@@ -769,6 +771,10 @@ class RuntimePlanService:
         rollback_renderer = self._rollback_renderer
         if source.renderer is RendererKind.RAW and getattr(rollback_renderer, "renderer", None) is not RendererKind.RAW:
             rollback_renderer = None
+        if source.renderer is RendererKind.KUSTOMIZE and getattr(rollback_renderer, "renderer", None) is not (
+            RendererKind.KUSTOMIZE
+        ):
+            rollback_renderer = kustomize_rollback_renderer(self._plan_service, snapshot_limits=self._snapshot_limits)
         if source.renderer is RendererKind.KUSTOMIZE and (
             rollback_renderer is None
             or getattr(rollback_renderer, "renderer", None) is not RendererKind.KUSTOMIZE
@@ -1655,7 +1661,9 @@ async def create_plan_runtime(
         snapshot_resolver=snapshot_resolver,
         plan_service=plan_service,
         worker=worker,
-        rollback_renderer=rollback_renderer,
+        # Kustomize rollbacks render through the same isolated sandbox backend as planning (D14).
+        rollback_renderer=rollback_renderer
+        or kustomize_rollback_renderer(plan_service, snapshot_limits=snapshot_limits),
         snapshot_limits=snapshot_limits,
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
@@ -1674,6 +1682,24 @@ async def create_plan_runtime(
         plan_service=api_plan_service,
         worker=worker,
     )
+
+
+def kustomize_rollback_renderer(
+    plan_service: Any,
+    *,
+    snapshot_limits: SnapshotLimits | None = None,
+) -> KustomizeRollbackRenderer | None:
+    """Exact-target Kustomize rollback adapter over the plan service's own Kustomize renderer.
+
+    Reusing the planner's renderer keeps rollback renders on the same sandboxed backend and
+    pinned Kustomize version as forward plans (D14, BUG-54).
+    """
+    planners = getattr(plan_service, "planners", None)
+    planner = planners.get(RendererKind.KUSTOMIZE) if isinstance(planners, Mapping) else None
+    renderer = getattr(planner, "renderer", None)
+    if not isinstance(renderer, KustomizeRenderer):
+        return None
+    return KustomizeRollbackRenderer(renderer, snapshot_limits=snapshot_limits)
 
 
 async def get_plan_service(**runtime_options: Any) -> RuntimePlanService:
