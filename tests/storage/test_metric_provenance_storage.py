@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from greenkube.core.metrics_compressor import MetricsCompressor
 from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.provenance import is_cost_trusted, is_usage_trusted
+from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.storage.postgres.repository import PostgresCarbonIntensityRepository, PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCarbonIntensityRepository, SQLiteCombinedMetricsRepository
 from greenkube.utils.time import to_iso_z
@@ -331,3 +333,66 @@ async def test_legacy_default_fallback_row_does_not_hide_an_older_measurement(db
     (row,) = await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))
     assert row.grid_intensity == pytest.approx(40.0)
     assert row.intensity_source == "consolidated"
+
+
+@pytest.mark.parametrize("implementation", ["sql", "python_fallback"])
+async def test_recompute_drops_the_intensity_default_reason(db, implementation):
+    """A row moved from a default to a measured intensity no longer claims the default in its legacy flags."""
+    repo, carbon = _repos(db)
+    recompute = (
+        repo.recompute_carbon_with_latest_intensities
+        if implementation == "sql"
+        else partial(CombinedMetricsRepository.recompute_carbon_with_latest_intensities, repo)
+    )
+    sample = T0 + timedelta(minutes=10)
+    default_reason = "Carbon intensity uses the zone default"
+    other_reason = "No PUE profile for provider 'aws'. Used default PUE 1.2"
+    defaulted: dict[str, Any] = {
+        "grid_intensity": 26.0,
+        "co2e_grams": 26.0,
+        "intensity_source": "zone_default",
+        "is_estimated": True,
+        "estimation_reasons": [default_reason],
+    }
+    await repo.write_combined_metrics(
+        [
+            _pod_row(sample, **defaulted),
+            _container_row(sample, **defaulted),
+            _pod_row(
+                sample, **{**defaulted, "pod_name": "api-0", "estimation_reasons": [other_reason, default_reason]}
+            ),
+        ]
+    )
+    await carbon.save_history([{"carbonIntensity": 40.0, "datetime": T0.isoformat(), "isEstimated": True}], "FR")
+
+    assert await recompute(carbon, T0, T0 + timedelta(hours=1)) == 3
+
+    pods = {row.pod_name: row for row in await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))}
+    (container,) = await repo.read_container_metrics(T0, T0 + timedelta(hours=1))
+    for row in (pods["redis-0"], container):
+        assert row.intensity_source == "realtime"
+        assert row.grid_intensity == pytest.approx(40.0)
+        assert row.estimation_reasons == []
+        assert row.is_estimated is False
+    assert pods["api-0"].estimation_reasons == [other_reason]
+    assert pods["api-0"].is_estimated is True
+    assert await recompute(carbon, T0, T0 + timedelta(hours=1)) == 0
+
+
+async def test_recompute_survives_malformed_legacy_reasons(db):
+    repo, carbon = _repos(db)
+    sample = T0 + timedelta(minutes=10)
+    await repo.write_combined_metrics([_pod_row(sample, intensity_source="zone_default", is_estimated=True)])
+    malformed = '["Carbon intensity uses the zone default"'
+    async with db.connection_scope() as conn:
+        if db.db_type == "postgres":
+            await conn.execute("UPDATE combined_metrics SET estimation_reasons = $1", malformed)
+        else:
+            await conn.execute("UPDATE combined_metrics SET estimation_reasons = ?", (malformed,))
+            await conn.commit()
+    await carbon.save_history([{"carbonIntensity": 40.0, "datetime": T0.isoformat(), "isEstimated": True}], "FR")
+
+    assert await repo.recompute_carbon_with_latest_intensities(carbon, T0, T0 + timedelta(hours=1)) == 1
+    (row,) = await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))
+    assert row.intensity_source == "realtime"
+    assert row.is_estimated is True

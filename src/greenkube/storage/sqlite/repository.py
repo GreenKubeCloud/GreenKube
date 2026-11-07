@@ -8,6 +8,7 @@ import aiosqlite
 
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
+from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
@@ -1181,11 +1182,17 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         lookup_formats = {"hour": "%Y-%m-%dT%H:00:00Z", "day": "%Y-%m-%dT00:00:00Z"}
         lookup_format = lookup_formats.get(getattr(cfg, "NORMALIZATION_GRANULARITY", "hour"), "%Y-%m-%dT%H:%M:%SZ")
         max_age_seconds = cfg.intensity_max_age.total_seconds()
+        prefix = INTENSITY_FALLBACK_REASON_PREFIX
         total = 0
         try:
             async with self.db_manager.connection_scope() as conn:
                 for table in ("combined_metrics", "container_metrics"):
                     ns_clause = "AND namespace = ?" if namespace else ""
+                    # Legacy flags: drop the intensity-default reason, and clear
+                    # is_estimated when it was the only one (rows written by json.dumps).
+                    reasons = f"{table}.estimation_reasons"
+                    has_fallback_reason = f"""json_valid({reasons}) AND {reasons} LIKE '[%"{prefix}%]'"""
+                    other_reasons = f"FROM json_each({reasons}) AS r WHERE r.value NOT LIKE '{prefix}%'"
                     params: list[Any] = [to_iso_z(start_time), to_iso_z(end_time)]
                     if namespace:
                         params.append(namespace)
@@ -1221,7 +1228,13 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         SET grid_intensity = fresh.intensity,
                             co2e_grams = (COALESCE({table}.joules, 0) / ?)
                                          * COALESCE({table}.pue, ?) * fresh.intensity,
-                            intensity_source = fresh.source
+                            intensity_source = fresh.source,
+                            estimation_reasons = CASE WHEN {has_fallback_reason}
+                                THEN (SELECT json_group_array(r.value) {other_reasons})
+                                ELSE {reasons} END,
+                            is_estimated = CASE WHEN {has_fallback_reason}
+                                THEN CASE WHEN EXISTS (SELECT 1 {other_reasons}) THEN {table}.is_estimated ELSE 0 END
+                                ELSE {table}.is_estimated END
                         FROM fresh
                         WHERE {table}.id = fresh.row_id
                           AND ({table}.grid_intensity IS NOT fresh.intensity

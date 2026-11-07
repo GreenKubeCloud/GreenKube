@@ -6,6 +6,7 @@ from typing import Any, List, Mapping, Optional
 from ...core.exceptions import QueryError
 from ...core.observability import record_metric_provenance
 from ...models.metrics import CombinedMetric
+from ...models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
 from ..base_repository import (
     CarbonIntensityRepository,
     CombinedMetricsRepository,
@@ -1504,6 +1505,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             lookup_expr = f"date_trunc('{granularity}', t.timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
         else:
             lookup_expr = "t.timestamp"
+        prefix = INTENSITY_FALLBACK_REASON_PREFIX
+        # Legacy flags: drop the intensity-default reason and clear is_estimated when it
+        # was the only one. Nested CASEs keep the jsonb cast to rows written by json.dumps.
+        has_fallback_reason = f"""t.estimation_reasons LIKE '[%"{prefix}%]'"""
+        other_reasons = (
+            "FROM jsonb_array_elements_text(t.estimation_reasons::jsonb) WITH ORDINALITY AS r(value, ord) "
+            f"WHERE r.value NOT LIKE '{prefix}%'"
+        )
         total = 0
         try:
             async with self.db_manager.connection_scope() as conn, conn.transaction():
@@ -1537,7 +1546,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             UPDATE {table} AS t
                             SET grid_intensity = f.intensity,
                                 co2e_grams = (COALESCE(t.joules, 0) / $5) * COALESCE(t.pue, $1) * f.intensity,
-                                intensity_source = f.source
+                                intensity_source = f.source,
+                                estimation_reasons = CASE WHEN {has_fallback_reason}
+                                    THEN (SELECT COALESCE(jsonb_agg(r.value ORDER BY r.ord), '[]'::jsonb)::text
+                                          {other_reasons})
+                                    ELSE t.estimation_reasons END,
+                                is_estimated = CASE WHEN {has_fallback_reason}
+                                    THEN CASE WHEN EXISTS (SELECT 1 {other_reasons}) THEN t.is_estimated ELSE FALSE END
+                                    ELSE t.is_estimated END
                             FROM fresh AS f
                             WHERE t.id = f.row_id
                               AND (t.grid_intensity IS DISTINCT FROM f.intensity

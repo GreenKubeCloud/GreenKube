@@ -16,7 +16,13 @@ from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
-from ..models.provenance import IntensitySource, PowerSource, UsageSource, cost_source_for
+from ..models.provenance import (
+    INTENSITY_FALLBACK_REASON_PREFIX,
+    IntensitySource,
+    PowerSource,
+    UsageSource,
+    cost_source_for,
+)
 from ..storage.base_repository import CarbonIntensityRepository
 from ..utils.date_utils import parse_iso_date
 
@@ -84,7 +90,7 @@ def provenance_estimation_reasons(intensity_source: Optional[str], power_source:
     """Explain intensity and power fallbacks in the legacy ``estimation_reasons`` list."""
     reasons: List[str] = []
     if intensity_source in _DEFAULTED_INTENSITY:
-        reasons.append(f"Carbon intensity uses the {_DEFAULTED_INTENSITY[intensity_source]}")
+        reasons.append(f"{INTENSITY_FALLBACK_REASON_PREFIX}{_DEFAULTED_INTENSITY[intensity_source]}")
     if power_source == PowerSource.DEFAULT_PROFILE.value:
         reasons.append("Node power profile unknown; used the default instance profile")
     return reasons

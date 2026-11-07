@@ -42,8 +42,14 @@ Each metric row records where its grid intensity came from (`intensity_source`):
 
 Defaults are computed when metrics are calculated and are never written into
 the intensity history, so a missing token or a provider outage cannot pass for
-measured data. The hourly recompute refreshes pod **and** container rows of the
-last 24 hours with the latest fresh values. `power_source` records whether the
+measured data. Defaults that earlier versions stored there
+(`estimation_method = default_fallback`) are deleted by the upgrade and ignored
+by every lookup. The hourly recompute refreshes pod **and** container rows of the
+last 24 hours with the latest fresh values; a row that moves from a default to a
+measured value also loses the "Carbon intensity uses the ..." entry of the
+deprecated `estimation_reasons` (and `is_estimated` when that was its only
+reason). Rows already compressed into hourly aggregates are not recomputed, so
+keep `METRICS_COMPRESSION_AGE_HOURS` at 24 or more. `power_source` records whether the
 node used a known instance profile (`instance_profile`), a profile derived from
 its capacity (`node_capacity_derived`) or the generic default (`default_profile`).
 

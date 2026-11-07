@@ -614,10 +614,14 @@ class CombinedMetricsRepository(ABC):
         rows are refreshed with the same rule so they never drift from their
         pod aggregate (A9, BUG-06).
 
-        Only points younger than ``INTENSITY_MAX_AGE`` at the row's normalized
-        lookup time are applied; rows without such a point keep their current
+        Only measured points younger than ``INTENSITY_MAX_AGE`` at the row's
+        normalized lookup time are applied (persisted ``default_fallback``
+        records are ignored); rows without such a point keep their current
         figures and provenance. Rows whose intensity and provenance are
-        unchanged are left untouched.
+        unchanged are left untouched. An updated row also loses the
+        "Carbon intensity uses the ..." entry of the deprecated
+        ``estimation_reasons``, and ``is_estimated`` is cleared when that was
+        its only reason.
 
         Default implementation loads rows and recomputes in Python. SQL
         backends override this with set-based UPDATE statements.
@@ -632,7 +636,7 @@ class CombinedMetricsRepository(ABC):
             The number of pod and container rows whose carbon figures were updated.
         """
         from ..core.config import get_config
-        from ..models.provenance import IntensitySource
+        from ..models.provenance import IntensitySource, drop_intensity_fallback_reasons
 
         cfg = get_config()
         max_age = cfg.intensity_max_age
@@ -663,6 +667,11 @@ class CombinedMetricsRepository(ABC):
                 m.grid_intensity = point.value
                 m.co2e_grams = kwh * pue * point.value
                 m.intensity_source = source.value
+                # The intensity is measured now: the default no longer explains the legacy flags.
+                kept = drop_intensity_fallback_reasons(m.estimation_reasons)
+                if len(kept) != len(m.estimation_reasons or []):
+                    m.estimation_reasons = kept
+                    m.is_estimated = bool(m.is_estimated) and bool(kept)
                 changed.append(m)
             return changed
 

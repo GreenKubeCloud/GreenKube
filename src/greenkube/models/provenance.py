@@ -77,6 +77,16 @@ MEASURED_POWER_SOURCES: frozenset[str] = frozenset(
 
 PROVENANCE_FIELDS: tuple[str, ...] = ("cost_source", "usage_source", "power_source", "intensity_source")
 
+#: Start of the legacy ``estimation_reasons`` entry written when the carbon
+#: intensity was a default or a stale value. The intensity recompute removes it
+#: once a measured value replaces the default.
+INTENSITY_FALLBACK_REASON_PREFIX = "Carbon intensity uses the "
+
+
+def drop_intensity_fallback_reasons(reasons: Optional[Iterable[str]]) -> list[str]:
+    """Return ``reasons`` without the intensity fallback entries."""
+    return [reason for reason in reasons or [] if not str(reason).startswith(INTENSITY_FALLBACK_REASON_PREFIX)]
+
 
 def _value(row: Any, field: str) -> Any:
     if isinstance(row, dict):
@@ -154,6 +164,7 @@ def cost_source_for(cost_found: bool) -> CostSource:
 
 __all__ = [
     "ALLOCATED_COST_SOURCES",
+    "INTENSITY_FALLBACK_REASON_PREFIX",
     "MEASURED_INTENSITY_SOURCES",
     "MEASURED_POWER_SOURCES",
     "MEASURED_USAGE_SOURCES",
@@ -167,6 +178,7 @@ __all__ = [
     "UsageSource",
     "combine_sources",
     "cost_source_for",
+    "drop_intensity_fallback_reasons",
     "is_cost_trusted",
     "is_intensity_measured",
     "is_power_profiled",
