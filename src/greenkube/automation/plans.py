@@ -64,6 +64,7 @@ _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanS
 _STALEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _BUSY_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED, PlanStatus.SYNCED})
+_EXPIRY_BATCH_SIZE = 500
 _REPLANABLE_STATUSES = frozenset(
     {PlanStatus.CLOSED, PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
 )
@@ -582,12 +583,11 @@ class AutomationPlanService:
                     "the existing rollback plan is no longer actionable at this source revision",
                 )
             return existing
+        # Workload-scoped read (idx_automation_plans_workload) instead of every plan (D15, BUG-57).
         busy = [
             candidate
-            for candidate in await self.repository.list_plans()
+            for candidate in await self._workload_plans(source, _BUSY_STATUSES)
             if candidate.plan_id != original_plan.plan_id
-            and _same_workload_binding(candidate.source, source)
-            and candidate.status in _BUSY_STATUSES
         ]
         if busy:
             raise AutomationPlanError(
@@ -720,15 +720,40 @@ class AutomationPlanService:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
-    async def expire_due_plans(self, *, now: datetime | None = None) -> list[Plan]:
+    async def expire_due_plans(self, *, now: datetime | None = None, limit: int = _EXPIRY_BATCH_SIZE) -> list[Plan]:
+        """Mark at most ``limit`` plans whose TTL elapsed as STALE, oldest expiry first.
+
+        The repository selects only expired rows through ``idx_automation_plans_status_expiry``
+        instead of loading every live plan on each sweep (D15, BUG-57); the next sweep picks up
+        any remainder.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("plan expiry limit must be a positive integer")
         current_time = _as_utc(now if now is not None else self.clock())
+        statuses = sorted(_EXPIREABLE_STATUSES, key=lambda status: status.value)
+        expired_reader = getattr(self.repository, "list_expired_plans", None)
+        if callable(expired_reader):
+            candidates = await cast(Any, expired_reader)(now=current_time, statuses=statuses, limit=limit)
+        else:
+            candidates = [plan for status in statuses for plan in await self.repository.list_plans(status=status)]
+        due = sorted(
+            (
+                plan
+                for plan in candidates
+                if plan.status in _EXPIREABLE_STATUSES
+                and plan.expires_at is not None
+                and _as_utc(plan.expires_at) <= current_time
+            ),
+            key=lambda item: (_as_utc(cast(datetime, item.expires_at)), item.plan_id),
+        )[:limit]
         expired: list[Plan] = []
-        for status in _EXPIREABLE_STATUSES:
-            for plan in await self.repository.list_plans(status=status):
-                if plan.expires_at is None or _as_utc(plan.expires_at) > current_time:
-                    continue
+        for plan in due:
+            try:
                 transitioned = await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
-                expired.append(transitioned)
+            except AutomationPlanError:
+                # A concurrent approval or replica already moved the plan; it is no longer due.
+                continue
+            expired.append(transitioned)
         return sorted(expired, key=lambda item: (item.created_at, item.plan_id))
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:

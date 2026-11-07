@@ -381,16 +381,25 @@ class AutomationPolicyEvaluator:
         if self.plan_repository is None:
             self._reject_missing_history(add_check)
         else:
+            # One indexed, batched read returns plans with their ``updated_at`` so cooldowns
+            # need no per-plan lookup (D15, BUG-57).
+            updated_at_by_plan: dict[str, datetime | None] | None = None
             try:
+                identity = {
+                    "cluster": source.cluster,
+                    "namespace": source.namespace,
+                    "workload_kind": source.workload_kind,
+                    "workload_name": source.workload_name,
+                    "statuses": _HISTORY_STATUSES,
+                }
+                workload_record_reader = getattr(self.plan_repository, "list_plan_records_for_workload", None)
                 workload_history_reader = getattr(self.plan_repository, "list_plans_for_workload", None)
-                if callable(workload_history_reader):
-                    plans = await cast(Any, workload_history_reader)(
-                        cluster=source.cluster,
-                        namespace=source.namespace,
-                        workload_kind=source.workload_kind,
-                        workload_name=source.workload_name,
-                        statuses=_HISTORY_STATUSES,
-                    )
+                if callable(workload_record_reader):
+                    history_records = list(await cast(Any, workload_record_reader)(**identity))
+                    plans = [record.plan for record in history_records]
+                    updated_at_by_plan = {record.plan.plan_id: record.updated_at for record in history_records}
+                elif callable(workload_history_reader):
+                    plans = await cast(Any, workload_history_reader)(**identity)
                 else:
                     plans = await self.plan_repository.list_plans()
             except Exception:
@@ -456,6 +465,7 @@ class AutomationPolicyEvaluator:
                     workload_plans,
                     now,
                     add_check,
+                    updated_at_by_plan=updated_at_by_plan,
                 )
 
         return AutomationPolicyResult(
@@ -880,7 +890,14 @@ class AutomationPolicyEvaluator:
                 detail=detail,
             )
 
-    async def _evaluate_cooldown(self, plans: Sequence[Plan], now: datetime, add_check) -> None:
+    async def _evaluate_cooldown(
+        self,
+        plans: Sequence[Plan],
+        now: datetime,
+        add_check,
+        *,
+        updated_at_by_plan: Mapping[str, datetime | None] | None = None,
+    ) -> None:
         cooldown = timedelta(minutes=self.config.cooldown_minutes)
         if cooldown <= timedelta(0):
             add_check(
@@ -906,7 +923,9 @@ class AutomationPolicyEvaluator:
         timestamps: list[datetime] = []
         for plan in candidates:
             timestamp = plan.created_at
-            if self.plan_repository is not None:
+            if updated_at_by_plan is not None and plan.plan_id in updated_at_by_plan:
+                timestamp = updated_at_by_plan[plan.plan_id] or timestamp
+            elif self.plan_repository is not None:
                 try:
                     record = await self.plan_repository.get_plan_record(plan.plan_id)
                 except Exception:

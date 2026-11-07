@@ -272,7 +272,10 @@ class SQLitePullRequestRepository(PullRequestRepository):
             "LEFT JOIN automation_branch_cleanup_completed cleanup "
             "ON cleanup.plan_id = pr.plan_id AND cleanup.provider_id = pr.provider_id "
             "AND cleanup.repo = pr.repo AND cleanup.branch_name = pr.head_branch "
-            "WHERE cleanup.plan_id IS NULL "
+            # The branch_cleanup_completed_at predicate drives idx_reco_pr_branch_cleanup_pending,
+            # so each pass walks only rows whose plan branch is still pending cleanup (D15).
+            "WHERE pr.branch_cleanup_completed_at IS NULL "
+            "AND cleanup.plan_id IS NULL "
             "AND pr.plan_id IS NOT NULL AND pr.plan_id <> '' "
             "AND pr.head_branch IS NOT NULL AND pr.head_branch <> '' "
             f"AND (pr.status IN ('closed', 'merged') OR plan.status IN ({placeholders}))"
@@ -309,6 +312,14 @@ class SQLitePullRequestRepository(PullRequestRepository):
                     completed_at = excluded.completed_at
                 """,
                 (plan_id, provider_id, repo, branch_name),
+            )
+            await conn.execute(
+                """
+                UPDATE recommendation_pull_requests SET branch_cleanup_completed_at = ?
+                WHERE plan_id = ? AND provider_id = ? AND repo = ? AND head_branch = ?
+                  AND branch_cleanup_completed_at IS NULL
+                """,
+                (to_iso_z(datetime.now(timezone.utc)), plan_id, provider_id, repo, branch_name),
             )
 
     async def reconcile_open_pull_requests(self, *, stale_before: datetime, limit: int) -> int:

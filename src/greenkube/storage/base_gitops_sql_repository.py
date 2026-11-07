@@ -59,6 +59,13 @@ from greenkube.storage.gitops_mapper import (
 from greenkube.storage.unit_of_work import UnitOfWork
 
 _PRUNE_BATCH_SIZE = 100
+_PLAN_HYDRATION_BATCH_SIZE = 500
+_MAX_PLAN_LIST_LIMIT = 10_000
+
+
+def _validate_list_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_PLAN_LIST_LIMIT:
+        raise ValueError(f"plan list limit must be an integer between 1 and {_MAX_PLAN_LIST_LIMIT}")
 
 
 class _BindingGenerationConflict(RuntimeError):
@@ -1544,7 +1551,49 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         record = await self.get_plan_record(plan_id)
         return record.plan if record is not None else None
 
-    async def list_plans(self, *, status: PlanStatus | None = None, source_id: str | None = None) -> list[Plan]:
+    async def _plan_records_from_rows(self, connection: Any, rows: Sequence[Any]) -> list[AutomationPlanRecord]:
+        """Hydrate plan rows with two batched queries instead of two per plan (D15, BUG-57)."""
+        if not rows:
+            return []
+        plan_ids = [str(row["plan_id"]) for row in rows]
+        files_by_plan: dict[str, list[Any]] = {}
+        recommendations_by_plan: dict[str, list[int]] = {}
+        for start in range(0, len(plan_ids), _PLAN_HYDRATION_BATCH_SIZE):
+            chunk = plan_ids[start : start + _PLAN_HYDRATION_BATCH_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            for file_row in await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({placeholders}) ORDER BY plan_id, id",
+                chunk,
+            ):
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for link_row in await self._fetch(
+                connection,
+                f"""
+                SELECT plan_id, recommendation_id FROM automation_plan_recommendations
+                WHERE plan_id IN ({placeholders}) ORDER BY plan_id, recommendation_id
+                """,
+                chunk,
+            ):
+                recommendations_by_plan.setdefault(str(link_row["plan_id"]), []).append(
+                    int(link_row["recommendation_id"])
+                )
+        return [
+            row_to_automation_plan_record(
+                row,
+                file_rows=files_by_plan.get(plan_id, []),
+                recommendation_ids=recommendations_by_plan.get(plan_id, []),
+            )
+            for row, plan_id in zip(rows, plan_ids, strict=True)
+        ]
+
+    async def list_plans(
+        self,
+        *,
+        status: PlanStatus | None = None,
+        source_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Plan]:
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
@@ -1553,18 +1602,17 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if source_id is not None:
             clauses.append("source_id = ?")
             params.append(source_id)
-        query = "SELECT plan_id FROM automation_plans"
+        query = "SELECT * FROM automation_plans"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def list_plans_for_workload(
         self,
@@ -1574,7 +1622,29 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         workload_kind: str,
         workload_name: str,
         statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
     ) -> list[Plan]:
+        records = await self.list_plan_records_for_workload(
+            cluster=cluster,
+            namespace=namespace,
+            workload_kind=workload_kind,
+            workload_name=workload_name,
+            statuses=statuses,
+            limit=limit,
+        )
+        return [record.plan for record in records]
+
+    async def list_plan_records_for_workload(
+        self,
+        *,
+        cluster: str,
+        namespace: str,
+        workload_kind: str,
+        workload_name: str,
+        statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
+    ) -> list[AutomationPlanRecord]:
+        """Workload plan history with ``updated_at`` (policy cooldowns) via idx_automation_plans_workload."""
         if statuses is not None and not statuses:
             return []
         if self._postgres:
@@ -1596,16 +1666,41 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if statuses is not None:
             clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
             params.extend(status.value for status in statuses)
-        query = "SELECT plan_id FROM automation_plans WHERE " + " AND ".join(clauses)
+        query = "SELECT * FROM automation_plans WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return await self._plan_records_from_rows(connection, rows)
+
+    async def list_expired_plans(
+        self,
+        *,
+        now: datetime,
+        statuses: Sequence[PlanStatus],
+        limit: int,
+    ) -> list[Plan]:
+        """Only the plans whose TTL elapsed, oldest expiry first (D15, BUG-57)."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("plan expiry time must be timezone-aware")
+        _validate_list_limit(limit)
+        if not statuses:
+            return []
+        expired = "expires_at <= ?" if self._postgres else "julianday(expires_at) <= julianday(?)"
+        placeholders = ", ".join("?" for _ in statuses)
+        query = f"""
+            SELECT * FROM automation_plans
+            WHERE status IN ({placeholders}) AND expires_at IS NOT NULL AND {expired}
+            ORDER BY expires_at, plan_id
+            LIMIT ?
+        """
+        params: list[Any] = [*(status.value for status in statuses), self._db_datetime(now), limit]
+        async with self.db_manager.connection_scope() as connection:
+            rows = await self._fetch(connection, query, params)
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune expired rendered file contents and terminal outbox rows.
@@ -1817,17 +1912,13 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             rows = await self._fetch(
                 connection,
                 """
-                SELECT plan_id FROM automation_plan_recommendations
-                WHERE recommendation_id = ? ORDER BY plan_id
+                SELECT plan.* FROM automation_plan_recommendations link
+                JOIN automation_plans plan ON plan.plan_id = link.plan_id
+                WHERE link.recommendation_id = ? ORDER BY plan.plan_id
                 """,
                 (recommendation_id,),
             )
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def set_recommendation_action_status(
         self,
