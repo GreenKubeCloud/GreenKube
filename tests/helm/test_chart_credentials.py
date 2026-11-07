@@ -114,11 +114,49 @@ def test_two_helm_template_renders_are_identical(args):
 def test_default_render_ships_no_generated_credentials():
     docs = _documents(_render())
 
+    # Nothing is supplied in values, so no Secret is rendered at all. The
+    # generated-credentials Secret is created by the bootstrap hook, never rendered.
+    assert [doc["metadata"]["name"] for doc in docs if doc.get("kind") == "Secret"] == []
+
+
+def test_values_secret_is_a_regular_release_resource():
+    docs = _documents(_render("--set", "secrets.electricityMapsToken=tok"))
+
     values_secret = _get(docs, "Secret", "greenkube-values")
     assert "helm.sh/hook" not in (values_secret["metadata"].get("annotations") or {})
-    assert set(values_secret["data"]) == {"BOAVIZTA_API_URL"}
-    # The generated-credentials Secret is created by the bootstrap hook, never rendered.
-    assert _find(docs, "Secret", "greenkube") is None
+    assert set(values_secret["data"]) == {"ELECTRICITY_MAPS_TOKEN"}
+
+
+def _projected_secret_for(docs: list[dict], deployment: str, key: str) -> str:
+    volumes = _get(docs, "Deployment", deployment)["spec"]["template"]["spec"]["volumes"]
+    names = [
+        source["secret"]["name"]
+        for volume in volumes
+        for source in volume.get("projected", {}).get("sources", [])
+        if "secret" in source and any(item["key"] == key for item in source["secret"].get("items", []))
+    ]
+    assert len(set(names)) == 1, f"{key} is projected from {names}"
+    return names[0]
+
+
+@pytest.mark.parametrize("key", ["BOAVIZTA_API_URL", "PROMETHEUS_URL", "OPENCOST_API_URL"])
+def test_settings_page_service_url_override_survives_a_pod_restart(key):
+    """With chart defaults, each service URL is read from Secret <release>, where
+    the Settings page stores its overrides. A non-empty chart default would put
+    the key in the values Secret, which the Pod reads instead, so an override
+    would be lost on the next restart."""
+    docs = _documents(_render())
+
+    assert _projected_secret_for(docs, "greenkube", key) == "greenkube"
+    assert key not in _get(docs, "ConfigMap", "greenkube")["data"]
+
+
+def test_service_url_set_in_values_wins_over_settings_page_overrides():
+    docs = _documents(_render("--set", "config.boavizta.url=https://boavizta.example.com"))
+
+    assert _projected_secret_for(docs, "greenkube", "BOAVIZTA_API_URL") == "greenkube-values"
+    values_secret = _get(docs, "Secret", "greenkube-values")
+    assert base64.b64decode(values_secret["data"]["BOAVIZTA_API_URL"]).decode() == "https://boavizta.example.com"
 
 
 def test_bootstrap_hook_creates_generated_credentials_once():

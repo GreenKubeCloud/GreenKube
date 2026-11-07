@@ -103,18 +103,26 @@ data:
   DB_STATEMENT_TIMEOUT_MS: {{ .Values.config.db.statementTimeoutMs | quote }}
   
   # --- Boavizta Config ---
+  # Service URLs (BOAVIZTA_API_URL, PROMETHEUS_URL, OPENCOST_API_URL) are read
+  # from mounted Secrets, not from here: a URL set in values wins, then a
+  # Settings-page override stored in Secret {{ include "greenkube.secretName" . }}, then the
+  # built-in default or discovery.
+  {{- if and .Values.secrets.existingSecret .Values.config.boavizta.url }}
+  # secrets.existingSecret replaces the values Secret, so the Boavizta URL set in
+  # values is passed here, as in 0.3.x; a key in that Secret still wins.
   BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
+  {{- end }}
   DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
 
   # --- Prometheus Collector Config ---
-  # Note: PROMETHEUS_URL is managed in the Secret (supports UI-set overrides via lookup).
+  # PROMETHEUS_URL comes from a mounted Secret (see the Boavizta note above).
   PROMETHEUS_VERIFY_CERTS: {{ .Values.config.prometheus.verifyCerts | quote }}
   PROMETHEUS_QUERY_RANGE_STEP: {{ .Values.config.prometheus.queryRangeStep | quote }}
   PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: {{ .Values.config.prometheus.queryRangeMaxSamples | quote }}
   PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
 
   # --- OpenCost Collector Config ---
-  # Note: OPENCOST_API_URL is managed in the Secret (supports UI-set overrides via lookup).
+  # OPENCOST_API_URL comes from a mounted Secret (see the Boavizta note above).
   OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
   
   LOW_NODE_CPU_THRESHOLD: {{ .Values.config.lowNodeCpuThreshold | quote }}

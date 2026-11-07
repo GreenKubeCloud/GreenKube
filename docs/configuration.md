@@ -83,7 +83,7 @@ image:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `config.boavizta.url` | `https://api.boavizta.org` | Boavizta API endpoint for embodied emissions |
+| `config.boavizta.url` | `""` | Boavizta API endpoint for embodied emissions. Empty uses the public API `https://api.boavizta.org`, or the URL saved on the Settings page. A URL set here always takes precedence. |
 | `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
@@ -435,5 +435,13 @@ config:
 The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
 
 The Settings page sends integration changes to `POST /api/v1/config/services`. The API accepts only the current configured service hosts or exact hosts listed in `config.serviceUrlAllowlist`, and does not log the submitted URLs. It updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.
+
+With the chart, Pods read each service URL and token from the first of these that holds it:
+
+1. The Secret `<release>-values`, when you set the key in values (`config.prometheus.url`, `config.opencost.url`, `config.boavizta.url`, `secrets.*`).
+2. The Secret `<release>`, where the Settings page stores its changes.
+3. The built-in default or in-cluster discovery.
+
+A Settings-page change to a key that is also set in values therefore lasts only until the next Pod restart, even though `X-Configuration-Persisted` is `true`. To manage a key from the Settings page, leave it empty in values; all three service URLs are empty by default. With `secrets.existingSecret`, every key is read from that Secret; the chart grants GreenKube no write access to it, so Settings-page changes stay in memory.
 
 The API expires unapproved GitOps plans once per minute. A daily retention sweep removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, pull-request records, and recommendation audit events. Worker heartbeat rows older than seven days are pruned when the worker starts.

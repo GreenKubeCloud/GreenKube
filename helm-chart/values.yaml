@@ -273,7 +273,9 @@ config:
 
   # Boavizta configuration
   boavizta:
-    url: https://api.boavizta.org
+    # If empty, GreenKube uses the public API (https://api.boavizta.org) unless
+    # the URL is changed from the Settings page. A URL set here always wins.
+    url: ''
     # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
     # recognize a cloud provider or instance type. Boavizta returns per-instance
     # allocated values (typically 50–170 kg for common cloud VMs). 100 kg is a

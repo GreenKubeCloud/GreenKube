@@ -127,6 +127,10 @@ True when the chart deploys and owns the PostgreSQL database.
 Credentials supplied through values, as a YAML map of key to plain value.
 Rendering depends on values only (no lookup, no random function), so every
 `helm template` render is identical (BUG-58). Empty with secrets.existingSecret.
+A key set in values is always read from the values Secret, so a Settings-page
+override of it lasts only until the next Pod restart. Keys left empty (every
+default, including the service URLs) are read from greenkube.secretName, where
+Settings-page overrides are stored, and otherwise fall back to the app default.
 */}}
 {{- define "greenkube.secretValues" -}}
 {{- $data := dict -}}
