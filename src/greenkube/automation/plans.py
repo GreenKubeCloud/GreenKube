@@ -400,7 +400,20 @@ class AutomationPlanService:
         if not persist:
             return plan
 
-        saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        # Compare-and-set insert: a concurrent request for the same deterministic plan ID must
+        # never overwrite a plan that already advanced (D12, BUG-56).
+        insert_if_absent = getattr(self.repository, "save_plan_if_absent", None)
+        if callable(insert_if_absent):
+            saved = await cast(Any, insert_if_absent)(plan, policy_result=policy_result, actor=actor)
+        else:
+            saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        if saved.digest != plan.digest or saved.source.id != plan.source.id:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                "plan ID was concurrently bound to a different source revision or digest; retry",
+            )
+        if saved.status is not plan.status:
+            return saved
         for previous in previous_plans:
             if previous.plan_id != saved.plan_id and previous.status in _REPLACEABLE_STATUSES:
                 await self._transition(previous, PlanStatus.SUPERSEDED)

@@ -114,7 +114,11 @@ def _plan(
         source_revision=_BASE_REVISION,
         renderer=renderer,
         validation=validation,
-        warnings=[_SECRET],
+        warnings=[
+            "apps/payments/deployment.yaml#0: ignored volatile metadata key 'resourceVersion'",
+            f"https://user:{_SECRET}@github.example.test/acme/gitops.git?access_token={_SECRET} is empty",
+            f"helm warning: token={_SECRET}; ghp_{_SECRET.replace('-', '')} leaked\x1b[0m",
+        ],
         digest=_DIGEST,
     )
     return Plan(
@@ -371,7 +375,13 @@ def test_create_uses_only_recommendation_ids_and_returns_safe_plan_projection(pl
             "original_sha": "b" * 40,
         }
     ]
-    assert body["warnings"] == ["render-warning"]
+    # D12 / BUG-56: real renderer warnings, with credentials redacted.
+    assert body["warnings"] == [
+        "apps/payments/deployment.yaml#0: ignored volatile metadata key 'resourceVersion'",
+        "https://[redacted]@github.example.test/acme/gitops.git?[redacted] is empty",
+        "helm warning: token=[redacted]; [redacted] leaked [0m",
+    ]
+    assert body["warnings_truncated"] is False
     assert body["source"]["repo"] == "https://github.example.test/acme/gitops.git"
     assert "actor" not in body
     assert _SECRET not in response.text

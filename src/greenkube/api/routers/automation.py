@@ -18,10 +18,11 @@ from greenkube.api.dependencies import (
     get_recommendation_repository,
 )
 from greenkube.api.routers.plans import _domain_error_response, _safe_repository_url
+from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
 from greenkube.automation.plans import AutomationPlanError
 from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
 from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullRequestRecord, PullRequestStatus
-from greenkube.storage.base_gitops_repository import GitOpsRepository
+from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
 
@@ -187,14 +188,18 @@ async def automation_status(
         configured_providers = await repository.list_provider_configs()
     except Exception:
         configured_providers = []
+    token_configured = False
     for provider in configured_providers:
         if provider.id == "unresolved":
             continue
+        provider_token_configured = await _provider_token_resolvable(provider)
+        token_configured = token_configured or (provider.enabled and provider_token_configured)
         providers.append(
             {
                 "id": provider.id,
                 "type": provider.provider_type,
                 "enabled": provider.enabled,
+                "token_configured": provider_token_configured,
                 "status": provider.status,
                 "capabilities": dict(provider.capabilities),
                 "last_checked_at": _iso_utc(provider.last_checked_at),
@@ -229,7 +234,8 @@ async def automation_status(
     return {
         "enabled": enabled,
         "ready": enabled and (worker_healthy if config.AUTOMATION_MODE != "disabled" else False),
-        "token_configured": configured,
+        # True only when an enabled provider's credential Secret actually resolves (D12, BUG-56).
+        "token_configured": token_configured,
         "provider": "gitops" if configured else None,
         "mode": config.AUTOMATION_MODE,
         "worker": {
@@ -267,6 +273,25 @@ async def automation_status(
         },
         "providers": providers,
     }
+
+
+async def _provider_token_resolvable(provider: GitOpsProviderConfig) -> bool:
+    """Whether the provider's referenced Secret key resolves to a non-empty credential.
+
+    The value is read through the same mounted-Secret resolver the plan runtime uses and
+    is never returned or logged.
+    """
+    if not provider.secret_name or not provider.secret_key:
+        return False
+    try:
+        value = await MountedSecretFileResolver().resolve_secret(
+            namespace=provider.secret_namespace,
+            name=provider.secret_name,
+            key=provider.secret_key,
+        )
+    except Exception:
+        return False
+    return bool(value and value.strip())
 
 
 def _aware_utc(value: datetime) -> datetime:
