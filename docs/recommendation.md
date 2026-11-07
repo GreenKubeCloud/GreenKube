@@ -161,17 +161,20 @@ Use the API to apply, ignore, or restore recommendations, and the dashboard to b
 
 ## Frontend Usage
 
-The web dashboard fetches active recommendations and realized savings in the background so the main dashboard can render even if recommendation refresh takes time.
+The web dashboard fetches active recommendations and realized savings in the background so the main dashboard can render quickly. Page loads only read persisted recommendations: they never ask the server to scan (no `refresh=true`).
 
 The `/recommendations` page currently provides:
 
 - Active, Pull requests, Ignored, and Realized Savings tabs.
+- Filters for namespace, source, risk level and capability, sent to `GET /recommendations/active` as `namespace`, `source`, `risk_level` and `capability`. The Ignored tab applies the same filters; the Pull requests tab lists every namespace because its endpoint has no namespace filter.
 - Type filtering for active and ignored records.
 - Potential annual CO2e and cost savings summaries for active records.
 - Source badges (GreenKube, VPA, Karpenter), risk badges and confidence indicators.
+- The ranking score and its top contributing factor on each card; hover the score for the full factor breakdown.
+- A sort selector. **Ranking score (default)** keeps the server order. **Projected cost savings** and **Projected CO₂e savings** sort the loaded list by annual savings. The **Profile** options (balanced, carbon first, cost first, quick wins, low risk) re-rank the top 50 recommendations through `GET /recommendations/top?profile=` and show that profile's scores.
+- A **Rescan** button: it requests a scan with `POST /optimization/runs`, polls `GET /optimization/runs/{id}` and reloads the page's data when the run succeeds or fails. When the page opens while a scan is already queued or running, it follows that run and reloads when it completes. Servers without the runs API answer `404`, and the button then only reloads persisted results.
 - An expandable evidence panel per active recommendation (window, coverage, utilization distribution, proposed change, rollback conditions, expiry).
-- A ranking profile selector (projected savings, balanced, carbon first, cost first, quick wins, low risk).
-- A **Preview plan** action on eligible container-targeted rightsizing cards: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available.
+- A **Preview plan** action on eligible container-targeted rightsizing cards: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available. Closing the dialog of a preview that was not approved discards it with `DELETE /automation/plans/{id}` (older servers: `POST /automation/plans/{id}/cancel`), so the next preview of the same workload is not blocked.
 - Ignore with a required reason from the Active tab.
 - Restore from the Ignored tab.
 - Applied recommendation details, verification state (`applied`, `verifying`, `verified`, `rollback_review`), measured vs projected savings and an expandable lifecycle event trail.
