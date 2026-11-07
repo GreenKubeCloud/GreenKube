@@ -114,6 +114,20 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.usageHeadroom` | `VERIFICATION_USAGE_HEADROOM` | `1.1` | p95 usage ceiling vs the proposed request. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
 
+### Impact Model (`impact`)
+
+The [Impact Model](methodology/impact-model.md) prices every recommendation projection. Unit prices come from the first available tier: observed per-resource OpenCost costs, then the bundled list price of the node's instance type and region, then the custom rates below.
+
+| Helm value | Environment variable | Default | Description |
+|---|---|---|---|
+| `impact.pricing.cpuCoreHour` | `IMPACT_PRICING_CPU_CORE_HOUR` | unset (`0.031611`) | Price of one vCPU-hour for nodes without observed costs or a catalog price. Unset uses the [OpenCost default custom pricing](https://github.com/opencost/opencost/blob/develop/configs/default.json). |
+| `impact.pricing.ramGiBHour` | `IMPACT_PRICING_RAM_GIB_HOUR` | unset (`0.004237`) | Price of one GiB-hour of memory, same fallback rules. |
+| `impact.pricing.currency` | `IMPACT_PRICING_CURRENCY` | `USD` | ISO 4217 code of the custom rates. GreenKube never converts currencies. |
+| `impact.realizationFactor` | `IMPACT_REALIZATION_FACTOR` | `1.0` | Share (0–1) of released capacity expected to become removed billable node-hours. `potential_savings_*` equal the allocated projection times this factor. Per-pool realization (RealizationContext) will replace it. |
+| `impact.carbonPricePerTonne` | `CARBON_PRICE_PER_TONNE` | `100` | Currency per tonne CO₂e used to compute `value_annual = expected cost + price × tCO₂e`. Set `0` to rank on cost alone. |
+
+On-premises clusters should set both `cpuCoreHour` and `ramGiBHour`; every projection records which tier priced it in `impact.assumptions.unit_prices`.
+
 ### GitOps automation (`automation`)
 
 Automation is disabled by default. The full workflow, supported source layouts, and security model are documented in [GitOps automation](automation.md). The most important values are:

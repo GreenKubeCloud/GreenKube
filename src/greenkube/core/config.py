@@ -264,6 +264,21 @@ class Config(BaseSettings):
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
 
+    # --- Impact Model (docs/methodology/impact-model.md) ---
+    # CustomRates of the cost fallback chain (observed -> pricing catalog ->
+    # custom rates). Unset means the OpenCost default custom pricing
+    # (0.031611 per core-hour, 0.004237 per GiB-hour, USD).
+    IMPACT_PRICING_CPU_CORE_HOUR: Optional[float] = None
+    IMPACT_PRICING_RAM_GIB_HOUR: Optional[float] = None
+    IMPACT_PRICING_CURRENCY: str = "USD"
+    # Share of released capacity expected to become removed billable node-hours,
+    # used until RealizationContext (roadmap B6) derives it per node pool.
+    # 1.0 projects expected billable savings equal to allocated savings.
+    IMPACT_REALIZATION_FACTOR: float = 1.0
+    # Carbon price (currency per tonne CO2e) that converts projected CO2e into
+    # value: value_annual = cost + CARBON_PRICE_PER_TONNE * tCO2e (roadmap I2, D-2).
+    CARBON_PRICE_PER_TONNE: float = 100.0
+
     # --- Recommendation sources (connectors) ---
     # VPA recommendation mode (updateMode: Off) is used for CPU/memory rightsizing
     # when enabled; native rightsizing for the same workload is then suppressed.
@@ -402,6 +417,40 @@ class Config(BaseSettings):
     def _validate_recommendation_apply_tolerance(cls, value: float) -> float:
         if not 0 <= value <= 1:
             raise ValueError("RECOMMENDATION_APPLY_TOLERANCE must be between 0 and 1.")
+        return value
+
+    @field_validator("IMPACT_PRICING_CPU_CORE_HOUR", "IMPACT_PRICING_RAM_GIB_HOUR", mode="before")
+    @classmethod
+    def _blank_impact_price_is_unset(cls, value: Any) -> Any:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("IMPACT_PRICING_CPU_CORE_HOUR", "IMPACT_PRICING_RAM_GIB_HOUR", mode="after")
+    @classmethod
+    def _validate_impact_price(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and value < 0:
+            raise ValueError("IMPACT_PRICING_* rates must not be negative.")
+        return value
+
+    @field_validator("IMPACT_PRICING_CURRENCY", mode="after")
+    @classmethod
+    def _validate_impact_currency(cls, value: str) -> str:
+        currency = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", currency):
+            raise ValueError("IMPACT_PRICING_CURRENCY must be a three-letter currency code (e.g. USD, EUR).")
+        return currency
+
+    @field_validator("IMPACT_REALIZATION_FACTOR", mode="after")
+    @classmethod
+    def _validate_realization_factor(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("IMPACT_REALIZATION_FACTOR must be between 0 and 1.")
+        return value
+
+    @field_validator("CARBON_PRICE_PER_TONNE", mode="after")
+    @classmethod
+    def _validate_carbon_price(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("CARBON_PRICE_PER_TONNE must not be negative.")
         return value
 
     @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")
