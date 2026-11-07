@@ -361,7 +361,7 @@ async def test_exhausted_provider_call_budget_stops_the_operation_and_fails_clos
     repository = FakeGitRepository.with_files(_repository_files(20))
     server = FakeGitHubServer(repository)
     worker, operations, plans, _ = _worker("github", _plan("github", repository.refs["main"]))
-    worker.provider_call_budget = 3
+    worker.provider_call_budget_limit = 3
 
     with respx.mock(assert_all_called=False) as router:
         router.route(url__startswith=server.base_url).mock(side_effect=server.handle)

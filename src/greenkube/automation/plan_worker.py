@@ -305,7 +305,7 @@ class PlanWorker:
     """Claim and execute one plan operation with fenced queue mutations."""
 
     #: Upper bound on Git provider HTTP calls for one plan operation (D5).
-    provider_call_budget: int = DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET
+    provider_call_budget_limit: int = DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET
 
     def __init__(
         self,
@@ -357,7 +357,7 @@ class PlanWorker:
                     raise PlanWorkerError(f"Plan {lease.operation.plan_id!r} was not found.")
                 operation_type = _plan_operation_type(plan)
 
-                with provider_call_budget(f"plan_{operation_type}", limit=self.provider_call_budget):
+                with provider_call_budget(f"plan_{operation_type}", limit=self.provider_call_budget_limit):
                     result = await self._execute(execution, plan)
             except PlanOperationLeaseError:
                 raise
