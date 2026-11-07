@@ -11,6 +11,8 @@ and add `cluster` and `region` for multi-cluster / multi-region environments.
 """
 
 import logging
+import time
+import weakref
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import log2
@@ -585,6 +587,34 @@ _node_memory_allocated: dict[str, int] = {}
 def _clear_gauge(gauge: Gauge) -> None:
     """Clear all label combinations from a gauge."""
     gauge._metrics.clear()
+
+
+# Savings accrue on one-hour slots and run rates only move when a recommendation
+# changes state, so scrapes within this many seconds reuse the previous savings
+# refresh instead of reloading applied recommendations and scanning the ledger.
+SAVINGS_REFRESH_TTL_SECONDS = 60.0
+_savings_refreshed_at: "weakref.WeakKeyDictionary[object, dict[str, float]]" = weakref.WeakKeyDictionary()
+
+
+def _savings_refresh_due(source: object, key: str) -> bool:
+    """Return True when the savings gauges read from ``source`` are stale."""
+    try:
+        last = _savings_refreshed_at.get(source, {}).get(key)
+    except TypeError:
+        return True
+    return last is None or time.monotonic() - last >= SAVINGS_REFRESH_TTL_SECONDS
+
+
+def _mark_savings_refreshed(source: object, key: str) -> None:
+    try:
+        _savings_refreshed_at.setdefault(source, {})[key] = time.monotonic()
+    except TypeError:
+        pass  # not weak-referenceable: refresh on every scrape
+
+
+def reset_savings_refresh_cache() -> None:
+    """Force the next scrape to reload every savings gauge."""
+    _savings_refreshed_at.clear()
 
 
 def clear_dashboard_summary_metrics() -> None:
@@ -1268,11 +1298,14 @@ async def refresh_metrics_from_db(
         logger.warning("refresh_metrics_from_db: failed to refresh implemented recommendation metrics: %s", exc)
 
     # --- Annual savings rates by method (applied recommendations) ---
-    try:
-        applied = await reco_repo.get_applied_recommendations()
-        update_savings_run_rate_metrics(applied)
-    except Exception as exc:
-        logger.warning("refresh_metrics_from_db: failed to refresh savings rate metrics: %s", exc)
+    run_rate_key = f"run_rate:{_get_cluster_name()}"
+    if _savings_refresh_due(reco_repo, run_rate_key):
+        try:
+            applied = await reco_repo.get_applied_recommendations()
+            update_savings_run_rate_metrics(applied)
+            _mark_savings_refreshed(reco_repo, run_rate_key)
+        except Exception as exc:
+            logger.warning("refresh_metrics_from_db: failed to refresh savings rate metrics: %s", exc)
 
     # --- Savings ledger: monotonic counters and exact dashboard windows ---
     if savings_repo is not None:
@@ -1281,18 +1314,21 @@ async def refresh_metrics_from_db(
 
             ledger_cluster = savings_cluster_name()
             cluster = _get_cluster_name()
-            counters = await savings_repo.get_lifetime_counters(ledger_cluster)
-            update_attributed_savings_metrics(counters, cluster=cluster)
-            clear_dashboard_savings_metrics()
-            savings_namespaces = await get_dashboard_namespaces("savings")
-            for window_slug, start_time, end_time in _dashboard_window_ranges(now):
-                breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
-                update_dashboard_savings_from_breakdown(
-                    window_slug,
-                    breakdown,
-                    cluster=cluster,
-                    namespaces=savings_namespaces,
-                )
+            ledger_key = f"ledger:{ledger_cluster}:{cluster}"
+            if _savings_refresh_due(savings_repo, ledger_key):
+                counters = await savings_repo.get_lifetime_counters(ledger_cluster)
+                update_attributed_savings_metrics(counters, cluster=cluster)
+                clear_dashboard_savings_metrics()
+                savings_namespaces = await get_dashboard_namespaces("savings")
+                for window_slug, start_time, end_time in _dashboard_window_ranges(now):
+                    breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
+                    update_dashboard_savings_from_breakdown(
+                        window_slug,
+                        breakdown,
+                        cluster=cluster,
+                        namespaces=savings_namespaces,
+                    )
+                _mark_savings_refreshed(savings_repo, ledger_key)
         except Exception as exc:
             logger.warning("refresh_metrics_from_db: failed to refresh savings ledger metrics: %s", exc)
 

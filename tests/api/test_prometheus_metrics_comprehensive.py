@@ -1297,3 +1297,34 @@ class TestRealizedSavingsMetrics:
             output, "greenkube_recommendations_implemented_total", namespace="__all__", type="RIGHTSIZING_CPU"
         )
         assert implemented == 5.0
+
+
+@pytest.mark.asyncio
+async def test_savings_refresh_is_throttled_between_scrapes(
+    mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, monkeypatch
+):
+    """Scrapes within the TTL reuse the savings gauges instead of rescanning the ledger."""
+    from greenkube.api import metrics_endpoint
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(metrics_endpoint.time, "monotonic", lambda: clock["now"])
+    savings_repo = AsyncMock()
+    savings_repo.get_lifetime_counters = AsyncMock(side_effect=[RuntimeError("down"), [], []])
+    savings_repo.get_accrual_breakdown = AsyncMock(return_value=[])
+    mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
+
+    async def scrape():
+        await refresh_metrics_from_db(
+            mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, savings_repo=savings_repo
+        )
+
+    await scrape()  # the ledger read fails: nothing is cached
+    await scrape()  # retried, succeeds and is cached
+    clock["now"] += metrics_endpoint.SAVINGS_REFRESH_TTL_SECONDS - 1
+    await scrape()  # within the TTL: neither the ledger nor applied records are read
+    assert savings_repo.get_lifetime_counters.await_count == 2
+    assert mock_reco_repo.get_applied_recommendations.await_count == 1
+    clock["now"] += 1
+    await scrape()
+    assert savings_repo.get_lifetime_counters.await_count == 3
+    assert mock_reco_repo.get_applied_recommendations.await_count == 2
