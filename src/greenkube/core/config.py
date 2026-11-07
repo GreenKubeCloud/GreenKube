@@ -137,6 +137,10 @@ class Config(BaseSettings):
     DEFAULT_COST: float = 0.0
     DEFAULT_ZONE: str = "unknown"
     DEFAULT_INTENSITY: float = 500
+    # Maximum age of a stored grid carbon intensity before it is considered
+    # stale; beyond it the zone default is used and rows are tagged
+    # intensity_source=zone_default (A8). Format: <number><ms|s|m|h>.
+    INTENSITY_MAX_AGE: str = "6h"
     DEFAULT_HARDWARE_LIFESPAN_YEARS: int = 4
     # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
     # recognise the cloud provider/instance type. 100 kg is a conservative midpoint.
@@ -199,6 +203,11 @@ class Config(BaseSettings):
     METRICS_RAW_RETENTION_DAYS: int = 7
     # Maximum total retention in days for hourly aggregated data. -1 = keep indefinitely.
     METRICS_AGGREGATED_RETENTION_DAYS: int = -1
+
+    # --- Controller observability ---
+    # Port of the controller's authenticated Prometheus endpoint
+    # (/prometheus/metrics). 0 disables the listener.
+    CONTROLLER_METRICS_PORT: int = 9102
 
     # --- Kubernetes client variables ---
     # Timeout (seconds) for individual Kubernetes API calls. 0 = no timeout.
@@ -388,6 +397,27 @@ class Config(BaseSettings):
         seconds = parse_gitops_duration_seconds(value)
         if not 1 <= seconds <= 86_400:
             raise ValueError("GITOPS_BINDING_TTL must be between 1 second and 24 hours")
+        return value
+
+    @field_validator("INTENSITY_MAX_AGE", mode="before")
+    @classmethod
+    def _default_blank_intensity_max_age(cls, value: Any) -> Any:
+        return "6h" if value == "" or value is None else value
+
+    @field_validator("INTENSITY_MAX_AGE", mode="after")
+    @classmethod
+    def _validate_intensity_max_age(cls, value: str) -> str:
+        try:
+            parse_gitops_duration_seconds(value)
+        except ValueError as exc:
+            raise ValueError("INTENSITY_MAX_AGE must be a duration such as '6h', '90m' or '3600s'") from exc
+        return value.strip().lower()
+
+    @field_validator("CONTROLLER_METRICS_PORT", mode="after")
+    @classmethod
+    def _validate_controller_metrics_port(cls, value: int) -> int:
+        if not 0 <= value <= 65_535:
+            raise ValueError("CONTROLLER_METRICS_PORT must be between 0 (disabled) and 65535")
         return value
 
     @field_validator("RECOMMENDATION_MAX_METRIC_ROWS", mode="after")
@@ -589,6 +619,11 @@ class Config(BaseSettings):
     @property
     def gitops_binding_ttl(self) -> timedelta:
         return timedelta(seconds=parse_gitops_duration_seconds(self.GITOPS_BINDING_TTL))
+
+    @property
+    def intensity_max_age(self) -> timedelta:
+        """Maximum age of a stored carbon intensity before the zone default is used."""
+        return timedelta(seconds=parse_gitops_duration_seconds(self.INTENSITY_MAX_AGE))
 
     def get_pue_for_provider(self, provider: str | None) -> float:
         """Retrieve the PUE for a specific cloud provider.

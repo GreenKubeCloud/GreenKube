@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 
 from ..core.config import config
-from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
+from ..core.observability import record_collection_request
 from ..utils.http_client import get_async_http_client
 from .base_electricity_provider import BaseElectricityProvider
 
@@ -318,6 +318,7 @@ class WattnetCollector(BaseElectricityProvider):
             data = response.json()
         except httpx.HTTPError as e:
             logger.error("Error fetching data from Wattnet API: %s", e)
+            record_collection_request("wattnet", "error")
             return self._default_records(zone, target_datetime)
         except Exception as e:
             logger.error("Unexpected error fetching data from Wattnet API: %s", e)
@@ -327,6 +328,7 @@ class WattnetCollector(BaseElectricityProvider):
         if not records:
             logger.info("Wattnet returned no carbon footprint data for zone: %s", zone)
             return self._default_records(zone, target_datetime)
+        record_collection_request("wattnet", "success")
         return records
 
     # ------------------------------------------------------------------
@@ -386,24 +388,10 @@ class WattnetCollector(BaseElectricityProvider):
 
     @staticmethod
     def _default_records(zone: str, target_datetime: datetime | None) -> list:
-        """Build the static fallback record, mirroring the EM collector."""
-        logger.info("Using default grid intensity for zone: %s", zone)
-        default_intensity = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
-        if default_intensity is not None:
-            if target_datetime:
-                if target_datetime.tzinfo is None:
-                    target_datetime = target_datetime.replace(tzinfo=timezone.utc)
-                dt_iso = target_datetime.isoformat()
-            else:
-                dt_iso = datetime.now(timezone.utc).isoformat()
-            return [
-                {
-                    "carbonIntensity": default_intensity,
-                    "datetime": dt_iso,
-                    "zone": zone,
-                    "isEstimated": True,
-                    "estimationMethod": "default_fallback",
-                }
-            ]
-        logger.warning("No default grid intensity found for zone: %s", zone)
+        """Return no record when no measurement is available.
+
+        Static zone defaults are applied at read time by the calculator
+        (``intensity_source=zone_default``) and never persisted (A8, BUG-07).
+        """
+        logger.info("No Wattnet measurement for zone %s: its default intensity is used at read time.", zone)
         return []

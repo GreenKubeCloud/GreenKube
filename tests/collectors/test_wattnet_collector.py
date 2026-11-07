@@ -343,12 +343,8 @@ async def test_collect_zone_not_covered_uses_default(mock_config):
     finally:
         await collector.close()
 
-    assert len(result) == 1
-    assert result[0]["zone"] == "US-CAL-CISO"
-    assert result[0]["isEstimated"] is True
-    assert result[0]["estimationMethod"] == "default_fallback"
-    # Default for US-CAL-CISO in the fallback map
-    assert result[0]["carbonIntensity"] is not None
+    # Defaults are applied at read time and never persisted (A8).
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -363,9 +359,7 @@ async def test_collect_missing_credentials_uses_default(mock_config):
     finally:
         await collector.close()
 
-    assert len(result) == 1
-    assert result[0]["isEstimated"] is True
-    assert result[0]["carbonIntensity"] == 26  # FR default
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -383,9 +377,7 @@ async def test_collect_api_error_uses_default(mock_config):
     finally:
         await collector.close()
 
-    assert len(result) == 1
-    assert result[0]["zone"] == "FR"
-    assert result[0]["isEstimated"] is True
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -404,8 +396,7 @@ async def test_collect_token_failure_uses_default(mock_config):
     finally:
         await collector.close()
 
-    assert len(result) == 1
-    assert result[0]["isEstimated"] is True
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -423,8 +414,7 @@ async def test_collect_empty_payload_uses_default(mock_config):
     finally:
         await collector.close()
 
-    assert len(result) == 1
-    assert result[0]["isEstimated"] is True
+    assert result == []
 
 
 @pytest.mark.asyncio

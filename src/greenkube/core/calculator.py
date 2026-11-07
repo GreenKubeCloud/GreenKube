@@ -3,13 +3,14 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
-from ..storage.base_repository import CarbonIntensityRepository
+from ..models.provenance import IntensitySource
+from ..storage.base_repository import CarbonIntensityRepository, IntensityPoint
 from .config import Config, get_config
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,33 @@ class CarbonCalculationResult:
     co2e_grams: float
     grid_intensity: float
     grid_intensity_timestamp: Optional[datetime] = None
+    intensity_source: Optional[str] = None
+    """Provenance of ``grid_intensity`` (greenkube.models.provenance.IntensitySource)."""
+
+
+@dataclass(frozen=True)
+class _CachedIntensity:
+    """A resolved intensity and its provenance, cached per (zone, normalized time)."""
+
+    value: Optional[float]
+    source: Optional[str]
 
 
 class CarbonCalculator:
-    """Calculates CO2e emissions based on energy consumption and grid carbon intensity."""
+    """Calculates CO2e emissions based on energy consumption and grid carbon intensity.
+
+    Intensity resolution order for a ``(zone, normalized time)`` (A8, BUG-07):
+
+    1. a stored value no older than ``INTENSITY_MAX_AGE`` →
+       ``realtime`` (provisional) or ``consolidated`` (final);
+    2. otherwise the zone default from the bundled Electricity Maps table →
+       ``zone_default``;
+    3. otherwise a stale stored value, if any → ``stale``;
+    4. otherwise ``DEFAULT_INTENSITY`` → ``global_default``.
+
+    Defaults are computed here, at read time; they are never written to the
+    intensity history.
+    """
 
     def __init__(
         self, repository: CarbonIntensityRepository, pue: Optional[float] = None, config: Config | None = None
@@ -58,8 +82,7 @@ class CarbonCalculator:
         # to the current value of config.DEFAULT_PUE.
         self.pue = pue if pue is not None else self._config.DEFAULT_PUE
 
-        # Simple per-run cache: key = (zone, timestamp) -> intensity value
-        # (float or None)
+        # Simple per-run cache: key = (zone, timestamp) -> _CachedIntensity
         self._intensity_cache = {}
         self._lock = asyncio.Lock()
 
@@ -68,34 +91,94 @@ class CarbonCalculator:
         async with self._lock:
             self._intensity_cache.clear()
 
-    async def prefetch_intensity(self, zone: str, timestamp: str, intensity: float):
+    def _normalize(self, timestamp) -> datetime:
+        dt = _to_datetime(timestamp)
+        gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
+        if gran == "hour":
+            return dt.replace(minute=0, second=0, microsecond=0)
+        if gran == "day":
+            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return dt
+
+    def _max_age(self) -> timedelta:
+        max_age = getattr(self._config, "intensity_max_age", None)
+        return max_age if isinstance(max_age, timedelta) else timedelta(hours=6)
+
+    async def prefetch_intensity(
+        self, zone: str, timestamp: str, intensity: float, source: Optional[str] = None
+    ) -> None:
         """Pre-populate the cache with a known intensity value.
 
         The timestamp is normalized using the same logic as ``calculate_emissions``
         so that a subsequent calculation for the same (zone, normalized-time) will
-        hit the cache instead of querying the repository/API again.
+        hit the cache instead of querying the repository/API again. Callers that
+        only know the value (no provenance) get ``realtime``: prefetched values
+        come from the age-bounded ``get_for_zone_at_time`` lookup.
         """
-        dt = _to_datetime(timestamp)
-        gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
-        if gran == "hour":
-            normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
-        elif gran == "day":
-            normalized_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            normalized_dt = dt
-        normalized = _iso_z(normalized_dt)
+        normalized = _iso_z(self._normalize(timestamp))
         cache_key = (zone, normalized)
+        entry = _CachedIntensity(value=intensity, source=source or IntensitySource.REALTIME.value)
 
         async with self._lock:
             if cache_key not in self._intensity_cache:
-                self._intensity_cache[cache_key] = intensity
+                self._intensity_cache[cache_key] = entry
+
+    async def _lookup_intensity(self, zone: str, normalized: str, normalized_dt: datetime) -> _CachedIntensity:
+        """Resolve a stored intensity and classify its freshness."""
+        repository = self.repository
+        if isinstance(repository, CarbonIntensityRepository):
+            point = await repository.get_intensity_point(zone, normalized)
+            if isinstance(point, IntensityPoint):
+                age = point.age(normalized_dt)
+                if age is not None and age > self._max_age():
+                    return _CachedIntensity(value=point.value, source=IntensitySource.STALE.value)
+                source = IntensitySource.CONSOLIDATED if point.is_estimated is False else IntensitySource.REALTIME
+                return _CachedIntensity(value=point.value, source=source.value)
+            if point is None:
+                return _CachedIntensity(value=None, source=None)
+        value = await repository.get_for_zone_at_time(zone, normalized)
+        if value is None:
+            return _CachedIntensity(value=None, source=None)
+        return _CachedIntensity(value=value, source=IntensitySource.REALTIME.value)
+
+    def _apply_defaults(self, zone: str, entry: _CachedIntensity, normalized_dt: datetime) -> _CachedIntensity:
+        """Replace missing or stale values by the zone or global default (computed, never stored)."""
+        if entry.value is not None and entry.source != IntensitySource.STALE.value:
+            return entry
+        zone_default = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
+        if zone_default is not None:
+            logger.info(
+                "Carbon intensity %s for zone '%s' at %s; using zone default %s gCO2e/kWh",
+                "stale" if entry.value is not None else "missing",
+                zone,
+                normalized_dt.isoformat(),
+                zone_default,
+            )
+            return _CachedIntensity(value=float(zone_default), source=IntensitySource.ZONE_DEFAULT.value)
+        if entry.value is not None:
+            logger.warning(
+                "Only a stale carbon intensity exists for zone '%s' at %s and no zone default is known; using it",
+                zone,
+                normalized_dt.isoformat(),
+            )
+            return entry
+        logger.warning(
+            "Carbon intensity missing for zone '%s' at %s and no zone default available; "
+            "using global fallback %s gCO2e/kWh",
+            zone,
+            normalized_dt.isoformat(),
+            self._config.DEFAULT_INTENSITY,
+        )
+        return _CachedIntensity(value=self._config.DEFAULT_INTENSITY, source=IntensitySource.GLOBAL_DEFAULT.value)
 
     async def calculate_emissions(
         self, joules: float, zone: str, timestamp: str | datetime, pue: Optional[float] = None
     ) -> Optional[CarbonCalculationResult]:
-        """Calculate CO2e grams and return it with the grid intensity used.
+        """Calculate CO2e grams and return it with the grid intensity used and its provenance.
 
-        If intensity is missing in the repository, the configured default is used.
+        If intensity is missing or stale in the repository, a default is used
+        (see the class docstring for the resolution order).
+
         Args:
             joules: Energy consumed in Joules.
             zone: Electricity Maps zone identifier.
@@ -103,61 +186,32 @@ class CarbonCalculator:
             pue: Power Usage Effectiveness to apply. If None, uses the instance default.
         """
         # Normalize timestamp to hour to increase cache hit rate across similar timestamps
-        dt = _to_datetime(timestamp)
-        gran = getattr(self._config, "NORMALIZATION_GRANULARITY", "hour")
-        if gran == "hour":
-            normalized_dt = dt.replace(minute=0, second=0, microsecond=0)
-        elif gran == "day":
-            normalized_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:  # 'none'
-            normalized_dt = dt
+        normalized_dt = self._normalize(timestamp)
         normalized = _iso_z(normalized_dt)
         cache_key = (zone, normalized)
 
         # Use a single async lock acquisition to check cache and fetch if needed.
         # This prevents concurrent coroutines from all fetching the same key.
         async with self._lock:
-            if cache_key in self._intensity_cache:
-                grid_intensity_data = self._intensity_cache[cache_key]
+            cached = self._intensity_cache.get(cache_key)
+            if isinstance(cached, _CachedIntensity):
+                entry = cached
+            elif cached is not None:
+                entry = _CachedIntensity(value=cached, source=IntensitySource.REALTIME.value)
             else:
-                grid_intensity_data = await self.repository.get_for_zone_at_time(zone, normalized)
-                self._intensity_cache[cache_key] = grid_intensity_data
+                entry = self._apply_defaults(
+                    zone, await self._lookup_intensity(zone, normalized, normalized_dt), normalized_dt
+                )
+                self._intensity_cache[cache_key] = entry
 
-        grid_intensity_value = grid_intensity_data
-
-        # Use default if intensity data is missing
-        if grid_intensity_value is None:
-            # Prefer zone-specific default from the Electricity Maps CSV over the
-            # global hardcoded fallback (500 gCO2/kWh) which is far too high for
-            # low-carbon grids like France (26) or Sweden (20).
-            zone_default = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
-            if zone_default is not None:
-                grid_intensity_value = float(zone_default)
-                async with self._lock:
-                    self._intensity_cache[cache_key] = grid_intensity_value
-                    logger.info(
-                        "Carbon intensity missing for zone '%s' at %s; using zone default %s gCO2e/kWh",
-                        zone,
-                        normalized_dt.isoformat(),
-                        grid_intensity_value,
-                    )
-            else:
-                grid_intensity_value = self._config.DEFAULT_INTENSITY
-                async with self._lock:
-                    self._intensity_cache[cache_key] = None
-                    logger.warning(
-                        "Carbon intensity missing for zone '%s' at %s and no zone default available; "
-                        "using global fallback %s gCO2e/kWh",
-                        zone,
-                        normalized_dt.isoformat(),
-                        self._config.DEFAULT_INTENSITY,
-                    )
+        grid_intensity_value = float(entry.value) if entry.value is not None else self._config.DEFAULT_INTENSITY
 
         if joules == 0.0:
             return CarbonCalculationResult(
                 co2e_grams=0.0,
                 grid_intensity=grid_intensity_value,
                 grid_intensity_timestamp=normalized_dt,
+                intensity_source=entry.source,
             )
 
         kwh = joules / self._config.JOULES_PER_KWH
@@ -169,6 +223,7 @@ class CarbonCalculator:
             co2e_grams=co2e_grams,
             grid_intensity=grid_intensity_value,
             grid_intensity_timestamp=normalized_dt,
+            intensity_source=entry.source,
         )
 
     def calculate_embodied_emissions(
