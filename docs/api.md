@@ -75,7 +75,9 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 | `GET` | `/recommendations/savings` | Read realized savings (`last`, `namespace`). |
 | `GET` | `/recommendations/{rec_id}` | Read a recommendation record. |
 | `GET` | `/recommendations/{rec_id}/events` | Read its lifecycle audit trail. |
-| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. |
+| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. Only `active` or `pr_open` records can be applied; any other status returns `409`. |
+| `POST` | `/recommendations/{rec_id}/remeasure` | Start a new fixed-horizon measurement of an applied change whose last measurement was `not_realized` (`verification_status=failed`) or `inconclusive`. Optional body `{"reason": "..."}`. Returns `202` with the record (`verifying`); `409` for any other state, `404` when unknown. |
+| `POST` | `/recommendations/{rec_id}/rollback-review/dismiss` | Dismiss a false-positive `rollback_review` with a required `{"reason": "..."}`: the record returns to `applied` and is measured again. `409` outside `rollback_review`, `404` when unknown. |
 | `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore a recommendation. |
 | `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. |
 | `POST` | `/recommendations/{rec_id}/apply-pr` | Compatibility endpoint that previews or queues a validated GitOps plan. |

@@ -80,9 +80,10 @@ A **recommendation** is one proposed change on one target. It contains:
 | `stale` | No longer produced by the latest scan |
 | `expired` | Not acted on before its expiry |
 | `pr_open` | A pull request implementing it is open |
-| `applied` | The change is live in the cluster |
+| `applied` | The change is live in the cluster (also the state of a measured change whose saving was not realized or inconclusive) |
 | `verifying` | The post-change observation window is running |
-| `verified` | Health and savings checks passed |
+| `verified` | The measured saving was realized and no health check failed |
+| `regressed` | Reserved for drift detection: a realized saving that no longer holds (nothing sets it yet) |
 | `rollback_review` | A health check failed after the change |
 | `reverted` | A rollback reached the cluster |
 | `failed` | The pull request was closed without merge, or the change could not be completed |
@@ -157,12 +158,15 @@ A change counts as applied only when two conditions hold:
 
 ### Verification
 
-Once applied, a recommendation is observed for `VERIFICATION_WINDOW_HOURS` (72 by default) and evaluated by gates:
+Each applied change gets **one fixed-horizon measurement**:
 
-- **Health:** usage stays below the proposed request plus headroom, and no new restarts occur.
-- **Savings:** the measured reduction reaches a share of the projection (`VERIFICATION_MIN_SAVINGS_RATIO`).
+- **Windows:** the after-window starts when the rollout completes (every replica updated and available) and lasts `VERIFICATION_WINDOW_HOURS` (72 by default). The baseline window has the same length and ends when the pull request was merged (or the plan approved), so it never overlaps the change.
+- **Health (per replica):** per-pod p95 usage stays below the applied per-pod request plus headroom; per-pod restart deltas stay within the limit; no OOM kill, readiness above the minimum and CPU throttling below the maximum (read from kube-state-metrics and cAdvisor through Prometheus). A signal that cannot be read is reported `not_available`, never counted as a pass.
+- **Savings:** only rows with trusted cost provenance count. A change is realized when the measured saving clears a small noise floor. The projection is not a gate; how close the measurement came to it is reported.
 
-The outcome is `verified`, `rollback_review`, `inconclusive`, or applied with savings not realized.
+The outcome is `verified` (realized), `rollback_review` (a health check failed), or `applied` with the saving `not_realized` or `inconclusive`. Request rightsizing changes what a workload *reserves*, not what it *uses*: its usage-based CO2e difference is reported but never claimed.
+
+Every decision is stored as an immutable measurement. A `not_realized` or `inconclusive` change is never re-tested automatically; `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement that supersedes the previous one. An operator can dismiss a false-positive `rollback_review` with a reason, which returns the change to `applied` and measures it again.
 
 > Verification is in **beta**. The measurement method is being reworked to use counterfactual baselines, confidence intervals and per-change provenance.
 
