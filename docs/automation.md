@@ -173,9 +173,9 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 1. GreenKube builds a typed, container-targeted action from the recommendation evidence. Recommendations without a safe per-container target remain non-actionable.
 2. The server resolves the workload binding, snapshots the immutable provider revision, and renders the before/after state.
 3. Raw YAML/JSON, Kustomize, and the supported Helm layouts are validated. Any unrelated rendered change fails the plan.
-4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, validation state, and an expiry.
-5. Approval must present that exact digest. A changed source or stale digest returns `409` and requires a new preview.
-6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates.
+4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, the renderer's warnings (credentials redacted), validation state, and an expiry. Previewing the same workload again supersedes its previous `draft`/`validated` plan instead of returning `409`. Closing a preview calls `DELETE /api/v1/automation/plans/{plan_id}`, which marks it `superseded`.
+5. Approval must present that exact digest. Unrelated commits on the target branch do not stale a plan: when every file the plan touches is unchanged between the planned base revision and the current head, the plan is committed on the moved head. That head is recorded as `committed_on_revision`, next to the planned `base_revision`. A change to a touched file or a stale digest returns `409` and requires a new preview.
+6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates. When a worker reclaims an operation whose previous worker lost its lease, it first adopts an open PR on the plan's deterministic branch (`pr_open`), before any staleness check.
 7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. The controller observes the exact Argo CD/Flux source revision and readiness; a confirmed plan moves to `synced`, while a timeout moves it to `sync_failed`. A plan never jumps directly to `applied`.
 8. Apply detection requires a synced plan and an exact per-container request match. Verification then uses the normal post-apply health and savings gates.
 
@@ -200,7 +200,18 @@ automation:
     changeFreezeWindows: []
 ```
 
-Discovery also supplies live workload labels, rollout state, controller suspend/health, and HPA/PDB evidence. A configured freeze label blocks only matching workloads. When rollout, controller-health, or HPA/PDB evidence cannot be collected, the gate fails closed instead of guessing.
+Discovery also supplies live workload labels, rollout state, controller suspend/health, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads.
+
+- **HPA.** An HPA blocks only the resource it scales on. A CPU-utilization target blocks CPU changes; a memory change on the same workload passes with a warning. A `ContainerResource` metric blocks only its own container. A plan that adds an HPA conflicts with an existing one.
+- **VPA.** A VPA that targets the workload in `Auto`, `Recreate`, `InPlaceOrRecreate` or `InPlace` mode rewrites requests itself, so it blocks the plan. `Initial` mode passes with a warning; `Off` passes.
+- **PDB.** A PDB that blocks the rolling restart rejects the plan.
+
+`automation.policy.missingEvidence` sets what these live gates do when discovery cannot collect their evidence:
+
+- `fail` rejects the plan with `policy_evidence_missing`.
+- `warn` allows it and adds a warning to `policy_result.warnings`.
+
+The chart defaults to `fail` for `profile: production` and `warn` for `standalone`.
 
 ## Pull-request options
 
@@ -227,7 +238,7 @@ A synced plan whose recommendations remain in `rollback_review` can produce a va
 - The API re-reads the original plan's base revision through the authorized provider and rejects files that changed after the forward plan.
 - The rollback preview uses the same digest approval and worker queue.
 - A recommendation becomes `reverted` only after the rollback plan is `synced`, a post-baseline workload generation is observed, and live per-container requests match the original pre-apply baseline.
-- RAW rollback is built in. Kustomize rollback requires an explicitly configured exact-target rollback adapter. The supported Argo CD `HELM_VALUES` subset and Flux `HELM_RELEASE` subset restore the same Git-managed inputs as their forward plans.
+- RAW and Kustomize rollback are built in. Kustomize rollback renders the overlay in the same renderer sandbox as forward planning and rejects any change outside the exact target. The supported Argo CD `HELM_VALUES` subset and Flux `HELM_RELEASE` subset restore the same Git-managed inputs as their forward plans.
 - Unsupported layouts fail closed rather than producing a partial rollback.
 
 The **Recommendations** page exposes rollback preview from the Pull requests tab when the original plan qualifies.
@@ -256,6 +267,12 @@ The default snapshot limits are 100 MiB compressed, 500 MiB extracted, 20,000 fi
 
 Do not run inline and worker mode against the same database. Database leases prevent duplicate execution, but only one mode should be configured.
 
+Worker loops are supervised:
+
+- An iteration that raises is logged with an error code and retried with jittered backoff.
+- A loop task that crashes or exits is restarted with backoff.
+- In inline mode, `GET /api/v1/health` returns `503` (`degraded`) and `GET /api/v1/automation/status` reports `ready: false` while the in-process loop is down or its heartbeat is stale. The readiness probe no longer reports a dead queue as ready.
+
 ## Intervals and operations
 
 | Value | Default | Purpose |
@@ -266,11 +283,17 @@ Do not run inline and worker mode against the same database. Database leases pre
 | `automation.syncPollIntervalSeconds` | `30` | Controller sync observation interval (10–86400). |
 | `automation.syncTimeoutSeconds` | `1800` | Time before an unsynced merged plan becomes `sync_failed` (60–86400). |
 
-A periodic reconciler fails an `applying` plan when its operation is terminal and no PR exists. A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, PR records, and recommendation audit events.
+A periodic reconciler fails an `applying` plan when its operation is terminal and no PR exists. The expiry sweep reads only the plans whose TTL elapsed, in bounded batches.
+
+A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days:
+
+- A pruned plan keeps a compact `file_plan_summary`: paths, original blob SHAs, content digests, diff statistics, validation and digest. `GET /api/v1/automation/plans/{plan_id}` and the workload's policy history keep working.
+- Plan metadata, PR records and recommendation audit events (`recommendation_events`) are never deleted.
+- Webhook deliveries for pull requests that GreenKube does not track are stored as `ignored` and answered with `202`. They are never retried, and retention prunes them.
 
 ## Observability
 
-- `GET /api/v1/automation/status` reports worker heartbeat age, queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state.
+- `GET /api/v1/automation/status` reports worker heartbeat age, the inline loop state (`worker.inline_loop`: state, heartbeat age, restarts, last error code), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`.
 - `GET /api/v1/automation/pull-requests` lists safe pending/open PR metadata.
 - `GET /prometheus/metrics` exposes control-loop metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the worker's process-local registry.
 - Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, and stale worker heartbeats.
