@@ -28,6 +28,25 @@ Instance types absent from the bundled profile data use `config.defaults.instanc
 
 For operational emissions, GreenKube converts joules to kWh (`joules / 3,600,000`) and multiplies by grid intensity and PUE. These are model-based estimates, not direct power-meter readings.
 
+### Grid intensity freshness and provenance
+
+Each metric row records where its grid intensity came from (`intensity_source`):
+
+| Value | Meaning |
+|---|---|
+| `consolidated` | Final provider value no older than `INTENSITY_MAX_AGE` (default `6h`) |
+| `realtime` | Provisional provider value no older than `INTENSITY_MAX_AGE`; the hourly recompute replaces it once the provider consolidates it |
+| `zone_default` | No fresh value: the bundled per-zone default is used |
+| `stale` | Only a value older than `INTENSITY_MAX_AGE` exists and the zone has no default |
+| `global_default` | Neither a value nor a zone default: `DEFAULT_INTENSITY` is used |
+
+Defaults are computed when metrics are calculated and are never written into
+the intensity history, so a missing token or a provider outage cannot pass for
+measured data. The hourly recompute refreshes pod **and** container rows of the
+last 24 hours with the latest fresh values. `power_source` records whether the
+node used a known instance profile (`instance_profile`), a profile derived from
+its capacity (`node_capacity_derived`) or the generic default (`default_profile`).
+
 ## Methodology
 
 The CCF methodology states:

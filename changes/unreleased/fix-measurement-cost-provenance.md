@@ -1,0 +1,23 @@
+### Added
+
+- Per-dimension provenance on pod and container metric rows and their hourly aggregates: `cost_source`, `usage_source`, `power_source`, `intensity_source` (migration 0039, `greenkube.models.provenance` with `is_cost_trusted()` / `is_usage_trusted()` helpers). Legacy rows are backfilled (`cost_source=opencost` when a positive cost was stored, `intensity_source=unknown`). (A11)
+- OpenCost cost components `cost_cpu`, `cost_ram`, `cost_storage`, `cost_network`, `cost_lb` on pod and container rows; container rows split CPU cost by CPU share and RAM cost by memory share. (A4)
+- Container `cpu_limit` / `memory_limit` collection and persistence; native sidecars (init containers with `restartPolicy: Always`) are collected as steady-state containers (`kind="sidecar"`), classic init containers only on request (`kind="init"`). (A7, BUG-10)
+- `INTENSITY_MAX_AGE` setting (Helm `config.intensityMaxAge`, default `6h`). (A8)
+- Controller Prometheus endpoint `/prometheus/metrics` on `CONTROLLER_METRICS_PORT` (Helm `collector.metricsPort`, default `9102`), with a `<release>-controller-metrics` Service, a controller ServiceMonitor and NetworkPolicy ingress. New metrics: `greenkube_collection_source_requests_total`, `greenkube_collection_source_duration_seconds`, `greenkube_collection_window_duration_seconds`, `greenkube_metric_rows_written_total` (provenance mix). Verification telemetry recorded by the controller is now scrapeable. (A12, BUG-14)
+- `metrics_compression_watermarks` table (migration 0040). (A3)
+
+### Changed
+
+- OpenCost is queried on `/allocation/compute` with `aggregate=namespace,pod`, `accumulate=true`, `includeIdle=false` over the exact collection window; per-step cost uses the minutes the pod ran in the window instead of a trailing total divided by steps. (A4, BUG-41)
+- Container rows inherit their pod's provenance and `is_estimated` instead of being blanket-flagged as estimated; `is_estimated` is deprecated in favour of provenance. (A11, BUG-29)
+- Hourly container and pod readers keep `sample_count`. (BUG-29)
+- Electricity Maps and Wattnet collectors return no record when no measurement is available; zone and global defaults are applied at read time only. (A8)
+- Raw metrics pruning removes whole hours below the compression watermark only, whatever `METRICS_RAW_RETENTION_DAYS`. (A3)
+
+### Fixed
+
+- Hourly compression lost samples in every hour crossing the raw-retention boundary (non-aligned cutoff + overwrite upsert); it now compresses closed hours once, from their complete raw set, behind a watermark, and never re-reads compressed hours. (A3, BUG-02)
+- Same-named pods in different namespaces (e.g. `redis-0`) shared one OpenCost cost. (A4, BUG-04)
+- Stale carbon intensities were used without age limit and static defaults were written into the intensity history as if measured. (A8, BUG-07)
+- The intensity recompute updated `combined_metrics` only; container rows now follow (set-based on SQLite and PostgreSQL), and PostgreSQL now refreshes `is_estimated` when a provider consolidates a value. (A9, BUG-06)

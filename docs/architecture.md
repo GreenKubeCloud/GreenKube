@@ -372,7 +372,8 @@ Stores final aggregated metrics (energy + carbon + cost + resources).
 Schema (33 columns):
 - Core: pod_name, namespace, timestamp, duration_seconds
 - Energy: joules, co2e_grams, grid_intensity, pue
-- Cost: total_cost
+- Cost: total_cost and its components cost_cpu, cost_ram, cost_storage, cost_network, cost_lb
+  (OpenCost allocation for the exact collection window, keyed by `(namespace, pod)`)
 - Resources:
   - CPU: cpu_request, cpu_usage_millicores
   - Memory: memory_request, memory_usage_bytes
@@ -382,7 +383,26 @@ Schema (33 columns):
   - GPU: gpu_usage_millicores
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
-- Estimation: is_estimated, estimation_reasons
+- Provenance (one column per dimension, see `greenkube.models.provenance`):
+  `cost_source` (opencost, kubecost, pricing_catalog, custom_rate, none),
+  `usage_source` (prometheus, metrics_server, none),
+  `power_source` (instance_profile, node_capacity_derived, default_profile, kepler),
+  `intensity_source` (realtime, consolidated, stale, zone_default, global_default; `unknown` for legacy rows).
+  Hourly aggregates of rows with different sources carry `mixed`. Consumers decide what to trust with
+  `is_cost_trusted()` / `is_usage_trusted()` instead of `is_estimated`.
+- Estimation (deprecated, kept for API v1): is_estimated, estimation_reasons
+
+Container rows (`container_metrics`) carry the same provenance as their pod aggregate (they are no longer
+blanket-flagged as estimated), their `emaps_zone`, and the container `cpu_limit` / `memory_limit`.
+Native sidecars (init containers with `restartPolicy: Always`) are steady-state containers; classic init
+containers are excluded from steady-state sums.
+
+**Hourly compression** (`MetricsCompressor`, hourly job): only closed hours older than
+`METRICS_COMPRESSION_AGE_HOURS` are aggregated into `combined_metrics_hourly` / `container_metrics_hourly`,
+each from its complete raw set and in the same transaction that advances the table's watermark in
+`metrics_compression_watermarks`. Compression resumes at the watermark (never re-reading compressed hours) and
+raw pruning deletes whole hours below the watermark only, so sums of cost, energy, CO₂e and sample counts are
+preserved exactly. The savings ledger has its own compression.
 - **GHG Scope 2:** `co2e_grams` — indirect emissions from purchased electricity (grid intensity × energy × PUE)
 - **GHG Scope 3 Cat. 1:** `embodied_co2e_grams` — upstream hardware manufacturing emissions (Boavizta, allocated by CPU share)
 - **Total (Scope 2 + 3):** `total_co2e_grams` — computed field, full pod carbon footprint
@@ -688,6 +708,8 @@ All configuration flows through `src/greenkube/core/config.py`:
 **Carbon:**
 - `DEFAULT_ZONE` — Fallback carbon zone
 - `DEFAULT_INTENSITY` — Fallback intensity (gCO2e/kWh)
+- `INTENSITY_MAX_AGE` — Maximum age of a stored intensity before the zone default is used (default `6h`)
+- `CONTROLLER_METRICS_PORT` — Controller Prometheus endpoint port (default `9102`, `0` disables)
 - `NORMALIZATION_GRANULARITY` — hour|day|none
 - `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 100 kg CO₂e)
 
