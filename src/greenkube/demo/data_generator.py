@@ -1435,6 +1435,11 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                         estimation_reasons=["daily_story_bucket"] if is_estimated else [],
                         embodied_co2e_grams=round(embodied_co2e, 4),
                         calculation_version=DEMO_CALCULATION_VERSION,
+                        # The story simulates a fully instrumented cluster (A11 provenance).
+                        cost_source="opencost",
+                        usage_source="prometheus",
+                        power_source="instance_profile",
+                        intensity_source="realtime" if is_estimated else "consolidated",
                     )
                 )
 

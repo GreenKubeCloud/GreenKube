@@ -12,6 +12,7 @@
 - OpenCost is queried on `/allocation/compute` with `aggregate=namespace,pod`, `accumulate=true`, `includeIdle=false` over the exact collection window; per-step cost uses the minutes the pod ran in the window instead of a trailing total divided by steps. (A4, BUG-41)
 - Container rows inherit their pod's provenance and `is_estimated` instead of being blanket-flagged as estimated; `is_estimated` is deprecated in favour of provenance. (A11, BUG-29)
 - Hourly container and pod readers keep `sample_count`. (BUG-29)
+- Demo metrics carry provenance (`opencost`, `prometheus`, `instance_profile`, `consolidated`/`realtime`) so measurement gates trust them like an instrumented cluster. (A11)
 - Electricity Maps and Wattnet collectors return no record when no measurement is available; zone and global defaults are applied at read time only. (A8)
 - Raw metrics pruning removes whole hours below the compression watermark only, whatever `METRICS_RAW_RETENTION_DAYS`. (A3)
 
