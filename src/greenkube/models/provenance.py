@@ -142,11 +142,14 @@ def combine_sources(values: Iterable[Optional[str]]) -> Optional[str]:
     return MIXED
 
 
-def cost_source_for(cost_found: bool, default_cost: float) -> CostSource:
-    """Provenance of an OpenCost-or-default cost lookup."""
-    if cost_found:
-        return CostSource.OPENCOST
-    return CostSource.CUSTOM_RATE if default_cost else CostSource.NONE
+def cost_source_for(cost_found: bool) -> CostSource:
+    """Provenance of an OpenCost-or-default cost lookup.
+
+    ``DEFAULT_COST`` is a flat placeholder per row, not a per core-hour or
+    GiB-hour rate, so rows priced with it carry ``none`` (as migration 0039
+    backfills legacy rows); ``custom_rate`` is reserved for configured rates.
+    """
+    return CostSource.OPENCOST if cost_found else CostSource.NONE
 
 
 __all__ = [

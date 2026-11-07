@@ -57,7 +57,7 @@ def cost_fields(cost: Optional[CostMetric], share: float, default_cost: float) -
             "cost_storage": None,
             "cost_network": None,
             "cost_lb": None,
-            "cost_source": cost_source_for(False, default_cost).value,
+            "cost_source": cost_source_for(False).value,
         }
     return {
         "total_cost": cost.total_cost * share,
@@ -66,7 +66,7 @@ def cost_fields(cost: Optional[CostMetric], share: float, default_cost: float) -
         "cost_storage": cost.storage_cost * share,
         "cost_network": cost.network_cost * share,
         "cost_lb": cost.lb_cost * share,
-        "cost_source": cost.source or cost_source_for(True, default_cost).value,
+        "cost_source": cost.source or cost_source_for(True).value,
     }
 
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from greenkube.core.calculator import CarbonCalculationResult
-from greenkube.core.metric_assembler import MetricAssembler, power_source_for_profile
+from greenkube.core.metric_assembler import MetricAssembler, cost_fields, power_source_for_profile
 from greenkube.core.prometheus_resource_mapper import PodResourceMaps
 from greenkube.models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from greenkube.models.node import NodeInfo, NodeZoneContext
@@ -222,3 +222,13 @@ def test_power_source_for_profile():
     assert power_source_for_profile(estimator, estimator.DEFAULT_INSTANCE_PROFILE) == "default_profile"
     assert power_source_for_profile(estimator, profile) == "instance_profile"
     assert power_source_for_profile(estimator, {"vcores": 8}) == "node_capacity_derived"
+
+
+def test_default_cost_placeholder_is_not_tagged_as_a_cost_rate():
+    """DEFAULT_COST is a flat placeholder, not a per core-hour rate: rows priced with it carry ``none``,
+    the value migration 0039 backfills for legacy rows priced the same way."""
+    fields = cost_fields(None, 1.0, default_cost=0.05)
+
+    assert fields["total_cost"] == pytest.approx(0.05)
+    assert fields["cost_source"] == "none"
+    assert not is_cost_trusted(fields)

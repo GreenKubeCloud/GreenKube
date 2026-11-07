@@ -384,7 +384,8 @@ Schema (33 columns):
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
 - Provenance (one column per dimension, see `greenkube.models.provenance`):
-  `cost_source` (opencost, kubecost, pricing_catalog, custom_rate, none),
+  `cost_source` (opencost, kubecost, pricing_catalog, custom_rate, none; rows priced with the flat
+  `DEFAULT_COST` placeholder carry `none`),
   `usage_source` (prometheus, metrics_server, none),
   `power_source` (instance_profile, node_capacity_derived, default_profile, kepler),
   `intensity_source` (realtime, consolidated, stale, zone_default, global_default; `unknown` for legacy rows).
