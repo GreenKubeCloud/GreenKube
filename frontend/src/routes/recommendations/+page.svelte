@@ -1,6 +1,6 @@
 <script>
 	import { selectedNamespace } from '$lib/stores.js';
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		getActiveRecommendations,
 		getIgnoredRecommendations,
@@ -8,6 +8,7 @@
 		getRecommendationSavings,
 		getOpenPullRequests,
 		getAutomationStatus,
+		getNamespaces,
 		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation,
@@ -16,11 +17,23 @@
 		getAutomationOperation,
 		approveAutomationPlan,
 		cancelAutomationPlan,
+		discardAutomationPlan,
 		previewAutomationPlanRollback,
 		getRecommendationEvents
 	} from '$lib/api.js';
+	import {
+		findPendingOptimizationRun,
+		isRunPending,
+		startOptimizationScan,
+		waitForOptimizationRun
+	} from '$lib/optimizationRuns.js';
 	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
 	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
+	import {
+		describeRankingFactors,
+		formatRankingScore,
+		topRankingFactor
+	} from '$lib/utils/ranking.js';
 	import DataState from '$lib/components/DataState.svelte';
 
 	// --- State ---
@@ -40,18 +53,58 @@
 	let expandedApplied = new Set(); // ids of expanded applied cards
 	let expandedEvidence = new Set(); // ids of active cards showing the evidence panel
 
-	// Multi-criteria ranking
-	let rankingProfile = ''; // '' = server default (projected savings)
+	// Ordering. 'server' keeps the API order (ranking score, then projected
+	// cost savings); the savings sorts are client-side; 'profile:*' re-ranks
+	// through /recommendations/top (top 50 only, the rest keep server order).
+	let sortMode = 'server';
 	let rankedIds = []; // recommendation ids ordered by the selected profile
+	let profileScores = new Map(); // id -> { ranking_score, ranking_factors } for the selected profile
+	let rankingError = '';
+	let rankingController = null;
 
-	const RANKING_PROFILES = [
-		{ value: '', label: 'Projected savings' },
-		{ value: 'balanced', label: 'Balanced' },
-		{ value: 'carbon_first', label: 'Carbon first' },
-		{ value: 'cost_first', label: 'Cost first' },
-		{ value: 'quick_wins', label: 'Quick wins' },
-		{ value: 'low_risk', label: 'Low risk' }
+	const PROFILE_RANK_LIMIT = 50;
+	const SORT_OPTIONS = [
+		{ value: 'server', label: 'Ranking score (default)' },
+		{ value: 'cost', label: 'Projected cost savings' },
+		{ value: 'co2', label: 'Projected CO₂e savings' },
+		{ value: 'profile:balanced', label: 'Profile: balanced' },
+		{ value: 'profile:carbon_first', label: 'Profile: carbon first' },
+		{ value: 'profile:cost_first', label: 'Profile: cost first' },
+		{ value: 'profile:quick_wins', label: 'Profile: quick wins' },
+		{ value: 'profile:low_risk', label: 'Profile: low risk' }
 	];
+
+	// Server-side filters, sent as query parameters of /recommendations/active.
+	let filterSource = '';
+	let filterRisk = '';
+	let filterCapability = '';
+	let namespaceOptions = [];
+
+	const SOURCE_OPTIONS = ['greenkube', 'vpa', 'karpenter'];
+	const RISK_OPTIONS = [
+		{ value: 'low', label: 'Low risk' },
+		{ value: 'medium', label: 'Medium risk' },
+		{ value: 'high', label: 'High risk' }
+	];
+	const CAPABILITY_OPTIONS = [
+		{ value: 'cpu_rightsizing', label: 'CPU rightsizing' },
+		{ value: 'memory_rightsizing', label: 'Memory rightsizing' },
+		{ value: 'autoscaling', label: 'Autoscaling' },
+		{ value: 'off_peak', label: 'Off-peak scaling' },
+		{ value: 'carbon_aware', label: 'Carbon-aware scheduling' },
+		{ value: 'zombie_cleanup', label: 'Zombie cleanup' },
+		{ value: 'namespace_cleanup', label: 'Namespace cleanup' },
+		{ value: 'node_optimization', label: 'Node optimization' },
+		{ value: 'node_pool', label: 'Node pool' },
+		{ value: 'storage_cleanup', label: 'Storage cleanup' },
+		{ value: 'lb_cleanup', label: 'Load balancer cleanup' }
+	];
+
+	// Recommendation scan run (E1): requested explicitly, polled, then reloaded.
+	let scanRun = null; // { run_id, status, recommendation_count?, error?, timedOut? }
+	let scanError = '';
+	let scanRequesting = false;
+	let scanController = null;
 
 	// Ignore modal state
 	let ignoreModal = null; // { rec } | null
@@ -86,13 +139,29 @@
 	// Per-card action loading state
 	let actionLoading = {}; // { [id]: bool }
 
-	$: if ($selectedNamespace !== undefined) loadData();
+	// Reload whenever the namespace or a server-side filter changes.
+	$: loadKey = [$selectedNamespace ?? '', filterSource, filterRisk, filterCapability].join('|');
+	$: if (loadKey !== undefined) loadData();
 
 	let loadSeq = 0;
 	let requestController = new AbortController();
 	onDestroy(() => {
 		requestController.abort();
+		scanController?.abort();
+		rankingController?.abort();
 		stopPlanStatusPolling();
+		discardPreviewPlan();
+	});
+
+	onMount(() => {
+		getNamespaces()
+			.then((namespaces) => {
+				namespaceOptions = Array.isArray(namespaces) ? namespaces : [];
+			})
+			.catch(() => {
+				namespaceOptions = [];
+			});
+		followPendingScan();
 	});
 
 	async function loadData() {
@@ -101,21 +170,30 @@
 		const seq = ++loadSeq;
 		requestController.abort();
 		requestController = new AbortController();
+		const { signal } = requestController;
+		const namespace = $selectedNamespace || undefined;
 		loading = true;
 		error = null;
 		automationStatus = null;
 		automationStatusError = '';
 		try {
+			// Plain reads: page loads never schedule a scan (BUG-25).
 			const [active, ignored, applied, sav, openPrs] = await Promise.all([
-				getActiveRecommendations({ namespace: $selectedNamespace || undefined, refresh: true }),
-				getIgnoredRecommendations(),
-				getAppliedRecommendations(),
-				getRecommendationSavings({ namespace: $selectedNamespace || undefined }),
-				getOpenPullRequests()
+				getActiveRecommendations({
+					namespace,
+					source: filterSource || undefined,
+					risk_level: filterRisk || undefined,
+					capability: filterCapability || undefined,
+					signal
+				}),
+				getIgnoredRecommendations({ namespace, signal }),
+				getAppliedRecommendations({ namespace, signal }),
+				getRecommendationSavings({ namespace, signal }),
+				getOpenPullRequests({ signal })
 			]);
 			if (seq !== loadSeq) return;
 			try {
-				automationStatus = await getAutomationStatus();
+				automationStatus = await getAutomationStatus({ signal });
 			} catch (statusError) {
 				if (statusError.name !== 'AbortError') {
 					automationStatusError = statusError.message || 'Automation readiness could not be checked.';
@@ -132,7 +210,79 @@
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
+		if (seq === loadSeq && sortMode.startsWith('profile:')) loadProfileRanking(sortMode);
+	}
 
+	// --- Recommendation scan runs ---
+	$: scanPending = scanRequesting || isRunPending(scanRun);
+
+	async function followScan(run, signal) {
+		scanRun = run;
+		const finalRun = await waitForOptimizationRun(run, {
+			signal,
+			onUpdate: (update) => {
+				scanRun = update;
+			}
+		});
+		scanRun = finalRun;
+		await loadData();
+	}
+
+	/** Page opened while a (scheduled) scan runs: reload when it completes. */
+	async function followPendingScan() {
+		scanController?.abort();
+		const controller = new AbortController();
+		scanController = controller;
+		try {
+			const run = await findPendingOptimizationRun({ signal: controller.signal });
+			if (run && scanController === controller) await followScan(run, controller.signal);
+		} catch (e) {
+			if (e?.name !== 'AbortError' && scanController === controller) {
+				scanError = e?.message || 'The recommendation scan status could not be read.';
+			}
+		}
+	}
+
+	/** Ask the controller for a fresh scan, then reload when it completes. */
+	async function rescan() {
+		if (scanPending) return;
+		scanController?.abort();
+		const controller = new AbortController();
+		scanController = controller;
+		scanError = '';
+		scanRun = null;
+		scanRequesting = true;
+		try {
+			const started = await startOptimizationScan({ signal: controller.signal });
+			scanRequesting = false;
+			if (!started.supported || !started.run) {
+				// Older servers have no runs API: reload persisted results only.
+				await loadData();
+				return;
+			}
+			await followScan(started.run, controller.signal);
+		} catch (e) {
+			if (e?.name !== 'AbortError' && scanController === controller) {
+				scanError = e?.message || 'The recommendation scan could not be requested.';
+			}
+		} finally {
+			if (scanController === controller) scanRequesting = false;
+		}
+	}
+
+	function scanStatusText(run) {
+		const label = `Recommendation scan #${run.run_id}`;
+		if (run.timedOut) return `${label} is still running. Results reload when you refresh again.`;
+		if (run.status === 'queued') return `${label} is queued. Results reload automatically when it completes.`;
+		if (run.status === 'running') return `${label} is running. Results reload automatically when it completes.`;
+		if (run.status === 'succeeded') {
+			const count = Number.isFinite(run.recommendation_count)
+				? ` with ${run.recommendation_count} recommendation${run.recommendation_count === 1 ? '' : 's'}`
+				: '';
+			return `${label} completed${count}. Results reloaded.`;
+		}
+		if (run.status === 'failed') return `${label} failed${run.error ? `: ${run.error}` : '.'}`;
+		return `${label} finished. Results reloaded.`;
 	}
 
 	function updateOpenPullRequests(openPrs, recommendations = activeRecs) {
@@ -151,38 +301,109 @@
 		}
 	}
 
-	// --- Type filter ---
+	// --- Filters and ordering ---
+	function enumValue(value) {
+		return value === null || value === undefined ? '' : String(value);
+	}
+
+	/** Same exact-match semantics as the API filters, for the ignored list. */
+	function matchesServerFilters(rec, source, risk, capability) {
+		return (
+			(!source || enumValue(rec.source) === source) &&
+			(!risk || enumValue(rec.risk_level) === risk) &&
+			(!capability || enumValue(rec.capability) === capability)
+		);
+	}
+
+	$: serverFiltersActive = Boolean(filterSource || filterRisk || filterCapability);
+	$: sourceOptions = [
+		...new Set([
+			...SOURCE_OPTIONS,
+			...[...activeRecs, ...ignoredRecs].map((rec) => enumValue(rec.source)).filter(Boolean),
+			...(filterSource ? [filterSource] : [])
+		])
+	];
+
+	function clearFilters() {
+		filterSource = '';
+		filterRisk = '';
+		filterCapability = '';
+		filterType = 'all';
+		selectedNamespace.set('');
+	}
+
 	$: openPrRecommendationIds = new Set(openPullRequests.map((pr) => pr.recommendation_id));
 	$: actionableActiveRecs = activeRecs;
-	$: currentList = activeTab === 'active' ? actionableActiveRecs : ignoredRecs;
+	$: currentList = activeTab === 'active'
+		? actionableActiveRecs
+		: ignoredRecs.filter((rec) => matchesServerFilters(rec, filterSource, filterRisk, filterCapability));
 	$: types = [...new Set(currentList.map(r => r.type))];
 	$: filtered = filterType === 'all'
 		? currentList
 		: currentList.filter(r => r.type === filterType);
 
-	$: displayed = rankedIds.length
-		? [...filtered].sort((a, b) => {
-			const ia = rankedIds.indexOf(a.id);
-			const ib = rankedIds.indexOf(b.id);
-			return (ia === -1 ? Number.MAX_SAFE_INTEGER : ia) - (ib === -1 ? Number.MAX_SAFE_INTEGER : ib);
-		})
-		: filtered;
+	function savingsValue(rec, key) {
+		const value = Number(rec?.[key]);
+		return Number.isFinite(value) ? value : 0;
+	}
 
-	async function applyRankingProfile(profile) {
-		rankingProfile = profile;
+	function sortRecommendations(list, mode, ids) {
+		if (mode === 'cost' || mode === 'co2') {
+			const key = mode === 'cost' ? 'potential_savings_cost' : 'potential_savings_co2e_grams';
+			// Stable: equal savings keep the server order.
+			return [...list].sort((a, b) => savingsValue(b, key) - savingsValue(a, key));
+		}
+		if (mode.startsWith('profile:') && ids.length) {
+			const position = new Map(ids.map((id, index) => [id, index]));
+			return [...list].sort(
+				(a, b) =>
+					(position.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (position.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+			);
+		}
+		return list;
+	}
+
+	$: displayed = sortRecommendations(filtered, sortMode, rankedIds);
+
+	/** Score and factors matching the order shown (profile scores when a profile ranks). */
+	function rankingFor(rec, mode, scores) {
+		if (mode.startsWith('profile:') && scores.has(rec.id)) return scores.get(rec.id);
+		return { ranking_score: rec.ranking_score, ranking_factors: rec.ranking_factors };
+	}
+
+	async function loadProfileRanking(mode) {
+		rankingController?.abort();
+		rankingController = null;
 		rankedIds = [];
-		if (!profile) return;
+		profileScores = new Map();
+		rankingError = '';
+		if (!mode.startsWith('profile:')) return;
+		const controller = new AbortController();
+		rankingController = controller;
 		try {
 			const ranked = await getTopRecommendations({
 				namespace: $selectedNamespace || undefined,
-				limit: 50,
+				limit: PROFILE_RANK_LIMIT,
 				metric: 'co2',
-				profile
+				profile: mode.slice('profile:'.length),
+				signal: controller.signal
 			});
-			rankedIds = ranked.map((r) => r.id).filter((id) => id != null);
+			if (rankingController !== controller || sortMode !== mode) return;
+			const rows = Array.isArray(ranked) ? ranked.filter((r) => r?.id != null) : [];
+			rankedIds = rows.map((r) => r.id);
+			profileScores = new Map(
+				rows.map((r) => [r.id, { ranking_score: r.ranking_score, ranking_factors: r.ranking_factors }])
+			);
 		} catch (e) {
-			error = e.message;
+			if (e?.name !== 'AbortError' && rankingController === controller) {
+				rankingError = e?.message || 'The ranking profile could not be applied.';
+			}
 		}
+	}
+
+	function changeSort(mode) {
+		sortMode = mode;
+		loadProfileRanking(mode);
 	}
 
 	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
@@ -328,7 +549,9 @@
 		rollback_unsupported: 'This plan cannot be safely rolled back.',
 		rollback_conflict: 'The original plan or current source changed; refresh before retrying.',
 		plan_preview_unavailable: 'Plan preview is unavailable for this recommendation.',
-		plan_preparation_unavailable: 'Server-side plan preparation is unavailable for this recommendation.'
+		plan_preparation_unavailable: 'Server-side plan preparation is unavailable for this recommendation.',
+		workload_plan_already_exists:
+			'Another plan for this workload is still active. It is either an approved plan that is still opening its pull request, or an earlier preview that this GreenKube server cannot replace automatically. Unapproved previews expire after 30 minutes: preview again then, or check the open pull requests.'
 	};
 
 	function planErrorCode(value) {
@@ -374,7 +597,7 @@
 			.join(' ');
 		if (/plan[\s_-]+preview[\s_-]+unavailable/i.test(text)) return 'plan_preview_unavailable';
 		const match = text.match(
-			/\b(plan_preview_unavailable|plan_preparation_unavailable|unsupported_source|needs_chart_mapping|ambiguous_binding|plan_stale|source_changed|plan_expired|revision_conflict|provider_not_ready|provider_capability_missing|requires_container_target|rollback_not_ready|rollback_unsupported|rollback_conflict)\b/i
+			/\b(plan_preview_unavailable|plan_preparation_unavailable|unsupported_source|needs_chart_mapping|ambiguous_binding|plan_stale|source_changed|plan_expired|revision_conflict|provider_not_ready|provider_capability_missing|requires_container_target|rollback_not_ready|rollback_unsupported|rollback_conflict|workload_plan_already_exists)\b/i
 		);
 		return match?.[1]?.toLowerCase() ?? '';
 	}
@@ -736,8 +959,25 @@
 		);
 	}
 
+	const DISCARDABLE_PLAN_STATUSES = ['draft', 'validated'];
+
+	/**
+	 * Discard an unapproved preview when its dialog closes, so previewing the
+	 * same workload again is not blocked by WORKLOAD_PLAN_ALREADY_EXISTS (D6).
+	 * Best effort: a preview that cannot be discarded still expires on its own.
+	 */
+	function discardPreviewPlan(plan = prPlan, approval = planApproval) {
+		if (!plan || approval) return;
+		const preview = planPresentation(plan);
+		if (!preview.planId || !DISCARDABLE_PLAN_STATUSES.includes(preview.status)) return;
+		Promise.resolve()
+			.then(() => discardAutomationPlan(preview.planId))
+			.catch(() => {});
+	}
+
 	function closePrModal() {
 		stopPlanStatusPolling();
+		discardPreviewPlan();
 		prModal = null;
 		prPlan = null;
 		planApproval = null;
@@ -1456,25 +1696,111 @@
 			<h1 class="text-2xl font-bold text-dark-100">Recommendations</h1>
 			<p class="text-sm text-dark-500 mt-1">Actionable suggestions to reduce your cluster's environmental footprint</p>
 		</div>
-		<div class="flex items-center gap-3">
-			{#if $selectedNamespace}
-				<button class="btn-secondary text-xs" on:click={() => selectedNamespace.set('')}>
-					Clear filter: {$selectedNamespace} ✕
-				</button>
-			{/if}
-			<select
-				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
-				bind:value={rankingProfile}
-				on:change={(e) => applyRankingProfile(e.currentTarget.value)}
-				title="Multi-criteria ranking profile"
+		<div class="flex items-center gap-3 flex-wrap">
+			<label class="flex items-center gap-2 text-xs text-dark-400">
+				<span>Sort by</span>
+				<select
+					aria-label="Sort recommendations"
+					class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
+					value={sortMode}
+					on:change={(e) => changeSort(e.currentTarget.value)}
+					title="Ranking score is the server order. Profiles re-rank the top {PROFILE_RANK_LIMIT} recommendations."
+				>
+					{#each SORT_OPTIONS as option}
+						<option value={option.value}>{option.label}</option>
+					{/each}
+				</select>
+			</label>
+			<button
+				class="btn-secondary text-xs disabled:opacity-50"
+				disabled={scanPending}
+				title="Run a new recommendation scan and reload the results when it completes"
+				on:click={rescan}
 			>
-				{#each RANKING_PROFILES as profile}
-					<option value={profile.value}>{profile.label}</option>
-				{/each}
-			</select>
-			<button class="btn-secondary text-xs" on:click={loadData}>↻ Refresh</button>
+				{scanPending ? '⟳ Scanning…' : '↻ Rescan'}
+			</button>
 		</div>
 	</div>
+
+	{#if scanError}
+		<div class="card text-sm text-amber-300" role="alert">{scanError}</div>
+	{:else if scanRun}
+		<div
+			class="card text-sm {scanRun.status === 'failed' ? 'text-amber-300' : 'text-dark-300'}"
+			role={scanRun.status === 'failed' ? 'alert' : 'status'}
+		>
+			{#if scanPending}<span class="animate-spin inline-block mr-1">⟳</span>{/if}
+			{scanStatusText(scanRun)}
+		</div>
+	{/if}
+
+	<!-- Filters (sent to the API as query parameters) -->
+	<div class="flex flex-wrap items-end gap-3" role="group" aria-label="Recommendation filters">
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Namespace
+			<select
+				aria-label="Filter by namespace"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={$selectedNamespace}
+			>
+				<option value="">All namespaces</option>
+				{#each namespaceOptions as ns}
+					<option value={ns}>{ns}</option>
+				{/each}
+				{#if $selectedNamespace && !namespaceOptions.includes($selectedNamespace)}
+					<option value={$selectedNamespace}>{$selectedNamespace}</option>
+				{/if}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Source
+			<select
+				aria-label="Filter by source"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterSource}
+			>
+				<option value="">All sources</option>
+				{#each sourceOptions as source}
+					<option value={source}>{getSourceConfig(source).label}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Risk
+			<select
+				aria-label="Filter by risk level"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterRisk}
+			>
+				<option value="">Any risk</option>
+				{#each RISK_OPTIONS as risk}
+					<option value={risk.value}>{risk.label}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-dark-500">
+			Capability
+			<select
+				aria-label="Filter by capability"
+				class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs normal-case tracking-normal text-dark-200"
+				bind:value={filterCapability}
+			>
+				<option value="">All capabilities</option>
+				{#each CAPABILITY_OPTIONS as capability}
+					<option value={capability.value}>{capability.label}</option>
+				{/each}
+			</select>
+		</label>
+		{#if serverFiltersActive || $selectedNamespace}
+			<button class="btn-secondary text-xs" on:click={clearFilters}>Clear filters ✕</button>
+		{/if}
+	</div>
+
+	{#if rankingError}
+		<div class="card text-sm text-amber-300" role="alert">
+			{rankingError} Showing the default ranking.
+		</div>
+	{/if}
 
 	{#if automationStatusError || (automationStatus === null && !loading)}
 		<div class="card text-sm text-amber-300" role="alert">
@@ -1763,6 +2089,9 @@
 					<p class="text-xs text-dark-500 mt-1">
 						Recommendations with a pending or open pull request are kept here until the PR is closed.
 					</p>
+					{#if $selectedNamespace || serverFiltersActive}
+						<p class="text-xs text-dark-500 mt-1">Pull requests are listed for all namespaces and sources.</p>
+					{/if}
 				</div>
 				{#if openPullRequests.length}
 					<div class="space-y-2">
@@ -1796,7 +2125,7 @@
 			{#if activeTab === 'active' && actionableActiveRecs.length}
 				<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
 					<div class="card-compact text-center">
-						<p class="stat-label">Active Recommendations</p>
+						<p class="stat-label">{serverFiltersActive ? 'Matching Recommendations' : 'Active Recommendations'}</p>
 						<p class="stat-value text-2xl">{actionableActiveRecs.length}</p>
 					</div>
 					<div class="card-compact text-center">
@@ -1816,6 +2145,14 @@
 				<div class="card text-center py-12">
 					<p class="text-4xl mb-3">👀</p>
 					<p class="text-dark-400 text-sm">No ignored recommendations.</p>
+				</div>
+			{:else if activeTab === 'ignored' && currentList.length === 0}
+				<div class="card text-center py-12">
+					<p class="text-dark-400 text-sm">No ignored recommendations match these filters.</p>
+				</div>
+			{:else if activeTab === 'active' && actionableActiveRecs.length === 0 && serverFiltersActive}
+				<div class="card text-center py-12">
+					<p class="text-dark-400 text-sm">No active recommendations match these filters.</p>
 				</div>
 			{:else if activeTab === 'active' && actionableActiveRecs.length === 0}
 				<div class="card text-center py-12">
@@ -1851,6 +2188,8 @@
 				<div class="space-y-3">
 					{#each displayed as rec (rec.id)}
 						{@const cfg = getTypeConfig(rec.type)}
+						{@const ranking = rankingFor(rec, sortMode, profileScores)}
+						{@const topFactor = topRankingFactor(ranking.ranking_factors)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
 								<div class="text-2xl shrink-0 mt-0.5">{cfg.icon}</div>
@@ -1886,6 +2225,15 @@
 													<span class="text-[10px] px-2 py-0.5 rounded-sm {riskClass(rec.risk_level)}"
 														title={rec.risk_factors?.join(', ')}>
 														{rec.risk_level} risk
+													</span>
+												{/if}
+												{#if ranking.ranking_score != null}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-200"
+														title={describeRankingFactors(ranking.ranking_factors) || 'No ranking breakdown was returned.'}
+														data-testid="ranking-score"
+													>
+														Score {formatRankingScore(ranking.ranking_score)}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
 													</span>
 												{/if}
 												{#if activeTab === 'ignored'}
@@ -2010,11 +2358,6 @@
 										{#if rec.confidence != null}
 											<span class="text-[10px] text-dark-400">
 												confidence {percent(rec.confidence)}
-											</span>
-										{/if}
-										{#if rec.ranking_score != null}
-											<span class="text-[10px] text-dark-500" title={JSON.stringify(rec.ranking_factors ?? {})}>
-												rank score {rec.ranking_score.toFixed(2)}
 											</span>
 										{/if}
 										{#if rec.evidence}
