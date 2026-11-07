@@ -127,7 +127,10 @@ class WorkloadHealthCollector:
         window = _duration((end - ensure_utc(start)).total_seconds())
         container_matcher = f', container="{_label_value(container_name)}"' if container_name else ""
 
-        ksm_present = _scalar(await self._query(f"count(kube_pod_status_ready{{{selector}}})", end))
+        # Read presence over the window: pods replaced before its end still have series.
+        ksm_present = _scalar(
+            await self._query(f"count(max_over_time(kube_pod_status_ready{{{selector}}}[{window}]))", end)
+        )
         if ksm_present is None or ksm_present <= 0:
             observation.notes.append("kube-state-metrics pod series not found")
         else:

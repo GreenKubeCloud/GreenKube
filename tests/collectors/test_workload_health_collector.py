@@ -48,7 +48,7 @@ async def _collect(answers, **kwargs):
 async def test_all_signals_are_read_over_the_window():
     observation, prometheus = await _collect(
         {
-            "count(kube_pod_status_ready": _vector(2),
+            "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": _vector(1),
             "avg(avg_over_time(kube_pod_status_ready": _vector(0.995),
             "cfs_throttled_periods_total": _vector(30),
@@ -65,12 +65,17 @@ async def test_all_signals_are_read_over_the_window():
     assert 'container="app"' in oom_query
     assert "[259200s]" in oom_query  # the 72h window, evaluated at its end
     assert 'pod=~"api\\\\-app\\\\-a|api\\\\-app\\\\-b"' in oom_query
+    # Pods replaced before the window end still count: presence is read over the window.
+    presence = next(
+        query for query in prometheus.queries if query.startswith("count(max_over_time(kube_pod_status_ready")
+    )
+    assert presence.endswith("[259200s]))")
 
 
 async def test_no_oom_series_with_kube_state_metrics_means_zero_kills():
     observation, _ = await _collect(
         {
-            "count(kube_pod_status_ready": _vector(2),
+            "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": [],
             "avg(avg_over_time(kube_pod_status_ready": _vector(1),
         }
@@ -83,7 +88,7 @@ async def test_no_oom_series_with_kube_state_metrics_means_zero_kills():
 
 
 async def test_missing_kube_state_metrics_leaves_signals_not_available():
-    observation, _ = await _collect({"count(kube_pod_status_ready": []})
+    observation, _ = await _collect({"count(max_over_time(kube_pod_status_ready": []})
 
     assert observation.oom_kill_count is None
     assert observation.readiness_ratio is None
@@ -93,7 +98,7 @@ async def test_missing_kube_state_metrics_leaves_signals_not_available():
 async def test_failed_queries_are_not_reported_as_healthy():
     observation, _ = await _collect(
         {
-            "count(kube_pod_status_ready": _vector(2),
+            "count(max_over_time(kube_pod_status_ready": _vector(2),
             "last_terminated_reason": None,
             "avg(avg_over_time(kube_pod_status_ready": None,
             "cfs_throttled_periods_total": None,
