@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.models.provenance import MIXED
 from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
@@ -56,6 +57,7 @@ RAW_POD_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("co2e_grams", "co2e_grams"),
     ("embodied_co2e_grams", "embodied_co2e_grams"),
     ("joules", "joules"),
+    ("gpu_power_watts", "gpu_power_watts"),
     ("pue", "pue"),
     ("grid_intensity", "grid_intensity"),
     ("emaps_zone", "emaps_zone"),
@@ -87,6 +89,7 @@ RAW_CONTAINER_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("co2e_grams", "co2e_grams"),
     ("embodied_co2e_grams", "embodied_co2e_grams"),
     ("joules", "joules"),
+    ("gpu_power_watts", "gpu_power_watts"),
     ("pue", "pue"),
     ("grid_intensity", "grid_intensity"),
     ("emaps_zone", "emaps_zone"),
@@ -101,6 +104,8 @@ def _hourly_columns(raw: Tuple[Tuple[str, str], ...]) -> Tuple[Tuple[str, str], 
         "memory_usage_bytes": "memory_usage_avg",
         "cpu_usage_max_millicores": "cpu_usage_max",
         "memory_usage_max_bytes": "memory_usage_max",
+        # The compressed hourly tables do not keep the DCGM GPU power (B5).
+        "gpu_power_watts": "NULL",
     }
     columns = [(renamed.get(expr, expr), name) for expr, name in raw]
     names = {name for _, name in columns}
@@ -342,6 +347,8 @@ def baseline_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces:
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
             SUM(joules) AS joules,
+            SUM(gpu_watt_seconds) AS gpu_watt_seconds,
+            SUM(CASE WHEN gpu_watt_seconds IS NOT NULL THEN duration_seconds ELSE 0 END) AS gpu_seconds,
             SUM(COALESCE(pue, 0) * sample_count) AS pue_sum,
             SUM(CASE WHEN pue IS NOT NULL THEN sample_count ELSE 0 END) AS pue_n,
             SUM(COALESCE(grid_intensity, 0) * intensity_sample_count) AS intensity_sum,
@@ -487,11 +494,13 @@ def baseline_from_row(
     cost_source = None
     if int(row["cost_source_n"] or 0):
         same = row["cost_source_min"] == row["cost_source_max"] and row["cost_source_n"] == row["row_n"]
-        cost_source = row["cost_source_min"] if same else "mixed"
+        cost_source = row["cost_source_min"] if same else MIXED
     pue_n = int(row["pue_n"] or 0)
     intensity_n = int(row["intensity_n"] or 0)
     cpu_max = _f(row["cpu_max"])
     memory_max = _f(row["mem_max"])
+    gpu_seconds = float(row["gpu_seconds"] or 0.0)
+    gpu_watts = float(row["gpu_watt_seconds"] or 0.0) / gpu_seconds if gpu_seconds > 0 else None
     values: Dict[str, Any] = {
         "pod_name": name,
         "namespace": row["namespace"],
@@ -522,6 +531,7 @@ def baseline_from_row(
         "co2e_grams": float(row["co2e_grams"] or 0.0),
         "embodied_co2e_grams": float(row["embodied_co2e_grams"] or 0.0),
         "joules": float(row["joules"] or 0.0),
+        "gpu_power_watts": gpu_watts,
         "pue": float(row["pue_sum"] or 0.0) / pue_n if pue_n else 1.0,
         "grid_intensity": float(row["intensity_sum"] or 0.0) / intensity_n if intensity_n else 0.0,
         "emaps_zone": row["emaps_zone"],

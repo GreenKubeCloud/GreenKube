@@ -58,6 +58,7 @@ ROLLUP_COLUMNS: Tuple[str, ...] = (
     "co2e_grams",
     "embodied_co2e_grams",
     "joules",
+    "gpu_watt_seconds",
     "pue",
     "grid_intensity",
     "intensity_sample_count",
@@ -100,6 +101,7 @@ class UsageInputRow:
     co2e_grams: Optional[float] = None
     embodied_co2e_grams: Optional[float] = None
     joules: Optional[float] = None
+    gpu_power_watts: Optional[float] = None
     pue: Optional[float] = None
     grid_intensity: Optional[float] = None
     emaps_zone: Optional[str] = None

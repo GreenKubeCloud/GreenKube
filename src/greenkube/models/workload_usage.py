@@ -92,6 +92,8 @@ class WorkloadUsageHour:
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
     joules: float = 0.0
+    #: DCGM GPU energy attributed to the pods (``gpu_power_watts`` x seconds, B5); None without GPU data.
+    gpu_watt_seconds: Optional[float] = None
     pue: Optional[float] = None
     grid_intensity: Optional[float] = None
     #: Samples that carried a positive grid intensity (weight of ``grid_intensity``).

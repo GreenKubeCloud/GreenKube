@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from greenkube.core.optimization.targeting import resolve_target
+from greenkube.models.provenance import MIXED
 from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
@@ -114,7 +115,7 @@ def _source_aggregate(values: List[Optional[str]]) -> Optional[str]:
         return None
     if len(present) == len(values) and len(set(present)) == 1:
         return present[0]
-    return "mixed"
+    return MIXED
 
 
 def _mode(values: List[Optional[str]]) -> Optional[str]:
@@ -163,6 +164,7 @@ class _SyntheticPodRow:
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
     joules: float = 0.0
+    gpu_power_watts: Optional[float] = None
     pue: Optional[float] = None
     grid_intensity: Optional[float] = None
     emaps_zone: Optional[str] = None
@@ -193,6 +195,7 @@ class _SyntheticPodRow:
         self.co2e_grams += _number(getattr(row, "co2e_grams", 0)) or 0.0
         self.embodied_co2e_grams += _number(getattr(row, "embodied_co2e_grams", 0)) or 0.0
         self.joules += _number(getattr(row, "joules", 0)) or 0.0
+        self.gpu_power_watts = _sum_optional(self.gpu_power_watts, getattr(row, "gpu_power_watts", None))
         self.pue = self.pue or _number(getattr(row, "pue", None))
         self.grid_intensity = self.grid_intensity or _number(getattr(row, "grid_intensity", None))
         self.emaps_zone = self.emaps_zone or getattr(row, "emaps_zone", None)
@@ -226,6 +229,7 @@ class _HourAccumulator:
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
     joules: float = 0.0
+    gpu_watt_seconds: Optional[float] = None
     pue_sum: float = 0.0
     pue_weight: int = 0
     intensity_sum: float = 0.0
@@ -240,7 +244,11 @@ class _HourAccumulator:
         self.steps[timestamp] = max(self.steps.get(timestamp, 0), weight)
         self.sample_count += weight
         duration = _number(getattr(row, "duration_seconds", None))
-        self.duration_seconds += duration if duration is not None and duration > 0 else step_seconds * weight
+        seconds = duration if duration is not None and duration > 0 else step_seconds * weight
+        self.duration_seconds += seconds
+        gpu_watts = _number(getattr(row, "gpu_power_watts", None))
+        if gpu_watts is not None:
+            self.gpu_watt_seconds = (self.gpu_watt_seconds or 0.0) + max(gpu_watts, 0.0) * seconds
 
         cpu = _number(getattr(row, "cpu_usage_millicores", None))
         if cpu is not None:
@@ -342,6 +350,7 @@ class _HourAccumulator:
             co2e_grams=self.co2e_grams,
             embodied_co2e_grams=self.embodied_co2e_grams,
             joules=self.joules,
+            gpu_watt_seconds=self.gpu_watt_seconds,
             pue=self.pue_sum / self.pue_weight if self.pue_weight else None,
             grid_intensity=self.intensity_sum / self.intensity_weight if self.intensity_weight else None,
             intensity_sample_count=self.intensity_weight,

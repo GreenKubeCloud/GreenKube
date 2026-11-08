@@ -276,6 +276,31 @@ async def test_baseline_rows_keep_current_requests_on_the_newest_rows(db):
     assert web and all(row.cpu_usage_p95 is not None for row in web)
 
 
+async def test_baseline_rows_carry_the_dcgm_gpu_power(db):
+    """Bounded scans keep the GPU power (B5) the Impact Model prices on deletions and schedules."""
+    start = _base_hour()
+    rows = [
+        _row(
+            start + timedelta(minutes=5 * step),
+            pod_name="trainer-0",
+            owner_kind="StatefulSet",
+            owner_name="trainer",
+            gpu_power_watts=200.0 if step % 2 else 100.0,
+        )
+        for step in range(12)
+    ]
+    rows += _workload_rows(start, hours=1)
+    repository, _ = await _rolled(db, rows, start, hours=1)
+
+    window = (start, start + timedelta(hours=1))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, _ = await repository.read_baseline_rows(*window, snapshot=snapshot)
+
+    trainer = [row for row in pods if row.owner_name == "trainer"]
+    assert trainer and all(row.gpu_power_watts == pytest.approx(150.0) for row in trainer)
+    assert all(row.gpu_power_watts is None for row in pods if row.owner_name == "api")
+
+
 async def test_rollup_falls_back_to_hourly_tables_after_raw_pruning(db, monkeypatch):
     start = floor_hour(datetime.now(timezone.utc) - timedelta(days=10))
     rows = _workload_rows(start, hours=2)
