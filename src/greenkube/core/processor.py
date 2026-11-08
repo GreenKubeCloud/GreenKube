@@ -111,6 +111,11 @@ class DataProcessor:
         """Collect the half-open window ``[start, end)`` (see :class:`HistoricalRangeProcessor`)."""
         return await self._range_processor.run_range(start=start, end=end, step=step, namespace=namespace)
 
+    @property
+    def last_idle_metrics(self) -> list:
+        """``__idle__`` rows of the last :meth:`run_range` call (committed by the caller)."""
+        return self._range_processor.last_idle_metrics
+
     async def close(self):
         """Close all collectors to release resources."""
         await self.prometheus_collector.close()

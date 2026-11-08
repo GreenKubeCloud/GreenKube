@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from greenkube.core.config import Config
-from greenkube.impact import CostSource, ImpactProjector, PowerSource, PricingCatalog
+from greenkube.impact import IMPACT_MODEL_VERSION, CostSource, ImpactProjector, PowerSource, PricingCatalog
 from greenkube.impact.projector import UNKNOWN_NODE, impact_fields, observed_window_hours, sample_from_metric
 from greenkube.impact.types import HOURS_PER_YEAR, WorkloadRef
 from greenkube.models.metrics import CombinedMetric
@@ -180,4 +180,4 @@ class TestEvidenceSavingsMethod:
         evidence = build_evidence(rec, context)
 
         assert evidence is not None
-        assert evidence.savings_method == "impact_model/1.0.0/container_resources"
+        assert evidence.savings_method == f"impact_model/{IMPACT_MODEL_VERSION}/container_resources"

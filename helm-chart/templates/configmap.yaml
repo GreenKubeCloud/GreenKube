@@ -212,4 +212,7 @@ data:
   {{- if not (kindIs "invalid" .carbonPricePerTonne) }}
   CARBON_PRICE_PER_TONNE: {{ .carbonPricePerTonne | toString | quote }}
   {{- end }}
+  {{- if not (kindIs "invalid" .memoryWattsPerGiB) }}
+  POWER_MEMORY_W_PER_GIB: {{ .memoryWattsPerGiB | toString | quote }}
+  {{- end }}
   {{- end }}

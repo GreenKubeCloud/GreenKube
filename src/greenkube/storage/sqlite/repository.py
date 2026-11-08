@@ -47,6 +47,35 @@ PROVENANCE_COLUMNS: tuple[str, ...] = (
     "power_source",
     "intensity_source",
 )
+#: Columns of ``node_idle_metrics`` (``greenkube.impact.rows.NodeIdleMetric`` fields, migration 0050).
+IDLE_METRIC_COLUMNS: tuple[str, ...] = (
+    "node",
+    "timestamp",
+    "duration_seconds",
+    "scope",
+    "joules",
+    "co2e_grams",
+    "embodied_co2e_grams",
+    "total_cost",
+    "cost_cpu",
+    "cost_ram",
+    "cost_source",
+    "cpu_unreserved_cores",
+    "memory_unreserved_bytes",
+    "gpu_power_watts",
+    "pue",
+    "grid_intensity",
+    "emaps_zone",
+    "power_source",
+    "intensity_source",
+    "model_version",
+)
+
+
+def _quote_idle(column: str) -> str:
+    return '"timestamp"' if column == "timestamp" else column
+
+
 #: Extra container-scoped columns (A7 limits, A9 intensity zone).
 CONTAINER_EXTRA_COLUMNS: tuple[str, ...] = ("emaps_zone", "cpu_limit", "memory_limit")
 
@@ -58,6 +87,19 @@ def _provenance_values(metric: CombinedMetric) -> tuple[Any, ...]:
 def _provenance_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     keys = set(row.keys())
     return {column: row[column] for column in PROVENANCE_COLUMNS if column in keys}
+
+
+#: Impact Model allocation columns of raw metric rows (B2, B5, migration 0050).
+ALLOCATION_COLUMNS: tuple[str, ...] = ("model_version", "gpu_power_watts")
+
+
+def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in ALLOCATION_COLUMNS)
+
+
+def _allocation_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = set(row.keys())
+    return {column: row[column] for column in ALLOCATION_COLUMNS if column in keys}
 
 
 def _container_metric_from_row(row: Mapping[str, Any], *, hourly: bool = False) -> CombinedMetric:
@@ -280,13 +322,15 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                   is_estimated, estimation_reasons, embodied_co2e_grams,
                                   calculation_version,
                                   cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                                  cost_source, usage_source, power_source, intensity_source)
+                                  cost_source, usage_source, power_source, intensity_source,
+                                  model_version, gpu_power_watts)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?
                             )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                                 total_cost = excluded.total_cost,
@@ -329,7 +373,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 cost_source = excluded.cost_source,
                                 usage_source = excluded.usage_source,
                                 power_source = excluded.power_source,
-                                intensity_source = excluded.intensity_source;
+                                intensity_source = excluded.intensity_source,
+                                model_version = excluded.model_version,
+                                gpu_power_watts = excluded.gpu_power_watts;
                         """,
                             (
                                 metric.pod_name,
@@ -368,6 +414,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 metric.embodied_co2e_grams,
                                 metric.calculation_version,
                                 *_provenance_values(metric),
+                                *_allocation_values(metric),
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -407,7 +454,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            is_estimated, estimation_reasons, embodied_co2e_grams,
                            calculation_version,
                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                           cost_source, usage_source, power_source, intensity_source
+                           cost_source, usage_source, power_source, intensity_source,
+                           model_version, gpu_power_watts
                     FROM combined_metrics
                     WHERE "timestamp" >= ? AND "timestamp" < ?
                 """,
@@ -463,6 +511,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 embodied_co2e_grams=row["embodied_co2e_grams"],
                                 calculation_version=row["calculation_version"],
                                 **_provenance_from_row(row),
+                                **_allocation_from_row(row),
                             )
                         )
                     return metrics
@@ -605,7 +654,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
                            is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version,
                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                           cost_source, usage_source, power_source, intensity_source
+                           cost_source, usage_source, power_source, intensity_source,
+                           model_version, gpu_power_watts
                     FROM combined_metrics WHERE {where}
                     ORDER BY "timestamp", namespace, pod_name
                     LIMIT ?
@@ -1000,6 +1050,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 estimation_reasons=estimation_reasons,
                                 calculation_version=row["calculation_version"],
                                 **_provenance_from_row(row),
+                                **_allocation_from_row(row),
                             )
                         )
                     return metrics
@@ -1029,10 +1080,10 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
                             cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                             cost_source, usage_source, power_source, intensity_source,
-                            emaps_zone, cpu_limit, memory_limit
+                            emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts
                         ) VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
                             total_cost = excluded.total_cost,
@@ -1064,7 +1115,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             intensity_source = excluded.intensity_source,
                             emaps_zone = excluded.emaps_zone,
                             cpu_limit = excluded.cpu_limit,
-                            memory_limit = excluded.memory_limit
+                            memory_limit = excluded.memory_limit,
+                            model_version = excluded.model_version,
+                            gpu_power_watts = excluded.gpu_power_watts
                         """,
                         (
                             metric.pod_name,
@@ -1093,6 +1146,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             metric.emaps_zone,
                             metric.cpu_limit,
                             metric.memory_limit,
+                            *_allocation_values(metric),
                         ),
                     )
                     saved_count += cursor.rowcount
@@ -1102,6 +1156,57 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         except sqlite3.Error as e:
             logging.error("Could not write container metrics: %s", e)
             raise QueryError(f"Could not write container metrics: {e}") from e
+
+    async def write_idle_metrics(self, metrics: List[Any]) -> int:
+        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
+        if not metrics:
+            return 0
+        columns = IDLE_METRIC_COLUMNS
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(
+            f"{column} = excluded.{column}" for column in columns if column not in ("node", "timestamp")
+        )
+        query = (
+            f"INSERT INTO node_idle_metrics ({', '.join(_quote_idle(c) for c in columns)}) VALUES ({placeholders}) "
+            f'ON CONFLICT(node, "timestamp") DO UPDATE SET {updates}'
+        )
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                for metric in metrics:
+                    values = [getattr(metric, column) for column in columns]
+                    values[columns.index("timestamp")] = to_iso_z(metric.timestamp)
+                    await conn.execute(query, values)
+                await conn.commit()
+            return len(metrics)
+        except sqlite3.Error as e:
+            logging.error("Could not write node idle metrics: %s", e)
+            raise QueryError(f"Could not write node idle metrics: {e}") from e
+
+    async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
+        """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
+        from greenkube.impact.rows import NodeIdleMetric
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    f"""
+                    SELECT {", ".join(_quote_idle(c) for c in IDLE_METRIC_COLUMNS)} FROM node_idle_metrics
+                    WHERE "timestamp" >= ? AND "timestamp" < ?
+                    ORDER BY "timestamp", node
+                    """,
+                    (to_iso_z(start_time), to_iso_z(end_time)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            result = []
+            for row in rows:
+                data = dict(row)
+                data["timestamp"] = ensure_utc(data["timestamp"])
+                result.append(NodeIdleMetric(**data))
+            return result
+        except sqlite3.Error as e:
+            logging.error("Could not read node idle metrics: %s", e)
+            raise QueryError(f"Could not read node idle metrics: {e}") from e
 
     async def read_container_metrics(
         self,

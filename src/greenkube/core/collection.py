@@ -271,6 +271,22 @@ class MetricsCollectionJob:
             collection_telemetry.set_watermark_lag(self.source, now, report.watermark)
         return report
 
+    async def _write_idle_metrics(self) -> None:
+        """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
+
+        Called after the fence check, like the pod rows. A failed write raises,
+        so the watermark never advances over a window without its idle rows.
+        """
+        idle_rows = getattr(self.processor, "last_idle_metrics", None)
+        write = getattr(self.metrics_repository, "write_idle_metrics", None)
+        # Processors without idle rows (other range processors, test doubles) commit none.
+        if not isinstance(idle_rows, (list, tuple)) or not idle_rows or write is None:
+            return
+        try:
+            await write(list(idle_rows))
+        except Exception as error:
+            raise RuntimeError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
+
     def _plan(self, now: datetime, watermark: CollectionWatermark | None, last: timedelta | None) -> CollectionPlan:
         if last is None:
             return plan_collection(
@@ -300,6 +316,7 @@ class MetricsCollectionJob:
         rows = await self.processor.run_range(start=window.start, end=window.end)
         fence.check("write metrics")
         written = await self.metrics_repository.write_combined_metrics(rows) if rows else 0
+        await self._write_idle_metrics()
         report.rows_written += written or 0
         report.windows_collected += 1
         if rows:

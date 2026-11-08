@@ -287,10 +287,14 @@ class Config(BaseSettings):
     IMPACT_PRICING_CPU_CORE_HOUR: Optional[float] = None
     IMPACT_PRICING_RAM_GIB_HOUR: Optional[float] = None
     IMPACT_PRICING_CURRENCY: str = "USD"
-    # Share of released capacity expected to become removed billable node-hours,
-    # used until RealizationContext (roadmap B6) derives it per node pool.
-    # 1.0 projects expected billable savings equal to allocated savings.
-    IMPACT_REALIZATION_FACTOR: float = 1.0
+    # Override of the share of released capacity expected to become removed
+    # billable node-hours. Unset (default) lets RealizationContext (roadmap B6)
+    # derive it from the cluster's autoscalers, consolidation policies and
+    # disruption blockers; a value pins it for every projection.
+    IMPACT_REALIZATION_FACTOR: Optional[float] = None
+    # Memory power per GiB of node memory (MemoryPowerModel, roadmap B5). The
+    # default is the Cloud Carbon Footprint coefficient (0.392 W/GB).
+    POWER_MEMORY_W_PER_GIB: float = 0.392
     # Carbon price (currency per tonne CO2e) that converts projected CO2e into
     # value: value_annual = cost + CARBON_PRICE_PER_TONNE * tCO2e (roadmap I2, D-2).
     CARBON_PRICE_PER_TONNE: float = 100.0
@@ -495,9 +499,16 @@ class Config(BaseSettings):
 
     @field_validator("IMPACT_REALIZATION_FACTOR", mode="after")
     @classmethod
-    def _validate_realization_factor(cls, value: float) -> float:
-        if not 0 <= value <= 1:
+    def _validate_realization_factor(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not 0 <= value <= 1:
             raise ValueError("IMPACT_REALIZATION_FACTOR must be between 0 and 1.")
+        return value
+
+    @field_validator("POWER_MEMORY_W_PER_GIB", mode="after")
+    @classmethod
+    def _validate_memory_power(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("POWER_MEMORY_W_PER_GIB must not be negative.")
         return value
 
     @field_validator("CARBON_PRICE_PER_TONNE", mode="after")

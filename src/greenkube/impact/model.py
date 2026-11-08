@@ -276,11 +276,20 @@ class _Accumulator:
     def add_cost(self, cost: CostBreakdown) -> None:
         self.cost = self.cost + cost
 
-    def add_co2e(self, idle: float = 0.0, dynamic: float = 0.0, embodied: float = 0.0) -> None:
+    def add_co2e(
+        self,
+        idle: float = 0.0,
+        dynamic: float = 0.0,
+        embodied: float = 0.0,
+        memory: float = 0.0,
+        gpu: float = 0.0,
+    ) -> None:
         self.co2e = Co2eBreakdown(
             idle_operational=self.co2e.idle_operational + idle,
             dynamic_operational=self.co2e.dynamic_operational + dynamic,
             embodied=self.co2e.embodied + embodied,
+            memory_operational=self.co2e.memory_operational + memory,
+            gpu_operational=self.co2e.gpu_operational + gpu,
         )
 
 
@@ -305,15 +314,15 @@ class ReservationAwareImpactModel:
                 for sample in baseline.samples
                 if sample.timestamp is not None and _utc_hour(sample.timestamp) in change.removed_hours_of_day
             ]
-            delta = self._project_sample_removal(
-                baseline, removed, ChangeKind.REPLICA_SCHEDULE, pool, pool.realization_factor, pool.realization_source
-            )
+            factor, source, reasons, pools = pool.realization_for(removed or baseline.samples)
+            delta = self._project_sample_removal(baseline, removed, ChangeKind.REPLICA_SCHEDULE, pool, factor, source)
+            _record_realization(delta, reasons, pools)
             delta.assumptions["removed_hours_of_day"] = sorted(change.removed_hours_of_day)
             return delta
         if isinstance(change, AssetDeletion):
             return self._project_asset_deletion(change, pool)
         if isinstance(change, NodePoolChange):
-            return self._project_node_pool(change, pool)
+            return self._project_node_pool(baseline, change, pool)
         raise TypeError(f"Unsupported change type: {type(change).__name__}")
 
     # ------------------------------------------------------------------ #
@@ -342,9 +351,11 @@ class ReservationAwareImpactModel:
                 cpu_released = _released(current, proposed, sample.cpu_usage_cores)
                 cpu_share_released = _released(current, proposed, sample.cpu_usage_cores, node.allocatable_cpu)
             mem_released = 0.0
+            mem_share_released = 0.0
             if change.mem_request_gib is not None:
                 current, proposed = change.mem_request_gib
                 mem_released = _released(current, proposed, sample.mem_usage_gib)
+                mem_share_released = _released(current, proposed, sample.mem_usage_gib, node.allocatable_mem)
 
             acc.cpu_core_hours += cpu_released * hours
             acc.mem_gib_hours += mem_released * hours
@@ -355,22 +366,28 @@ class ReservationAwareImpactModel:
                 )
             )
             # Request cuts do not change usage, so dynamic power is unchanged:
-            # only the reservation-allocated idle power and embodied share move.
-            # A reservation never holds more than the whole node's idle power.
+            # only the reservation-allocated idle power, memory power and
+            # embodied share move. A reservation never holds more than the
+            # whole node's idle power or memory power.
             idle_kwh = cpu_share_released * hours * node.idle_watts_per_reserved_core / 1000.0
+            memory_kwh = mem_share_released * hours * max(node.memory_watts_per_gib, 0.0) / 1000.0
             acc.add_co2e(
                 idle=idle_kwh * pue * intensity,
+                memory=memory_kwh * pue * intensity,
                 embodied=cpu_share_released * hours * node.embodied_g_per_reserved_core_hour,
             )
 
+        factor, source, reasons, pools = pool.realization_for(baseline.samples)
         delta = self._finalize(
             ChangeKind.CONTAINER_RESOURCES,
             acc,
             baseline.window_hours,
             pool,
-            realization_factor=pool.realization_factor,
+            realization_factor=factor,
+            realization_source=source,
             co2e_basis="idle_and_embodied_share_released",
         )
+        _record_realization(delta, reasons, pools)
         change_details: Dict[str, Any] = {}
         if change.cpu_request_cores is not None:
             change_details["cpu_request_cores"] = list(change.cpu_request_cores)
@@ -413,9 +430,14 @@ class ReservationAwareImpactModel:
             used = _capped(max(sample.cpu_usage_cores or 0.0, 0.0), node.cpu_capacity_cores)
             idle_kwh = cpu_share * hours * node.idle_watts_per_reserved_core / 1000.0
             dynamic_kwh = used * hours * node.dynamic_watts_per_used_core / 1000.0
+            mem_share = _capped(mem_reserved, node.allocatable_mem)
+            memory_kwh = mem_share * hours * max(node.memory_watts_per_gib, 0.0) / 1000.0
+            gpu_kwh = max(sample.gpu_watts or 0.0, 0.0) * hours / 1000.0
             acc.add_co2e(
                 idle=idle_kwh * pue * intensity,
                 dynamic=dynamic_kwh * pue * intensity,
+                memory=memory_kwh * pue * intensity,
+                gpu=gpu_kwh * pue * intensity,
                 embodied=cpu_share * hours * node.embodied_g_per_reserved_core_hour,
             )
 
@@ -467,7 +489,9 @@ class ReservationAwareImpactModel:
     # Node pools                                                          #
     # ------------------------------------------------------------------ #
 
-    def _project_node_pool(self, change: NodePoolChange, pool: NodePoolContext) -> ImpactDelta:
+    def _project_node_pool(
+        self, baseline: WorkloadBaseline, change: NodePoolChange, pool: NodePoolContext
+    ) -> ImpactDelta:
         acc = _Accumulator()
         node_hours = 0.0
         missing: List[str] = []
@@ -488,24 +512,34 @@ class ReservationAwareImpactModel:
                 )
             )
             # Workloads move to the remaining nodes, so dynamic power stays;
-            # the removed node's idle power and embodied emissions go away.
-            idle_kwh = node.idle_watts * hours / 1000.0
+            # the removed node's idle power, memory power, idle GPUs and
+            # embodied emissions go away.
+            intensity = node.pue * node.grid_intensity_g_per_kwh
             acc.add_co2e(
-                idle=idle_kwh * node.pue * node.grid_intensity_g_per_kwh,
+                idle=node.idle_watts * hours / 1000.0 * intensity,
+                memory=node.memory_watts * hours / 1000.0 * intensity,
+                gpu=max(node.gpu_unattributed_watts, 0.0) * hours / 1000.0 * intensity,
                 embodied=node.embodied_g_per_hour * hours,
             )
 
-        realization_factor = 1.0 if change.action_is_consolidation else pool.realization_factor
+        reasons: Tuple[str, ...] = ()
+        pools: Tuple = ()
+        if change.action_is_consolidation:
+            realization_factor, realization_source = 1.0, "consolidation_action"
+        else:
+            node_samples = [ResourceSample(ref=baseline.ref, hours=1.0, node=name) for name in change.removed_nodes]
+            realization_factor, realization_source, reasons, pools = pool.realization_for(node_samples)
         delta = self._finalize(
             ChangeKind.NODE_POOL,
             acc,
             float(HOURS_PER_YEAR),
             pool,
             realization_factor=realization_factor,
-            realization_source="consolidation_action" if change.action_is_consolidation else None,
+            realization_source=realization_source,
             co2e_basis="node_idle_and_embodied_removed",
             node_hours=node_hours,
         )
+        _record_realization(delta, reasons, pools)
         delta.assumptions["removed_nodes"] = list(change.removed_nodes)
         if missing:
             delta.assumptions["unknown_nodes"] = missing
@@ -580,6 +614,14 @@ class ReservationAwareImpactModel:
             confidence=round(confidence, 4),
             assumptions=assumptions,
         )
+
+
+def _record_realization(delta: ImpactDelta, reasons: Tuple[str, ...], pools: Tuple) -> None:
+    """Adds why the realization factor has its value to a projection's assumptions (B6)."""
+    if reasons:
+        delta.assumptions["realization_reasons"] = list(reasons)
+    if pools:
+        delta.assumptions["realization_pools"] = list(pools)
 
 
 def _utc_hour(timestamp: datetime) -> int:

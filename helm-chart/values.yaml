@@ -497,10 +497,14 @@ impact:
     # costs). Only bundled catalogs in this currency are used: set EUR for the
     # OVHcloud and Scaleway catalogs. GreenKube never converts currencies.
     currency: USD
-  # Share of released capacity expected to become removed billable node-hours.
-  # Used until per-pool realization (RealizationContext) lands; 1.0 projects
-  # expected billable savings equal to allocated savings.
-  realizationFactor: 1.0
+  # Override of the share (0-1) of released capacity expected to become removed
+  # billable node-hours. Leave null to derive it per node pool from the
+  # cluster (Cluster Autoscaler status, Karpenter consolidation policies,
+  # do-not-disrupt annotations and blocking PDBs); set a value to pin it.
+  realizationFactor: null
+  # Memory power per GiB of node memory (W/GiB). Default: the Cloud Carbon
+  # Footprint memory coefficient.
+  memoryWattsPerGiB: 0.392
   # Carbon price (currency per tonne CO2e) used to value projected CO2e:
   # value = cost + carbonPricePerTonne x tCO2e.
   carbonPricePerTonne: 100

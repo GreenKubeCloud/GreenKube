@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Collection, List, Optional
+from typing import Any, Collection, List, Optional
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -268,6 +268,17 @@ class CombinedMetricsRepository(ABC):
             A list of CombinedMetric objects.
         """
         pass
+
+    async def write_idle_metrics(self, metrics: List[Any]) -> int:
+        """Upserts ``__idle__`` rows (``greenkube.impact.rows.NodeIdleMetric``) keyed by node and timestamp.
+
+        Backends without a ``node_idle_metrics`` table store nothing.
+        """
+        return 0
+
+    async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
+        """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
+        return []
 
     async def read_hourly_metrics(
         self,

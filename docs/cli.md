@@ -1,6 +1,6 @@
 # CLI Reference
 
-GreenKube ships with a CLI with two runtime modes: `start` runs the collector service and `demo` launches a self-contained sample environment. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
+GreenKube ships with a CLI with two runtime modes: `start` runs the collector service and `demo` launches a self-contained sample environment. `recompute` is a maintenance command for stored metrics. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
 
 ## Getting started
 
@@ -51,6 +51,23 @@ greenkube demo [OPTIONS]
 ```bash
 docker run --rm -p 9000:9000 greenkube/greenkube demo --no-browser --port 9000
 ```
+
+### `greenkube recompute`
+
+Re-allocate raw metric rows still within retention with the current [Impact Model](methodology/impact-model.md#recalculation-b8) version, for example after an upgrade that changed the model. Energy, CO₂e, embodied emissions, modeled costs and the per-node `__idle__` rows are recomputed from the stored requests, usage, node snapshots and grid intensity. Observed OpenCost costs and hourly aggregates are kept as they are.
+
+```
+greenkube recompute --since TEXT [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--since TEXT` | Start of the range: a duration before now (`12h`, `7d`) or an ISO-8601 timestamp. Required. |
+| `--until TEXT` | End of the range (exclusive), same formats; default: now. |
+| `--all` | Recompute every row in the range, not only rows written by another model version. |
+| `--dry-run` | Report what would change without writing. |
+
+Run it inside the controller pod (`kubectl exec`), where the database settings are configured.
 
 ### `greenkube version`
 

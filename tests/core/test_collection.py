@@ -345,8 +345,41 @@ async def test_lost_lease_mid_job_aborts_before_writing_or_advancing(stack):
 
     assert not report.succeeded and "Lease" in (report.error or "")
     assert await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP) == []
+    # The __idle__ rows are a commit too: a fenced-out replica writes none (B2, A14).
+    assert await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP) == []
     watermark = await stack["watermarks"].get("test-cluster", METRICS_WATERMARK_SOURCE)
     assert watermark is not None and watermark.last_complete_end == BASE
+
+
+@pytest.mark.asyncio
+async def test_collected_windows_store_idle_rows_next_to_pod_rows(stack):
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+
+    report = await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+
+    assert report.succeeded, report.error
+    idle = await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP)
+    assert sorted(row.timestamp for row in idle) == [BASE, BASE + STEP]
+    assert {row.node for row in idle} == {"n1"}
+
+
+@pytest.mark.asyncio
+async def test_failed_idle_write_does_not_advance_the_watermark(stack):
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    metrics_repo = stack["metrics_repo"]
+    original = metrics_repo.write_idle_metrics
+
+    async def failing_write(_rows):
+        raise RuntimeError("disk full")
+
+    metrics_repo.write_idle_metrics = failing_write
+    try:
+        report = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    finally:
+        metrics_repo.write_idle_metrics = original
+
+    assert not report.succeeded and "idle" in (report.error or "")
+    assert report.watermark == BASE
 
 
 @pytest.mark.asyncio

@@ -16,12 +16,21 @@ from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
+from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import (
     CustomRates,
     PricingCatalog,
     UnitPriceResolver,
     observed_rates_from_rows,
     row_hours,
+)
+from greenkube.impact.realization import (
+    SOURCE_CONFIG,
+    SOURCE_CONTEXT,
+    SOURCE_UNOBSERVED,
+    UNOBSERVED_FACTOR,
+    current_realization_context,
+    realization_override,
 )
 from greenkube.impact.types import (
     BYTES_PER_GIB,
@@ -161,6 +170,7 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
         observed_cost_network=_cost("cost_network"),
         observed_cost_lb=_cost("cost_lb"),
         observed_cost_source=getattr(metric, "cost_source", None),
+        gpu_watts=_positive(getattr(metric, "gpu_power_watts", None)),
     )
 
 
@@ -282,13 +292,25 @@ class ImpactProjector:
             default_intensity=default_intensity,
             is_fallback=True,
         )
+        override = realization_override(config)
+        context = current_realization_context() if override is None else None
+        if override is not None:
+            factor, source, reasons = override, SOURCE_CONFIG, ("IMPACT_REALIZATION_FACTOR pins the factor",)
+        elif context is not None:
+            default_pool = context.pools[context.default_pool]
+            factor, source, reasons = default_pool.factor, SOURCE_CONTEXT, default_pool.reasons
+        else:
+            factor, source = UNOBSERVED_FACTOR, SOURCE_UNOBSERVED
+            reasons = ("The cluster's autoscalers have not been observed yet: expected savings equal allocated",)
         return NodePoolContext(
             nodes=nodes,
             default_node=default_node,
-            realization_factor=float(_setting(config, "IMPACT_REALIZATION_FACTOR", 1.0)),
+            realization_factor=factor,
             carbon_price_per_tonne=float(_setting(config, "CARBON_PRICE_PER_TONNE", 100.0)),
             currency=self.resolver.custom_rates.currency,
-            realization_source="config:IMPACT_REALIZATION_FACTOR",
+            realization_source=source,
+            realization_reasons=tuple(reasons),
+            realization=context,
         )
 
     def _node_profile(
@@ -343,6 +365,7 @@ class ImpactProjector:
             region=region,
             provider=provider,
             is_fallback=is_fallback,
+            memory_watts_per_gib=memory_watts_per_gib(config),
         )
 
     # ------------------------------------------------------------------ #

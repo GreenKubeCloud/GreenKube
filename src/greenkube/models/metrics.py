@@ -921,5 +921,16 @@ class CombinedMetric(BaseModel):
     calculation_version: Optional[str] = Field(
         None, description="Version of the calculation algorithm that produced this metric."
     )
+    model_version: Optional[str] = Field(
+        None,
+        description=(
+            "Impact Model version (greenkube.impact.IMPACT_MODEL_VERSION) that allocated the energy, CO2e and "
+            "modeled cost of this row; None for rows written before the model allocated stored rows (B2, B8)."
+        ),
+    )
+    gpu_power_watts: Optional[float] = Field(
+        None,
+        description="Average GPU power attributed to the pod by DCGM over the row's interval, in W (B5).",
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

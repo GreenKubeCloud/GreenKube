@@ -227,7 +227,10 @@ async def test_unknown_instance_type_derives_power_from_node_capacity(make_proce
 
     pod = next(r for r in rows if not r.container_name)
     # 8 vCPU x AWS CCF (0.74 / 3.5 W): util 1/8 -> 5.92 + 0.125 * (28 - 5.92) = 8.68 W.
-    assert pod.joules == pytest.approx(8.68 * 300)
+    # The pod reserves 1 of 8 cores (B2): 5.92 / 8 idle + 2.76 dynamic = 3.5 W.
+    assert pod.joules == pytest.approx(3.5 * 300)
+    (idle,) = processor.last_idle_metrics
+    assert pod.joules + idle.joules == pytest.approx(8.68 * 300)
     assert pod.is_estimated
     assert any("derived from 8 vCPU capacity" in reason for reason in pod.estimation_reasons)
     assert collection_telemetry.UNKNOWN_POWER_PROFILE_NODES._value.get() == 0
@@ -245,7 +248,11 @@ async def test_missing_node_label_is_resolved_from_kube_pod_info(make_processor)
 
     pod = next(r for r in rows if not r.container_name)
     assert pod.node == "n1"
-    assert pod.joules == pytest.approx(609.6)
+    # Half the 1.48 W idle power (1 of 2 cores reserved) + all 0.552 W of dynamic power.
+    assert pod.joules == pytest.approx((0.74 + 0.552) * 300)
+    (idle,) = processor.last_idle_metrics
+    assert idle.node == "n1"
+    assert pod.joules + idle.joules == pytest.approx(609.6)
 
 
 @pytest.mark.asyncio
@@ -258,6 +265,11 @@ async def test_unresolvable_node_uses_default_profile_and_is_reported(make_proce
 
     pod = next(r for r in rows if not r.container_name)
     assert pod.node is None
+    # Allocated against the default profile (1 vCPU, 1-10 W) without an idle
+    # row: the 1-core request holds all idle power, plus 0.2 x 9 W dynamic.
+    assert pod.joules == pytest.approx((1.0 + 0.2 * 9.0) * 300)
+    assert pod.model_version is not None
+    assert processor.last_idle_metrics == []
     assert any("DEFAULT_INSTANCE_PROFILE" in reason for reason in pod.estimation_reasons)
     assert collection_telemetry.UNKNOWN_POWER_PROFILE_NODES._value.get() == 1
 

@@ -115,6 +115,19 @@ def test_container_rows_without_cost_components_split_the_total_by_usage():
     assert by_name["app"].cost_cpu is None
 
 
+def test_pod_gpu_power_is_never_counted_once_per_container():
+    """DCGM attributes GPUs to pods: several containers do not each inherit the pod's GPU power."""
+    maps = PodResourceMaps(container_cpu_usage_map={("shop", "web-0", "app"): 75, ("shop", "web-0", "proxy"): 25})
+    aggregate = _aggregate(gpu_power_watts=60.0, gpu_usage_millicores=800)
+
+    rows = MetricAssembler.assemble_container_metrics([aggregate], _containers(), maps)
+    assert len(rows) == 2
+    assert all(row.gpu_power_watts is None and row.gpu_usage_millicores is None for row in rows)
+
+    (single,) = MetricAssembler.assemble_container_metrics([aggregate], _containers()[:1], maps)
+    assert (single.gpu_power_watts, single.gpu_usage_millicores) == (60.0, 800)
+
+
 def test_power_source_for_profile():
     estimator = MagicMock()
     estimator.DEFAULT_INSTANCE_PROFILE = {"vcores": 1}

@@ -8,6 +8,14 @@ See ``docs/methodology/impact-model.md`` for the methodology. Analyzers use
 
 from greenkube.impact.allocation import allocate_node, allocate_snapshot, node_totals, reservation_shares
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel, ReservationAwareImpactModel
+from greenkube.impact.power import (
+    DEFAULT_MEMORY_WATTS_PER_GIB,
+    GpuDevice,
+    GpuPowerModel,
+    LinearCpuPowerModel,
+    MemoryPowerModel,
+    node_gpu_power,
+)
 from greenkube.impact.pricing import (
     CustomRates,
     PricingCatalog,
@@ -56,12 +64,17 @@ __all__ = [
     "CostSource",
     "CustomRates",
     "DEFAULT_IMPACT_MODEL",
+    "DEFAULT_MEMORY_WATTS_PER_GIB",
     "EnergyBreakdown",
+    "GpuDevice",
+    "GpuPowerModel",
     "IDLE_WORKLOAD_NAME",
     "IMPACT_MODEL_VERSION",
     "ImpactDelta",
     "ImpactModel",
     "ImpactProjector",
+    "LinearCpuPowerModel",
+    "MemoryPowerModel",
     "NodeImpactProfile",
     "NodePoolChange",
     "NodePoolContext",
@@ -81,6 +94,7 @@ __all__ = [
     "apportion_node_price",
     "carbon_value",
     "impact_fields",
+    "node_gpu_power",
     "node_totals",
     "opencost_default_rates",
     "reservation_shares",

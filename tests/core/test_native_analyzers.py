@@ -568,8 +568,12 @@ class TestRightsizingMemory:
         released_ratio = (32 * mib - recommender.min_memory_bytes) / (32 * mib)
         assert mem_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * ram_share * released_ratio)
         assert mem_rec.impact["cost_breakdown_annual"]["cpu"] == 0.0
-        # Memory power is not modeled yet (roadmap B5): a memory cut releases no CO2e.
-        assert mem_rec.potential_savings_co2e_grams == 0.0
+        # Memory power is allocated by memory reservation (roadmap B5): a memory
+        # cut releases memory power only, never idle CPU power or embodied.
+        co2e = mem_rec.impact["co2e_breakdown_annual_g"]
+        assert co2e["memory_operational"] > 0
+        assert co2e["idle_operational"] == co2e["embodied"] == 0.0
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(co2e["memory_operational"])
 
     def test_memory_savings_are_annualized_from_analysis_window(self, recommender):
         """Potential memory savings should be annual projections, not only lookback-window totals."""
@@ -617,7 +621,10 @@ class TestRightsizingMemory:
         assert mem_rec.potential_savings_cost == pytest.approx(
             2 * 0.001 * ram_share * released_ratio * annualization_factor
         )
-        assert mem_rec.potential_savings_co2e_grams == 0.0
+        # Memory power released by the cut (B5), annualized like the cost.
+        co2e = mem_rec.impact["co2e_breakdown_annual_g"]
+        assert mem_rec.potential_savings_co2e_grams == pytest.approx(co2e["memory_operational"])
+        assert co2e["memory_operational"] > 0
 
 
 # ---------------------------------------------------------------------------
