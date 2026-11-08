@@ -61,3 +61,16 @@ GREENKUBE_TEST_POSTGRES_DSN=postgresql://greenkube:greenkube_password@localhost:
 The regular `pytest --cov=greenkube ...` command then runs both SQLite and PostgreSQL variants of the contract tests.
 Because every PostgreSQL test uses its own schema, tests can be added without coupling their data setup to global CI
 database state.
+
+## End-to-end loop on a live cluster
+
+`make e2e` runs the whole loop on Minikube with Argo CD, Flux, Gitea and Prometheus: it builds the image from the
+checkout, installs GreenKube with the quickstart values, then drives a sample workload from recommendation to pull
+request, merge, GitOps sync, apply detection and measurement. The scripts live in `hack/e2e/`; the
+[first pull request guide](get-started/first-pr.md) describes the prerequisites, settings and steps.
+
+`tests/e2e/test_live_loop.py` wraps the same run and is skipped unless `GREENKUBE_E2E=1` (`make e2e-test`).
+`tests/e2e/test_quickstart_assets.py` always runs: it checks that the quickstart values render a valid configuration
+and that the sample repository and GitOps objects agree. `tests/e2e/test_harness_safety.py` also always runs: with
+stub `kubectl`, `helm` and `curl` binaries, it checks that the harness scripts refuse any kubectl context other than
+`E2E_KUBE_CONTEXT` and never update or delete objects without the harness's ownership marker.

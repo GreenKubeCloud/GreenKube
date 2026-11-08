@@ -14,9 +14,9 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - name: controller-metrics
+    - name: ctrl-metrics
       port: {{ include "greenkube.controllerMetricsPort" . }}
-      targetPort: controller-metrics
+      targetPort: ctrl-metrics
       protocol: TCP
   selector:
     {{- include "greenkube.selectorLabels" . | nindent 4 }}

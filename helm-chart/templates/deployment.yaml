@@ -117,7 +117,7 @@ spec:
           # Scans, verification and collection run here: serve their metrics
           # (CONTROLLER_METRICS_PORT comes from the ConfigMap).
           ports:
-            - name: controller-metrics
+            - name: ctrl-metrics
               containerPort: {{ include "greenkube.controllerMetricsPort" . }}
               protocol: TCP
           {{- end }}

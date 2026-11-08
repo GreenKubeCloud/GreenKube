@@ -77,7 +77,7 @@ tests:
         equal:
           path: spec.template.spec.containers[0].ports
           value:
-            - name: controller-metrics
+            - name: ctrl-metrics
               containerPort: 9102
               protocol: TCP
       - documentIndex: 1

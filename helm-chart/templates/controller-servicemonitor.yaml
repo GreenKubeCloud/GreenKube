@@ -19,7 +19,7 @@ spec:
       {{- include "greenkube.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: controller-metrics
   endpoints:
-    - port: controller-metrics
+    - port: ctrl-metrics
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
