@@ -158,6 +158,7 @@ See [GitOps automation](docs/automation.md) for the step-by-step setup, supporte
 |----------|-------------|
 | [Concepts](docs/concepts.md) | The GreenKube loop and its vocabulary: sources, recommendations, plans, sync, verification and the ledger |
 | [Installation guide](docs/installation.md) | Helm installation, values, development and production profiles, API keys, frontend access |
+| [Your first pull request](docs/get-started/first-pr.md) | The whole loop on a local cluster with a sample app, Argo CD, Flux and Gitea (`make e2e`) |
 | [GitOps automation](docs/automation.md) | Discovery, plans, pull requests, sync, rollback and the security model |
 | [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, ranked, applied, verified and recorded |
 | [Configuration](docs/configuration.md) | All Helm values and environment variables |
