@@ -303,8 +303,8 @@ class TestRightsizingCPU:
         assert cpu_recs[0].recommended_cpu_request_millicores > 250
         assert cpu_recs[0].recommended_cpu_request_millicores < 1000
 
-    def test_no_cpu_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
-        """A peak-aware target above the current request is not an optimization."""
+    def test_peaks_above_the_request_recommend_a_cpu_increase(self, recommender):
+        """Per-step peaks above the request are a reliability problem (E9): recommend an increase."""
         metrics = [
             _make_metric(
                 pod_name="bursty-api",
@@ -319,7 +319,13 @@ class TestRightsizingCPU:
         recs = recommender.generate_recommendations(metrics)
         cpu_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU]
 
-        assert cpu_recs == []
+        assert len(cpu_recs) == 1
+        rec = cpu_recs[0]
+        assert rec.current_cpu_request_millicores == 500
+        assert rec.recommended_cpu_request_millicores is not None
+        assert rec.recommended_cpu_request_millicores > 819
+        # An increase costs money: the Impact Model projects a negative saving.
+        assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
 
     def test_no_cpu_rightsizing_when_minimum_floor_removes_savings(self, recommender):
         """Minimum CPU floors must not turn an equal request into a savings recommendation."""
@@ -498,8 +504,8 @@ class TestRightsizingMemory:
         assert mem_recs[0].recommended_memory_request_bytes > 250 * mib
         assert mem_recs[0].recommended_memory_request_bytes < 1000 * mib
 
-    def test_no_memory_rightsizing_when_peak_aware_target_would_increase_request(self, recommender):
-        """A peak-aware memory target above the current request is not an optimization."""
+    def test_peaks_above_the_request_recommend_a_memory_increase(self, recommender):
+        """A working-set peak above the request is a reliability problem (E9): recommend an increase."""
         mib = 1024 * 1024
         metrics = [
             _make_metric(
@@ -516,7 +522,12 @@ class TestRightsizingMemory:
         recs = recommender.generate_recommendations(metrics)
         mem_recs = [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY]
 
-        assert mem_recs == []
+        assert len(mem_recs) == 1
+        rec = mem_recs[0]
+        assert rec.recommended_memory_request_bytes is not None
+        assert rec.recommended_memory_request_bytes >= 819 * mib * 1.1
+        assert rec.priority == "high"
+        assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
 
     def test_memory_rightsizing_uses_latest_request_not_historical_maximum(self, recommender):
         """A workload already reduced during the lookback should use its current memory request."""
@@ -907,19 +918,19 @@ class TestOverprovisionedNode:
 
 
 class TestUnderutilizedNode:
-    """Tests for underutilized node detection (few pods + low usage)."""
+    """UNDERUTILIZED_NODE is no longer emitted (E9): node advice comes from the overprovisioned check."""
 
-    def test_detects_underutilized_node(self, recommender):
-        """Node with 1 pod and low usage should be flagged."""
+    def test_lonely_low_usage_node_is_reported_once_as_overprovisioned(self, recommender):
+        """A node with one idle pod gets the overprovisioned advice, never the duplicate type."""
         node_infos = [MagicMock(name="lonely-node", cpu_capacity_cores=8.0)]
         node_infos[0].name = "lonely-node"
         metrics = [
             _make_metric(pod_name="solo-pod", node="lonely-node", cpu_usage_millicores=100),
         ]
         recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-        assert len(node_recs) == 1
-        assert node_recs[0].target_node == "lonely-node"
+        assert [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE] == []
+        node_recs = [r for r in recs if r.type == RecommendationType.OVERPROVISIONED_NODE]
+        assert [r.target_node for r in node_recs] == ["lonely-node"]
 
     def test_no_underutilized_for_busy_node(self, recommender):
         """Node with many pods should NOT be flagged."""
@@ -1212,40 +1223,6 @@ class TestNodeMemoryCapacityEdgeCases:
 # ---------------------------------------------------------------------------
 
 
-class TestUnderutilizedNodeReason:
-    """Tests for the reason field in UNDERUTILIZED_NODE recommendations."""
-
-    def test_underutilized_reason_mentions_pod_count(self, recommender):
-        """UNDERUTILIZED_NODE reason must mention the number of pods."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "lonely-node"
-        node_infos[0].cpu_capacity_cores = 8.0
-
-        metrics = [
-            _make_metric(pod_name="solo", node="lonely-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-
-        assert len(node_recs) == 1
-        assert "pod" in node_recs[0].reason.lower(), "Reason should mention pod count"
-
-    def test_underutilized_reason_mentions_utilization_percentage(self, recommender):
-        """UNDERUTILIZED_NODE reason must contain a CPU utilization percentage."""
-        node_infos = [MagicMock()]
-        node_infos[0].name = "idle-node"
-        node_infos[0].cpu_capacity_cores = 8.0
-
-        metrics = [
-            _make_metric(pod_name="solo", node="idle-node", cpu_usage_millicores=50),
-        ]
-        recs = recommender.generate_recommendations(metrics, node_infos=node_infos)
-        node_recs = [r for r in recs if r.type == RecommendationType.UNDERUTILIZED_NODE]
-
-        assert len(node_recs) == 1
-        assert "%" in node_recs[0].reason, "Reason should contain a utilization percentage"
-
-
 # ---------------------------------------------------------------------------
 # Test: ORPHANED_PERSISTENT_VOLUME
 # ---------------------------------------------------------------------------
@@ -1504,3 +1481,10 @@ class TestOrphanedLoadBalancer:
         recs = self._lb_recs(recommender, [mock_lb])
         assert len(recs) == 1
         assert recs[0].pod_name == "lb-mocked"
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

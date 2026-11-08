@@ -416,13 +416,21 @@ config:
 
   # Recommendation engine configuration
   recommendations:
-    lookbackDays: 7
-    # Hard bound on combined + container rows loaded into one recommendation scan.
-    # The lookback window is shortened automatically before loading above this bound.
+    # Lookback of recommendation scans; 14 days covers two weekly cycles.
+    lookbackDays: 14
+    # Hard bound on combined + container rows loaded into one recommendation scan
+    # by the row-loading path (backends without the workload usage rollup). SQLite
+    # and PostgreSQL scans read per-target summaries and are bounded by targets.
     maxMetricRows: 750000
     rightsizingCpuThreshold: 0.3
     rightsizingMemoryThreshold: 0.3
     rightsizingHeadroom: 1.2
+    # Recommend a request increase when p99 usage exceeds this share of the request.
+    rightsizingIncreaseThreshold: 0.9
+    # Observed coverage (days) required before a request decrease is recommended.
+    minDecreaseCoverageDays: 7
+    # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
+    limitsPolicy: keep
     zombieCostThreshold: 0.01
     zombieEnergyThreshold: 1000
     autoscalingCvThreshold: 0.7

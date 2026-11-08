@@ -563,3 +563,10 @@ class TestRecommendationLifecycleTransitions:
         # Check that savings summary reflects the applied data
         resp = client.get("/api/v1/recommendations/savings")
         assert resp.status_code == 200
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

@@ -678,3 +678,10 @@ class TestScheduleAndDeletionAnalyzers:
         assert _impact(lb)["assumptions"]["cost_source"] == "opencost"
         assert pv.potential_savings_co2e_grams is None
         assert lb.potential_savings_co2e_grams is None
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

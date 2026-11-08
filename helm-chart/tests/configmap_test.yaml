@@ -234,7 +234,19 @@ tests:
     asserts:
       - equal:
           path: data.RECOMMENDATION_LOOKBACK_DAYS
+          value: "14"
+
+  - it: should set the two-way rightsizing and limits policy defaults
+    asserts:
+      - equal:
+          path: data.RIGHTSIZING_INCREASE_THRESHOLD
+          value: "0.9"
+      - equal:
+          path: data.RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS
           value: "7"
+      - equal:
+          path: data.RECOMMENDATION_LIMITS_POLICY
+          value: "keep"
 
   - it: should set RIGHTSIZING_CPU_THRESHOLD
     asserts:

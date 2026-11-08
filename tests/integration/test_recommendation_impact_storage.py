@@ -72,3 +72,10 @@ async def test_records_without_impact_read_back_as_none(real_database: RealDatab
     assert await repo.upsert_recommendations([record]) == 1
     (stored,) = await repo.get_active_recommendations(namespace="prod")
     assert stored.impact is None
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

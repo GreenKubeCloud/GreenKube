@@ -259,14 +259,22 @@ class Config(BaseSettings):
 
     # --- Recommendation Engine variables ---
     RECOMMEND_SYSTEM_NAMESPACES: bool = False
-    RECOMMENDATION_LOOKBACK_DAYS: int = 7
-    # Hard bound on combined + container metric rows loaded into memory for one
-    # recommendation scan. The lookback window is shortened before materializing
-    # a larger result set.
+    # Lookback of recommendation scans; 14 days covers two weekly cycles (E9).
+    RECOMMENDATION_LOOKBACK_DAYS: int = 14
+    # Hard bound on combined + container metric rows loaded into memory by the
+    # row-loading scan path (backends without the workload usage rollup). The
+    # lookback window is shortened before materializing a larger result set.
     RECOMMENDATION_MAX_METRIC_ROWS: int = 750_000
     RIGHTSIZING_CPU_THRESHOLD: float = 0.3
     RIGHTSIZING_MEMORY_THRESHOLD: float = 0.3
     RIGHTSIZING_HEADROOM: float = 1.2
+    # Two-way rightsizing (E9): recommend a request increase when p99 usage
+    # exceeds this share of the request.
+    RIGHTSIZING_INCREASE_THRESHOLD: float = 0.9
+    # Observed coverage (days) required before a request decrease is recommended.
+    RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: float = 7.0
+    # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
+    RECOMMENDATION_LIMITS_POLICY: str = "keep"
     ZOMBIE_COST_THRESHOLD: float = 0.01
     ZOMBIE_ENERGY_THRESHOLD: float = 1000.0
     AUTOSCALING_CV_THRESHOLD: float = 0.7
@@ -452,6 +460,14 @@ class Config(BaseSettings):
         if not 0 <= value <= 65_535:
             raise ValueError("CONTROLLER_METRICS_PORT must be between 0 (disabled) and 65535")
         return value
+
+    @field_validator("RECOMMENDATION_LIMITS_POLICY", mode="after")
+    @classmethod
+    def _validate_recommendation_limits_policy(cls, value: str) -> str:
+        normalized = (value or "keep").strip().lower()
+        if normalized not in {"keep", "remove_cpu", "memory_equals_request"}:
+            raise ValueError("RECOMMENDATION_LIMITS_POLICY must be keep, remove_cpu or memory_equals_request")
+        return normalized
 
     @field_validator("RECOMMENDATION_MAX_METRIC_ROWS", mode="after")
     @classmethod

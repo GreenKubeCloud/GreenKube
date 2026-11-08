@@ -181,3 +181,10 @@ class TestEvidenceSavingsMethod:
 
         assert evidence is not None
         assert evidence.savings_method == "impact_model/1.0.0/container_resources"
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
