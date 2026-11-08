@@ -188,7 +188,7 @@ For Gitea, `webBaseUrl` is optional and must be an HTTP(S) origin, such as `http
 
 The chart adds a checksum of non-secret ConfigMap inputs to each application Pod template. Helm upgrades that change runtime configuration therefore roll the affected Pods; changes to externally managed Secret data still require an explicit restart when the application reads that value at startup.
 
-The nested `tokenSecret: {name, key, namespace}` form is also accepted for compatibility, and `repositories` is accepted as an alias for `repositoryAllowlist`. Do not mix conflicting flat and nested values.
+The nested `tokenSecret: {name, key, namespace}` form and the `repositories` alias are no longer accepted: rendering fails and names the replacement keys (`secretName`, `secretKey`, `secretNamespace`, `repositoryAllowlist`).
 
 #### Upgrading from the legacy single-provider configuration
 

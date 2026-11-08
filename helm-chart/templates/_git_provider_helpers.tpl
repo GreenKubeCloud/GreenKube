@@ -1,42 +1,23 @@
 {{/*
-Normalize the flat and documented nested provider Secret shapes.
+Return the configured providers, rejecting the removed alias keys with a migration hint.
 */}}
 {{- define "greenkube.normalizedAutomationProviders" -}}
 {{- $providers := .Values.automation.providers | default (list) -}}
 {{- if not (kindIs "slice" $providers) -}}
 {{- fail "automation.providers must be a list" -}}
 {{- end -}}
-{{- $normalizedProviders := list -}}
 {{- range $index, $provider := $providers -}}
   {{- if not (kindIs "map" $provider) -}}
     {{- fail (printf "automation.providers[%d] must be a map" $index) -}}
   {{- end -}}
-  {{- $normalized := deepCopy $provider -}}
   {{- if hasKey $provider "tokenSecret" -}}
-    {{- $tokenSecret := get $provider "tokenSecret" -}}
-    {{- if not (kindIs "map" $tokenSecret) -}}
-      {{- fail (printf "automation.providers[%d].tokenSecret must be a map" $index) -}}
-    {{- end -}}
-    {{- range $pair := (list (list "name" "secretName") (list "key" "secretKey") (list "namespace" "secretNamespace")) -}}
-      {{- $nestedKey := index $pair 0 -}}
-      {{- $flatKey := index $pair 1 -}}
-      {{- if hasKey $tokenSecret $nestedKey -}}
-        {{- if and (hasKey $normalized $flatKey) (ne (get $normalized $flatKey) (get $tokenSecret $nestedKey)) -}}
-          {{- fail (printf "automation.providers[%d] has conflicting %s and tokenSecret.%s values" $index $flatKey $nestedKey) -}}
-        {{- end -}}
-        {{- $_ := set $normalized $flatKey (get $tokenSecret $nestedKey) -}}
-      {{- end -}}
-    {{- end -}}
+    {{- fail (printf "automation.providers[%d].tokenSecret was removed; use secretName, secretKey and secretNamespace" $index) -}}
   {{- end -}}
   {{- if hasKey $provider "repositories" -}}
-    {{- if and (hasKey $normalized "repositoryAllowlist") (ne (toJson (get $normalized "repositoryAllowlist")) (toJson (get $provider "repositories"))) -}}
-      {{- fail (printf "automation.providers[%d] has conflicting repositories and repositoryAllowlist values" $index) -}}
-    {{- end -}}
-    {{- $_ := set $normalized "repositoryAllowlist" (get $provider "repositories") -}}
+    {{- fail (printf "automation.providers[%d].repositories was removed; use repositoryAllowlist" $index) -}}
   {{- end -}}
-  {{- $normalizedProviders = append $normalizedProviders $normalized -}}
 {{- end -}}
-{{- toYaml $normalizedProviders -}}
+{{- toYaml $providers -}}
 {{- end -}}
 
 {{/*
