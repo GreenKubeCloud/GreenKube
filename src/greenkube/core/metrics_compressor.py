@@ -488,7 +488,12 @@ class MetricsCompressor:
             refresh_hours=refresh_hours if refresh_hours is not None else DEFAULT_REFRESH_HOURS,
         )
         if result.hours:
-            logger.info("Workload usage rollup: %d hours rolled into %d rows.", result.hours, result.rows)
+            logger.info(
+                "Workload usage rollup: %d hours rolled into %d rows (%d late hours).",
+                result.hours,
+                result.rows,
+                result.late_hours,
+            )
         return result
 
     async def _prune_usage_rollup(self, now: datetime) -> int:

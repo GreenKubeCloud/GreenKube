@@ -679,16 +679,23 @@ class RollupResult:
     rows: int = 0
     start: Optional[datetime] = None
     end: Optional[datetime] = None
+    #: Hours older than the refresh window re-rolled because they received rows.
+    late_hours: int = 0
 
 
 class WorkloadUsageRollup:
     """Keeps ``workload_usage_hourly`` up to date, one hour at a time.
 
-    Each run re-rolls the last ``refresh_hours`` hours (late collection
-    windows and the carbon-intensity recompute still change them) plus every
-    hour since the last rolled one, up to the current (open) hour. The first
-    run backfills ``backfill_hours``. An hour is rolled from raw rows when the
-    raw table still holds it, otherwise from the compressed hourly table.
+    Each run re-rolls the last ``refresh_hours`` hours (the carbon-intensity
+    recompute still changes them) plus every hour since the last rolled one,
+    up to the current (open) hour. It also re-rolls every older hour of the
+    backfill window that received raw rows since the previous run, found from
+    the raw tables' row ids (input high-water marks saved after each run):
+    collection catch-up after an outage (``COLLECTION_MAX_BACKFILL``) or
+    ``greenkube start --last`` can write hours far behind the rollup. The
+    first run backfills ``backfill_hours``. An hour is rolled from raw rows
+    when the raw table still holds it, otherwise from the compressed hourly
+    table.
     """
 
     def __init__(
@@ -708,19 +715,34 @@ class WorkloadUsageRollup:
         now = now or datetime.now(timezone.utc)
         end = floor_hour(now) + timedelta(hours=1)
         earliest = end - timedelta(hours=self.backfill_hours)
+        # Read the input marks before any input row: rows written while this
+        # run is rolling are above the saved marks and roll on the next run.
+        marks = await self.repository.input_high_water_marks()
         latest = await self.repository.latest_rolled_hour()
         start = end - timedelta(hours=max(int(refresh_hours), 1))
+        written: List[datetime] = []
         if latest is None:
             start = earliest
         else:
             start = min(start, floor_hour(latest))
+            saved = await self.repository.read_rollup_marks()
+            if saved:
+                # Hours that received rows since the last run, however old
+                # (catch-up after an outage, `start --last`, re-collection).
+                written = await self.repository.hours_written_between(saved, marks)
         oldest_input = await self.repository.earliest_input_time()
         if oldest_input is None:
+            await self.repository.save_rollup_marks(marks)
             return RollupResult(start=end, end=end)
-        start = max(start, earliest, floor_hour(oldest_input))
-        result = RollupResult(start=start, end=end)
-        hour = start
-        while hour < end:
+        floor_input = floor_hour(oldest_input)
+        start = max(start, earliest, floor_input)
+        hours = {start + timedelta(hours=offset) for offset in range(int((end - start) / timedelta(hours=1)))}
+        late = {floor_hour(hour) for hour in written if max(earliest, floor_input) <= floor_hour(hour) < start}
+        hours |= late
+        result = RollupResult(start=min(hours) if hours else start, end=end, late_hours=len(late))
+        if late:
+            logger.info("Workload usage rollup: re-rolling %d hours that received late rows.", len(late))
+        for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
             rows = (
                 rollup_rows(pod_rows, container_rows, step_seconds=self.step_seconds, source=source)
@@ -730,5 +752,5 @@ class WorkloadUsageRollup:
             await self.repository.replace_hour(hour, rows)
             result.hours += 1
             result.rows += len(rows)
-            hour += timedelta(hours=1)
+        await self.repository.save_rollup_marks(marks)
         return result

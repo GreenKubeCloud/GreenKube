@@ -25,7 +25,6 @@ from greenkube.storage.base_repository import ContainerMetricsRepository
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
-    from greenkube.models.workload_usage import UsageSnapshot
     from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository
     from greenkube.storage.base_workload_usage_repository import WorkloadUsageRepository
 
@@ -71,14 +70,6 @@ def usage_repository_for(combined_repo: object) -> Optional["WorkloadUsageReposi
     if isinstance(combined_repo, SQLiteCombinedMetricsRepository):
         return create_workload_usage_repository(combined_repo.db_manager, "sqlite")
     return None
-
-
-def _keep_namespaces(snapshot: "UsageSnapshot", namespaces: set[str]) -> None:
-    """Drop summaries of namespaces that no longer exist, so reconciliation can mark them stale."""
-    for target in [target for target in snapshot.summaries if target[0] not in namespaces]:
-        del snapshot.summaries[target]
-        snapshot.hour_profiles.pop(target, None)
-        snapshot.hour_profile_samples.pop(target, None)
 
 
 class ContextBuilder:
@@ -132,16 +123,17 @@ class ContextBuilder:
             backfill_hours=lookback_days * 24,
         ).refresh(end, refresh_hours=1)
 
-        snapshot = await usage_repo.read_usage_snapshot(start, read_end, namespace=namespace)
-        pod_rows, container_rows = await usage_repo.read_baseline_rows(
-            start, read_end, namespace=namespace, snapshot=snapshot
-        )
-
+        # Namespaces that no longer exist are left out in SQL: their targets
+        # get no summary (reconciliation marks their recommendations stale),
+        # and their history counts neither in node averages nor in the
+        # observed window.
         active_namespaces = await get_active_k8s_namespaces()
-        if active_namespaces is not None:
-            _keep_namespaces(snapshot, active_namespaces)
-            pod_rows = [row for row in pod_rows if row.namespace in active_namespaces]
-            container_rows = [row for row in container_rows if row.namespace in active_namespaces]
+        snapshot = await usage_repo.read_usage_snapshot(
+            start, read_end, namespace=namespace, namespaces=active_namespaces
+        )
+        pod_rows, container_rows = await usage_repo.read_baseline_rows(
+            start, read_end, namespace=namespace, snapshot=snapshot, namespaces=active_namespaces
+        )
 
         # Annualize over the span actually observed: a cluster with three days
         # of history is not extrapolated as if it had fourteen.

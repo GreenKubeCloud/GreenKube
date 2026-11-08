@@ -267,3 +267,42 @@ async def test_namespace_scope_and_inactive_namespaces(db, no_cluster):
     active = await ContextBuilder(cfg).build(repo, AsyncMock())
     assert {target[0] for target in active.usage_snapshot().summaries} == {"shop"}
     assert {row.namespace for row in active.metrics} == {"shop"}
+
+
+async def test_deleted_namespaces_leave_node_averages_and_observed_window(db, no_cluster):
+    """History of a namespace that no longer exists counts nowhere in the scan, not only in summaries."""
+    repo = _repo(db)
+    start = _start()
+    await repo.write_combined_metrics(_rows(start, hours=6))
+    cfg = Config()
+    no_cluster.return_value = {"shop", "idle-ns"}
+    before = await ContextBuilder(cfg).build(repo, AsyncMock())
+
+    # A deleted namespace ran a big pod on node-b, starting half a day earlier.
+    gone_start = start - timedelta(hours=12)
+    await repo.write_combined_metrics(
+        [
+            CombinedMetric(
+                pod_name="old-0",
+                namespace="gone",
+                timestamp=gone_start + timedelta(minutes=5 * step),
+                duration_seconds=300,
+                node="node-b",
+                cpu_request=4000,
+                memory_request=8192 * MIB,
+                cpu_usage_millicores=3000,
+                memory_usage_bytes=4096 * MIB,
+                total_cost=0.05,
+            )
+            for step in range(18 * 12)
+        ]
+    )
+    after = await ContextBuilder(cfg).build(repo, AsyncMock())
+
+    assert "gone" not in {target[0] for target in after.usage_snapshot().summaries}
+    assert after.window_start == before.window_start
+    assert after.analysis_window_seconds == pytest.approx(before.analysis_window_seconds, abs=120)
+    node_before, node_after = before.usage_snapshot().nodes["node-b"], after.usage_snapshot().nodes["node-b"]
+    assert node_after.hours_observed == node_before.hours_observed
+    for name in ("cpu_usage_avg", "memory_usage_avg", "cpu_request_avg", "memory_request_avg"):
+        assert getattr(node_after, name) == pytest.approx(getattr(node_before, name))

@@ -27,7 +27,7 @@ from greenkube.models.workload_usage import (
     WorkloadUsageHour,
     WorkloadUsageSummary,
 )
-from greenkube.storage.base_workload_usage_repository import ROLLUP_COLUMNS
+from greenkube.storage.base_workload_usage_repository import INPUT_TABLES, ROLLUP_COLUMNS
 
 _KEY = "namespace, target_kind, target_name, container_name"
 
@@ -134,21 +134,64 @@ def upsert_sql(placeholders: Sequence[str]) -> str:
     )
 
 
+def mark_ranges(after: Mapping[str, int], upto: Mapping[str, int]) -> List[Tuple[str, int, int]]:
+    """Return ``(table, lower, upper)`` id ranges of the raw rows written since ``after``.
+
+    A table without a saved mark, or whose ids went backwards (table emptied
+    and recreated), is read from id 0 so that no row is missed.
+    """
+    ranges: List[Tuple[str, int, int]] = []
+    for table in INPUT_TABLES:
+        upper = int(upto.get(table, 0) or 0)
+        lower = int(after.get(table, 0) or 0)
+        if lower > upper:
+            lower = 0
+        if upper > lower:
+            ranges.append((table, lower, upper))
+    return ranges
+
+
 # --------------------------------------------------------------------------- #
 # Scan reads                                                                   #
 # --------------------------------------------------------------------------- #
 
 
-def _window_filter(ph: Callable[[int], str], namespace: Optional[str], extra: str = "") -> str:
-    where = f"hour_bucket >= {ph(1)} AND hour_bucket < {ph(2)}"
+def scope_params(
+    start: Any, end: Any, namespace: Optional[str], namespaces: Optional[Sequence[str]] = None
+) -> Tuple[Any, ...]:
+    """Parameters matching :func:`_window_filter` placeholders, in order."""
+    values: Tuple[Any, ...] = (start, end)
     if namespace is not None:
-        where += f" AND namespace = {ph(3)}"
+        values = (*values, namespace)
+    if namespaces is not None:
+        values = (*values, *namespaces)
+    return values
+
+
+def _window_filter(
+    ph: Callable[[int], str],
+    namespace: Optional[str],
+    extra: str = "",
+    namespaces: Optional[Sequence[str]] = None,
+) -> str:
+    where = f"hour_bucket >= {ph(1)} AND hour_bucket < {ph(2)}"
+    index = 3
+    if namespace is not None:
+        where += f" AND namespace = {ph(index)}"
+        index += 1
+    if namespaces is not None:
+        # Namespaces that still exist: history of deleted ones is left out of
+        # summaries, node averages and the observed window alike.
+        if namespaces:
+            where += f" AND namespace IN ({', '.join(ph(index + offset) for offset in range(len(namespaces)))})"
+        else:
+            where += " AND 1 = 0"
     if extra:
         where += f" AND {extra}"
     return where
 
 
-def summary_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
+def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
     """One row per target container over the window (see the module docstring)."""
     partition = f"PARTITION BY {_KEY}"
     ranks = []
@@ -195,7 +238,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
                 SUM(intensity_sample_count) AS intensity_n,
                 MAX(emaps_zone) AS emaps_zone
             FROM workload_usage_hourly
-            WHERE {_window_filter(ph, namespace)}
+            WHERE {_window_filter(ph, namespace, namespaces=namespaces)}
             GROUP BY {_KEY}, hour_bucket
         ),
         ranked AS (
@@ -234,18 +277,20 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
     """
 
 
-def hour_profile_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
+def hour_profile_sql(
+    ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None
+) -> str:
     return f"""
         SELECT namespace, target_kind, target_name, hour_of_day,
             SUM(cpu_usage_avg * cpu_sample_count) AS cpu_sum,
             SUM(cpu_sample_count) AS cpu_n
         FROM workload_usage_hourly
-        WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND cpu_sample_count > 0")}
+        WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND cpu_sample_count > 0", namespaces)}
         GROUP BY namespace, target_kind, target_name, hour_of_day
     """
 
 
-def node_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
+def node_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
     return f"""
         WITH per_node AS (
             SELECT node, hour_bucket,
@@ -255,7 +300,7 @@ def node_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
                 SUM(cpu_request_sum) AS cpu_req,
                 SUM(memory_request_sum) AS mem_req
             FROM workload_usage_hourly
-            WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND node <> ''")}
+            WHERE {_window_filter(ph, namespace, f"container_name = '{POD_LEVEL}' AND node <> ''", namespaces)}
             GROUP BY node, hour_bucket
         )
         SELECT node, COUNT(*) AS hours_observed, SUM(steps) AS steps,
@@ -268,7 +313,7 @@ def node_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
 _HOD = f"CASE WHEN container_name = '{POD_LEVEL}' THEN hour_of_day ELSE -1 END"
 
 
-def baseline_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
+def baseline_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
     """Rows aggregated for projections: pod level by hour of day, containers without it."""
     return f"""
         SELECT {_KEY}, node, {_HOD} AS hod, cpu_request, memory_request,
@@ -304,7 +349,7 @@ def baseline_sql(ph: Callable[[int], str], namespace: Optional[str]) -> str:
             MAX(emaps_zone) AS emaps_zone,
             MAX(node_instance_type) AS node_instance_type
         FROM workload_usage_hourly
-        WHERE {_window_filter(ph, namespace)}
+        WHERE {_window_filter(ph, namespace, namespaces=namespaces)}
         GROUP BY {_KEY}, node, {_HOD}, cpu_request, memory_request
     """
 

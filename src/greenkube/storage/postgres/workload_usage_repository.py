@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot, WorkloadUsageHour
 from greenkube.storage import workload_usage_sql as q
 from greenkube.storage.base_workload_usage_repository import (
+    INPUT_TABLES,
     ROLLUP_COLUMNS,
     UsageInputRow,
     WorkloadUsageRepository,
     rollup_values,
 )
 from greenkube.utils.time import ensure_utc
+
+# UTC hour of a raw row, independent of the session time zone.
+_HOUR = "(date_trunc('hour', timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
 
 
 def _ph(index: int) -> str:
@@ -122,6 +126,34 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         rows = await self._fetch("SELECT MAX(hour_bucket) AS latest FROM workload_usage_hourly", ())
         return _decode(rows[0]["latest"]) if rows else None
 
+    async def input_high_water_marks(self) -> Dict[str, int]:
+        selects = ", ".join(f"(SELECT MAX(id) FROM {table}) AS {table}" for table in INPUT_TABLES)
+        rows = await self._fetch(f"SELECT {selects}", ())
+        return {table: int((rows[0][table] if rows else None) or 0) for table in INPUT_TABLES}
+
+    async def read_rollup_marks(self) -> Dict[str, int]:
+        rows = await self._fetch("SELECT input_table, last_id FROM workload_usage_rollup_marks", ())
+        return {str(row["input_table"]): int(row["last_id"]) for row in rows}
+
+    async def save_rollup_marks(self, marks: Mapping[str, int]) -> None:
+        now = datetime.now(timezone.utc)
+        async with self.db_manager.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO workload_usage_rollup_marks (input_table, last_id, updated_at) VALUES ($1, $2, $3) "
+                "ON CONFLICT (input_table) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at",
+                [(table, int(value), now) for table, value in marks.items()],
+            )
+
+    async def hours_written_between(self, after: Mapping[str, int], upto: Mapping[str, int]) -> List[datetime]:
+        hours: set = set()
+        for table, lower, upper in q.mark_ranges(after, upto):
+            rows = await self._fetch(
+                f"SELECT DISTINCT {_HOUR} AS hour FROM {table} WHERE id > $1 AND id <= $2",
+                (lower, upper),
+            )
+            hours.update(value for value in (_decode(row["hour"]) for row in rows) if value is not None)
+        return sorted(hours)
+
     async def prune_before(self, cutoff: datetime) -> int:
         async with self.db_manager.transaction() as conn:
             status = await conn.execute("DELETE FROM workload_usage_hourly WHERE hour_bucket < $1", ensure_utc(cutoff))
@@ -146,12 +178,17 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
     # ------------------------------------------------------------------ #
 
     async def read_usage_snapshot(
-        self, start: datetime, end: datetime, namespace: Optional[str] = None
+        self,
+        start: datetime,
+        end: datetime,
+        namespace: Optional[str] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> UsageSnapshot:
-        params = _params(start, end, namespace)
-        summaries = await self._fetch(q.summary_sql(_ph, namespace), params)
-        profiles = await self._fetch(q.hour_profile_sql(_ph, namespace), params)
-        nodes = await self._fetch(q.node_sql(_ph, namespace), params)
+        scope = sorted(namespaces) if namespaces is not None else None
+        params = q.scope_params(ensure_utc(start), ensure_utc(end), namespace, scope)
+        summaries = await self._fetch(q.summary_sql(_ph, namespace, scope), params)
+        profiles = await self._fetch(q.hour_profile_sql(_ph, namespace, scope), params)
+        nodes = await self._fetch(q.node_sql(_ph, namespace, scope), params)
         return q.build_snapshot(summaries, profiles, nodes, _decode)
 
     async def read_baseline_rows(
@@ -160,7 +197,10 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         end: datetime,
         namespace: Optional[str] = None,
         snapshot: Optional[UsageSnapshot] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> Tuple[List[BaselineMetric], List[BaselineMetric]]:
-        rows = await self._fetch(q.baseline_sql(_ph, namespace), _params(start, end, namespace))
+        scope = sorted(namespaces) if namespaces is not None else None
+        params = q.scope_params(ensure_utc(start), ensure_utc(end), namespace, scope)
+        rows = await self._fetch(q.baseline_sql(_ph, namespace, scope), params)
         summaries = snapshot.summaries if snapshot is not None else {}
         return q.split_baseline([q.baseline_from_row(row, _decode, summaries) for row in rows])

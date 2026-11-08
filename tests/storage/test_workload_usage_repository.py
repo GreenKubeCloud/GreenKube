@@ -315,3 +315,53 @@ async def test_refresh_rerolls_recent_hours_and_prunes(db):
         for item in await repository.read_hours(start, start + timedelta(days=1))
     )
     assert await repository.latest_rolled_hour() == start + timedelta(hours=1)
+
+
+async def test_compression_rolls_hours_written_behind_the_rollup(db):
+    """Catch-up after an outage (or ``start --last``) writes hours older than the refresh window."""
+    now = datetime.now(timezone.utc)
+    base = floor_hour(now)
+    hole = range(30, 72)  # hours ago, all older than the 24h refresh window
+    repo = _metrics_repo(db)
+    await repo.write_combined_metrics([_row(base - timedelta(hours=h)) for h in range(96, 0, -1) if h not in hole])
+    compressor = MetricsCompressor(db, Config())
+    await compressor.refresh_usage_rollup(now)
+
+    usage = create_workload_usage_repository(db, db.db_type)
+    rolled = {item.hour_bucket for item in await usage.read_hours(base - timedelta(hours=100), base)}
+    assert not any(base - timedelta(hours=h) in rolled for h in hole)
+
+    await repo.write_combined_metrics([_row(base - timedelta(hours=h)) for h in hole])
+    result = await compressor.refresh_usage_rollup(now + timedelta(minutes=10))
+
+    stored = await usage.read_hours(base - timedelta(hours=100), base)
+    pod_level = {item.hour_bucket for item in stored if item.container_name == ""}
+    assert all(base - timedelta(hours=h) in pod_level for h in hole)
+    assert result.late_hours == len(hole)
+    # Only the late hours and the refresh window are re-rolled, not the whole gap since the oldest one.
+    assert result.hours <= len(hole) + 25
+
+    # Nothing new: the next run re-rolls the refresh window only.
+    again = await compressor.refresh_usage_rollup(now + timedelta(minutes=20))
+    assert again.late_hours == 0
+
+
+async def test_rollup_marks_cover_container_rows_and_table_resets(db):
+    start = _base_hour()
+    repository, _ = await _rolled(db, _workload_rows(start, hours=1), start, hours=30)
+    marks = await repository.read_rollup_marks()
+    assert set(marks) == {"combined_metrics", "container_metrics"}
+    assert marks == await repository.input_high_water_marks()
+    assert all(value > 0 for value in marks.values())
+
+    late = start - timedelta(hours=5)
+    await _metrics_repo(db).write_combined_metrics(
+        [_row(late + timedelta(minutes=5), pod_name="api-7d9f8b6c5d-abcde", node=None, container_name="web")]
+    )
+    upto = await repository.input_high_water_marks()
+    assert upto["container_metrics"] > marks["container_metrics"]
+    assert upto["combined_metrics"] == marks["combined_metrics"]
+    assert await repository.hours_written_between(marks, upto) == [late]
+    # Marks above the current ids (tables emptied and recreated) read from id 0.
+    reset = {table: value + 10_000 for table, value in marks.items()}
+    assert late in await repository.hours_written_between(reset, upto)

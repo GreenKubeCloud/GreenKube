@@ -5,9 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot, WorkloadUsageHour
+
+#: Raw metric tables whose writes the rollup tracks by row id. The hourly
+#: tables are only written by the compressor from these raw rows.
+INPUT_TABLES: Tuple[str, ...] = ("combined_metrics", "container_metrics")
 
 #: Columns of ``workload_usage_hourly`` in insertion order (identity first).
 ROLLUP_COLUMNS: Tuple[str, ...] = (
@@ -135,6 +139,26 @@ class WorkloadUsageRepository(ABC):
         """Return the most recent rolled hour, or None when the rollup is empty."""
 
     @abstractmethod
+    async def input_high_water_marks(self) -> Dict[str, int]:
+        """Return the highest row id of each raw input table (:data:`INPUT_TABLES`), 0 when empty."""
+
+    @abstractmethod
+    async def read_rollup_marks(self) -> Dict[str, int]:
+        """Return the input marks saved by the last rollup run (empty before the first one)."""
+
+    @abstractmethod
+    async def save_rollup_marks(self, marks: Mapping[str, int]) -> None:
+        """Store the input marks the rollup has read up to."""
+
+    @abstractmethod
+    async def hours_written_between(self, after: Mapping[str, int], upto: Mapping[str, int]) -> List[datetime]:
+        """Return the distinct UTC hours of raw rows with ``after[table] < id <= upto[table]``.
+
+        These are the hours that received rows since the rollup last read its
+        inputs, however old they are (late collection, re-collection).
+        """
+
+    @abstractmethod
     async def prune_before(self, cutoff: datetime) -> int:
         """Delete rollup rows of hours before ``cutoff``; return the count."""
 
@@ -150,9 +174,17 @@ class WorkloadUsageRepository(ABC):
 
     @abstractmethod
     async def read_usage_snapshot(
-        self, start: datetime, end: datetime, namespace: Optional[str] = None
+        self,
+        start: datetime,
+        end: datetime,
+        namespace: Optional[str] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> UsageSnapshot:
-        """Summaries per target container, hour-of-day profiles and node summaries over ``[start, end)``."""
+        """Summaries per target container, hour-of-day profiles and node summaries over ``[start, end)``.
+
+        ``namespaces`` (when given) keeps only rows of these namespaces, e.g.
+        the namespaces that still exist in the cluster.
+        """
 
     @abstractmethod
     async def read_baseline_rows(
@@ -161,6 +193,7 @@ class WorkloadUsageRepository(ABC):
         end: datetime,
         namespace: Optional[str] = None,
         snapshot: Optional[UsageSnapshot] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> Tuple[List[BaselineMetric], List[BaselineMetric]]:
         """Return ``(pod_rows, container_rows)`` aggregated for impact projections and evidence.
 

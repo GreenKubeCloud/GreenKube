@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot, WorkloadUsageHour
 from greenkube.storage import workload_usage_sql as q
 from greenkube.storage.base_workload_usage_repository import (
+    INPUT_TABLES,
     ROLLUP_COLUMNS,
     UsageInputRow,
     WorkloadUsageRepository,
@@ -163,6 +164,35 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
         rows = await self._fetch("SELECT MAX(hour_bucket) FROM workload_usage_hourly", ())
         return _decode(rows[0][0]) if rows and rows[0][0] else None
 
+    async def input_high_water_marks(self) -> Dict[str, int]:
+        selects = ", ".join(f"(SELECT MAX(id) FROM {table})" for table in INPUT_TABLES)
+        rows = await self._fetch(f"SELECT {selects}", ())
+        values = tuple(rows[0]) if rows else (None,) * len(INPUT_TABLES)
+        return {table: int(value or 0) for table, value in zip(INPUT_TABLES, values)}
+
+    async def read_rollup_marks(self) -> Dict[str, int]:
+        rows = await self._fetch("SELECT input_table, last_id FROM workload_usage_rollup_marks", ())
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def save_rollup_marks(self, marks: Mapping[str, int]) -> None:
+        now = _encode(datetime.now(timezone.utc))
+        async with self.db_manager.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO workload_usage_rollup_marks (input_table, last_id, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(input_table) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at",
+                [(table, int(value), now) for table, value in marks.items()],
+            )
+
+    async def hours_written_between(self, after: Mapping[str, int], upto: Mapping[str, int]) -> List[datetime]:
+        hours: set = set()
+        for table, lower, upper in q.mark_ranges(after, upto):
+            rows = await self._fetch(
+                f"SELECT DISTINCT {_HOUR} FROM {table} WHERE id > ? AND id <= ?",
+                (lower, upper),
+            )
+            hours.update(value for value in (_decode(row[0]) for row in rows) if value is not None)
+        return sorted(hours)
+
     async def prune_before(self, cutoff: datetime) -> int:
         async with self.db_manager.transaction() as conn:
             cursor = await conn.execute(
@@ -186,14 +216,19 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
     # ------------------------------------------------------------------ #
 
     async def read_usage_snapshot(
-        self, start: datetime, end: datetime, namespace: Optional[str] = None
+        self,
+        start: datetime,
+        end: datetime,
+        namespace: Optional[str] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> UsageSnapshot:
-        params = _params(start, end, namespace)
+        scope = sorted(namespaces) if namespaces is not None else None
+        params = q.scope_params(_encode(start), _encode(end), namespace, scope)
         summaries, profiles, nodes = await self._fetch_bounded(
             [
-                (q.summary_sql(_ph, namespace), params),
-                (q.hour_profile_sql(_ph, namespace), params),
-                (q.node_sql(_ph, namespace), params),
+                (q.summary_sql(_ph, namespace, scope), params),
+                (q.hour_profile_sql(_ph, namespace, scope), params),
+                (q.node_sql(_ph, namespace, scope), params),
             ]
         )
         return q.build_snapshot(summaries, profiles, nodes, _decode)
@@ -204,7 +239,10 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
         end: datetime,
         namespace: Optional[str] = None,
         snapshot: Optional[UsageSnapshot] = None,
+        namespaces: Optional[Collection[str]] = None,
     ) -> Tuple[List[BaselineMetric], List[BaselineMetric]]:
-        (rows,) = await self._fetch_bounded([(q.baseline_sql(_ph, namespace), _params(start, end, namespace))])
+        scope = sorted(namespaces) if namespaces is not None else None
+        params = q.scope_params(_encode(start), _encode(end), namespace, scope)
+        (rows,) = await self._fetch_bounded([(q.baseline_sql(_ph, namespace, scope), params)])
         summaries = snapshot.summaries if snapshot is not None else {}
         return q.split_baseline([q.baseline_from_row(row, _decode, summaries) for row in rows])
