@@ -17,7 +17,9 @@ from greenkube.core.db import DatabaseManager
 from greenkube.impact import IMPACT_MODEL_VERSION
 from greenkube.impact.power import GpuPowerModel
 from greenkube.impact.pricing import CustomRates
+from greenkube.impact.recompute import MetricRecomputer
 from greenkube.models.node import NodeInfo
+from greenkube.storage.sqlite.node_repository import SQLiteNodeRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from tests.core.fake_prometheus import FakePrometheus  # pyrefly: ignore[missing-import]
 from tests.core.range_harness import FakeOpenCost, build_range_processor  # pyrefly: ignore[missing-import]
@@ -197,3 +199,44 @@ async def test_namespace_filtered_runs_expose_but_do_not_write_idle_rows(setup):
 
     assert len(processor.last_idle_metrics) == 1
     assert await repo.read_idle_metrics(BASE, END) == []
+
+
+@pytest.mark.asyncio
+async def test_recompute_reproduces_collection_on_a_node_without_observed_costs(setup):
+    """Collection and ``greenkube recompute --all`` resolve the same node inputs (power, embodied, prices)."""
+    prom = FakePrometheus()
+    _cluster(prom)
+    processor, repo = await setup(prom, FakeOpenCost(pods=()))
+    rows = await processor.run_range(BASE, END)
+    await repo.write_combined_metrics(rows)
+    await repo.write_idle_metrics(processor.last_idle_metrics)
+    collected = {row.pod_name: row for row in await repo.read_combined_metrics(BASE, END)}
+    (collected_idle,) = await repo.read_idle_metrics(BASE, END)
+    node_repo = SQLiteNodeRepository(repo.db_manager)
+    await node_repo.save_nodes(
+        [
+            NodeInfo(
+                name="n1",
+                instance_type="m5.large",
+                cloud_provider="aws",
+                cpu_capacity_cores=2,
+                memory_capacity_bytes=8 * GIB,
+                embodied_emissions_kg=100.0,
+                timestamp=BASE - timedelta(days=1),
+            )
+        ]
+    )
+
+    report = await MetricRecomputer(processor._config, repo, node_repo).run(BASE, END, only_outdated=False)
+
+    assert report.pod_rows_recomputed == 2
+    recomputed = {row.pod_name: row for row in await repo.read_combined_metrics(BASE, END)}
+    (recomputed_idle,) = await repo.read_idle_metrics(BASE, END)
+    fields = ("joules", "co2e_grams", "embodied_co2e_grams", "total_cost", "cost_cpu", "cost_ram")
+    for pod, row in collected.items():
+        for name in fields:
+            assert getattr(recomputed[pod], name) == pytest.approx(getattr(row, name)), (pod, name)
+        assert recomputed[pod].cost_source == row.cost_source
+    for name in (*fields, "cpu_unreserved_cores", "memory_unreserved_bytes"):
+        assert getattr(recomputed_idle, name) == pytest.approx(getattr(collected_idle, name)), name
+    assert recomputed_idle.cost_source == collected_idle.cost_source
