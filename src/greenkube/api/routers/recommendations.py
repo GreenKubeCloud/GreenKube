@@ -5,7 +5,7 @@ API routes for the recommendation lifecycle.
 Endpoints:
   GET  /recommendations            - Current active recommendations from DB
   GET  /recommendations/active     - Current active recommendations from DB (filterable)
-  GET  /recommendations/top        - Ranked actionable recommendations by projected savings
+  GET  /recommendations/top        - Ranked recommendations by projected savings or expected value
   GET  /recommendations/ignored    - All permanently ignored recommendations
   GET  /recommendations/history    - Historical records filtered by time range
   GET  /recommendations/savings    - Aggregate CO2 and cost savings from applied recs
@@ -14,6 +14,11 @@ Endpoints:
   POST /recommendations/{id}/rollback-review/dismiss - Dismiss a false-positive rollback review
   PATCH /recommendations/{id}/ignore - Permanently ignore a recommendation
   DELETE /recommendations/{id}/ignore - Un-ignore a recommendation (restore to active)
+  GET  /sources/track-record       - Measured realization rate per source family and capability
+
+Active lists, the top list and the detail carry the live decision: the
+risk-adjusted expected value (``value``, ``ranking_score``) under the requested
+``profile`` and ``carbon_price``, and the delivery ``eligibility`` (F10, I1-I3).
 
 GET endpoints never run the optimizer and never write recommendations. The
 deprecated ``refresh=true`` parameter only queues an optimization run for the
@@ -28,14 +33,20 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from greenkube.api.dependencies import (
+    AutomationPlanApiService,
     get_authenticated_actor,
+    get_automation_plan_service,
+    get_gitops_binding_repository,
+    get_pull_request_repository,
     get_recommendation_repository,
     get_savings_ledger_repository,
     validate_namespace,
 )
 from greenkube.api.routers.optimization import enqueue_refresh, get_optimization_run_repository
 from greenkube.core.config import get_config
-from greenkube.core.recommendation_ranking import rank_recommendations
+from greenkube.core.optimization.scoring import normalize_profile, profile_names
+from greenkube.core.optimization.track_record import load_track_record
+from greenkube.core.recommendation_ranking import DecisionRequest, decide_records, rank_recommendations
 from greenkube.core.savings_attributor import record_user_declared_savings, validate_user_declared_savings
 from greenkube.core.savings_report import assemble_savings_report
 from greenkube.models.metrics import (
@@ -47,7 +58,9 @@ from greenkube.models.metrics import (
 )
 from greenkube.models.savings import SavingsReport
 from greenkube.models.verification import DismissRollbackReviewRequest, RemeasureRequest
+from greenkube.storage.base_gitops_repository import GitOpsRepository
 from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
+from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
 from greenkube.utils.date_utils import parse_duration
@@ -108,20 +121,64 @@ _REFRESH_DESCRIPTION = (
     "its id in the X-GreenKube-Run-Id header. The response always contains the current data."
 )
 
+_PROFILE_DESCRIPTION = (
+    "Ranking profile, a preset over the carbon price, risk aversion and effort weight of the expected value: "
+    + ", ".join(profile_names())
+    + ". Defaults to RECOMMENDATION_RANKING_PROFILE."
+)
+_CARBON_PRICE_DESCRIPTION = "Carbon price (currency per tonne CO2e) overriding the profile's for this request."
+
+
+def _decision_request(profile: Optional[str], carbon_price: Optional[float]) -> DecisionRequest:
+    """Validates the per-request ranking parameters (422 on an unknown profile)."""
+    if profile:
+        try:
+            profile = normalize_profile(profile)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return DecisionRequest(profile=profile or None, carbon_price=carbon_price)
+
+
+async def _decide(
+    records: List[RecommendationRecord],
+    decision: DecisionRequest,
+    reco_repo: RecommendationRepository,
+    gitops_repo: GitOpsRepository,
+    pr_repo: PullRequestRepository,
+    service: Optional[AutomationPlanApiService],
+) -> List[RecommendationRecord]:
+    """Attaches the live expected value and eligibility, ordered by expected value."""
+    return await decide_records(
+        records,
+        config=get_config(),
+        reco_repo=reco_repo,
+        gitops_repo=gitops_repo,
+        pr_repo=pr_repo,
+        automation_configured=service is not None,
+        request=decision,
+    )
+
 
 @router.get("/recommendations", response_model=List[RecommendationRecord])
 async def list_recommendations(
     response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
+    profile: Optional[str] = Query(None, description=_PROFILE_DESCRIPTION),
+    carbon_price: Optional[float] = Query(None, ge=0, description=_CARBON_PRICE_DESCRIPTION),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    gitops_repo: GitOpsRepository = Depends(get_gitops_binding_repository),
+    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
+    service: Optional[AutomationPlanApiService] = Depends(get_automation_plan_service),
     actor: str = Depends(get_authenticated_actor),
     refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
 ):
     """Read active recommendations; never runs analyzers or writes recommendations."""
+    decision = _decision_request(profile, carbon_price)
     if refresh:
         await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
-    return await reco_repo.get_active_recommendations(namespace=namespace)
+    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    return await _decide(records, decision, reco_repo, gitops_repo, pr_repo, service)
 
 
 @router.get("/recommendations/active", response_model=List[RecommendationRecord])
@@ -132,21 +189,31 @@ async def list_active_recommendations(
     source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, karpenter)."),
     risk_level: Optional[str] = Query(None, description="Filter by risk level (low, medium, high)."),
     capability: Optional[str] = Query(None, description="Filter by optimization capability."),
+    profile: Optional[str] = Query(None, description=_PROFILE_DESCRIPTION),
+    carbon_price: Optional[float] = Query(None, ge=0, description=_CARBON_PRICE_DESCRIPTION),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    gitops_repo: GitOpsRepository = Depends(get_gitops_binding_repository),
+    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
+    service: Optional[AutomationPlanApiService] = Depends(get_automation_plan_service),
     actor: str = Depends(get_authenticated_actor),
 ):
-    """Return active recommendations from the database.
+    """Return active recommendations from the database with their live decision.
 
-    Ordered by ranking score, then projected cost savings (highest first).
+    Ordered by risk-adjusted expected value (``ranking_score``, currency per
+    year) under the requested profile and carbon price, then value, projected
+    cost and identity. Scores are absolute, so filters never reorder the
+    remaining recommendations. Each record carries its ``eligibility``.
     ``refresh=true`` only queues a controller run; it never blocks or writes
     recommendations in the request.
     """
+    decision = _decision_request(profile, carbon_price)
     if refresh:
         await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
 
     records = await reco_repo.get_active_recommendations(namespace=namespace)
-    return _filter_records(records, source, risk_level, capability)
+    filtered = _filter_records(records, source, risk_level, capability)
+    return await _decide(filtered, decision, reco_repo, gitops_repo, pr_repo, service)
 
 
 @router.get("/recommendations/top", response_model=List[TopRecommendation])
@@ -154,33 +221,41 @@ async def list_top_recommendations(
     response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
     limit: int = Query(5, ge=1, le=50, description="Number of recommendations to return."),
-    metric: Literal["co2", "cost"] = Query("co2", description="Savings metric used for ranking."),
+    metric: Literal["co2", "cost", "value"] = Query(
+        "co2",
+        description="Ranking metric: projected co2 or cost savings, or value (risk-adjusted expected value).",
+    ),
     profile: Optional[str] = Query(
         None,
-        description=(
-            "Multi-criteria ranking profile: balanced, carbon_first, cost_first, quick_wins, low_risk. "
-            "When omitted, ranking uses projected savings only."
+        description=_PROFILE_DESCRIPTION.replace(
+            "Defaults to RECOMMENDATION_RANKING_PROFILE.", "When set, ranking uses the expected value."
         ),
     ),
+    carbon_price: Optional[float] = Query(None, ge=0, description=_CARBON_PRICE_DESCRIPTION),
     refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     run_repo: OptimizationRunRepository = Depends(get_optimization_run_repository),
+    gitops_repo: GitOpsRepository = Depends(get_gitops_binding_repository),
+    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
+    service: Optional[AutomationPlanApiService] = Depends(get_automation_plan_service),
     actor: str = Depends(get_authenticated_actor),
 ):
     """Return the highest-impact active recommendations.
 
     The default ranking uses projected CO2e savings for the coming year. Pass
-    ``metric=cost`` to prioritize direct cloud cost savings, or ``profile`` to
-    rank by the multi-criteria score (impact, confidence, risk, effort).
+    ``metric=cost`` to prioritize direct cloud cost savings, or ``metric=value``
+    or a ``profile`` to rank by the risk-adjusted expected value.
     """
+    decision = _decision_request(profile, carbon_price)
     if refresh:
         await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
 
-    if profile:
+    if profile or metric == "value" or carbon_price is not None:
         records = await reco_repo.get_active_recommendations(namespace=namespace)
     else:
         records = await reco_repo.get_top_recommendations(limit=limit, savings_metric=metric, namespace=namespace)
-    return rank_recommendations(records, limit=limit, savings_metric=metric, profile=profile)
+    decided = await _decide(records, decision, reco_repo, gitops_repo, pr_repo, service)
+    return rank_recommendations(decided, limit=limit, savings_metric=metric, profile=profile)
 
 
 @router.get("/recommendations/ignored", response_model=List[RecommendationRecord])
@@ -275,18 +350,26 @@ async def get_savings_summary(
 @router.get("/recommendations/{rec_id}", response_model=RecommendationRecord)
 async def get_recommendation_detail(
     rec_id: int,
+    profile: Optional[str] = Query(None, description=_PROFILE_DESCRIPTION),
+    carbon_price: Optional[float] = Query(None, ge=0, description=_CARBON_PRICE_DESCRIPTION),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    gitops_repo: GitOpsRepository = Depends(get_gitops_binding_repository),
+    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
+    service: Optional[AutomationPlanApiService] = Depends(get_automation_plan_service),
 ):
     """Return a single recommendation with its full evidence block and assessment.
 
     This is the review endpoint: it returns the observation window, utilization
     distribution, proposed change, confidence, risk factors, rollback conditions
-    and expiry needed to decide without re-running the analysis.
+    and expiry needed to decide without re-running the analysis, plus the live
+    expected value and eligibility.
     """
+    decision = _decision_request(profile, carbon_price)
     record = await reco_repo.get_recommendation_by_id(rec_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
-    return record
+    (decided,) = await _decide([record], decision, reco_repo, gitops_repo, pr_repo, service)
+    return decided
 
 
 @router.patch("/recommendations/{rec_id}/apply", response_model=RecommendationRecord)
@@ -482,3 +565,26 @@ async def unignore_recommendation(
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/sources/track-record")
+async def get_source_track_record(
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Measured realization rate per source family and capability (roadmap I3).
+
+    Each entry is a Beta(alpha, beta) distribution with a uniform prior:
+    ``realized`` outcomes add to alpha, ``not_realized`` and ``rollback_review``
+    to beta; ``inconclusive`` outcomes are only counted. ``p_success`` of a
+    recommendation combines its confidence with the entry of its source and
+    capability.
+    """
+    from greenkube.core.optimization.track_record import PRIOR_ALPHA, PRIOR_BETA
+
+    book = await load_track_record(reco_repo)
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "method": book.method,
+        "prior": {"alpha": PRIOR_ALPHA, "beta": PRIOR_BETA},
+        "entries": [entry.to_dict() for entry in book.entries()],
+    }
