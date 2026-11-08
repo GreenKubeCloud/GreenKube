@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import List, Literal, Optional
@@ -46,6 +48,14 @@ from greenkube.automation.git.base import (
 
 logger = logging.getLogger(__name__)
 _GITLAB_STATUS_STATES = {"pending": "pending", "success": "success", "failure": "failed", "error": "failed"}
+
+#: CODEOWNERS username → user ID lookups, shared by every adapter of the process.
+#: Keyed by API base URL and username; unknown users are cached too.
+_USER_ID_CACHE: OrderedDict[tuple[str, str], tuple[Optional[int], float]] = OrderedDict()
+_USER_ID_CACHE_SIZE = 1_024
+_USER_ID_CACHE_TTL_SECONDS = 3_600.0
+#: Lookups one CODEOWNERS mapping may make, cached answers excluded.
+_MAX_USER_LOOKUPS = 2 * MAX_CODEOWNER_REVIEWERS
 
 
 class GitLabProvider(GitProvider):
@@ -521,21 +531,43 @@ class GitLabProvider(GitProvider):
     ) -> tuple[list[str], list[str]]:
         """GitLab reviewers are user IDs: ``@username`` owners are looked up, groups are skipped."""
         reviewer_ids: list[str] = []
+        lookups = 0
         for owner in owners:
             if len(reviewer_ids) >= MAX_CODEOWNER_REVIEWERS:
                 break
             if not owner.startswith("@") or "/" in owner or len(owner) < 2:
                 continue
-            response = await self._request("GET", "/users", params={"username": owner[1:]})
-            if response.status_code == 404:
+            key = (self.api_base_url or "", owner[1:].casefold())
+            cached = _USER_ID_CACHE.get(key)
+            if cached is not None and cached[1] > time.monotonic():
+                _USER_ID_CACHE.move_to_end(key)
+                user_id = cached[0]
+            elif lookups >= _MAX_USER_LOOKUPS:
                 continue
-            data = response.json()
-            user = data[0] if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) else None
-            user_id = user.get("id") if user is not None else None
-            if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0:
-                if str(user_id) not in reviewer_ids:
-                    reviewer_ids.append(str(user_id))
+            else:
+                lookups += 1
+                user_id = await self._lookup_user_id(owner[1:])
+                _USER_ID_CACHE[key] = (user_id, time.monotonic() + _USER_ID_CACHE_TTL_SECONDS)
+                _USER_ID_CACHE.move_to_end(key)
+                while len(_USER_ID_CACHE) > _USER_ID_CACHE_SIZE:
+                    _USER_ID_CACHE.popitem(last=False)
+            if user_id is not None and str(user_id) not in reviewer_ids:
+                reviewer_ids.append(str(user_id))
         return reviewer_ids, []
+
+    async def _lookup_user_id(self, username: str) -> Optional[int]:
+        response = await self._request("GET", "/users", params={"username": username})
+        if response.status_code == 404:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        user = data[0] if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) else None
+        user_id = user.get("id") if user is not None else None
+        if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0:
+            return user_id
+        return None
 
     async def set_commit_status(
         self,

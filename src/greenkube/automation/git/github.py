@@ -44,6 +44,13 @@ _TREE_ENTRY_TYPES = frozenset({"blob", "commit"})
 logger = logging.getLogger(__name__)
 
 
+def _author_login(pull_request: PullRequestInfo) -> str | None:
+    """The login of the PR's author (GreenKube's identity), when the payload carries it."""
+    user = pull_request.raw.get("user") if isinstance(pull_request.raw, dict) else None
+    login = user.get("login") if isinstance(user, dict) else None
+    return login if isinstance(login, str) and login else None
+
+
 class GitHubProvider(GitProvider):
     """Opens pull requests through the GitHub REST API."""
 
@@ -422,7 +429,11 @@ class GitHubProvider(GitProvider):
         if selected_options.labels:
             await self._add_labels(repo, pull_request.number, selected_options.labels)
         await self._request_reviewers(
-            repo, pull_request.number, selected_options.reviewers, selected_options.team_reviewers
+            repo,
+            pull_request.number,
+            selected_options.reviewers,
+            selected_options.team_reviewers,
+            author=_author_login(pull_request),
         )
 
     async def _add_labels(self, repo: GitRepository, number: int, labels: Sequence[str]) -> None:
@@ -441,6 +452,8 @@ class GitHubProvider(GitProvider):
         number: int,
         requested_users: Sequence[str],
         requested_teams: Sequence[str],
+        *,
+        author: str | None = None,
     ) -> None:
         if not requested_users and not requested_teams:
             return
@@ -468,16 +481,41 @@ class GitHubProvider(GitProvider):
         if len(existing_users) != len(users) or len(existing_teams) != len(teams):
             raise GitProviderError("GitHub returned an invalid requested-reviewers response.")
 
-        reviewers = [name for name in requested_users if name.casefold() not in existing_users]
+        # GitHub refuses a review request from the PR's own author (GreenKube's identity).
+        skipped = {author.casefold()} if author else set()
+        reviewers = [name for name in requested_users if name.casefold() not in existing_users | skipped]
         team_reviewers = [name for name in requested_teams if name.casefold() not in existing_teams]
-        if reviewers or team_reviewers:
-            response = await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
-                json_body={"reviewers": reviewers, "team_reviewers": team_reviewers},
-            )
-            if response.status_code == 404:
-                raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+        if not reviewers and not team_reviewers:
+            return
+        try:
+            await self._post_reviewers(repo, number, reviewers, team_reviewers)
+            return
+        except GitProviderError as error:
+            if error.status_code != 422 or len(reviewers) + len(team_reviewers) < 2:
+                raise
+        # One unknown, departed or non-collaborator login makes GitHub refuse the whole
+        # request (422); request each reviewer alone so the valid ones are still asked.
+        refused: list[str] = []
+        for users, teams in [*(([name], []) for name in reviewers), *(([], [name]) for name in team_reviewers)]:
+            try:
+                await self._post_reviewers(repo, number, users, teams)
+            except GitProviderError as error:
+                if error.status_code != 422:
+                    raise
+                refused.extend(users or [f"team {name}" for name in teams])
+        if refused:
+            raise GitProviderError(f"GitHub refused review requests for: {', '.join(refused)}.", status_code=422)
+
+    async def _post_reviewers(
+        self, repo: GitRepository, number: int, reviewers: Sequence[str], team_reviewers: Sequence[str]
+    ) -> None:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
+            json_body={"reviewers": list(reviewers), "team_reviewers": list(team_reviewers)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError("GitHub could not request configured pull-request reviewers.")
 
     async def add_pull_request_metadata(
         self,
@@ -491,7 +529,7 @@ class GitHubProvider(GitProvider):
         number = self._validate_pull_request_number(repo, pull_request.number)
         if labels:
             await self._add_labels(repo, number, labels)
-        await self._request_reviewers(repo, number, reviewers, team_reviewers)
+        await self._request_reviewers(repo, number, reviewers, team_reviewers, author=_author_login(pull_request))
 
     async def set_commit_status(
         self,

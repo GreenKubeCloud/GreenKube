@@ -288,3 +288,55 @@ async def test_missing_codeowners_returns_none(name):
         assert await provider.read_codeowners(repo, repository.refs["main"]) is None
     # A tree-backed adapter answers from one tree read; the others probe each documented path.
     assert server.calls() == (1 if name == "github" else 3)
+
+
+@pytest.mark.asyncio
+async def test_gitlab_caches_codeowner_user_ids_across_adapters(monkeypatch):
+    from greenkube.automation.git import gitlab
+
+    monkeypatch.setattr(gitlab, "_USER_ID_CACHE", type(gitlab._USER_ID_CACHE)())
+    first, server, repo, _ = _setup("gitlab")
+    server.users["alice"] = 42
+    second = GitLabProvider("token")
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
+        assert await first.codeowner_reviewers(repo, ["@alice", "@nobody"]) == (["42"], [])
+        lookups = server.breakdown()["GET /api/v4/users"]
+        assert await second.codeowner_reviewers(repo, ["@Alice", "@nobody"]) == (["42"], [])
+    assert lookups == 2
+    assert server.breakdown()["GET /api/v4/users"] == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_skips_the_pr_author_and_requests_reviewers_one_by_one_after_a_422():
+    provider, _, repo, _ = _setup("github")
+    api = "https://api.github.com/repos/acme/gitops/pulls/5/requested_reviewers"
+    respx.get(api).mock(return_value=Response(200, json={"users": [], "teams": []}))
+    posted: list[dict] = []
+
+    def answer(request):
+        payload = json.loads(request.content)
+        posted.append(payload)
+        if "ghost" in payload["reviewers"]:
+            return Response(422, json={"message": "Reviews may only be requested from collaborators."})
+        return Response(201, json={"number": 5})
+
+    respx.post(api).mock(side_effect=answer)
+    pull_request = _pull_request(5, raw={"user": {"login": "GreenKube-Bot", "id": 4242}})
+
+    with pytest.raises(GitProviderError, match="ghost") as refused:
+        await provider.add_pull_request_metadata(
+            repo,
+            pull_request,
+            reviewers=["greenkube-bot", "alice", "ghost"],
+            team_reviewers=["platform"],
+        )
+
+    assert refused.value.status_code == 422
+    assert posted[0] == {"reviewers": ["alice", "ghost"], "team_reviewers": ["platform"]}
+    assert posted[1:] == [
+        {"reviewers": ["alice"], "team_reviewers": []},
+        {"reviewers": ["ghost"], "team_reviewers": []},
+        {"reviewers": [], "team_reviewers": ["platform"]},
+    ]
