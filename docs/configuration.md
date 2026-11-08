@@ -116,13 +116,13 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 ### Impact Model (`impact`)
 
-The [Impact Model](methodology/impact-model.md) prices every recommendation projection. Unit prices come from the first available tier: observed per-resource OpenCost costs, then the bundled list price of the node's instance type and region, then the custom rates below.
+The [Impact Model](methodology/impact-model.md) prices every recommendation projection. A container with an observed OpenCost cost is priced from that cost. Otherwise unit prices come from the first available tier: observed per-resource OpenCost costs on the node, then the bundled list price of the node's instance type and region, then the custom rates below.
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
 | `impact.pricing.cpuCoreHour` | `IMPACT_PRICING_CPU_CORE_HOUR` | unset (`0.031611`) | Price of one vCPU-hour for nodes without observed costs or a catalog price. Unset uses the [OpenCost default custom pricing](https://github.com/opencost/opencost/blob/develop/configs/default.json). |
 | `impact.pricing.ramGiBHour` | `IMPACT_PRICING_RAM_GIB_HOUR` | unset (`0.004237`) | Price of one GiB-hour of memory, same fallback rules. |
-| `impact.pricing.currency` | `IMPACT_PRICING_CURRENCY` | `USD` | ISO 4217 code of the custom rates. GreenKube never converts currencies. |
+| `impact.pricing.currency` | `IMPACT_PRICING_CURRENCY` | `USD` | ISO 4217 code of all projected costs: the custom rates and observed OpenCost costs (set it to OpenCost's currency). Only bundled catalogs in this currency are used, so set `EUR` to use the OVHcloud and Scaleway catalogs. GreenKube never converts currencies. |
 | `impact.realizationFactor` | `IMPACT_REALIZATION_FACTOR` | `1.0` | Share (0–1) of released capacity expected to become removed billable node-hours. `potential_savings_*` equal the allocated projection times this factor. Per-pool realization (RealizationContext) will replace it. |
 | `impact.carbonPricePerTonne` | `CARBON_PRICE_PER_TONNE` | `100` | Currency per tonne CO₂e used to compute `value_annual = expected cost + price × tCO₂e`. Set `0` to rank on cost alone. |
 

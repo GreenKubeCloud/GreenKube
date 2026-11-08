@@ -458,6 +458,9 @@ impact:
   pricing:
     cpuCoreHour: null
     ramGiBHour: null
+    # Currency of every projected cost (custom rates and observed OpenCost
+    # costs). Only bundled catalogs in this currency are used: set EUR for the
+    # OVHcloud and Scaleway catalogs. GreenKube never converts currencies.
     currency: USD
   # Share of released capacity expected to become removed billable node-hours.
   # Used until per-pool realization (RealizationContext) lands; 1.0 projects
