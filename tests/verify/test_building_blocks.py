@@ -117,10 +117,14 @@ def test_load_driver_resolution_order_and_coverage():
         "istio_rps",
         "linkerd_rps",
         "ingress_nginx_rps",
+        "envoy_rps",
         "annotation",
         "cpu_usage",
     ]
-    assert 'ns="prod"' in (candidates_for(change)[3].promql or "")
+    assert 'ns="prod"' in (candidates_for(change)[4].promql or "")
+    assert 'envoy_cluster_name=~"prod_api_[^_]+"' in (candidates_for(change)[3].promql or "")
+    dotted = candidates_for(change_event(hour_now(), name="api.v2"))[3].promql or ""
+    assert 'envoy_cluster_name=~"prod_api\\\\.v2_[^_]+"' in dotted
     pre = TimeWindow(start=hour_now() - timedelta(days=16), end=hour_now() - timedelta(days=9))
     post = TimeWindow(start=hour_now() - timedelta(days=8), end=hour_now() - timedelta(days=1))
     resolver = LoadDriverResolver(min_coverage=0.8)

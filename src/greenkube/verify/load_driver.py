@@ -7,9 +7,11 @@ the first one whose coverage reaches the minimum in **both** the pre- and the
 post-change window:
 
 1. requests per second from the service mesh or ingress (Istio
-   ``istio_requests_total``, Linkerd ``response_total``, then ingress-nginx
-   ``nginx_ingress_controller_requests`` for a Service named after the
-   workload);
+   ``istio_requests_total``, Linkerd ``response_total``, ingress-nginx
+   ``nginx_ingress_controller_requests``, then Envoy
+   ``envoy_cluster_upstream_rq_total`` for Contour-style
+   ``<namespace>_<service>_<port>`` clusters; the ingress and Envoy drivers
+   assume a Service named after the workload);
 2. the PromQL expression in the workload annotation
    ``greenkube.io/load-metric`` (``$namespace`` and ``$workload`` are
    substituted);
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
@@ -48,6 +51,11 @@ _RANGE_PATHS = ("/api/v1/query_range", "/prometheus/api/v1/query_range")
 
 def _label(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _regex_label(value: str) -> str:
+    """``value`` as a literal inside a PromQL (RE2) regular expression label matcher."""
+    return _label(re.sub(r"([\\.+*?()|\[\]{}^$])", r"\\\1", value))
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,14 @@ def candidates_for(change: ChangeEvent) -> List[LoadDriverCandidate]:
             promql=(
                 "sum(rate(nginx_ingress_controller_requests{"
                 f'exported_namespace="{namespace}", exported_service="{name}"}}[5m]))'
+            ),
+        ),
+        LoadDriverCandidate(
+            key="envoy_rps",
+            label="Envoy upstream requests/s (Contour-style cluster of a Service named after the workload)",
+            promql=(
+                "sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"
+                f'"{_regex_label(change.target.namespace)}_{_regex_label(change.target.name)}_[^_]+"}}[5m]))'
             ),
         ),
     ]

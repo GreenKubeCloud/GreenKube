@@ -556,7 +556,7 @@ async def test_an_unreachable_load_driver_delays_the_baseline_until_its_retry_de
     assert measurement.load_driver is not None and measurement.load_driver.key == "cpu_usage"
     assert measurement.counterfactual_params[UNAVAILABLE_DRIVERS_KEY] == {
         "pre": [],
-        "post": ["ingress_nginx_rps", "istio_rps", "linkerd_rps"],
+        "post": ["envoy_rps", "ingress_nginx_rps", "istio_rps", "linkerd_rps"],
     }
 
 
@@ -575,7 +575,12 @@ async def test_a_baseline_is_frozen_without_a_driver_that_stays_unreachable(data
     await scenario.service.run_due(now=completed + LOAD_DRIVER_RETRY)
     snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
     assert snapshot is not None and set(snapshot.load_series) == {"cpu_usage"}
-    assert snapshot.collector_versions[UNAVAILABLE_DRIVERS_KEY] == ["ingress_nginx_rps", "istio_rps", "linkerd_rps"]
+    assert snapshot.collector_versions[UNAVAILABLE_DRIVERS_KEY] == [
+        "envoy_rps",
+        "ingress_nginx_rps",
+        "istio_rps",
+        "linkerd_rps",
+    ]
     assert snapshot.verify_digest()
 
 
