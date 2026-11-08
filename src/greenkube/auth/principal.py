@@ -87,7 +87,13 @@ ANONYMOUS = Principal(kind="anonymous", name="anonymous", role=Role.ADMIN.value,
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-_APPROVE_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),)
+# Mutations that approve a plan and queue its pull request. The compatibility
+# endpoint ``apply-pr`` approves the validated digest itself, so it needs
+# ``approve`` too (a ``dry_run`` call included: the scope table sees paths only).
+_APPROVE_PATHS = (
+    re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),
+    re.compile(r"^/api/v1/recommendations/[^/]+/apply-pr$"),
+)
 _ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users")
 # Endpoints any authenticated principal may call for itself.
 SELF_SERVICE_PATHS = frozenset({"/api/v1/auth/me"})
@@ -98,7 +104,7 @@ def required_scope(method: str, path: str) -> str | None:
     """Return the scope a request needs, or ``None`` when authentication suffices.
 
     The table is coarse on purpose: reads need ``read``, mutations ``write``,
-    plan approvals ``approve``, signal pushes ``signals:write``, the Prometheus
+    plan approvals (including ``apply-pr``) ``approve``, signal pushes ``signals:write``, the Prometheus
     endpoint ``metrics:read``, and user or API-key administration ``admin``.
     """
     method = method.upper()

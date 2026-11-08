@@ -76,6 +76,20 @@ def test_approve_scope_is_separate_from_write(tmp_path, monkeypatch):
     assert approve.status_code == 403
 
 
+def test_apply_pr_approves_a_plan_so_it_needs_the_approve_scope(tmp_path, monkeypatch):
+    """The compatibility endpoint approves and queues the validated digest (opens a PR)."""
+    with auth_harness(tmp_path, monkeypatch) as h:
+        writer = _create(h, name="writer", scopes=("read", "write"))["key"]
+        approver = _create(h, name="approver", scopes=("read", "approve"))["key"]
+        denied = h.client.post("/api/v1/recommendations/1/apply-pr", json={}, headers=_bearer(writer))
+        allowed = h.client.post("/api/v1/recommendations/1/apply-pr", json={}, headers=_bearer(approver))
+
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "INSUFFICIENT_SCOPE"
+    assert allowed.status_code != 403, allowed.text
+    assert allowed.status_code != 401, allowed.text
+
+
 def test_revoked_and_expired_keys_are_rejected(tmp_path, monkeypatch):
     with auth_harness(tmp_path, monkeypatch) as h:
         revoked = _create(h, name="old")
