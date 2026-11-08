@@ -3,11 +3,12 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, Callable, Coroutine, List
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
@@ -29,8 +30,38 @@ from greenkube.storage.base_repository import RecommendationRepository
 router = APIRouter()
 WORKER_STALE_AFTER = timedelta(seconds=120)
 
+# Compatibility routes superseded by /automation/plans (roadmap M4, F5). They keep working
+# this release and announce their removal (RFC 9745 Deprecation, RFC 8594 Sunset).
+LEGACY_ROUTE_HEADERS = {
+    "Deprecation": "@1796947200",  # 2026-12-11, v0.4.0
+    "Sunset": "Fri, 29 Jan 2027 00:00:00 GMT",  # v0.5.0
+    "Link": '</api/v1/automation/plans>; rel="successor-version"',
+}
 
-@router.post("/recommendations/{rec_id}/apply-pr", response_model=None)
+
+class _DeprecatedRoute(APIRoute):
+    """Adds the legacy-route deprecation headers to every response, errors included."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def deprecated_handler(request: Request) -> Response:
+            try:
+                response = await handler(request)
+            except HTTPException as error:
+                raise HTTPException(
+                    error.status_code, error.detail, headers={**(error.headers or {}), **LEGACY_ROUTE_HEADERS}
+                ) from error
+            response.headers.update(LEGACY_ROUTE_HEADERS)
+            return response
+
+        return deprecated_handler
+
+
+legacy_router = APIRouter(route_class=_DeprecatedRoute)
+
+
+@legacy_router.post("/recommendations/{rec_id}/apply-pr", response_model=None, deprecated=True)
 async def apply_recommendation_pr(
     rec_id: int,
     response: Response,
@@ -119,7 +150,7 @@ async def list_recommendation_pull_requests(
     return _externalize_pull_request_urls(await pr_repo.get_pull_requests_for_recommendation(rec_id))
 
 
-@router.get("/recommendations/{rec_id}/apply-pr/eligibility")
+@legacy_router.get("/recommendations/{rec_id}/apply-pr/eligibility", deprecated=True)
 async def recommendation_pr_eligibility(
     rec_id: int,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
@@ -400,7 +431,7 @@ def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[Pul
     return externalized
 
 
-@router.get("/automation/operations/{operation_id}")
+@legacy_router.get("/automation/operations/{operation_id}", deprecated=True)
 async def get_automation_operation(
     operation_id: str,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
@@ -417,6 +448,9 @@ async def get_automation_operation(
         raise HTTPException(status_code=404, detail=f"Automation plan {operation.plan_id} not found.")
     pull_request = await pr_repo.get_pull_request_by_plan_id(operation.plan_id)
     return _operation_response(operation, plan, pull_request)
+
+
+router.include_router(legacy_router)
 
 
 def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
