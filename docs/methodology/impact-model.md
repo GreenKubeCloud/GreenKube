@@ -1,19 +1,25 @@
 # Impact Model v1 — methodology
 
-**Model version:** `1.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B4
+**Model version:** `1.1.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
 
-The Impact Model is the single set of formulas GreenKube uses to say what a workload **is charged** (allocated cost and allocated CO₂e), what it **draws** (energy), and what a proposed change **releases**. Recommendation projections use it today. Measurement (the savings ledger) will use the same model, so that a projection and its later measurement can be compared.
+The Impact Model is the single set of formulas GreenKube uses to say what a workload **is charged** (allocated cost and allocated CO₂e), what it **draws** (energy), and what a proposed change **releases**. Recommendation projections and the metric rows collection stores both come from it, so a projection and its later measurement are computed the same way.
 
-This page is the reference for code review. When a formula below changes the numbers the model produces, the change must bump the model version.
+This page is the reference for code review. When a formula below changes the numbers the model produces, the change must bump the model version: the major version when an existing formula changes, the minor version when a component is added and the existing ones keep their values.
+
+| Version | Change |
+|---|---|
+| `1.0.0` | Reservation-aware allocation and projections (CPU power, embodied, cost). |
+| `1.1.0` | Memory power (`MemoryPowerModel`) and GPU power (`GpuPowerModel`), allocated and projected. Stored rows carry the version that allocated them. |
 
 ## Status of this version
 
 | Part | Status |
 |---|---|
 | Projections for analyzers and connectors (`ImpactModel.project`) | **In use.** Every native analyzer with a savings figure, plus the VPA and Karpenter connectors, calls the model. The projection is stored as `impact` on each recommendation. |
-| Reservation-aware allocation (`ImpactModel.allocate`) | **Implemented and tested** as pure functions (golden and conservation tests). Not yet wired into metric collection, so stored metric rows still come from the previous pipeline. |
-| Cost fallback chain (observed → catalog → custom rates) | **In use for projections.** Each sample is anchored to its own observed cost when the row has one (the OpenCost `total_cost` written today, or `cost_cpu`/`cost_ram` when present). The node-level observed tier activates when metric rows carry per-resource costs. |
-| Realization factor | **Fixed by configuration** (`IMPACT_REALIZATION_FACTOR`, default `1.0`) until per-pool realization (RealizationContext, roadmap B6) lands. |
+| Reservation-aware allocation (`ImpactModel.allocate`) | **In use for stored metrics.** Collection allocates every node and step with the model: pod rows carry the allocated energy, CO₂e, embodied emissions and (without OpenCost) modeled cost, with `model_version`; the unreserved remainder of each node is an `__idle__` row ([Stored rows](#stored-rows-and-the-__idle__-workload)). |
+| Cost fallback chain (observed → catalog → custom rates) | **In use for projections and stored rows.** Each sample is anchored to its own observed cost when the row has one. Rows without an observed cost are priced at list prices or custom rates and labeled with that tier. |
+| Realization factor | **Per node pool** from the cluster's autoscalers, consolidation policies and disruption blockers ([RealizationContext](#realization-factor)). `IMPACT_REALIZATION_FACTOR` overrides it when set. |
+| Recalculation (`greenkube recompute`) | Raw rows within retention can be re-allocated after a model change ([Recalculation](#recalculation-b8)). |
 | `realize()` (node-hours actually removed, for the ledger) | Not part of v1. |
 
 ## Vocabulary
@@ -43,6 +49,8 @@ A **node profile** holds what the model knows about a node:
 
 - CPU capacity (cores) and memory capacity (GiB);
 - idle power `P_min` and full-load power `P_max` (W);
+- memory power per GiB `w_mem` (W/GiB, `POWER_MEMORY_W_PER_GIB`, default 0.392);
+- the power of GPUs DCGM attributes to no pod, `P_gpu_idle` (W);
 - embodied emissions per hour `M_h` (gCO₂e/h);
 - unit prices `p_cpu` (per core-hour) and `p_ram` (per GiB-hour);
 - PUE and grid intensity.
@@ -56,6 +64,11 @@ The model selects the power profile like the energy estimator does:
 1. **`instance_profile`**: the instance type is in `data/instance_power_profiles.csv`, which holds Cloud Carbon Footprint per-vCPU coefficients times vCPUs.
 2. **`node_capacity_derived`**: the instance type is unknown but the node CPU capacity is known. The model uses `DEFAULT_INSTANCE_MIN_WATTS` and `DEFAULT_INSTANCE_MAX_WATTS` per `DEFAULT_INSTANCE_VCORES`, times the capacity.
 3. **`default_profile`**: nothing is known about the node. The model uses the default instance profile, and the projection is flagged with `unknown_node_profile`.
+
+### Memory and GPU power (B5)
+
+- **`MemoryPowerModel`**: `P_mem = w_mem × memory GiB`, with the Cloud Carbon Footprint coefficient 0.392 W/GiB by default. On an m5.large (8 GiB) fully reserved, memory adds about 3.1 W.
+- **`GpuPowerModel`**: the board power DCGM measures (`DCGM_FI_DEV_POWER_USAGE`, averaged over the step). When only the GPU model and utilization are known, `P = idle + util × (TDP − idle)` with the TDP of `data/gpu_profiles.json` and idle at 15% of TDP. Each sample carries the GPU power DCGM attributes to its pod (`gpu_power_watts`); unattributed GPUs are node-level (`P_gpu_idle`).
 
 ### Embodied emissions
 
@@ -87,6 +100,8 @@ Node totals and how they are split:
 | RAM cost | `GiB × p_ram × H` | `share_i(mem) × total` | `idle(mem) × total` |
 | Idle energy | `P_min × H / 1000` kWh | `share_i(cpu) × total` | `idle(cpu) × total` |
 | Dynamic energy | `util × (P_max − P_min) × H / 1000` kWh | `use_i × total` | 0 |
+| Memory energy | `w_mem × max(A(mem) × H, Σ_j r_j(mem)) / 1000` kWh | `w_mem × r_i(mem) / 1000` | `idle(mem) × total` |
+| GPU energy | `(Σ_i P_gpu_i × hours_i + P_gpu_idle × H) / 1000` kWh | `P_gpu_i × hours_i / 1000` | `P_gpu_idle × H / 1000` |
 | Operational CO₂e | energy × PUE × intensity | same split as its energy | same split as its energy |
 | Embodied CO₂e | `M_h × H` | `share_i(cpu) × total` | `idle(cpu) × total` |
 
@@ -110,7 +125,18 @@ The node has 4 cores and 16 GiB, `P_min` = 40 W, `P_max` = 120 W, `M_h` = 10 g/h
 | `__idle__` | | | 0.040 | 0.005 | 0.5 | 1.25 |
 | **Node** | | | **0.240** | **0.080** | **8.0** | **10.0** |
 
-The full fixture has three nodes and ten pods, including an over-committed node and a pod present for half the window. It is in `tests/impact/test_allocation.py`.
+The full fixture has three nodes and ten pods, including an over-committed node and a pod present for half the window. It is in `tests/impact/test_allocation.py` (memory power is 0 in that fixture; `tests/impact/test_power.py` covers memory and GPU power, with the same conservation test).
+
+### Stored rows and the `__idle__` workload
+
+Collection (`HistoricalRangeProcessor`) runs the allocation for every node and step:
+
+- pod rows store the allocated `joules` (all four energy components), `co2e_grams` (operational, with the row's PUE and grid intensity), `embodied_co2e_grams`, `gpu_power_watts` and `gpu_usage_millicores`, and `model_version`;
+- a pod with an observed OpenCost or Kubecost cost keeps it (`cost_source: opencost`); a pod without one is charged its reservation at the node's list price or custom rate, with `cost_source: pricing_catalog` or `custom_rate` and an estimation reason. A price derived from other pods' OpenCost costs is never used for such a row, so it can never pass for an observed cost;
+- the node's unreserved share is written to `node_idle_metrics` (one row per node and step, `scope: idle`): idle and memory power, unattributed GPU power, embodied emissions and cost of the unreserved capacity (priced with the node's observed rates when OpenCost reports per-resource costs, otherwise at list prices or custom rates);
+- container rows are split from their pod row as before and inherit its `model_version`.
+
+Pod rows plus the idle row equal the node totals for energy, operational and embodied CO₂e. Cost conserves too when no pod carries an observed cost; with OpenCost, pod rows keep OpenCost's allocation. Idle rows live in their own table, so pod-level dashboards, analyzers and recommendations never see a synthetic `__idle__` pod. Samples whose node cannot be resolved are allocated against the default profile without an idle row.
 
 ## Unit prices: the cost fallback chain
 
@@ -190,6 +216,7 @@ share_s         = min(max(current, usage_s), A) − min(max(proposed, usage_s), 
 
 Δcost      = Σ_s released_s(cpu) × hours_s × p_cpu(s) + released_s(mem) × hours_s × p_ram(s)
 ΔCO₂e_idle = Σ_s share_s × hours_s × P_min / A × PUE_s × intensity_s / 1000
+ΔCO₂e_mem  = Σ_s share_s(mem) × hours_s × w_mem × PUE_s × intensity_s / 1000      # memory share, capped at A(mem)
 ΔCO₂e_emb  = Σ_s share_s × hours_s × M_h / A
 ```
 
@@ -199,13 +226,13 @@ share_s         = min(max(current, usage_s), A) − min(max(proposed, usage_s), 
 - `current` is the latest request. When the request changed during the window, the projection prices the latest request, so it can differ from the cost observed earlier in the window.
 - The idle and embodied share is capped at the node's allocatable capacity: a reservation larger than the node profile (typically the 1-vCPU default profile of an unknown node) never releases more than the whole node's idle power and embodied emissions. Cost is not capped.
 - A CPU-only cut projects zero RAM savings, and the reverse.
-- Request cuts do not change usage, so **dynamic** power is unchanged. Projected CO₂e is only the idle and embodied share released (BUG-16).
+- Request cuts do not change usage, so **dynamic** power is unchanged. Projected CO₂e is only the idle, memory and embodied share released (BUG-16): a memory cut releases memory power only (`co2e_breakdown_annual_g.memory_operational`).
 - A target below observed usage releases capacity only down to that usage.
 
 ### Workload deletion (zombie pods, idle namespaces)
 
 - Cost: each sample's observed allocated cost when it has one (OpenCost `totalCost`, split into components when available). Otherwise the modeled reservation cost.
-- CO₂e: the sample's whole allocated share, that is idle and embodied by reservation plus dynamic by usage. The reservation share is capped at the node's allocatable cores and the usage at its capacity, so one workload never carries more than the whole node.
+- CO₂e: the sample's whole allocated share, that is idle, memory and embodied by reservation, dynamic by usage and its attributed GPU power. The reservation shares are capped at the node's allocatable cores and memory and the usage at its capacity, so one workload never carries more than the whole node.
 - Realization factor: 1.
 
 ### Asset deletion (orphaned PersistentVolumes and LoadBalancers)
@@ -224,7 +251,7 @@ A pool is recommended for consolidation when its average CPU request utilization
 
 ```text
 Δcost = Σ_removed (cores × p_cpu + GiB × p_ram) × 8760
-ΔCO₂e = Σ_removed (P_min / 1000 × PUE × intensity + M_h) × 8760     # dynamic power moves to other nodes
+ΔCO₂e = Σ_removed ((P_min + P_mem + P_gpu_idle) / 1000 × PUE × intensity + M_h) × 8760     # dynamic power moves to other nodes
 ```
 
 The realization factor is 1, because the consolidation is the action itself.
@@ -236,16 +263,30 @@ expected_billable_cost_annual = allocated_cost_annual × realization_factor
 co2e_expected_annual_g        = co2e_allocated_annual_g × realization_factor
 ```
 
-Released requests only remove cost and emissions from the bill when nodes are removed. Until RealizationContext (B6) derives the factor per node pool, the model uses `IMPACT_REALIZATION_FACTOR` (default **1.0**, recorded as `realization_factor_source: config:IMPACT_REALIZATION_FACTOR`).
-
-The default of 1.0 keeps `potential_savings_cost` in **allocated** terms. That is also what verification measures today: allocated cost before and after the change. B6 will use this heuristic:
+Released requests only remove cost and emissions from the bill when nodes are removed. **RealizationContext** (B6, `greenkube.impact.realization`) derives the factor per node pool from what the cluster can do:
 
 | Situation | Factor |
 |---|---|
-| No autoscaler (fixed nodes) | 0.0 |
-| Karpenter `WhenEmptyOrUnderutilized` or `Balanced` | 0.8 |
-| Cluster Autoscaler | 0.6 |
-| Any of the above with blockers (`do-not-disrupt`, PDBs) | × 0.5 |
+| No autoscaler (fixed nodes: allocated savings only) | 0.0 |
+| Karpenter `WhenEmptyOrUnderutilized`, `WhenUnderutilized` (v1beta1) or `Balanced` | 0.8 |
+| Karpenter `WhenEmpty` (nodes are removed only once empty; GreenKube heuristic) | 0.3 |
+| Cluster Autoscaler (nodes outside Karpenter pools) | 0.6 |
+| Karpenter disruption budget of `0` nodes, always active, for consolidation | 0.0 |
+| Any of the above with blockers | × 0.5 |
+
+Blockers are pods annotated `karpenter.sh/do-not-disrupt: "true"` (or the legacy `karpenter.sh/do-not-evict`) or `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, nodes annotated `karpenter.sh/do-not-disrupt` or `cluster-autoscaler.kubernetes.io/scale-down-disabled`, PodDisruptionBudgets with `disruptionsAllowed: 0` selecting pods of the pool, a scheduled zero disruption budget, and a Cluster Autoscaler that reports itself unhealthy.
+
+Inputs and their sources:
+
+- the Cluster Autoscaler status ConfigMap `kube-system/cluster-autoscaler-status`. Its presence means the autoscaler runs; its health is parsed defensively from the text or YAML status;
+- Karpenter NodePools (`spec.disruption.consolidationPolicy` and `budgets`) and the `karpenter.sh/nodepool` label of nodes;
+- running pods, nodes and PodDisruptionBudgets.
+
+The controller reads them from its collection cycle, at most every 10 minutes, inside the cluster only (the chart's ClusterRole already grants these reads). A projection uses the hours-weighted factor of the pools its samples ran on; nodes the context does not know use the Cluster Autoscaler (or fixed-node) pool. The projection records the factor, `realization_factor_source: realization_context`, `realization_reasons` (rendered with the recommendation evidence) and the pools used (`realization_pools`).
+
+- `IMPACT_REALIZATION_FACTOR`, when set, overrides the context for every projection (`realization_factor_source: config:IMPACT_REALIZATION_FACTOR`).
+- Before the controller has observed the cluster (or outside a cluster), the factor is **1.0** with `realization_factor_source: realization_context:unobserved`, so expected savings equal allocated savings, as in model 1.0.0.
+- Deletions keep a factor of 1, and node-pool consolidation keeps 1 when the consolidation is the action itself.
 
 ## Carbon price and value
 
@@ -265,7 +306,7 @@ Every projected recommendation carries `impact` (persisted in `recommendation_hi
 
 ```json
 {
-  "model_version": "1.0.0",
+  "model_version": "1.1.0",
   "kind": "container_resources",
   "method": "projected",
   "currency": "USD",
@@ -277,7 +318,7 @@ Every projected recommendation carries `impact` (persisted in `recommendation_hi
   "co2e_modeled": true,
   "co2e_allocated_annual_g": 23629.48,
   "co2e_expected_annual_g": 23629.48,
-  "co2e_breakdown_annual_g": {"idle_operational": 1029.48, "dynamic_operational": 0.0, "embodied": 22600.0, "total": 23629.48},
+  "co2e_breakdown_annual_g": {"idle_operational": 1029.48, "dynamic_operational": 0.0, "memory_operational": 0.0, "gpu_operational": 0.0, "embodied": 22600.0, "total": 23629.48},
   "carbon_price_per_tonne": 100.0,
   "value_annual": 76.58,
   "confidence": 0.8,
@@ -286,7 +327,8 @@ Every projected recommendation carries `impact` (persisted in `recommendation_hi
     "window_hours": 168.0,
     "annualization_factor": 52.14,
     "unit_prices": [{"cpu_core_hour": 0.009372, "ram_gib_hour": 0.001256, "currency": "USD", "source": "opencost", "detail": "observed_total_apportioned"}],
-    "realization_factor_source": "config:IMPACT_REALIZATION_FACTOR",
+    "realization_factor_source": "realization_context:unobserved",
+    "realization_reasons": ["The cluster's autoscalers have not been observed yet: expected savings equal allocated"],
     "co2e_basis": "idle_and_embodied_share_released",
     "pue": 1.3,
     "grid_intensity_g_per_kwh": 100.0,
@@ -310,7 +352,7 @@ The Software Carbon Intensity specification (ISO/IEC 21031) defines `SCI = (E ×
 
 | SCI term | Impact Model |
 |---|---|
-| `E` (energy) | Allocated energy: dynamic by usage plus idle by reservation, times PUE |
+| `E` (energy) | Allocated energy: dynamic CPU by usage, idle CPU and memory by reservation, attributed GPU, times PUE |
 | `I` (intensity) | Grid intensity of the row's electricity zone and hour (Electricity Maps or Wattnet, with zone defaults) |
 | `M` (embodied) | Boavizta manufacturing emissions × reservation share × time / lifespan |
 | `R` (functional unit) | Not modeled: GreenKube reports per workload and per year |
@@ -318,8 +360,8 @@ The Software Carbon Intensity specification (ISO/IEC 21031) defines `SCI = (E ×
 ## Limitations
 
 - **No storage or network energy.** Deleting a volume or a load balancer projects cost only.
-- **Memory power is not modeled yet** (roadmap B5). Memory request cuts project zero CO₂e, and embodied emissions are shared by CPU reservation only, as in Cloud Carbon Footprint.
-- **No GPU model.** GPU cost and power are not projected.
+- **Memory power is constant per GiB.** It does not depend on memory activity. Embodied emissions are shared by CPU reservation only, as in Cloud Carbon Footprint.
+- **GPU power needs the DCGM exporter.** Without it GPU power is not counted. GPU cost is not modeled, and GPU request changes are not projected.
 - **The embodied lifespan is fixed** (4 years by default). Boavizta values are per instance and depend on its own assumptions.
 - **Kepler** (roadmap B7), when added, may only provide dynamic CPU power, never idle.
 - **Allocatable = capacity** until kubelet allocatable is collected. The system-reserved slice is therefore part of `__idle__`.
@@ -327,4 +369,15 @@ The Software Carbon Intensity specification (ISO/IEC 21031) defines `SCI = (E ×
 - **List prices.** Catalogs contain on-demand list prices with no discounts, savings plans or spot prices. Observed OpenCost costs take precedence when available.
 - **Unsplit observed totals.** OpenCost's `totalCost` can include volume, network and load-balancer cost. While rows carry only the total, the apportioning attributes those to CPU and RAM. Request-cut projections can then be high by that amount, but never above the observed total.
 - **Annualization assumes the observed window repeats.** Short or unusual windows extrapolate their pattern.
-- **Allocation is not yet wired into collection.** Until it is, the stored `co2e_grams` of metric rows still follow the previous usage-based policy. Projections do not read them.
+- **Rows written before model 1.1.0** (`model_version` empty) follow the previous usage-based policy until they are recomputed. Hourly aggregates are never recomputed.
+- **Realization is a heuristic.** It does not yet measure pool headroom or the node-hours actually removed (`realize()`, roadmap C).
+
+## Recalculation (B8)
+
+```bash
+greenkube recompute --since 7d            # rows written by another model version
+greenkube recompute --since 2026-01-01T00:00:00Z --until 2026-01-08T00:00:00Z --all
+greenkube recompute --since 24h --dry-run
+```
+
+`greenkube recompute` re-allocates **raw** rows still within retention with the current model, from what each row recorded: requests, usage, node, PUE, grid intensity, observed costs and attributed GPU power. Node power profiles, capacities and embodied emissions come from the node snapshots. Each node and step is recomputed as a whole and its `__idle__` row rewritten, so conservation holds. Container rows are re-split from their pod. Observed OpenCost costs and the stored intensity are kept. Hourly aggregates keep their original version. By default only rows whose `model_version` differs from the current one are recomputed; `--all` recomputes every row in the range.

@@ -2,17 +2,38 @@
 
 Since Cloud Carbon Footprint (CCF) does not provide default estimation constants for other cloud providers than AWS, GCP and Azure, we have derived provider-level estimates using the CCF methodology for "unknown micro-architectures".
 
-## CPU-to-energy estimate
+## Node power and its allocation
 
-GreenKube estimates node power from observed CPU use and an instance power profile. For a collection step:
+GreenKube estimates node power from three components (Impact Model `1.1.0`, see [Impact Model methodology](methodology/impact-model.md)). For a collection step of `H` hours:
 
 ```text
-node_utilization = min(total_node_cpu_cores / instance_vcores, 1)
-node_power_watts = min_watts + node_utilization × (max_watts - min_watts)
-node_energy_joules = node_power_watts × step_duration_seconds
+node_utilization = min(total_node_cpu_cores / node_vcores, 1)
+cpu_power_watts    = min_watts + node_utilization × (max_watts - min_watts)     # LinearCpuPowerModel
+memory_power_watts = node_memory_gib × POWER_MEMORY_W_PER_GIB                    # MemoryPowerModel, 0.392 W/GiB
+gpu_power_watts    = Σ GPUs: DCGM_FI_DEV_POWER_USAGE, else TDP model             # GpuPowerModel
 ```
 
-For nodes with CPU usage, the estimated node energy is allocated to pods in proportion to their observed CPU use. If CPU use is zero but pods are present, the minimum (idle) node power is divided evenly between them. If the node has no pods, that idle energy is recorded as `System/Unallocated`.
+Stored pod rows carry the **reservation-aware allocation** of that power (roadmap B2):
+
+- idle CPU power (`min_watts`) and embodied emissions are shared by CPU **reservation** `max(request, usage) / node cores`;
+- dynamic CPU power (`node_utilization × (max_watts − min_watts)`) is shared by CPU **usage**;
+- memory power is shared by memory reservation `max(request, usage) / node memory`;
+- each GPU's power goes to the pod DCGM attributes it to.
+
+What no pod reserves (unreserved cores and memory, GPUs without a pod) is written to an explicit `__idle__` row per node and step (`node_idle_metrics`), so pod rows plus the idle row add up to the node's power, embodied emissions and modeled cost. Before this, 100% of node power was spread over pods by CPU use while cost excluded idle capacity (BUG-19).
+
+### Memory power
+
+`MemoryPowerModel` applies the Cloud Carbon Footprint memory coefficient, **0.392 W per GiB** (`POWER_MEMORY_W_PER_GIB`, Helm `impact.memoryWattsPerGiB`), to the node's memory capacity from the node snapshot. An m5.large (8 GiB) fully reserved draws about 3.1 W of memory power on top of its CPU profile. When the node memory capacity is unknown, only the reserved memory is counted.
+
+### GPU power (DCGM)
+
+When the NVIDIA DCGM exporter is scraped by Prometheus, GreenKube reads, per step:
+
+- `avg_over_time(DCGM_FI_DEV_POWER_USAGE[step])`: the measured board power of each GPU;
+- `avg_over_time(DCGM_FI_DEV_GPU_UTIL[step])`: the utilization, stored on the pod row as `gpu_usage_millicores` (1000 = one fully used GPU).
+
+A GPU with Kubernetes attribution (`namespace`/`pod` labels, or `exported_namespace`/`exported_pod` when the exporter is scraped without `honorLabels`) is charged to that pod (`gpu_power_watts` on the row). Unattributed GPUs are charged to the node's `__idle__` row. When DCGM reports utilization but no power for a GPU, its power is `idle + util × (TDP − idle)` from the bundled `data/gpu_profiles.json` (board power of common data-center GPUs; idle is 15% of TDP). Without the DCGM exporter, GPU power is not counted. A DCGM query error never fails a collection window: GPU power is missing for that window and a warning is logged.
 
 Known instance profiles use the provider's per-vCPU constants multiplied by the instance vCPU count. The currently loaded provider constants are:
 
@@ -119,7 +140,7 @@ GreenKube classifies carbon emissions according to the [GHG Protocol Corporate A
 | GHG Scope | GreenKube field | Description |
 |---|---|---|
 | **Scope 2** (location-based estimate) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (default) or optional Wattnet, with the configurable `DEFAULT_INTENSITY` fallback. |
-| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU share — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **100 kg CO₂e**) when Boavizta does not recognise the provider or instance type. The Boavizta `/v1/cloud/instance` endpoint returns per-instance allocated GWP (typically 50–170 kg for common cloud VMs such as `aws/m5.large`); the fallback is calibrated to the same scale to avoid over-estimating Scope 3. |
+| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU reservation share (`max(request, usage)`; the unreserved share goes to the node's `__idle__` row) — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **100 kg CO₂e**) when Boavizta does not recognise the provider or instance type. The Boavizta `/v1/cloud/instance` endpoint returns per-instance allocated GWP (typically 50–170 kg for common cloud VMs such as `aws/m5.large`); the fallback is calibrated to the same scale to avoid over-estimating Scope 3. |
 | **Scope 2 + Scope 3** | `total_co2e_grams` | Full pod carbon footprint — computed field on `CombinedMetric`, also exposed as `total_co2e_all_scopes` in API summary and timeseries responses. |
 
 **Scope 1** (direct combustion) is not applicable for cloud/virtualised Kubernetes workloads and is therefore not tracked.
