@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -196,9 +197,9 @@ class AuthService:
             raise AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS, status_code=401)
         user = await self.repository.get_user_by_username(normalized)
         if user is None or user.disabled_at is not None:
-            await asyncio.to_thread(dummy_verify, password)
+            await _run_kdf(dummy_verify, password)
             raise AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS, status_code=401)
-        if not await asyncio.to_thread(verify_password, password, user.password_hash):
+        if not await _run_kdf(verify_password, password, user.password_hash):
             raise AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS, status_code=401)
         if needs_rehash(user.password_hash):
             await self.repository.set_password(
@@ -263,7 +264,7 @@ class AuthService:
         user_agent: str | None = None,
     ) -> IssuedSession:
         """Change a password, revoke every session of the user and issue a new one."""
-        if not await asyncio.to_thread(verify_password, current_password or "", user.password_hash):
+        if not await _run_kdf(verify_password, current_password or "", user.password_hash):
             raise AuthError("INVALID_CREDENTIALS", "The current password is incorrect.", status_code=403)
         reason = validate_new_password(new_password or "", username=user.username)
         if reason:
@@ -346,8 +347,31 @@ class AuthService:
         return key
 
 
+# Each scrypt run allocates about 32 MiB. Without a bound, a burst of concurrent
+# sign-ins (all passing the throttle check before any failure is recorded) would
+# run one hash per executor thread and could exhaust a 128-512 MiB pod. Extra
+# requests queue on this per-event-loop semaphore instead.
+MAX_CONCURRENT_KDF = 2
+_kdf_semaphores: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _kdf_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _kdf_semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_KDF)
+        _kdf_semaphores[loop] = semaphore
+    return semaphore
+
+
+async def _run_kdf[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run a password hash or verification off the event loop, at most ``MAX_CONCURRENT_KDF`` at once."""
+    async with _kdf_semaphore():
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+
 async def _hash(password: str) -> str:
-    return await asyncio.to_thread(hash_password, password)
+    return await _run_kdf(hash_password, password)
 
 
 def _settings_from_config() -> AuthSettings:

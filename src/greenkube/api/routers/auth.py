@@ -121,6 +121,17 @@ def _throttle(request: Request, settings: AuthSettings) -> LoginThrottle:
     return current
 
 
+def _enforce_throttle(throttle: LoginThrottle, ip: str, username: str) -> None:
+    retry_after = throttle.retry_after(ip, username)
+    if retry_after:
+        record_auth_failure("rate_limited")
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "TOO_MANY_ATTEMPTS", "message": "Too many sign-in attempts. Try again later."},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 def _error(error: AuthError) -> HTTPException:
     return HTTPException(status_code=error.status_code, detail={"code": error.code, "message": error.message})
 
@@ -209,14 +220,7 @@ async def login(body: LoginRequest, request: Request, response: Response):
         )
     ip = client_ip(request, settings)
     throttle = _throttle(request, settings)
-    retry_after = throttle.retry_after(ip, body.username)
-    if retry_after:
-        record_auth_failure("rate_limited")
-        raise HTTPException(
-            status_code=429,
-            detail={"code": "TOO_MANY_ATTEMPTS", "message": "Too many sign-in attempts. Try again later."},
-            headers={"Retry-After": str(retry_after)},
-        )
+    _enforce_throttle(throttle, ip, body.username)
     try:
         issued = await service.login(
             body.username,
@@ -285,19 +289,26 @@ async def change_password(
         raise HTTPException(status_code=401, detail="Authentication required.")
     current = _current_session(request, principal)
     remember = bool(current and current.remember)
+    # Wrong current passwords count as failed sign-ins for this user, so a stolen
+    # session cookie does not allow unthrottled guessing of the password.
+    ip = client_ip(request, settings)
+    throttle = _throttle(request, settings)
+    _enforce_throttle(throttle, ip, user.username)
     try:
         issued = await service.change_password(
             user,
             body.current_password,
             body.new_password,
             remember=remember,
-            ip=client_ip(request, settings),
+            ip=ip,
             user_agent=request.headers.get("user-agent"),
         )
     except AuthError as error:
         if error.code == "INVALID_CREDENTIALS":
+            throttle.record_failure(ip, user.username)
             record_auth_failure("bad_credentials")
         raise _error(error) from None
+    throttle.record_success(ip, user.username)
     erased = False
     if user.must_change_password:
         erased = await erase_consumed_initial_password(service, initial_admin_secret_from_config(get_config()))

@@ -387,6 +387,31 @@ def test_password_change_requires_the_current_password(tmp_path, monkeypatch):
     assert response.status_code == 403
 
 
+def test_wrong_current_passwords_are_rate_limited(tmp_path, monkeypatch):
+    """A stolen session cookie must not allow unthrottled guessing of the current password."""
+    with auth_harness(tmp_path, monkeypatch, AUTH_LOGIN_RATE_LIMIT="3/minute") as h:
+        h.login()
+        headers = h.csrf()
+        statuses = [
+            h.client.post(
+                "/api/v1/auth/password",
+                json={"current_password": f"guess-{attempt}", "new_password": "rotated-password-1"},
+                headers=headers,
+            ).status_code
+            for attempt in range(3)
+        ]
+        blocked = h.client.post(
+            "/api/v1/auth/password",
+            json={"current_password": ADMIN_PASSWORD, "new_password": "rotated-password-1"},
+            headers=headers,
+        )
+
+    assert statuses == [403, 403, 403]
+    assert blocked.status_code == 429
+    assert int(blocked.headers["retry-after"]) >= 1
+    assert blocked.json()["detail"]["code"] == "TOO_MANY_ATTEMPTS"
+
+
 # --------------------------------------------------------------------------- #
 # Roles and open access                                                        #
 # --------------------------------------------------------------------------- #

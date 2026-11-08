@@ -27,23 +27,37 @@ def _networks(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network
     return tuple(networks)
 
 
-def from_trusted_proxy(request: Request, settings: AuthSettings) -> bool:
-    host = request.client.host if request.client else ""
+def _is_trusted(host: str, networks) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return any(address in network for network in _networks(settings.trusted_proxy_ips))
+    return any(address in network for network in networks)
+
+
+def from_trusted_proxy(request: Request, settings: AuthSettings) -> bool:
+    host = request.client.host if request.client else ""
+    return _is_trusted(host, _networks(settings.trusted_proxy_ips))
 
 
 def client_ip(request: Request, settings: AuthSettings) -> str:
-    """The client address, honouring ``X-Forwarded-For`` only from ``TRUSTED_PROXY_IPS``."""
+    """The client address, honouring ``X-Forwarded-For`` only from ``TRUSTED_PROXY_IPS``.
+
+    The header is read from the right: proxies append the address they received
+    the request from, so the rightmost entry that is not itself a trusted proxy is
+    the real client. Entries further left are whatever the client chose to send
+    and cannot be trusted (they would let one client spread its sign-in attempts
+    over many per-IP budgets).
+    """
     host = request.client.host if request.client else "unknown"
-    if from_trusted_proxy(request, settings):
-        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-        if forwarded:
-            return forwarded
-    return host
+    networks = _networks(settings.trusted_proxy_ips)
+    if not _is_trusted(host, networks):
+        return host
+    hops = [hop.strip() for hop in request.headers.get("x-forwarded-for", "").split(",") if hop.strip()]
+    for hop in reversed(hops):
+        if not _is_trusted(hop, networks):
+            return hop
+    return hops[0] if hops else host
 
 
 def is_https(request: Request, settings: AuthSettings) -> bool:
