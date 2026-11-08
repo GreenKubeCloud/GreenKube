@@ -71,95 +71,121 @@ wait_until "binding of ${APPS_NAMESPACE}/${workload}" 300 10 binding_resolved ||
   fail_step binding "$(cat "${E2E_EVIDENCE_DIR}/${prefix}-binding.json" 2>/dev/null || echo 'no binding found')"
 evidence "${prefix}.binding" ok "$(jq -c '{status, binding: (.binding // {} | {controller, repo_url, path, renderer, provider_id, revision})}' "${E2E_EVIDENCE_DIR}/${prefix}-binding.json")"
 
-# --- 2. Collection + recommendation scans until the workload is eligible -------------
-scan_once() {
-  local run run_id state
-  run="$(gk_api POST /optimization/runs "$(jq -cn --arg ns "${APPS_NAMESPACE}" '{namespace: $ns}')")" || return 1
-  run_id="$(jq -r .run_id <<<"${run}")"
-  for _ in $(seq 1 60); do
-    state="$(gk_api GET "/optimization/runs/${run_id}")" || return 1
-    case "$(jq -r .status <<<"${state}")" in
-      succeeded | failed) break ;;
-    esac
-    sleep 5
-  done
-  save_json "${prefix}-optimization-run" "${state}"
-}
-
-eligible_recommendations() {
-  local recs ids id eligibility eligible=()
+# A previous run may have stopped with a GreenKube PR still open for this
+# workload: resume from the merge instead of failing on the open-PR budget.
+find_open_pull_request() {
+  local recs id prs open
   recs="$(gk_api GET "/recommendations/active?namespace=${APPS_NAMESPACE}")" || return 1
-  save_json "${prefix}-recommendations" "${recs}"
-  ids="$(jq -r --arg name "${workload}" \
-    '.[] | select(.owner_name == $name and .container_name != null
-      and ((.type | ascii_downcase) == "rightsizing_cpu" or (.type | ascii_downcase) == "rightsizing_memory")) | .id' <<<"${recs}")"
-  for id in ${ids}; do
-    eligibility="$(gk_api GET "/recommendations/${id}/apply-pr/eligibility")" || continue
-    save_json "${prefix}-eligibility-${id}" "${eligibility}"
-    if [[ "$(jq -r .eligible <<<"${eligibility}")" == "true" ]]; then
-      eligible+=("${id}")
+  for id in $(jq -r --arg name "${workload}" '.[] | select(.owner_name == $name) | .id' <<<"${recs}"); do
+    prs="$(gk_api GET "/recommendations/${id}/pull-requests")" || continue
+    open="$(jq -c '[.[] | select(.status == "open" and .plan_id != null)] | last // empty' <<<"${prs}")"
+    if [[ -n "${open}" ]]; then
+      printf '%s' "${open}"
+      return 0
     fi
   done
-  ((${#eligible[@]} > 0)) || return 1
-  printf '%s\n' "${eligible[@]}" >"${E2E_STATE_DIR}/${prefix}-eligible-ids"
-}
-
-scan_until_eligible() {
-  scan_once || true
-  eligible_recommendations
-}
-started=${SECONDS}
-wait_until "an eligible rightsizing recommendation for ${workload}" "${E2E_TIMEOUT_RECOMMENDATION}" 20 scan_until_eligible ||
-  fail_step recommendation "$(jq -c --arg name "${workload}" '[.[] | select(.owner_name == $name) | {id, type, container_name, status, confidence, risk_level, samples: .evidence.sample_count}]' "${E2E_EVIDENCE_DIR}/${prefix}-recommendations.json" 2>/dev/null)"
-rec_ids=()
-while IFS= read -r id; do
-  [[ -n "${id}" ]] && rec_ids+=("${id}")
-done <"${E2E_STATE_DIR}/${prefix}-eligible-ids"
-evidence "${prefix}.collection" ok "$(jq -c '{run_id, status, trigger, recommendation_count, new_count, changed_count, sources}' "${E2E_EVIDENCE_DIR}/${prefix}-optimization-run.json" 2>/dev/null)"
-evidence "${prefix}.recommendation" ok "after $((SECONDS - started))s: $(jq -c --argjson ids "$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')" \
-  '[.[] | select(.id as $id | $ids | index($id)) | {id, type, container_name, current_cpu_request_millicores, recommended_cpu_request_millicores, current_memory_request_bytes, recommended_memory_request_bytes, confidence, risk_level, samples: .evidence.sample_count}]' \
-  "${E2E_EVIDENCE_DIR}/${prefix}-recommendations.json")"
-
-# --- 3. Plan preview -------------------------------------------------------------------
-ids_json="$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')"
-plan="$(gk_api POST /automation/plans "$(jq -cn --argjson ids "${ids_json}" '{recommendation_ids: $ids}')")" ||
-  fail_step plan_preview "$(cat "${E2E_STATE_DIR}/last-error.json")"
-save_json "${prefix}-plan-preview" "${plan}"
-plan_id="$(jq -r .plan_id <<<"${plan}")"
-digest="$(jq -r .digest <<<"${plan}")"
-[[ "$(jq -r .status <<<"${plan}")" == "validated" && "${digest}" == sha256:* ]] ||
-  fail_step plan_preview "$(jq -c '{plan_id, status, digest, policy_result}' <<<"${plan}")"
-evidence "${prefix}.plan_preview" ok "$(jq -c '{plan_id, status, digest, source: {controller: .source.controller, repo: .source.repo, base_revision: .source.base_revision}, files: [.files[].path], warnings}' <<<"${plan}")"
-
-# --- 4. Digest-bound approval ------------------------------------------------------------
-approval="$(gk_api POST "/automation/plans/${plan_id}/approve" "$(jq -cn --arg d "${digest}" '{digest: $d}')")" ||
-  fail_step approval "$(cat "${E2E_STATE_DIR}/last-error.json")"
-save_json "${prefix}-plan-approved" "${approval}"
-operation_id="$(jq -r .operation_id <<<"${approval}")"
-evidence "${prefix}.approval" ok "$(jq -c '{plan_id, status, operation_id, operation_status}' <<<"${approval}")"
-
-# --- 5. The worker opens the pull request on Gitea ---------------------------------------
-operation_done() {
-  local op
-  op="$(gk_api GET "/automation/operations/${operation_id}")" || return 1
-  save_json "${prefix}-operation" "${op}"
-  case "$(jq -r .status <<<"${op}")" in
-    succeeded) return 0 ;;
-    failed | cancelled) return 0 ;;
-  esac
   return 1
 }
-wait_until "operation ${operation_id}" "${E2E_TIMEOUT_PR}" 5 operation_done ||
-  fail_step pull_request "$(jq -c '{status, attempts, error}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
-op_status="$(jq -r .status "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
-[[ "${op_status}" == "succeeded" ]] ||
-  fail_step pull_request "$(jq -c '{status, attempts, error, result}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
 
-pull_requests="$(gk_api GET /automation/pull-requests)"
-save_json "${prefix}-pull-requests" "${pull_requests}"
-pr_record="$(jq -c --arg plan "${plan_id}" '[.[] | select(.plan_id == $plan)][0] // empty' <<<"${pull_requests}")"
-[[ -n "${pr_record}" ]] || fail_step pull_request "no PR record for plan ${plan_id}"
-pr_number="$(jq -r .pr_number <<<"${pr_record}")"
+if pr_record="$(find_open_pull_request)"; then
+  plan_id="$(jq -r .plan_id <<<"${pr_record}")"
+  pr_number="$(jq -r .pr_number <<<"${pr_record}")"
+  rec_ids=()
+  for id in $(gk_api GET "/automation/plans/${plan_id}" | jq -r '.recommendation_ids[]'); do
+    rec_ids+=("${id}")
+  done
+  evidence "${prefix}.resume" ok "open PR #${pr_number} of plan ${plan_id} for recommendations ${rec_ids[*]}"
+else
+  # --- 2. Collection + recommendation scans until the workload is eligible -------------
+  scan_once() {
+    local run run_id state
+    run="$(gk_api POST /optimization/runs "$(jq -cn --arg ns "${APPS_NAMESPACE}" '{namespace: $ns}')")" || return 1
+    run_id="$(jq -r .run_id <<<"${run}")"
+    for _ in $(seq 1 60); do
+      state="$(gk_api GET "/optimization/runs/${run_id}")" || return 1
+      case "$(jq -r .status <<<"${state}")" in
+        succeeded | failed) break ;;
+      esac
+      sleep 5
+    done
+    save_json "${prefix}-optimization-run" "${state}"
+  }
+
+  eligible_recommendations() {
+    local recs ids id eligibility eligible=()
+    recs="$(gk_api GET "/recommendations/active?namespace=${APPS_NAMESPACE}")" || return 1
+    save_json "${prefix}-recommendations" "${recs}"
+    ids="$(jq -r --arg name "${workload}" \
+      '.[] | select(.owner_name == $name and .container_name != null
+        and ((.type | ascii_downcase) == "rightsizing_cpu" or (.type | ascii_downcase) == "rightsizing_memory")) | .id' <<<"${recs}")"
+    for id in ${ids}; do
+      eligibility="$(gk_api GET "/recommendations/${id}/apply-pr/eligibility")" || continue
+      save_json "${prefix}-eligibility-${id}" "${eligibility}"
+      if [[ "$(jq -r .eligible <<<"${eligibility}")" == "true" ]]; then
+        eligible+=("${id}")
+      fi
+    done
+    ((${#eligible[@]} > 0)) || return 1
+    printf '%s\n' "${eligible[@]}" >"${E2E_STATE_DIR}/${prefix}-eligible-ids"
+  }
+
+  scan_until_eligible() {
+    scan_once || true
+    eligible_recommendations
+  }
+  started=${SECONDS}
+  wait_until "an eligible rightsizing recommendation for ${workload}" "${E2E_TIMEOUT_RECOMMENDATION}" 20 scan_until_eligible ||
+    fail_step recommendation "$(jq -c --arg name "${workload}" '[.[] | select(.owner_name == $name) | {id, type, container_name, status, confidence, risk_level, samples: .evidence.sample_count}]' "${E2E_EVIDENCE_DIR}/${prefix}-recommendations.json" 2>/dev/null)"
+  rec_ids=()
+  while IFS= read -r id; do
+    [[ -n "${id}" ]] && rec_ids+=("${id}")
+  done <"${E2E_STATE_DIR}/${prefix}-eligible-ids"
+  evidence "${prefix}.collection" ok "$(jq -c '{run_id, status, trigger, recommendation_count, new_count, changed_count, sources}' "${E2E_EVIDENCE_DIR}/${prefix}-optimization-run.json" 2>/dev/null)"
+  evidence "${prefix}.recommendation" ok "after $((SECONDS - started))s: $(jq -c --argjson ids "$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')" \
+    '[.[] | select(.id as $id | $ids | index($id)) | {id, type, container_name, current_cpu_request_millicores, recommended_cpu_request_millicores, current_memory_request_bytes, recommended_memory_request_bytes, confidence, risk_level, samples: .evidence.sample_count}]' \
+    "${E2E_EVIDENCE_DIR}/${prefix}-recommendations.json")"
+
+  # --- 3. Plan preview -------------------------------------------------------------------
+  ids_json="$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')"
+  plan="$(gk_api POST /automation/plans "$(jq -cn --argjson ids "${ids_json}" '{recommendation_ids: $ids}')")" ||
+    fail_step plan_preview "$(cat "${E2E_STATE_DIR}/last-error.json")"
+  save_json "${prefix}-plan-preview" "${plan}"
+  plan_id="$(jq -r .plan_id <<<"${plan}")"
+  digest="$(jq -r .digest <<<"${plan}")"
+  [[ "$(jq -r .status <<<"${plan}")" == "validated" && "${digest}" == sha256:* ]] ||
+    fail_step plan_preview "$(jq -c '{plan_id, status, digest, policy_result}' <<<"${plan}")"
+  evidence "${prefix}.plan_preview" ok "$(jq -c '{plan_id, status, digest, source: {controller: .source.controller, repo: .source.repo, base_revision: .source.base_revision}, files: [.files[].path], warnings}' <<<"${plan}")"
+
+  # --- 4. Digest-bound approval ------------------------------------------------------------
+  approval="$(gk_api POST "/automation/plans/${plan_id}/approve" "$(jq -cn --arg d "${digest}" '{digest: $d}')")" ||
+    fail_step approval "$(cat "${E2E_STATE_DIR}/last-error.json")"
+  save_json "${prefix}-plan-approved" "${approval}"
+  operation_id="$(jq -r .operation_id <<<"${approval}")"
+  evidence "${prefix}.approval" ok "$(jq -c '{plan_id, status, operation_id, operation_status}' <<<"${approval}")"
+
+  # --- 5. The worker opens the pull request on Gitea ---------------------------------------
+  operation_done() {
+    local op
+    op="$(gk_api GET "/automation/operations/${operation_id}")" || return 1
+    save_json "${prefix}-operation" "${op}"
+    case "$(jq -r .status <<<"${op}")" in
+      succeeded) return 0 ;;
+      failed | cancelled) return 0 ;;
+    esac
+    return 1
+  }
+  wait_until "operation ${operation_id}" "${E2E_TIMEOUT_PR}" 5 operation_done ||
+    fail_step pull_request "$(jq -c '{status, attempts, error}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+  op_status="$(jq -r .status "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+  [[ "${op_status}" == "succeeded" ]] ||
+    fail_step pull_request "$(jq -c '{status, attempts, error, result}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+
+  pull_requests="$(gk_api GET /automation/pull-requests)"
+  save_json "${prefix}-pull-requests" "${pull_requests}"
+  pr_record="$(jq -c --arg plan "${plan_id}" '[.[] | select(.plan_id == $plan)][0] // empty' <<<"${pull_requests}")"
+  [[ -n "${pr_record}" ]] || fail_step pull_request "no PR record for plan ${plan_id}"
+  pr_number="$(jq -r .pr_number <<<"${pr_record}")"
+fi
 gitea_pr="$(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}")"
 save_json "${prefix}-gitea-pr" "${gitea_pr}"
 gitea_files="$(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}/files")"
@@ -168,9 +194,14 @@ evidence "${prefix}.pull_request" ok "$(jq -c --argjson files "$(jq -c '[.[].fil
   '{number, title, state, html_url, head: .head.ref, base: .base.ref, files: $files}' <<<"${gitea_pr}") greenkube_pr_url=$(jq -r .pr_url <<<"${pr_record}")"
 
 # --- 6. A reviewer merges the PR (Gitea API) ----------------------------------------------
-gitea_api POST "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}/merge" \
-  "$(jq -cn --arg msg "Merge GreenKube rightsizing PR #${pr_number} (e2e)" '{Do: "merge", merge_message_field: $msg}')" >/dev/null ||
-  fail_step merge "Gitea merge API failed"
+# Gitea computes mergeability asynchronously and answers 405 until it is known.
+merge_pr() {
+  gitea_api POST "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}/merge" \
+    "$(jq -cn --arg msg "Merge GreenKube rightsizing PR #${pr_number} (e2e)" '{Do: "merge", merge_message_field: $msg}')" \
+    >/dev/null 2>&1
+}
+wait_until "Gitea merge of PR #${pr_number}" 120 3 merge_pr ||
+  fail_step merge "Gitea merge API failed: $(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}" | jq -c '{state, mergeable, merged}')"
 merged_pr="$(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}")"
 save_json "${prefix}-gitea-pr-merged" "${merged_pr}"
 merge_sha="$(jq -r .merge_commit_sha <<<"${merged_pr}")"
