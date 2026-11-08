@@ -133,10 +133,10 @@ Collection (`HistoricalRangeProcessor`) runs the allocation for every node and s
 
 - pod rows store the allocated `joules` (all four energy components), `co2e_grams` (operational, with the row's PUE and grid intensity), `embodied_co2e_grams`, `gpu_power_watts` and `gpu_usage_millicores`, and `model_version`;
 - a pod with an observed OpenCost or Kubecost cost keeps it (`cost_source: opencost`); a pod without one is charged its reservation at the node's list price or custom rate, with `cost_source: pricing_catalog` or `custom_rate` and an estimation reason. A price derived from other pods' OpenCost costs is never used for such a row, so it can never pass for an observed cost;
-- the node's unreserved share is written to `node_idle_metrics` (one row per node and step, `scope: idle`): idle and memory power, unattributed GPU power, embodied emissions and cost of the unreserved capacity (priced with the node's observed rates when OpenCost reports per-resource costs, otherwise at list prices or custom rates);
-- container rows are split from their pod row as before and inherit its `model_version`.
+- the node's unreserved share is written to `node_idle_metrics` (one row per node and step, `scope: idle`): idle and memory power, unattributed GPU power, embodied emissions and cost of the unreserved capacity (always priced at list prices or custom rates and labeled with that tier: OpenCost idle cost is not queried, so the idle cost is a model output even on clusters with OpenCost). The collection job commits idle rows together with the pod rows, after its leader-fence check, and does not advance its watermark when the idle write fails;
+- container rows are split from their pod row as before and inherit its `model_version`. DCGM attributes GPUs to pods, so only a single-container pod passes `gpu_power_watts` and `gpu_usage_millicores` to its container row; with several containers these fields stay empty rather than repeating the pod's GPU on each container.
 
-Pod rows plus the idle row equal the node totals for energy, operational and embodied CO₂e. Cost conserves too when no pod carries an observed cost; with OpenCost, pod rows keep OpenCost's allocation. Idle rows live in their own table, so pod-level dashboards, analyzers and recommendations never see a synthetic `__idle__` pod. Samples whose node cannot be resolved are allocated against the default profile without an idle row.
+Pod rows plus the idle row equal the node totals for energy, operational and embodied CO₂e. Cost conserves too when no pod carries an observed cost; with OpenCost, pod rows keep OpenCost's allocation. Only rows whose cost is really observed (`opencost`, `kubecost`) feed the observed price tier, so a recompute never reads a stored modeled cost back as an observed price and is idempotent. Idle rows live in their own table, so pod-level dashboards, analyzers and recommendations never see a synthetic `__idle__` pod. Samples whose node cannot be resolved are allocated against the default profile without an idle row.
 
 ## Unit prices: the cost fallback chain
 
@@ -286,6 +286,7 @@ The controller reads them from its collection cycle, at most every 10 minutes, i
 
 - `IMPACT_REALIZATION_FACTOR`, when set, overrides the context for every projection (`realization_factor_source: config:IMPACT_REALIZATION_FACTOR`).
 - Before the controller has observed the cluster (or outside a cluster), the factor is **1.0** with `realization_factor_source: realization_context:unobserved`, so expected savings equal allocated savings, as in model 1.0.0.
+- When the Cluster Autoscaler status or the Karpenter NodePools cannot be read (RBAC, timeout; a missing ConfigMap or CRD is not an error), the affected pools are never treated as "no autoscaler": they keep their previous observation, or the unobserved factor 1.0 before any, and the reason says the input could not be read.
 - Deletions keep a factor of 1, and node-pool consolidation keeps 1 when the consolidation is the action itself.
 
 ## Carbon price and value
