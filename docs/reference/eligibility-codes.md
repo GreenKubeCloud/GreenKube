@@ -41,6 +41,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 |---|---|---|
 | `not_active` | The recommendation is ignored, applied, stale, expired or being verified. | Un-ignore it, or wait for the next scan to refresh it. |
 | `pull_request_open` | A pull request is already open for this recommendation. | Review and merge or close it. |
+| `pull_requests_unavailable` | The open pull requests could not be read, so a duplicate cannot be ruled out. Reported for active recommendations GreenKube could otherwise deliver (fail closed). | Check the database connection, then retry. |
 
 ### Action kind and target
 
@@ -69,6 +70,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 |---|---|---|
 | `warming_up` | Fewer samples than `automation.policy.minSamples` or coverage below `minCoverage`. `eligible_at` estimates when both are met, counting one sample per query step from the end of the observation window (multi-replica workloads usually get there sooner). | Wait; no action is needed. |
 | `policy_evidence_missing` | Evidence the policy needs is missing: usage evidence, a risk level or confidence, or live discovery evidence under `missingEvidence: fail`. | Rescan and refresh GitOps discovery. |
+| `policy_evaluation_unavailable` | The automation policy evaluator failed for this workload (for example its plan-history read failed), so its live gates were not checked (fail closed). | Check the database connection, then retry. |
 | `policy_invalid` | `GITOPS_POLICY_JSON` (`automation.policy`) does not parse. | Fix the Helm values. |
 | `policy_risk_exceeded` | Risk above `automation.policy.maxRiskLevel`. | Apply manually after review, or raise the maximum. |
 | `policy_confidence_too_low` | Confidence below `automation.policy.minConfidence`. | Wait for more evidence, or lower the minimum. |

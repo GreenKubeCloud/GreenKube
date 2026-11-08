@@ -103,6 +103,14 @@ CODES: Dict[str, Tuple[str, str]] = {
         "The workload's GitOps binding could not be read.",
         "Check the database connection and GET /api/v1/gitops/status, then retry.",
     ),
+    "pull_requests_unavailable": (
+        "The open pull requests could not be read, so a duplicate pull request cannot be ruled out.",
+        "Check the database connection, then retry.",
+    ),
+    "policy_evaluation_unavailable": (
+        "The automation policy could not be evaluated for this workload.",
+        "Check the database connection (the policy reads the workload's plan history), then retry.",
+    ),
     "binding_missing": (
         "No GitOps source is known for this workload.",
         "Make sure Argo CD or Flux manages the workload, then run POST /api/v1/gitops/refresh.",
@@ -212,9 +220,11 @@ class EligibilityContext:
     policy_error: Optional[str] = None
     #: Freshened bindings by (namespace, kind, name); None when they were not read.
     bindings: Optional[Mapping[Tuple[str, str, str], WorkloadBinding]] = None
-    open_pr_recommendation_ids: FrozenSet[int] = frozenset()
-    #: Policy evaluator results by recommendation id (resolved bindings only).
-    policy_results: Mapping[int, AutomationPolicyResult] = field(default_factory=dict)
+    #: Recommendation ids with an open pull request; None when they could not be read.
+    open_pr_recommendation_ids: Optional[FrozenSet[int]] = frozenset()
+    #: Policy evaluator results by recommendation id (resolved bindings only); None when the
+    #: evaluation failed, which blocks the recommendation (fail closed).
+    policy_results: Mapping[int, Optional[AutomationPolicyResult]] = field(default_factory=dict)
     step_seconds: int = 300
 
 
@@ -432,7 +442,8 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
     rec_id = getattr(record, "id", None)
     active = status == "active"
 
-    if status == "pr_open" or (rec_id is not None and rec_id in ctx.open_pr_recommendation_ids):
+    open_prs = ctx.open_pr_recommendation_ids
+    if status == "pr_open" or (rec_id is not None and open_prs is not None and rec_id in open_prs):
         blockers.append(_entry("pull_request_open"))
     elif not active:
         blockers.append(_entry("not_active", f"The recommendation is {status}; only active ones can become a PR."))
@@ -457,6 +468,8 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
         blockers.append(_entry("automation_disabled"))
     elif workload_ready:
         key = workload_key(record)
+        if open_prs is None and active:
+            blockers.append(_entry("pull_requests_unavailable"))
         if ctx.bindings is None:
             blockers.append(_entry("binding_unavailable"))
         else:
@@ -473,7 +486,9 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
                 blockers.append(warm_blocker)
             blockers.extend(_local_policy_blockers(record, ctx.policy, ctx.now))
             result = ctx.policy_results.get(rec_id) if rec_id is not None else None
-            if result is not None:
+            if rec_id is not None and rec_id in ctx.policy_results and result is None:
+                blockers.append(_entry("policy_evaluation_unavailable"))
+            elif result is not None:
                 evaluator_blockers, evaluator_warnings = _evaluator_entries(result)
                 blockers.extend(evaluator_blockers)
                 warnings.extend(evaluator_warnings)
@@ -530,14 +545,15 @@ async def load_bindings(
     return result
 
 
-async def load_open_pr_ids(pr_repo: Any) -> FrozenSet[int]:
+async def load_open_pr_ids(pr_repo: Any) -> Optional[FrozenSet[int]]:
+    """Recommendation ids with an open pull request; None when they cannot be read (fail closed)."""
     if pr_repo is None:
         return frozenset()
     try:
         records = await pr_repo.get_open_pull_requests()
     except Exception as exc:
         logger.warning("Could not read open pull requests for eligibility: %s", exc)
-        return frozenset()
+        return None
     ids = set()
     for record in records or []:
         status = _text(getattr(record, "status", None))
@@ -551,12 +567,16 @@ async def evaluate_policies(
     records: Sequence[Any],
     ctx: EligibilityContext,
     plan_repository: Any,
-) -> Dict[int, AutomationPolicyResult]:
-    """Run the automation policy evaluator read-only for records whose binding is resolved."""
+) -> Dict[int, Optional[AutomationPolicyResult]]:
+    """Run the automation policy evaluator read-only for records whose binding is resolved.
+
+    A record whose evaluation fails maps to None, so its eligibility blocks with
+    ``policy_evaluation_unavailable`` instead of skipping the gates.
+    """
     if ctx.bindings is None or ctx.policy_error or not (ctx.automation_configured and ctx.automation_enabled):
         return {}
     evaluator = AutomationPolicyEvaluator(config=ctx.policy, plan_repository=plan_repository, clock=lambda: ctx.now)
-    results: Dict[int, AutomationPolicyResult] = {}
+    results: Dict[int, Optional[AutomationPolicyResult]] = {}
     for record in records:
         rec_id = getattr(record, "id", None)
         key = workload_key(record)
@@ -576,6 +596,7 @@ async def evaluate_policies(
             results[rec_id] = await evaluator.evaluate([record], binding.source)
         except Exception as exc:
             logger.warning("Policy evaluation failed for recommendation %s: %s", rec_id, exc)
+            results[rec_id] = None
     return results
 
 

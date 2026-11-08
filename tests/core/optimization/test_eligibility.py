@@ -344,6 +344,36 @@ class TestLiveContext:
         assert await load_open_pr_ids(prs) == frozenset({7})
         assert await load_open_pr_ids(None) == frozenset()
 
+    async def test_failed_reads_fail_closed(self, monkeypatch):
+        """A failed policy evaluation or pull request read never yields can_open_pr: true."""
+        monkeypatch.setattr(
+            "greenkube.core.optimization.eligibility.AutomationPolicyEvaluator.evaluate",
+            AsyncMock(side_effect=RuntimeError("database down")),
+        )
+        plans = MagicMock()
+        ctx = _ctx(bindings={KEY: _binding()})
+        results = await evaluate_policies([_record()], ctx, plans)
+        assert 7 in results and results[7] is None
+        decision = assess_eligibility(_record(), replace(ctx, policy_results=results))
+        assert decision["can_open_pr"] is False
+        assert "policy_evaluation_unavailable" in _codes(decision)
+        assert "direct" not in decision["delivery_modes"]
+
+        prs = MagicMock()
+        prs.get_open_pull_requests = AsyncMock(side_effect=RuntimeError("database down"))
+        open_prs = await load_open_pr_ids(prs)
+        assert open_prs is None
+        decision = assess_eligibility(_record(), _ctx(bindings={KEY: _binding()}, open_pr_recommendation_ids=open_prs))
+        assert decision["can_open_pr"] is False
+        assert "pull_requests_unavailable" in _codes(decision)
+
+    async def test_failed_reads_do_not_block_records_that_cannot_open_a_pr_anyway(self):
+        decision = assess_eligibility(
+            _record(type=RecommendationType.ZOMBIE_POD, action=None),
+            _ctx(bindings={KEY: _binding()}, open_pr_recommendation_ids=None),
+        )
+        assert "pull_requests_unavailable" not in _codes(decision)
+
     def test_criticality_from_binding_labels(self):
         ctx = _ctx(bindings={KEY: _binding(workload_labels={"greenkube.io/criticality": "critical"})})
         assert criticality_by_record([_record()], ctx) == {7: "critical"}

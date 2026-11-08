@@ -226,7 +226,7 @@ async def decide_records(
     )
     policy, policy_error = elig.load_policy(os.getenv("GITOPS_POLICY_JSON"))
     bindings = None
-    open_prs: frozenset = frozenset()
+    open_prs: Optional[frozenset] = frozenset()
     if automation_configured and automation_enabled:
         # Bindings and pull requests only exist when automation runs; skip the reads otherwise.
         if gitops_repo is not None:
