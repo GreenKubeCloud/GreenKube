@@ -65,6 +65,9 @@ automation:
     - id: gitea-quickstart
       type: gitea
       apiBaseUrl: http://gitea-http.gitea.svc.cluster.local:3000/api/v1
+      # Pull-request links open in the browser through
+      #   kubectl -n gitea port-forward svc/gitea-http 3000
+      webBaseUrl: http://localhost:3000
       secretName: greenkube-git
       secretKey: token
       repositoryAllowlist:

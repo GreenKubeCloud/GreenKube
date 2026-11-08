@@ -64,6 +64,7 @@ The most useful ones:
 |---|---|---|
 | `GITEA_TOKEN` / `GITEA_TOKEN_FILE` | — | Gitea token of `GITEA_OWNER` |
 | `GITEA_OWNER` / `GITEA_REPO` | `greenkube` / `greenkube-e2e-quickstart` | Sample repository (created and deleted by the harness) |
+| `GITEA_WEB_URL` | `http://localhost:3000` | Browser-facing Gitea origin used in pull-request links |
 | `GK_NAMESPACE` / `GK_RELEASE` | `greenkube` / `greenkube` | Where GreenKube is installed |
 | `GK_IMAGE_TAG` | `e2e-dev` | Tag of the image built from your checkout |
 | `GK_SKIP_BUILD` | `0` | `1` reuses an image already in Minikube |
@@ -189,7 +190,7 @@ from that pull request instead of opening a second one.
 | Recommendation not eligible | `policy_result.checks` in the eligibility response: confidence grows with the number of samples |
 | Binding not resolved | The provider `apiBaseUrl` host must be the host of the Argo CD/Flux repository URL, and the repository must be in `repositoryAllowlist` |
 | Plan stays `merged` | The GitOps controller has not synced the merge commit yet; check the Application or Kustomization |
-| PR link unreachable from the browser | Set `automation.providers[].webBaseUrl` to the browser-facing Gitea origin |
+| PR link unreachable from the browser | The quickstart sets `automation.providers[].webBaseUrl` to `http://localhost:3000` (`GITEA_WEB_URL`): run `kubectl -n gitea port-forward svc/gitea-http 3000`, or set it to your browser-facing Gitea origin |
 
 ## Clean up
 

@@ -26,6 +26,7 @@ automation:
     - id: gitea-quickstart
       type: gitea
       apiBaseUrl: ${GITEA_IN_CLUSTER_URL}/api/v1
+      webBaseUrl: ${GITEA_WEB_URL}
       secretName: greenkube-git
       secretKey: token
       repositoryAllowlist:

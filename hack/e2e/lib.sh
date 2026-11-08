@@ -34,6 +34,8 @@ QUICKSTART_DIR="${REPO_ROOT}/docs/examples/quickstart"
 : "${GITEA_SERVICE_PORT:=3000}"
 : "${GITEA_IN_CLUSTER_URL:=http://${GITEA_SERVICE}.${GITEA_NAMESPACE}.svc.cluster.local:${GITEA_SERVICE_PORT}}"
 : "${GITEA_LOCAL_PORT:=33000}"
+# Browser-facing Gitea origin used in pull-request links (webBaseUrl).
+: "${GITEA_WEB_URL:=http://localhost:3000}"
 : "${GITEA_OWNER:=greenkube}"
 : "${GITEA_REPO:=greenkube-e2e-quickstart}"
 : "${GITEA_BRANCH:=main}"
