@@ -44,6 +44,7 @@ from greenkube.gitops.contracts import (
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime
 from greenkube.gitops.discovery.service import DiscoveryCoverage
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.storage.base_gitops_repository import (
     WorkloadBinding,
     WorkloadBindingConflictError,
@@ -59,7 +60,7 @@ router = APIRouter(prefix="/gitops")
 _MAX_BINDING_LIST_LIMIT = 100
 _MAX_BINDING_LIST_CANDIDATES = 20
 _MAX_BINDING_DETAIL_CANDIDATES = 50
-_REVISION_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|sha1:[0-9a-fA-F]{40}|sha256:[0-9a-fA-F]{64})$")
+_REVISION_PATTERN = re.compile(rf"{GIT_OBJECT_SHA.pattern}|sha1:[0-9a-fA-F]{{40}}|sha256:[0-9a-fA-F]{{64}}")
 _SCP_REPOSITORY_PATTERN = re.compile(r"^[^/@:\s]+@(?P<host>[^:/\s]+):(?P<path>[^?\s#]+)$")
 # Expose only reason codes emitted by the GitOps adapters and reconciler.
 _SAFE_REASON_CODES = frozenset(

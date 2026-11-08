@@ -6,7 +6,6 @@ import copy
 import difflib
 import hashlib
 import json
-import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -43,13 +42,11 @@ from greenkube.gitops.planning.helm import (
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanError, _containers, _pod_spec
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult, RenderedResource, render_raw
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
 from greenkube.gitops.snapshots import SnapshotLimits, snapshot_from_files
 from greenkube.gitops.snapshots.models import RepositorySnapshot, SnapshotFile
 from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
 
-_COMMIT_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_BLOB_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
 _SUPPORTED_RENDERERS = frozenset(
     {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
@@ -147,7 +144,7 @@ class KustomizeRollbackRenderer:
     ) -> RawRenderResult:
         """Render every candidate file at the verified current base revision."""
         revision = source.revision
-        if not isinstance(revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(revision):
+        if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise RollbackValidationError("Kustomize rollback requires the verified current base revision")
         snapshot = snapshot_from_files(
             files,
@@ -674,7 +671,7 @@ def _rendered_baseline_quantity(value: object, parser: Callable[[object], int | 
 
 
 def _validate_revision(value: str) -> str:
-    if not isinstance(value, str) or not _COMMIT_SHA_PATTERN.fullmatch(value):
+    if not isinstance(value, str) or not GIT_OBJECT_SHA.fullmatch(value):
         raise RollbackConflictError("current base revision must be an immutable 40- or 64-character Git revision")
     return value.lower()
 
@@ -996,7 +993,7 @@ def _normalize_flux_helm_release_renderer_config(config: Mapping[str, Any]) -> d
     if isinstance(manifest_source, Mapping):
         source = dict(manifest_source)
         revision = source.get("revision")
-        if revision is not None and (not isinstance(revision, str) or _revision_commit(revision) is None):
+        if revision is not None and (not isinstance(revision, str) or revision_commit(revision) is None):
             return None
         source["revision"] = "__current_immutable_revision__"
         normalized["manifest_source"] = source
@@ -1037,7 +1034,7 @@ def _normalize_helm_renderer_config(config: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _verify_original_blob(path: str, content: bytes, original_sha: str | None) -> None:
-    if original_sha is None or not _BLOB_SHA_PATTERN.fullmatch(original_sha):
+    if original_sha is None or not GIT_OBJECT_SHA.fullmatch(original_sha):
         raise RollbackConflictError(f"{path}: immutable original blob SHA is missing or invalid")
     if _git_blob_sha(content, original_sha) != original_sha.lower():
         raise RollbackConflictError(f"{path}: immutable original content does not match its recorded blob SHA")
@@ -1047,13 +1044,6 @@ def _git_blob_sha(content: bytes, revision_or_sha: str) -> str:
     algorithm = hashlib.sha256 if len(revision_or_sha) == 64 else hashlib.sha1
     header = f"blob {len(content)}\0".encode("ascii")
     return algorithm(header + content).hexdigest()
-
-
-def _revision_commit(value: str) -> str | None:
-    if _COMMIT_SHA_PATTERN.fullmatch(value):
-        return value.lower()
-    match = re.search(r"(?:sha1|sha256):([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", value)
-    return match.group(1).lower() if match is not None else None
 
 
 def _content_bytes(content: str | bytes, path: str, description: str) -> bytes:
@@ -1088,7 +1078,7 @@ def _render(
         raise RollbackValidationError("rollback renderer rejected the repository snapshot") from exc
     if not isinstance(result, RawRenderResult) or result.renderer is not renderer.renderer:
         raise RollbackValidationError("rollback renderer returned an incompatible render result")
-    if not isinstance(result.output_digest, str) or not _SHA256_PATTERN.fullmatch(result.output_digest):
+    if not isinstance(result.output_digest, str) or not SHA256_DIGEST.fullmatch(result.output_digest):
         raise RollbackValidationError("rollback renderer returned an invalid output digest")
     if not isinstance(result.resources, tuple) or not isinstance(result.warnings, tuple):
         raise RollbackValidationError("rollback renderer returned invalid resource or warning collections")

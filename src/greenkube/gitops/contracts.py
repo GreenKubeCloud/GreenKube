@@ -14,8 +14,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
+from greenkube.gitops.sha import SHA256_DIGEST
+
 _QUANTITY_PATTERN = re.compile(r"^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+|(?:n|u|m|k|K|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei))?$")
-_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SCP_REPOSITORY_PATTERN = re.compile(r"^(?:[^/@:\s]+@)?(?P<host>[^:/\s]+):(?P<path>[^?#\s]+)$")
 DEFAULT_BINDING_TTL = timedelta(minutes=30)
 MAX_BINDING_TTL = timedelta(hours=24)
@@ -153,7 +154,7 @@ def _repository_path(value: str, *, allow_root: bool) -> str:
 
 
 def _validate_digest(value: str) -> str:
-    if not _SHA256_PATTERN.fullmatch(value):
+    if not SHA256_DIGEST.fullmatch(value):
         raise ValueError("digest must be a sha256 digest")
     return value
 

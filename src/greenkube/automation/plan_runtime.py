@@ -91,6 +91,7 @@ from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanner
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots import (
     RepositorySnapshot,
     SnapshotError,
@@ -111,7 +112,6 @@ from greenkube.utils.time import ensure_utc
 
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
-_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _MAX_PROVIDER_CONFIG_BYTES = 1024 * 1024
 _MAX_CONFIGURED_PROVIDERS = 100
 
@@ -277,7 +277,7 @@ class ProviderSourceSnapshotResolver:
                 )
 
             revision = await _current_revision(target.provider, target.repository, source.ref)
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "the provider did not resolve the source ref to an immutable full Git commit SHA",
@@ -816,7 +816,7 @@ class RuntimePlanService:
                     "current rollback snapshot does not match the resolved provider repository",
                 )
             revision = metadata.commit_sha
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "current rollback snapshot does not identify an immutable full Git commit SHA",
@@ -978,7 +978,7 @@ class RuntimePlanService:
     ) -> dict[str, str | bytes]:
         file_plan = plan.file_plan
         assert file_plan is not None
-        if not _COMMIT_SHA.fullmatch(file_plan.base_revision):
+        if not GIT_OBJECT_SHA.fullmatch(file_plan.base_revision):
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_CONFLICT,
                 "original plan base revision is not an immutable full Git commit SHA",

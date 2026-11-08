@@ -57,6 +57,7 @@ from greenkube.gitops.contracts import (
     SetContainerResources,
     WorkloadSource,
 )
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import (
     PullRequestRecord,
     PullRequestStatus,
@@ -70,8 +71,6 @@ from greenkube.storage.base_plan_operation_repository import (
 )
 from greenkube.utils.time import ensure_utc
 
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
-_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
 _ACTIVE_PLAN_STATUSES = frozenset({PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _OPEN_PULL_REQUEST_STATES = frozenset({"open", "opened"})
@@ -435,7 +434,7 @@ class PlanWorker:
                 ) from exc
             if current_revision is None:
                 raise PlanWorkerError("Current source revision could not be resolved.", retryable=True)
-            if not isinstance(current_revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(current_revision):
+            if not isinstance(current_revision, str) or not GIT_OBJECT_SHA.fullmatch(current_revision):
                 raise PlanWorkerError(
                     "Current source revision is not an immutable full Git commit SHA.",
                     plan_status=PlanStatus.STALE,
@@ -1031,7 +1030,7 @@ class PlanWorker:
     def _validate_operation_and_plan(self, operation: Operation, plan: Plan, now: datetime) -> None:
         if operation.plan_id != plan.plan_id:
             raise PlanWorkerError("Claimed operation does not match the loaded plan.")
-        if plan.digest is None or not _DIGEST_PATTERN.fullmatch(plan.digest):
+        if plan.digest is None or not SHA256_DIGEST.fullmatch(plan.digest):
             raise PlanWorkerError(
                 "Plan has no valid persisted digest.",
                 plan_status=PlanStatus.FAILED,
@@ -1057,7 +1056,7 @@ class PlanWorker:
                 plan_status=PlanStatus.FAILED,
                 action_status=ActionStatus.FAILED,
             )
-        if not _COMMIT_SHA_PATTERN.fullmatch(plan.file_plan.base_revision):
+        if not GIT_OBJECT_SHA.fullmatch(plan.file_plan.base_revision):
             raise PlanWorkerError(
                 "Plan base revision is not an immutable full Git commit SHA.",
                 plan_status=PlanStatus.STALE,
@@ -1113,7 +1112,7 @@ class PlanWorker:
             result.branch != branch
             or result.files_changed != expected_paths
             or not isinstance(result.commit_sha, str)
-            or not _COMMIT_SHA_PATTERN.fullmatch(result.commit_sha)
+            or not GIT_OBJECT_SHA.fullmatch(result.commit_sha)
         ):
             raise PlanWorkerError(
                 "Git provider returned a commit result that does not match the atomic file plan.",
@@ -1883,7 +1882,7 @@ def _pull_request_head_sha(pull_request: PullRequestInfo) -> str | None:
     head = raw.get("head")
     # GitHub and Gitea nest the head commit; GitLab merge requests expose ``sha``.
     sha = head.get("sha") if isinstance(head, dict) else raw.get("sha")
-    return sha if isinstance(sha, str) and _COMMIT_SHA_PATTERN.fullmatch(sha) else None
+    return sha if isinstance(sha, str) and GIT_OBJECT_SHA.fullmatch(sha) else None
 
 
 def _pull_request_status(status: PullRequestStatus | str) -> str:

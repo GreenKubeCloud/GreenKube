@@ -68,13 +68,12 @@ from greenkube.gitops.planning.raw_manifest import (
 )
 from greenkube.gitops.renderers.helm import HelmError, HelmRenderer
 from greenkube.gitops.renderers.raw import RawRenderError, RawRenderResult, render_raw
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
 from greenkube.gitops.snapshots.models import RepositorySnapshot as ArchiveSnapshot
 
 DEFAULT_HELM_VERSION = "v3.22.1+gd6c1a0e"
 _MAX_FLUX_VALUES_FILES = 32
 _MAX_FLUX_VALUES_BYTES = 8_388_608
-_FULL_SHA = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SNAPSHOT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HELMRELEASE_KIND = re.compile(r"(?m)^\s*kind\s*:\s*['\"]?HelmRelease(?:['\"])?\s*(?:#.*)?$")
 _HELMRELEASE_JSON_KIND = re.compile(r'"kind"\s*:\s*"HelmRelease"')
 _MANAGED_ANNOTATION = "greenkube.cloud/managed"
@@ -765,7 +764,7 @@ def _validate_common_request(
         raise error_type("source must be a resolved WorkloadSource")
     if not isinstance(snapshot, ArchiveSnapshot):
         raise error_type("snapshot must be an archive RepositorySnapshot")
-    if not isinstance(base_revision, str) or _FULL_SHA.fullmatch(base_revision) is None:
+    if not isinstance(base_revision, str) or GIT_OBJECT_SHA.fullmatch(base_revision) is None:
         raise error_type("resolved base revision must be a full 40- or 64-character commit SHA")
     if base_revision.lower() != snapshot.metadata.commit_sha.lower():
         raise error_type("base revision does not match the archive snapshot commit")
@@ -1234,7 +1233,7 @@ def _render_chart(
         not isinstance(result, RawRenderResult)
         or result.renderer is not RendererKind.HELM_RELEASE
         or not isinstance(result.output_digest, str)
-        or _SNAPSHOT_DIGEST.fullmatch(result.output_digest) is None
+        or SHA256_DIGEST.fullmatch(result.output_digest) is None
     ):
         raise error_type("Helm renderer did not return a validated render result")
     if planner_renderer not in {RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}:
@@ -1549,7 +1548,7 @@ def _flux_chart_context(
         or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
     ):
         raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
-    source_revision = _revision_commit(source.source_revision) if source.source_revision else None
+    source_revision = revision_commit(source.source_revision) if source.source_revision else None
     if source_revision is None or source_revision != base_revision.lower():
         raise FluxHelmReleaseUnsupportedError(
             "Flux GitRepository artifact revision must match the immutable repository snapshot"
@@ -2575,10 +2574,3 @@ def _plain(value: Any) -> Any:
     if isinstance(value, str):
         return str(value)
     return value
-
-
-def _revision_commit(value: str) -> str | None:
-    if _FULL_SHA.fullmatch(value):
-        return value.lower()
-    match = re.search(r"(?:sha1|sha256):([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", value)
-    return match.group(1).lower() if match is not None else None

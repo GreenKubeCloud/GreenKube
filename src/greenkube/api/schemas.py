@@ -16,6 +16,7 @@ from greenkube.gitops.contracts import (
     PlanStatus,
     RendererKind,
 )
+from greenkube.gitops.sha import SHA256_DIGEST
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 from greenkube.models.node import NodeInfo
 
@@ -93,7 +94,7 @@ class GitOpsWorkloadSourceResponse(GitOpsResponseModel):
     source_revision: Optional[str] = None
     observed_at: datetime
     expires_at: Optional[datetime] = None
-    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generation_token: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
 
 
 class GitOpsBindingProvenanceResponse(GitOpsResponseModel):
@@ -144,7 +145,7 @@ class GitOpsManualBindingResolutionRequest(GitOpsResponseModel):
     """Explicit confirmation of one current server-returned candidate."""
 
     candidate_id: StrictStr = Field(min_length=1, max_length=256)
-    generation_token: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generation_token: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
     confirmed: Literal[True]
 
 
@@ -202,7 +203,7 @@ class AutomationPlanCreateRequest(GitOpsResponseModel):
 class AutomationPlanApproveRequest(GitOpsResponseModel):
     """Approval for the exact digest returned by plan creation or read."""
 
-    digest: StrictStr = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    digest: StrictStr = Field(pattern=rf"^{SHA256_DIGEST.pattern}$")
 
 
 class AutomationPlanSourceResponse(GitOpsResponseModel):

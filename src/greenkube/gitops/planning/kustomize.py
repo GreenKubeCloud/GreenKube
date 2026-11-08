@@ -43,6 +43,7 @@ from greenkube.gitops.planning.raw_manifest import (
 )
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.gitops.snapshots.models import RepositorySnapshot
 
 KUSTOMIZE_VERSION = "v5.8.3"
@@ -73,8 +74,6 @@ _SUPPORTED_KUSTOMIZATION_KEYS = frozenset(
     }
 )
 _REMOTE_HOST = re.compile(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::[0-9]+)?/")
-_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SNAPSHOT_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PATCH_ENTRY_KEYS = frozenset({"path", "patch", "target", "options"})
 _PATCH_TARGET_KEYS = frozenset({"group", "version", "kind", "name", "namespace", "labelSelector", "annotationSelector"})
 _PATCH_METADATA_MARKERS = frozenset({"greenkube.cloud/managed", "greenkube.cloud/action-id"})
@@ -276,7 +275,7 @@ def _validate_request(
 ) -> list[SetContainerResources]:
     if not isinstance(snapshot, RepositorySnapshot):
         raise KustomizePlanError("snapshot must be an archive RepositorySnapshot")
-    if not isinstance(base_revision, str) or not _SHA_PATTERN.fullmatch(base_revision):
+    if not isinstance(base_revision, str) or not GIT_OBJECT_SHA.fullmatch(base_revision):
         raise KustomizePlanError("resolved base revision must be a full 40- or 64-character commit SHA")
     if base_revision.lower() != snapshot.metadata.commit_sha.lower():
         raise KustomizePlanError("base revision does not match the archive snapshot commit")
@@ -405,7 +404,7 @@ def _snapshot_file_map(snapshot: RepositorySnapshot) -> dict[str, Any]:
             raise KustomizePlanError(f"{path}: archive snapshot contains duplicate file metadata")
         if type(item.size_bytes) is not int or item.size_bytes < 0:
             raise KustomizePlanError(f"{path}: archive snapshot file size is invalid")
-        if not isinstance(item.digest, str) or not _SNAPSHOT_DIGEST_PATTERN.fullmatch(item.digest):
+        if not isinstance(item.digest, str) or not SHA256_DIGEST.fullmatch(item.digest):
             raise KustomizePlanError(f"{path}: archive snapshot file digest is invalid")
         files[path] = item
     return files
@@ -1100,7 +1099,7 @@ def _render(renderer: KustomizeRenderer, snapshot: RepositorySnapshot, overlay_p
         not isinstance(result, RawRenderResult)
         or result.renderer is not RendererKind.KUSTOMIZE
         or not isinstance(result.output_digest, str)
-        or not _SNAPSHOT_DIGEST_PATTERN.fullmatch(result.output_digest)
+        or not SHA256_DIGEST.fullmatch(result.output_digest)
     ):
         raise KustomizePlanError("Kustomize renderer did not return a validated render result")
     return result

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,6 +47,7 @@ from greenkube.gitops.planning.raw_manifest import (
 from greenkube.gitops.renderers import RawRenderError, render_raw
 from greenkube.gitops.renderers.helm import HelmError
 from greenkube.gitops.renderers.kustomize import KustomizeError
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots.models import (
     RepositorySnapshot as ArchiveRepositorySnapshot,
 )
@@ -58,8 +58,6 @@ from greenkube.storage.base_gitops_repository import AutomationPlanRepository
 from greenkube.utils.time import ensure_utc
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
-_GIT_BLOB_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _STALEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
@@ -842,7 +840,7 @@ class AutomationPlanService:
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "could not resolve the current source base revision",
             ) from exc
-        if not isinstance(revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(revision):
+        if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise AutomationPlanError(
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "the current source resolver did not return an immutable full Git commit SHA",
@@ -937,7 +935,7 @@ def _archive_contents(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot repository identity does not match the resolved workload source",
         )
-    if not isinstance(metadata.commit_sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(metadata.commit_sha):
+    if not isinstance(metadata.commit_sha, str) or not GIT_OBJECT_SHA.fullmatch(metadata.commit_sha):
         raise AutomationPlanError(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot does not identify an immutable full Git commit SHA",
@@ -1086,7 +1084,7 @@ def _validated_blob_sha(
             AutomationErrorCode.SOURCE_CHANGED,
             f"provider content for {path!r} does not match the immutable archive snapshot",
         )
-    if not isinstance(sha, str) or not _GIT_BLOB_SHA_PATTERN.fullmatch(sha):
+    if not isinstance(sha, str) or not GIT_OBJECT_SHA.fullmatch(sha):
         raise AutomationPlanError(
             AutomationErrorCode.PROVIDER_NOT_READY,
             f"provider did not return a valid Git blob SHA for {path!r}; snapshot SHA-256 cannot be substituted",
