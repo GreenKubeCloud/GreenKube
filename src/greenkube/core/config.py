@@ -12,10 +12,6 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 # Import datacenter PUE profiles
 from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
-from greenkube.models.configuration import (
-    ConfigurationPersistenceAcknowledgement,
-    ConfigurationSnapshot,
-)
 
 _GITOPS_DURATION_PATTERN = re.compile(r"^(\d+)(ms|s|m|h)$")
 
@@ -758,12 +754,12 @@ class Config(BaseSettings):
 
 
 class ConfigService:
-    """Coordinate layered configuration and versioned runtime overrides.
+    """Apply runtime service-endpoint overrides to the running process.
 
-    Bootstrap values and externally mounted secrets are read through ``Config``.
-    Only the explicitly listed runtime keys can be changed or persisted by this
-    service; this prevents an API update from accidentally replacing security
-    fields or discovery defaults.
+    Overrides are written to the process environment and the ``Config``
+    singleton is reloaded in place. They are not persisted: Helm values and
+    Secrets stay the source of truth. Only the listed keys can change, so an
+    API update can never replace security fields or discovery defaults.
     """
 
     RUNTIME_KEYS: ClassVar[frozenset[str]] = frozenset(
@@ -776,136 +772,20 @@ class ConfigService:
             "WATTNET_PASSWORD",
         }
     )
-    SECRET_KEYS: ClassVar[frozenset[str]] = frozenset(
-        {
-            "ELECTRICITY_MAPS_TOKEN",
-            "BOAVIZTA_TOKEN",
-            "PROMETHEUS_BEARER_TOKEN",
-            "PROMETHEUS_USERNAME",
-            "PROMETHEUS_PASSWORD",
-            "WATTNET_EMAIL",
-            "WATTNET_PASSWORD",
-            "API_KEY",
-        }
-    )
-    DISCOVERY_KEYS: ClassVar[frozenset[str]] = frozenset({"CLUSTER_NAME"})
 
-    def __init__(self, settings: Config | None = None, repository=None):
+    def __init__(self, settings: Config | None = None):
         self.settings = settings or get_config()
-        self.repository = repository
         self.version = 0
-        self._runtime_overrides: dict[str, str] = {}
-        self._previous_environment: dict[str, str | None] = {}
 
-    def snapshot(self) -> ConfigurationSnapshot:
-        """Return a frozen, redaction-safe view of effective configuration."""
-        values = self.settings.model_dump()
-        secrets = {key: "***" for key in self.SECRET_KEYS if values.get(key)}
-        discovery = {key: values[key] for key in self.DISCOVERY_KEYS if key in values}
-        runtime = {key: values[key] for key in self.RUNTIME_KEYS - self.SECRET_KEYS if key in values}
-        bootstrap = {
-            key: value
-            for key, value in values.items()
-            if key not in self.RUNTIME_KEYS and key not in self.SECRET_KEYS and key not in self.DISCOVERY_KEYS
-        }
-        return ConfigurationSnapshot(
-            version=self.version,
-            bootstrap=bootstrap,
-            secrets=secrets,
-            runtime_policy=runtime,
-            discovery=discovery,
-        )
-
-    def reload(self) -> ConfigurationSnapshot:
-        """Reload environment-backed settings while preserving singleton identity."""
-        self.settings.reload()
-        self.version += 1
-        return self.snapshot()
-
-    def clear(self) -> ConfigurationSnapshot:
-        """Clear in-process runtime overrides and reload the base layers."""
-        for key, previous in self._previous_environment.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
-        self._runtime_overrides.clear()
-        self._previous_environment.clear()
-        return self.reload()
-
-    async def load(self) -> ConfigurationSnapshot:
-        """Load persisted runtime overrides before reloading the base layers."""
-        if self.repository is not None:
-            version, values = await self.repository.load()
-            for key, value in values.items():
-                if key in self.RUNTIME_KEYS:
-                    self._previous_environment.setdefault(key, os.environ.get(key))
-                    self._runtime_overrides[key] = value
-                    os.environ[key] = value
-            self.version = version
-        return self.reload()
-
-    async def apply(self, updates: dict[str, str], persist: bool = True) -> ConfigurationPersistenceAcknowledgement:
-        """Apply allowed runtime updates and acknowledge durable persistence."""
+    def apply(self, updates: dict[str, str]) -> int:
+        """Apply allowed runtime updates in memory and return the new configuration version."""
         invalid = set(updates) - self.RUNTIME_KEYS
         if invalid:
             raise ValueError(f"Unsupported runtime configuration keys: {sorted(invalid)}")
-        for key, value in updates.items():
-            self._previous_environment.setdefault(key, os.environ.get(key))
-            self._runtime_overrides[key] = value
-            os.environ[key] = value
-        self.reload()
-
-        if not persist or self.repository is None:
-            return ConfigurationPersistenceAcknowledgement(
-                version=self.version,
-                persisted=False,
-                keys=tuple(sorted(updates)),
-                message="Runtime configuration applied in memory only.",
-            )
-        try:
-            await self.repository.save(self._runtime_overrides, self.version)
-        except Exception as exc:
-            logger = logging.getLogger(__name__)
-            logger.warning("Runtime configuration was not persisted: %s", exc)
-            return ConfigurationPersistenceAcknowledgement(
-                version=self.version,
-                persisted=False,
-                keys=tuple(sorted(updates)),
-                backend=self.repository.__class__.__name__,
-                message="Runtime configuration applied in memory; persistence failed.",
-            )
-        return ConfigurationPersistenceAcknowledgement(
-            version=self.version,
-            persisted=True,
-            keys=tuple(sorted(updates)),
-            backend=self.repository.__class__.__name__,
-            message="Runtime configuration persisted.",
-        )
-
-    async def clear_persisted(self) -> ConfigurationPersistenceAcknowledgement:
-        """Clear runtime overrides in memory and in the configured repository."""
-        self.clear()
-        if self.repository is None:
-            return ConfigurationPersistenceAcknowledgement(
-                version=self.version, persisted=False, message="Runtime configuration cleared in memory."
-            )
-        try:
-            await self.repository.clear(self.version)
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Runtime configuration clear was not persisted: %s", exc)
-            return ConfigurationPersistenceAcknowledgement(
-                version=self.version,
-                persisted=False,
-                backend=self.repository.__class__.__name__,
-                message="Runtime configuration cleared in memory; persistence failed.",
-            )
-        return ConfigurationPersistenceAcknowledgement(
-            version=self.version,
-            persisted=True,
-            backend=self.repository.__class__.__name__,
-            message="Runtime configuration cleared and persisted.",
-        )
+        os.environ.update(updates)
+        self.settings.reload()
+        self.version += 1
+        return self.version
 
 
 # Module-level singleton – kept for backward compatibility.
@@ -925,5 +805,5 @@ def get_config() -> Config:
 
 
 def get_config_service() -> ConfigService:
-    """Return the process-wide layered configuration service."""
+    """Return the process-wide runtime configuration service."""
     return config_service
