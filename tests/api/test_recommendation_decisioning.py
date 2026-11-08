@@ -142,6 +142,31 @@ class TestActiveDecision:
         assert profile_rows[0]["value"]["profile"] == "low_risk"
         assert all(row["sort_metric"] == "value" for row in profile_rows)
 
+    def test_top_by_profile_matches_active_under_configured_costs(self, decision_client, mock_reco_repo, monkeypatch):
+        """/top?profile= keeps the configured prices and the track record (no second, default scoring)."""
+        config = get_config().model_copy(
+            update={
+                "CARBON_PRICE_PER_TONNE": 500.0,
+                "RECOMMENDATION_INCIDENT_COST": 1000.0,
+                "RECOMMENDATION_ENGINEER_HOUR_COST": 80.0,
+            }
+        )
+        monkeypatch.setattr("greenkube.api.routers.recommendations.get_config", lambda: config)
+        capability = "cpu_rightsizing"
+        mock_reco_repo.get_outcome_counts_by_source_capability = AsyncMock(
+            return_value=[{"source": "vpa", "capability": capability, "realized": 2, "not_realized": 6}]
+        )
+
+        active = decision_client.get("/api/v1/recommendations/active?profile=low_risk").json()
+        top = decision_client.get("/api/v1/recommendations/top?profile=low_risk&limit=50").json()
+        assert active[0]["value"]["components"]["carbon_price_per_tonne"] == 500.0
+        assert [row["id"] for row in top] == [row["id"] for row in active]
+        by_id = {row["id"]: row for row in active}
+        for row in top:
+            assert row["value"]["ev"] == by_id[row["id"]]["value"]["ev"]
+            assert row["value"]["components"] == by_id[row["id"]]["value"]["components"]
+            assert row["sort_value"] == row["value"]["ev"]
+
 
 def _source():
     return WorkloadSource(
@@ -216,6 +241,15 @@ class TestEligibilityWithAutomation:
         assert web == {"action_unavailable"}
         batch = {b["code"] for b in rows[3]["eligibility"]["blockers"]}
         assert {"policy_risk_exceeded", "policy_confidence_too_low"} <= batch
+
+    def test_unreadable_pull_requests_fail_closed(self, automation_client):
+        prs = automation_client.app.dependency_overrides[get_pull_request_repository]()
+        prs.get_open_pull_requests = AsyncMock(side_effect=RuntimeError("database down"))
+        rows = {row["id"]: row for row in automation_client.get("/api/v1/recommendations/active").json()}
+        checkout = rows[1]["eligibility"]
+        assert checkout["can_open_pr"] is False
+        assert [b["code"] for b in checkout["blockers"]] == ["pull_requests_unavailable"]
+        assert checkout["delivery_modes"] == ["manual"]
 
 
 class TestTrackRecordEndpoint:

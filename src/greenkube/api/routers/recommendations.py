@@ -255,7 +255,10 @@ async def list_top_recommendations(
     else:
         records = await reco_repo.get_top_recommendations(limit=limit, savings_metric=metric, namespace=namespace)
     decided = await _decide(records, decision, reco_repo, gitops_repo, pr_repo, service)
-    return rank_recommendations(decided, limit=limit, savings_metric=metric, profile=profile)
+    # The records already carry the live value under the requested profile and carbon price:
+    # rank them as they are, never re-score them with the defaults.
+    ranking_metric = "value" if profile else metric
+    return rank_recommendations(decided, limit=limit, savings_metric=ranking_metric)
 
 
 @router.get("/recommendations/ignored", response_model=List[RecommendationRecord])
