@@ -160,6 +160,9 @@ data:
   RIGHTSIZING_CPU_THRESHOLD: {{ .rightsizingCpuThreshold | quote }}
   RIGHTSIZING_MEMORY_THRESHOLD: {{ .rightsizingMemoryThreshold | quote }}
   RIGHTSIZING_HEADROOM: {{ .rightsizingHeadroom | quote }}
+  RIGHTSIZING_INCREASE_THRESHOLD: {{ .rightsizingIncreaseThreshold | default 0.9 | quote }}
+  RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: {{ .minDecreaseCoverageDays | default 7 | quote }}
+  RECOMMENDATION_LIMITS_POLICY: {{ .limitsPolicy | default "keep" | quote }}
   ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}
   ZOMBIE_ENERGY_THRESHOLD: {{ .zombieEnergyThreshold | quote }}
   AUTOSCALING_CV_THRESHOLD: {{ .autoscalingCvThreshold | quote }}

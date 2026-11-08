@@ -3,7 +3,7 @@
 
 import re
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from greenkube.models.metrics import CombinedMetric
 
@@ -18,17 +18,27 @@ def infer_deployment_target(pod_name: str) -> Tuple[str, str] | None:
     return "Deployment", match.group("deployment")
 
 
-def target_key(metric: CombinedMetric) -> Tuple[str, str, str]:
-    """Returns the stable recommendation target for a metric."""
-    if metric.owner_kind and metric.owner_name:
-        return (metric.namespace, metric.owner_kind, metric.owner_name)
+def resolve_target(
+    namespace: str,
+    pod_name: str,
+    owner_kind: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> Tuple[str, str, str]:
+    """Returns the stable recommendation target of a pod: its owner, an inferred Deployment, or the pod."""
+    if owner_kind and owner_name:
+        return (namespace, owner_kind, owner_name)
 
-    inferred_target = infer_deployment_target(metric.pod_name)
+    inferred_target = infer_deployment_target(pod_name)
     if inferred_target:
         target_kind, target_name = inferred_target
-        return (metric.namespace, target_kind, target_name)
+        return (namespace, target_kind, target_name)
 
-    return (metric.namespace, "Pod", metric.pod_name)
+    return (namespace, "Pod", pod_name)
+
+
+def target_key(metric: CombinedMetric) -> Tuple[str, str, str]:
+    """Returns the stable recommendation target for a metric."""
+    return resolve_target(metric.namespace, metric.pod_name, metric.owner_kind, metric.owner_name)
 
 
 def group_by_recommendation_target(

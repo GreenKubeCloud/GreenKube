@@ -276,3 +276,10 @@ async def test_engine_persists_action_plans_with_database_recommendation_ids():
     assert recommendations[0].patch.action == recommendations[0].action
     assert repository.upsert_recommendations.await_count == 2
     repository.reconcile_active_recommendations.assert_awaited_once()
+
+
+@pytest.fixture(autouse=True)
+def _no_decrease_coverage_gate(monkeypatch):
+    """These fixtures span hours, not weeks: disable the one-week coverage gate for
+    request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
+    monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")

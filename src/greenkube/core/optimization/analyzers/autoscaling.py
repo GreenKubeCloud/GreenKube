@@ -1,12 +1,9 @@
-# src/greenkube/core/optimization/analyzers/autoscaling.py
 """Autoscaling candidates: spiky CPU usage without an existing HPA."""
 
 import logging
-import math
 from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.statistics import latest_request_value, usage_stats
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.models.metrics import Recommendation, RecommendationType
 
@@ -20,7 +17,9 @@ class AutoscalingAnalyzer(Analyzer):
     """Identifies targets with spiky load patterns that would benefit from HPA.
 
     Skips pods whose owner (Deployment/StatefulSet) is already managed by
-    an existing HorizontalPodAutoscaler.
+    an existing HorizontalPodAutoscaler. The coefficient of variation is that
+    of the per-replica, per-step CPU usage over the lookback, from the pod-level
+    usage summary.
     """
 
     capability = "autoscaling"
@@ -30,26 +29,21 @@ class AutoscalingAnalyzer(Analyzer):
         cfg = self.config
         hpa_targets = context.hpa_targets
 
-        for (ns, target_kind, target_name), series in context.target_series().items():
-            mean_usage, max_usage, usages = usage_stats(
-                series,
-                "cpu_usage_millicores",
-                "cpu_usage_max_millicores",
-            )
-            if len(usages) < 3:
+        for (ns, target_kind, target_name), summary in context.workload_summaries():
+            stats = summary.cpu
+            if stats is None or stats.sample_count < 3:
                 continue
 
-            cpu_request = latest_request_value(series, "cpu_request")
+            cpu_request = summary.cpu_request
             if cpu_request == 0:
                 continue
 
+            mean_usage = stats.avg
             if mean_usage == 0:
                 continue
 
-            variance = sum((u - mean_usage) ** 2 for u in usages) / len(usages)
-            stddev = math.sqrt(variance)
-            cv = stddev / mean_usage
-            spike_ratio = max_usage / mean_usage
+            cv = (stats.stddev or 0.0) / mean_usage
+            spike_ratio = stats.max / mean_usage
 
             if cv > cfg.AUTOSCALING_CV_THRESHOLD and spike_ratio > cfg.AUTOSCALING_SPIKE_RATIO:
                 if hpa_targets and target_kind != "Pod" and (ns, target_kind, target_name) in hpa_targets:

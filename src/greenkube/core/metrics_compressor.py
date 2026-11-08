@@ -18,6 +18,12 @@ past their retention are pruned. The job is lossless by construction:
   after the compression watermark, so an hour is either fully raw or fully
   deleted — never half pruned.
 
+The same job keeps the ``workload_usage_hourly`` rollup up to date (roadmap
+E3, BUG-12): it re-rolls the last day of hours from their raw rows (or their
+hourly aggregates once raw rows are pruned) before compression, and prunes it
+with the hourly retention. Recommendation scans read summaries of that rollup
+instead of raw rows.
+
 The savings ledger has its own compression (owned by the ledger, see C0.6).
 """
 
@@ -196,6 +202,7 @@ class MetricsCompressor:
         config: Config | None = None,
         *,
         collection_watermark_provider: CollectionWatermarkProvider | None = None,
+        rollup_enabled: bool = True,
     ):
         """
         Args:
@@ -204,10 +211,13 @@ class MetricsCompressor:
             collection_watermark_provider: Optional coroutine returning the end
                 of the last completely collected window. Compression never
                 passes it, so hours that are still being (back)filled stay raw.
+            rollup_enabled: Refresh and prune the ``workload_usage_hourly``
+                rollup in the same cycle (roadmap E3).
         """
         self._db = db_manager
         self._config = config or get_config()
         self._collection_watermark_provider = collection_watermark_provider
+        self._rollup_enabled = rollup_enabled
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,6 +240,13 @@ class MetricsCompressor:
             "hourly_rows_pruned": 0,
         }
 
+        # Roll up before compression and pruning, while the last day is still raw.
+        if self._rollup_enabled:
+            try:
+                await self.refresh_usage_rollup(now)
+            except Exception as e:
+                logger.error("Workload usage rollup failed: %s", e)
+
         try:
             compressed = await self._compress_to_hourly(now)
             stats["hours_compressed"] = compressed["hours"]
@@ -246,6 +263,12 @@ class MetricsCompressor:
             stats["hourly_rows_pruned"] = await self._prune_hourly(now)
         except Exception as e:
             logger.error("Hourly metrics pruning failed: %s", e)
+
+        if self._rollup_enabled:
+            try:
+                await self._prune_usage_rollup(now)
+            except Exception as e:
+                logger.error("Workload usage rollup pruning failed: %s", e)
 
         # Reclaim dead tuple space so the PVC can be reused for new data.
         try:
@@ -439,6 +462,49 @@ class MetricsCompressor:
                 return await cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
+    # Workload usage rollup (roadmap E3)
+    # ------------------------------------------------------------------
+
+    def _usage_rollup(self):
+        from ..core.workload_usage import WorkloadUsageRollup
+        from ..storage.base_workload_usage_repository import create_workload_usage_repository
+        from ..utils.time import parse_query_step_seconds
+
+        repository = create_workload_usage_repository(self._db, self._db.db_type)
+        lookback_days = max(int(getattr(self._config, "RECOMMENDATION_LOOKBACK_DAYS", 14) or 14), 1)
+        return WorkloadUsageRollup(
+            repository,
+            step_seconds=parse_query_step_seconds(self._config.PROMETHEUS_QUERY_RANGE_STEP),
+            backfill_hours=lookback_days * 24,
+        )
+
+    async def refresh_usage_rollup(self, now: datetime | None = None, *, refresh_hours: int | None = None):
+        """Re-roll the recent hours of ``workload_usage_hourly`` (and backfill it on first run)."""
+        from ..core.workload_usage import DEFAULT_REFRESH_HOURS
+
+        rollup = self._usage_rollup()
+        result = await rollup.refresh(
+            now or self._now(),
+            refresh_hours=refresh_hours if refresh_hours is not None else DEFAULT_REFRESH_HOURS,
+        )
+        if result.hours:
+            logger.info(
+                "Workload usage rollup: %d hours rolled into %d rows (%d late hours).",
+                result.hours,
+                result.rows,
+                result.late_hours,
+            )
+        return result
+
+    async def _prune_usage_rollup(self, now: datetime) -> int:
+        """Prune the rollup like the hourly aggregates (METRICS_AGGREGATED_RETENTION_DAYS)."""
+        retention_days = self._config.METRICS_AGGREGATED_RETENTION_DAYS
+        if retention_days < 0:
+            return 0
+        cutoff = floor_hour(now - timedelta(days=retention_days))
+        return await self._usage_rollup().repository.prune_before(cutoff)
+
+    # ------------------------------------------------------------------
     # Retention: prune old raw rows
     # ------------------------------------------------------------------
 
@@ -562,6 +628,7 @@ class MetricsCompressor:
                 "combined_metrics_hourly",
                 "container_metrics",
                 "container_metrics_hourly",
+                "workload_usage_hourly",
                 "carbon_intensity_history",
                 "node_snapshots",
                 "node_snapshots_scd",

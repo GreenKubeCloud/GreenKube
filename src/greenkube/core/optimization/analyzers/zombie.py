@@ -1,4 +1,3 @@
-# src/greenkube/core/optimization/analyzers/zombie.py
 """Zombie pod detection: cost without meaningful energy consumption."""
 
 from typing import TYPE_CHECKING, List
@@ -22,16 +21,17 @@ class ZombieAnalyzer(Analyzer):
         cfg = self.config
         projector = ImpactProjector.for_context(context)
 
-        for (ns, target_kind, target_name), series in context.target_series().items():
-            agg = {
-                "total_cost": sum(metric.total_cost for metric in series),
-                "joules": sum(metric.joules for metric in series),
-            }
-            if agg["total_cost"] > cfg.ZOMBIE_COST_THRESHOLD and agg["joules"] < cfg.ZOMBIE_ENERGY_THRESHOLD:
+        for target, summary in context.workload_summaries():
+            ns, target_kind, target_name = target
+            total_cost = summary.total_cost
+            joules = summary.joules
+            if total_cost > cfg.ZOMBIE_COST_THRESHOLD and joules < cfg.ZOMBIE_ENERGY_THRESHOLD:
                 label = target_label(target_kind, target_name)
                 # Deleting the workload releases its whole allocation: observed cost,
                 # plus the idle, dynamic and embodied CO2e share it holds.
-                delta = projector.workload_deletion(projector.workload_ref(ns, target_kind, target_name), series)
+                delta = projector.workload_deletion(
+                    projector.workload_ref(ns, target_kind, target_name), context.workload_rows(target)
+                )
                 recs.append(
                     Recommendation(
                         pod_name=target_name,
@@ -40,12 +40,12 @@ class ZombieAnalyzer(Analyzer):
                         scope=scope_for_target_kind(target_kind),
                         **owner_fields(target_kind, target_name),
                         description=(
-                            f"{label} has cost ${agg['total_cost']:.4f} but consumed only "
-                            f"{agg['joules']:.0f} Joules. It may be idle or a zombie."
+                            f"{label} has cost ${total_cost:.4f} but consumed only "
+                            f"{joules:.0f} Joules. It may be idle or a zombie."
                         ),
                         reason=(
-                            f"Pod cost {agg['total_cost']:.4f} but "
-                            f"consumed only {agg['joules']:.1f} Joules. "
+                            f"Pod cost {total_cost:.4f} but "
+                            f"consumed only {joules:.1f} Joules. "
                             f"This may be an idle or 'zombie' pod."
                         ),
                         priority="high",

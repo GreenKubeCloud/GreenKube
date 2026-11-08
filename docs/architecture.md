@@ -303,14 +303,15 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
 
 1. **Native (`greenkube`)** — the built-in analyzers:
    - **Zombie Pods:** workloads consuming cost with minimal energy.
-   - **Rightsizing:** over-provisioned CPU/memory based on observed usage
-     percentiles and configured headroom.
+   - **Rightsizing (two-way):** request decreases for over-provisioned CPU/memory
+     (after a week of coverage) and reliability increases when p99 usage nears the
+     request, from per-step usage percentiles and configured headroom.
    - **Autoscaling Candidates:** high coefficient of variation / spike ratio,
      skipping workloads already governed by an HPA.
    - **Off-peak Scaling:** idle windows suggesting scale-to-zero schedules.
    - **Idle Namespaces:** namespaces with minimal activity.
    - **Carbon-Aware Scheduling:** workloads running during high-intensity periods.
-   - **Node optimization:** overprovisioned / underutilized nodes.
+   - **Node optimization:** overprovisioned nodes.
    - **Orphaned PV / LoadBalancer cleanup.**
 
 2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice.
@@ -654,7 +655,7 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 100 kg CO₂e)
 
 **Recommendations:**
-- `RECOMMENDATION_LOOKBACK_DAYS` — Default: 7
+- `RECOMMENDATION_LOOKBACK_DAYS` — Default: 14
 - `RIGHTSIZING_CPU_THRESHOLD` — Default: 0.3
 - `ZOMBIE_COST_THRESHOLD` — Default: 0.01
 - `RECOMMENDATION_MAX_METRIC_ROWS` — Default: 750000

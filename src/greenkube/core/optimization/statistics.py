@@ -9,6 +9,7 @@ from greenkube.utils.time import SECONDS_PER_YEAR
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
+    from greenkube.models.workload_usage import WorkloadUsageSummary
 
 
 def percentile(values: List[float], p: float) -> float:
@@ -24,12 +25,36 @@ def percentile(values: List[float], p: float) -> float:
     return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
 
 
+#: Quantile sketch of a rollup baseline row: (percentile, number of points).
+#: 101 points, point ``i`` standing for quantile ``i/100``, so the interpolated
+#: :func:`percentile` of the sketch returns the stored p50/p90/p95/p99 and max.
+_SKETCH_LAYOUT: Tuple[Tuple[int, int], ...] = ((50, 51), (90, 40), (95, 5), (99, 4))
+
+
+def _sketch_points(metric: CombinedMetric, usage_attr: str, observed_max: float) -> Optional[List[float]]:
+    """Quantile sketch of the usage distribution carried by a rollup baseline row, if any."""
+    prefix = "cpu" if usage_attr.startswith("cpu") else "memory"
+    points: List[float] = []
+    for p, count in _SKETCH_LAYOUT:
+        value = getattr(metric, f"{prefix}_usage_p{p}", None)
+        if value is None:
+            return None
+        points.extend([float(value)] * count)
+    points.append(max(observed_max, points[-1]))
+    return points
+
+
 def usage_stats(
     series: List[CombinedMetric],
     usage_attr: str,
     max_attr: str,
 ) -> Tuple[float, float, List[float]]:
-    """Returns weighted average, observed maximum, and average points for a usage series."""
+    """Returns weighted average, observed maximum, and usage points for a usage series.
+
+    Rows aggregated from the usage rollup (``BaselineMetric``) contribute a
+    quantile sketch of their target's per-step distribution instead of their
+    average, so percentiles of the points match the usage summary (E3, E9).
+    """
     weighted_total = 0.0
     sample_total = 0
     average_points: List[float] = []
@@ -44,10 +69,15 @@ def usage_stats(
         usage_float = float(usage)
         weighted_total += usage_float * sample_count
         sample_total += sample_count
-        average_points.append(usage_float)
 
         max_usage = getattr(metric, max_attr, None)
-        observed_max_values.append(float(max_usage if max_usage is not None else usage_float))
+        row_max = float(max_usage if max_usage is not None else usage_float)
+        observed_max_values.append(row_max)
+        sketch = _sketch_points(metric, usage_attr, row_max)
+        if sketch is not None:
+            average_points.extend(sketch)
+        else:
+            average_points.append(usage_float)
 
     if sample_total == 0 or not observed_max_values:
         return 0.0, 0.0, []
@@ -64,6 +94,12 @@ def latest_request_value(series: List[CombinedMetric], request_attr: str) -> int
     latest_timestamp = max(metric.timestamp for metric in timestamped if metric.timestamp is not None)
     latest_metrics = [metric for metric in timestamped if metric.timestamp == latest_timestamp]
     return max((getattr(metric, request_attr) or 0) for metric in latest_metrics)
+
+
+def coverage_days(summary: "WorkloadUsageSummary") -> Optional[float]:
+    """Days between the first and the end of the last observed hour, or None when unknown."""
+    seconds = summary.coverage_seconds
+    return seconds / 86_400.0 if seconds is not None else None
 
 
 def balanced_rightsizing_target(config: "Config", avg_usage: float, observed_max: float, p95_usage: float) -> int:
