@@ -57,6 +57,17 @@ UPDATED_MANIFEST = BASE_MANIFEST.replace("1000m", "300m")
 POLICY = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: policy\n"
 REPOSITORY_FILES = 5_000
 MAX_PROVIDER_CALLS = 15
+#: Derived labels, CODEOWNERS lookups and the validation status, on top of opening the PR.
+MAX_PULL_REQUEST_METADATA_CALLS = 8
+_METADATA_MARKERS = ("/labels", "/statuses/", "/requested_reviewers", "CODEOWNERS", "/comments", "/notes", "/users")
+
+
+def _is_pull_request_metadata_call(request: str) -> bool:
+    method, _, path = request.partition(" ")
+    if method == "PUT" and "/merge_requests/" in path:
+        return True
+    return any(marker in path for marker in _METADATA_MARKERS)
+
 
 SERVERS = {"github": FakeGitHubServer, "gitlab": FakeGitLabServer, "gitea": FakeGiteaServer}
 API_BASE_URLS = {"github": None, "gitlab": None, "gitea": "http://gitea.local"}
@@ -273,7 +284,14 @@ async def test_opening_a_plan_pr_in_a_5000_file_repository_costs_fewer_than_15_p
 
     assert operations.failures == []
     assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
-    assert server.calls() < MAX_PROVIDER_CALLS, server.breakdown()
+    core = [request for request in server.requests if not _is_pull_request_metadata_call(request)]
+    assert len(core) < MAX_PROVIDER_CALLS, server.breakdown()
+    # Labels, CODEOWNERS and the validation status (J2, J3, J5) cost a constant number of calls.
+    assert server.calls() - len(core) <= MAX_PULL_REQUEST_METADATA_CALLS, server.breakdown()
+    assert server.pull_request_labels[1] == ["greenkube", "optimization/rightsizing"]
+    assert [(status["sha"], status.get("context", status.get("name"))) for status in server.statuses] == [
+        (repository.refs[plan_branch_name(plan)], "greenkube/validation")
+    ]
     branch = plan_branch_name(plan)
     assert repository.file_text(branch, MANIFEST_PATH) == UPDATED_MANIFEST
     assert repository.file_text(branch, POLICY_PATH) == POLICY
@@ -290,7 +308,7 @@ async def test_opening_a_plan_pr_in_a_5000_file_repository_costs_fewer_than_15_p
     ]
     assert operations.successes[0]["commit_sha"] == repository.refs[branch]
     # No request ever enumerates file contents of the whole repository.
-    assert sum(1 for request in server.requests if "/contents/" in request or "/repository/files/" in request) <= 4
+    assert sum(1 for request in core if "/contents/" in request or "/repository/files/" in request) <= 4
 
     from greenkube.api.metrics_endpoint import get_metrics_output
 

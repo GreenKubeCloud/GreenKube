@@ -257,7 +257,10 @@ async def test_rollback_plan_on_a_moved_head_with_unchanged_files_opens_its_pull
     assert plans.committed_on == [MOVED_HEAD]
     assert len(provider.commit_requests) == 1
     assert provider.commit_requests[0].base_revision == MOVED_HEAD
-    assert provider.commit_requests[0].message.startswith("Rollback GreenKube plan original-plan")
+    message = provider.commit_requests[0].message
+    assert message.startswith("greenkube: revert rightsize payments/api")
+    assert "Rollback of GreenKube plan original-plan" in message
+    assert "\nGreenKube-Rollback-Of: original-plan\n" in message
     assert {record.pr_number for record in pull_requests.records} == {17}
     # The PR body names the planned base and the moved head the commit was made on.
     body = provider.pull_request_bodies[0]

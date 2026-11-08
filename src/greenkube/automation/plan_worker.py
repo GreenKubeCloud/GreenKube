@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol, TypeVar, cast
+from functools import partial
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from greenkube.automation.git.base import (
     EMPTY_PULL_REQUEST_OPTIONS,
@@ -29,6 +30,15 @@ from greenkube.automation.git.base import (
 )
 from greenkube.automation.git.budget import DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET, provider_call_budget
 from greenkube.automation.plans import PlanRevisionResolver
+from greenkube.automation.pr_content import (
+    PullRequestContext,
+    PullRequestMetadata,
+    PullRequestRenderSettings,
+    derive_metadata,
+    render_commit_message,
+    render_pull_request,
+)
+from greenkube.automation.pr_content.model import PullRequestFeatures
 from greenkube.automation.rollback import (
     inverse_plan_id,
     same_resolved_renderer_config,
@@ -71,6 +81,10 @@ from greenkube.storage.base_plan_operation_repository import (
 )
 from greenkube.utils.time import ensure_utc
 
+logger = logging.getLogger(__name__)
+
+#: Commit status context published on the PR head (J5).
+VALIDATION_STATUS_CONTEXT = "greenkube/validation"
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
 _ACTIVE_PLAN_STATUSES = frozenset({PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _OPEN_PULL_REQUEST_STATES = frozenset({"open", "opened"})
@@ -323,6 +337,8 @@ class PlanWorker:
         pull_request_options: PullRequestOptions | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_seconds: int = 900,
+        render_settings: PullRequestRenderSettings | None = None,
+        pull_request_features: PullRequestFeatures | None = None,
     ) -> None:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
@@ -337,6 +353,8 @@ class PlanWorker:
         self.pull_request_options = pull_request_options or EMPTY_PULL_REQUEST_OPTIONS
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
+        self._render_settings = render_settings
+        self._pull_request_features = pull_request_features
 
     async def process_once(self, worker_id: str) -> bool:
         """Claim and process a single operation, returning whether one was claimed."""
@@ -902,15 +920,18 @@ class PlanWorker:
             branch_state = await self._branch_state(execution, target, branch, plan)
             if branch_state != "applied":
                 raise _replan_error("Existing pull request branch does not match the approved file plan.")
+            context = await self._pull_request_context(plan, target, branch)
+            metadata = self._pull_request_metadata(context)
             await self._git_call(
                 execution,
                 provider.ensure_pull_request_options,
                 target.repository,
                 existing_pr,
-                self.pull_request_options,
+                self._existing_pull_request_options(provider, existing_pr, metadata),
             )
             await self._validate_rollback_review(plan)
             await self._record_open_pull_request(plan, target, branch, existing_pr)
+            await self._decorate_pull_request(execution, context, target, existing_pr, metadata)
             return _PlanResult(target, branch, _pull_request_head_sha(existing_pr), existing_pr)
 
         if plan.status is PlanStatus.PR_OPEN:
@@ -937,7 +958,13 @@ class PlanWorker:
         commit_sha: str | None = None
         if branch_state == "base":
             await self._validate_rollback_review(plan)
-            request = self._commit_request(plan, target, branch)
+            commit_context = await self._pull_request_context(plan, target, branch)
+            request = self._commit_request(
+                plan,
+                target,
+                branch,
+                message=render_commit_message(commit_context, self.render_settings),
+            )
             try:
                 result = await self._git_call(execution, provider.create_commit, request)
             except GitConflictError:
@@ -958,23 +985,26 @@ class PlanWorker:
         # back to adopting the matching open request below (D5).
         await self._heartbeat(execution, force=True)
         await self._validate_rollback_review(plan)
-        recommendations, missing_recommendation_ids = await self._recommendation_records_for_pr(plan)
-        planned_base_revision = await self._planned_base_revision(plan)
+        context = await self._pull_request_context(plan, target, branch)
+        metadata = self._pull_request_metadata(context)
+        content = render_pull_request(context, self.render_settings)
+        title = content.title
+        if (
+            metadata.draft
+            and not provider.supports(GitProviderCapability.DRAFT_PULL_REQUEST)
+            and provider.name == "gitea"
+        ):
+            # Gitea has no draft API; a "WIP:" prefix marks the request as work in progress (J2).
+            title = f"WIP: {title}"
+        creation_options = self._creation_pull_request_options(provider, metadata)
         try:
             pull_request = await provider.create_pull_request(
                 target.repository,
                 head=branch,
                 base=plan.source.ref,
-                title=_pull_request_title(plan),
-                body=_pull_request_body(
-                    plan,
-                    branch,
-                    target.repository,
-                    recommendations,
-                    missing_recommendation_ids,
-                    planned_base_revision=planned_base_revision,
-                ),
-                options=self.pull_request_options,
+                title=title,
+                body=content.body,
+                options=creation_options,
             )
         except GitProviderTransientError:
             raise
@@ -986,19 +1016,40 @@ class PlanWorker:
                 branch,
                 plan.source.ref,
             )
-            if existing_pr is None:
+            if existing_pr is not None:
+                pull_request = existing_pr
+                await self._git_call(
+                    execution,
+                    provider.ensure_pull_request_options,
+                    target.repository,
+                    pull_request,
+                    self._existing_pull_request_options(provider, pull_request, metadata),
+                )
+            elif creation_options != self.pull_request_options:
+                # The provider refused the draft GreenKube added for a high-risk plan (e.g. a
+                # GitHub plan without draft pull requests): open the request ready for review.
+                logger.warning("Git provider refused a draft pull request for plan %s; opening it ready.", plan.plan_id)
+                try:
+                    pull_request = await provider.create_pull_request(
+                        target.repository,
+                        head=branch,
+                        base=plan.source.ref,
+                        title=content.title,
+                        body=content.body,
+                        options=self.pull_request_options,
+                    )
+                except GitProviderTransientError:
+                    raise
+                except GitProviderError as retry_error:
+                    raise PlanWorkerError(
+                        f"Provider rejected pull-request creation without a matching open request: {retry_error}",
+                        retryable=True,
+                    ) from retry_error
+            else:
                 raise PlanWorkerError(
                     f"Provider rejected pull-request creation without a matching open request: {exc}",
                     retryable=True,
                 ) from exc
-            pull_request = existing_pr
-            await self._git_call(
-                execution,
-                provider.ensure_pull_request_options,
-                target.repository,
-                pull_request,
-                self.pull_request_options,
-            )
         self._validate_pull_request(pull_request, branch, plan.source.ref)
         pull_request_head = _pull_request_head_sha(pull_request)
         if commit_sha is None or pull_request_head is None or pull_request_head.lower() != commit_sha.lower():
@@ -1009,7 +1060,179 @@ class PlanWorker:
                 raise _replan_error("Pull-request branch changed while it was being opened; re-plan before applying.")
         commit_sha = pull_request_head or commit_sha
         await self._record_open_pull_request(plan, target, branch, pull_request, commit_sha=commit_sha)
+        await self._decorate_pull_request(execution, context, target, pull_request, metadata, head_sha=commit_sha)
         return _PlanResult(target, branch, commit_sha, pull_request)
+
+    # ------------------------------------------------------------------
+    # Pull-request content and metadata (roadmap J1, J2, J3, J5)
+    # ------------------------------------------------------------------
+
+    @property
+    def render_settings(self) -> PullRequestRenderSettings:
+        if self._render_settings is None:
+            self._render_settings = PullRequestRenderSettings.from_config()
+        return self._render_settings
+
+    @property
+    def pull_request_features(self) -> PullRequestFeatures:
+        if self._pull_request_features is None:
+            self._pull_request_features = PullRequestFeatures.from_config()
+        return self._pull_request_features
+
+    async def _pull_request_context(self, plan: Plan, target: GitProviderTarget, branch: str) -> PullRequestContext:
+        recommendations, missing_recommendation_ids = await self._recommendation_records_for_pr(plan)
+        return PullRequestContext(
+            plan=plan,
+            repository=target.repository.full_name,
+            branch=branch,
+            recommendations=tuple(recommendations),
+            missing_recommendation_ids=tuple(missing_recommendation_ids),
+            planned_base_revision=await self._planned_base_revision(plan),
+        )
+
+    def _pull_request_metadata(self, context: PullRequestContext) -> PullRequestMetadata:
+        features = self.pull_request_features
+        return derive_metadata(
+            context,
+            default_labels=features.default_labels,
+            draft_high_risk=features.draft_high_risk,
+        )
+
+    def _creation_pull_request_options(
+        self,
+        provider: PlanGitProvider,
+        metadata: PullRequestMetadata,
+    ) -> PullRequestOptions:
+        """Configured options, plus draft for a high-risk plan when the provider has drafts (J2)."""
+        options = self.pull_request_options
+        if metadata.draft and not options.draft and provider.supports(GitProviderCapability.DRAFT_PULL_REQUEST):
+            return options.model_copy(update={"draft": True})
+        return options
+
+    def _existing_pull_request_options(
+        self,
+        provider: PlanGitProvider,
+        pull_request: PullRequestInfo,
+        metadata: PullRequestMetadata,
+    ) -> PullRequestOptions:
+        """Options re-applied to an adopted request: never undraft a request GreenKube opened as draft."""
+        options = self.pull_request_options
+        raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
+        if (
+            metadata.draft
+            and not options.draft
+            and raw.get("draft") is True
+            and provider.supports(GitProviderCapability.DRAFT_PULL_REQUEST)
+        ):
+            return options.model_copy(update={"draft": True})
+        return options
+
+    async def _decorate_pull_request(
+        self,
+        execution: _Execution,
+        context: PullRequestContext,
+        target: GitProviderTarget,
+        pull_request: PullRequestInfo,
+        metadata: PullRequestMetadata,
+        *,
+        head_sha: str | None = None,
+    ) -> None:
+        """Best effort: derived labels, CODEOWNERS reviewers and the validation status.
+
+        The request is already open and recorded, so a provider refusal here is
+        logged and never fails or retries the plan operation.
+        """
+        provider: Any = target.provider
+        features = self.pull_request_features
+        repository = target.repository
+        plan = context.plan
+        if provider.supports(GitProviderCapability.PULL_REQUEST_METADATA):
+            reviewers: list[str] = []
+            team_reviewers: list[str] = []
+            if features.codeowners and provider.supports(GitProviderCapability.REVIEWERS):
+                try:
+                    reviewers, team_reviewers = await self._codeowner_reviewers(
+                        execution, provider, context, repository
+                    )
+                except PlanOperationLeaseError:
+                    raise
+                except Exception as error:
+                    logger.warning("Could not read CODEOWNERS for plan %s (%s).", plan.plan_id, _safe_error(error))
+                if not provider.supports(GitProviderCapability.TEAM_REVIEWERS):
+                    team_reviewers = []
+            labels = list(metadata.labels) if provider.supports(GitProviderCapability.LABELS) else []
+            if labels or reviewers or team_reviewers:
+                try:
+                    await self._git_call(
+                        execution,
+                        partial(
+                            provider.add_pull_request_metadata,
+                            repository,
+                            pull_request,
+                            labels=labels,
+                            reviewers=reviewers,
+                            team_reviewers=team_reviewers,
+                        ),
+                    )
+                except PlanOperationLeaseError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "Could not add labels or reviewers to the pull request of plan %s (%s).",
+                        plan.plan_id,
+                        _safe_error(error),
+                    )
+        sha = head_sha or _pull_request_head_sha(pull_request)
+        if features.commit_status and sha and provider.supports(GitProviderCapability.COMMIT_STATUS):
+            state, description = _validation_status(plan)
+            try:
+                await self._git_call(
+                    execution,
+                    partial(
+                        provider.set_commit_status,
+                        repository,
+                        sha,
+                        state=state,
+                        context=VALIDATION_STATUS_CONTEXT,
+                        description=description,
+                        target_url=self.render_settings.link(f"changes/{plan.plan_id}"),
+                    ),
+                )
+            except PlanOperationLeaseError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "Could not publish the %s status for plan %s (%s).",
+                    VALIDATION_STATUS_CONTEXT,
+                    plan.plan_id,
+                    _safe_error(error),
+                )
+
+    async def _codeowner_reviewers(
+        self,
+        execution: _Execution,
+        provider: Any,
+        context: PullRequestContext,
+        repository: GitRepository,
+    ) -> tuple[list[str], list[str]]:
+        """Reviewers owning the touched paths in CODEOWNERS at the planned base revision (J3)."""
+        file_plan = context.plan.file_plan
+        revision = context.base_revision
+        if file_plan is None or not GIT_OBJECT_SHA.fullmatch(revision or ""):
+            return [], []
+        codeowners = await self._git_call(execution, provider.read_codeowners, repository, revision)
+        if codeowners is None:
+            return [], []
+        owners = codeowners.owners_for(edit.path for edit in file_plan.files)
+        if not owners:
+            return [], []
+        users, teams = await self._git_call(execution, provider.codeowner_reviewers, repository, owners)
+        configured_users = {name.casefold() for name in self.pull_request_options.reviewers}
+        configured_teams = {name.casefold() for name in self.pull_request_options.team_reviewers}
+        return (
+            [name for name in users if name.casefold() not in configured_users],
+            [name for name in teams if name.casefold() not in configured_teams],
+        )
 
     def _validate_operation_and_plan(self, operation: Operation, plan: Plan, now: datetime) -> None:
         if operation.plan_id != plan.plan_id:
@@ -1111,18 +1334,24 @@ class PlanWorker:
         branch: str,
         *,
         start_revision: str | None = None,
+        message: str | None = None,
     ) -> GitCommitRequest:
-        """Build the atomic commit; ``start_revision`` defaults to the plan's base revision."""
+        """Build the atomic commit; ``start_revision`` defaults to the plan's base revision.
+
+        ``message`` is the rendered commit message with its ``GreenKube-Plan`` and
+        ``GreenKube-Recommendations`` trailers (J1).
+        """
         file_plan = plan.file_plan
         assert file_plan is not None
         if plan.digest is None:
             raise PlanWorkerError("Cannot create a commit without a plan digest.")
         files = [GitFileEdit(path=edit.path, action=edit.operation, content=edit.content) for edit in file_plan.files]
-        message = (
-            f"Rollback GreenKube plan {plan.rollback_of_plan_id} ({plan.digest[:19]})"
-            if plan.rollback_of_plan_id is not None
-            else f"Apply GreenKube plan {plan.plan_id} ({plan.digest[:19]})"
-        )
+        if message is None:
+            message = (
+                f"Rollback GreenKube plan {plan.rollback_of_plan_id} ({plan.digest[:19]})"
+                if plan.rollback_of_plan_id is not None
+                else f"Apply GreenKube plan {plan.plan_id} ({plan.digest[:19]})"
+            )
         return GitCommitRequest(
             repo=target.repository,
             branch=branch,
@@ -1410,14 +1639,17 @@ class PlanWorker:
                 return None
             if branch_state != "applied":
                 return None
+            context = await self._pull_request_context(plan, target, branch)
+            metadata = self._pull_request_metadata(context)
             await self._git_call(
                 execution,
                 target.provider.ensure_pull_request_options,
                 target.repository,
                 pull_request,
-                self.pull_request_options,
+                self._existing_pull_request_options(target.provider, pull_request, metadata),
             )
             await self._record_open_pull_request(plan, target, branch, pull_request)
+            await self._decorate_pull_request(execution, context, target, pull_request, metadata)
             return _PlanResult(target, branch, _pull_request_head_sha(pull_request), pull_request)
         finally:
             try:
@@ -1650,215 +1882,26 @@ def _validated_tree_changes(comparison: object, start_revision: str, head_ref: s
     return changes
 
 
-def _pull_request_title(plan: Plan) -> str:
-    if plan.rollback_of_plan_id is not None:
-        return f"Rollback GreenKube plan {plan.rollback_of_plan_id}"
-    return f"Apply GreenKube plan {plan.plan_id}"
-
-
-def _revision_identity(value: str) -> str:
-    normalized = value.strip().casefold()
-    match = re.search(r"(?:^|@sha(?:1|256):)([0-9a-f]{40}|[0-9a-f]{64})$", normalized)
-    return match.group(1) if match is not None else normalized
-
-
-def _pull_request_body(
-    plan: Plan,
-    branch: str,
-    repository: GitRepository,
-    recommendations: Sequence[RecommendationRecord],
-    missing_recommendation_ids: Sequence[int] = (),
-    *,
-    planned_base_revision: str | None = None,
-) -> str:
+def _validation_status(plan: Plan) -> tuple[Literal["success", "failure"], str]:
+    """State and description of the ``greenkube/validation`` commit status (J5)."""
     file_plan = plan.file_plan
-    if file_plan is None:
-        raise PlanWorkerError("A pull request requires a persisted, render-validated file plan.")
-    base_revision = planned_base_revision or file_plan.base_revision
-    committed_on_revision = plan.committed_on_revision
-
-    title = "Automated GitOps rollback" if plan.rollback_of_plan_id is not None else "Automated GitOps change"
-    lines = [
-        f"{title} created from an approved GreenKube plan.",
-        "",
-        "## Plan and provenance",
-        f"- Plan: `{plan.plan_id}`",
-        f"- Digest: `{plan.digest}`",
-        f"- Provider: `{plan.source.provider_id}`",
-        f"- Repository: `{repository.full_name}`",
-        (
-            f"- Controller: `{plan.source.controller_kind.value}/"
-            f"{plan.source.controller_namespace}/{plan.source.controller_name}`"
-        ),
-        f"- Renderer: `{plan.source.renderer.value}`",
-        f"- Source path: `{plan.source.path}`",
-        f"- Base branch/revision: `{plan.source.ref}` / `{base_revision}`",
-    ]
-    if committed_on_revision is not None and committed_on_revision.lower() != base_revision.lower():
-        lines.append(
-            f"- Committed on moved head: `{committed_on_revision}` (every file this plan touches is unchanged "
-            "since the planned base revision)"
-        )
-    lines.extend(
-        (
-            f"- Plan branch: `{branch}`",
-            f"- Validation: `{'passed' if file_plan.validation.passed else 'failed'}`",
-        )
-    )
-    if plan.source.source_revision:
-        lines.append(f"- Observed controller revision: `{plan.source.source_revision}`")
-        if _revision_identity(plan.source.source_revision) != _revision_identity(base_revision):
-            lines.append(
-                f"- Revision drift: this plan targets branch head `{base_revision}`, while the controller "
-                f"reports `{plan.source.source_revision}`; refresh discovery or sync before approval if the live "
-                "revision is required."
-            )
-    if plan.rollback_of_plan_id is not None:
-        lines.append(f"- Rolls back plan: `{plan.rollback_of_plan_id}`")
-
-    target = plan.action.target
-    lines.extend(
-        (
-            "",
-            "## Target and operations",
-            f"- Workload: `{target.namespace}/{target.kind}/{target.name}`",
-        )
-    )
-    for operation in plan.action.operations:
-        if isinstance(operation, SetContainerResources):
-            requests = ", ".join(f"{name}={value}" for name, value in sorted(operation.resources.requests.items()))
-            limits = ", ".join(f"{name}={value}" for name, value in sorted(operation.resources.limits.items()))
-            resources = "; ".join(
-                part
-                for part in (f"requests: {requests}" if requests else "", f"limits: {limits}" if limits else "")
-                if part
-            )
-            lines.append(f"- Container `{operation.container}`: {resources or 'no resource values'}")
-        else:
-            lines.append(f"- Operation: `{operation.op}`")
-
-    lines.extend(("", "## Recommendation evidence and impact"))
-    for record in recommendations:
-        evidence = record.evidence
-        lines.extend(
-            (
-                f"### Recommendation #{record.id}: `{record.type.value}`",
-                f"- Target: `{record.namespace or 'cluster'}/{record.owner_kind or 'resource'}/"
-                f"{record.owner_name or record.pod_name or 'unknown'}`"
-                + (f", container `{record.container_name}`" if record.container_name else ""),
-                f"- Finding: {_pr_inline(record.reason or record.description)}",
-                f"- Projected annual savings: cost {_pr_cost(record.potential_savings_cost)}, "
-                f"carbon {_pr_carbon(record.potential_savings_co2e_grams)}",
-                f"- Confidence/risk: {_pr_percent(record.confidence)} / `{_pr_inline(record.risk_level or 'unknown')}`",
-            )
-        )
-        if record.risk_factors:
-            lines.append(f"- Risk factors: {_pr_inline(', '.join(record.risk_factors))}")
-        if evidence is None:
-            lines.append("- Measurement evidence: not available in the persisted recommendation.")
-            continue
-
-        current = evidence.current
-        proposed = evidence.proposed
-        resource_changes = [
-            f"CPU {_pr_cpu(current.cpu_request_millicores)} -> {_pr_cpu(proposed.cpu_request_millicores)}",
-            f"memory {_pr_memory(current.memory_request_bytes)} -> {_pr_memory(proposed.memory_request_bytes)}",
-        ]
-        lines.append(f"- Current → proposed requests: {'; '.join(resource_changes)}")
-        lines.append(
-            f"- Observation: {evidence.sample_count} samples, {_pr_percent(evidence.coverage_ratio)} coverage, "
-            f"window {_pr_time(evidence.observation_window_start)} to {_pr_time(evidence.observation_window_end)}"
-        )
-        if evidence.cpu_usage is not None:
-            lines.append(
-                f"- CPU usage: p95 {_pr_cpu(round(evidence.cpu_usage.p95))}, "
-                f"max {_pr_cpu(round(evidence.cpu_usage.max))}"
-            )
-        if evidence.memory_usage is not None:
-            lines.append(
-                f"- Memory usage: p95 {_pr_memory(round(evidence.memory_usage.p95))}, "
-                f"max {_pr_memory(round(evidence.memory_usage.max))}"
-            )
-        if evidence.rollback_conditions:
-            conditions = [
-                condition.description or f"{condition.metric} {condition.comparator} {condition.threshold:g}"
-                for condition in evidence.rollback_conditions
-            ]
-            lines.append(f"- Rollback conditions: {_pr_inline('; '.join(conditions))}")
-
-    if missing_recommendation_ids:
-        missing = ", ".join(f"#{item}" for item in missing_recommendation_ids)
-        lines.extend(
-            ("", f"Recommendation evidence is unavailable for {missing}; review those records before merging.")
-        )
-
-    files = "\n".join(f"- `{edit.path}` ({edit.operation})" for edit in file_plan.files)
-    lines.extend(
-        (
-            "",
-            "## Files",
-            files,
-            "",
-            "## Rendered change",
-            "The renderer validated this diff against the target workload and rejected unrelated resource changes.",
-            "",
-            "### Source diff",
-            "```diff",
-            _pr_truncate(file_plan.diff),
-            "```",
-            "",
-            "### Rendered diff",
-            "```diff",
-            _pr_truncate(file_plan.rendered_diff),
-            "```",
-            "",
-            "## Verification",
-            "After merge, GreenKube waits for the GitOps controller to sync, then evaluates fresh resource usage, "
-            "readiness, restarts, throttling, and trusted cost/carbon samples. Projected savings are estimates until "
-            "the configured verification window produces a verdict.",
-        )
-    )
-    return _pr_truncate("\n".join(lines), max_chars=32_000)
+    render_valid = file_plan is not None and file_plan.validation.passed
+    policy = plan.policy_result if isinstance(plan.policy_result, dict) else {}
+    if "allowed" in policy:
+        warnings = policy.get("warnings") if isinstance(policy.get("warnings"), list) else []
+        policy_text = "policy passed" if policy.get("allowed") else "policy rejected"
+        if policy.get("allowed") and warnings:
+            policy_text += f" with {len(warnings)} warning(s)"
+        policy_ok = bool(policy.get("allowed"))
+    else:
+        policy_text, policy_ok = "policy not recorded", True
+    render_text = "render diff valid" if render_valid else "render validation failed"
+    state: Literal["success", "failure"] = "success" if render_valid and policy_ok else "failure"
+    return state, f"GreenKube: {render_text}; {policy_text}."
 
 
-def _pr_inline(value: object, *, max_chars: int = 1_000) -> str:
-    text = " ".join(str(value).split()).replace("`", "\\`")
-    return text if len(text) <= max_chars else f"{text[:max_chars].rstrip()}..."
-
-
-def _pr_cost(value: float | None) -> str:
-    return "not available" if value is None else f"${value:,.2f}/year"
-
-
-def _pr_carbon(value: float | None) -> str:
-    return "not available" if value is None else f"{value:,.3f} g CO2e/year"
-
-
-def _pr_percent(value: float | None) -> str:
-    return "not available" if value is None else f"{value:.0%}"
-
-
-def _pr_cpu(value: int | None) -> str:
-    return "not available" if value is None else f"{value}m"
-
-
-def _pr_memory(value: int | None) -> str:
-    if value is None:
-        return "not available"
-    for suffix, factor in (("Gi", 1_073_741_824), ("Mi", 1_048_576), ("Ki", 1_024)):
-        if value >= factor and value % factor == 0:
-            return f"{value // factor}{suffix}"
-    return f"{value}B"
-
-
-def _pr_time(value: datetime | None) -> str:
-    return value.isoformat() if value is not None else "not available"
-
-
-def _pr_truncate(value: str, *, max_chars: int = 12_000) -> str:
-    if len(value) <= max_chars:
-        return value
-    return f"{value[:max_chars].rstrip()}\n... truncated after {max_chars} characters"
+def _safe_error(error: Exception) -> str:
+    return f"{type(error).__name__}: {str(error)[:200]}"
 
 
 def _pull_request_head_sha(pull_request: PullRequestInfo) -> str | None:
