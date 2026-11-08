@@ -169,12 +169,16 @@ class MetricRowAllocator:
         """Builds the node profile of one interval: power, embodied, prices, environment.
 
         Unit prices follow the cost chain (observed per-resource costs of the
-        interval's rows, then the catalog, then custom rates).
+        interval's rows, then the catalog, then custom rates). Only rows whose
+        cost is really observed (OpenCost/Kubecost) feed the observed tier: a
+        stored row with a modeled cost must never be read back as an observed
+        price, or a recompute would blend model outputs into "observed" rates.
         """
+        observed_rows = [row for row in rows if _is_observed_cost(row)]
         resolver = UnitPriceResolver(
             catalog=self.catalog,
             custom_rates=self.custom_rates,
-            observed=observed_rates_from_rows(rows, hours),
+            observed=observed_rates_from_rows(observed_rows, hours),
         )
         cores = spec.cpu_capacity_cores or spec.vcores or 1.0
         memory_gib = (spec.memory_capacity_bytes or 0.0) / BYTES_PER_GIB
@@ -278,7 +282,7 @@ class MetricRowAllocator:
 
         idle: Optional[NodeIdleMetric] = None
         if emit_idle and idle_impact is not None:
-            idle = self._idle_row(idle_impact, node, rows, samples, hours, idle_fields or {})
+            idle = self._idle_row(idle_impact, node, modeled, rows, samples, hours, idle_fields or {})
         return AllocatedWindow(rows=allocated, idle=idle)
 
     def _apply(
@@ -318,15 +322,24 @@ class MetricRowAllocator:
         self,
         impact: WorkloadImpact,
         node: NodeImpactProfile,
+        modeled: UnitPrices,
         rows: Sequence[CombinedMetric],
         samples: Sequence[Any],
         hours: float,
         fields: Mapping[str, Any],
     ) -> NodeIdleMetric:
+        """Builds the ``__idle__`` row of a node interval.
+
+        OpenCost idle cost is not queried, so the unreserved capacity is always
+        priced at the modeled (catalog or custom) prices and labeled with that
+        tier, never with the observed tier of the pods' OpenCost costs.
+        """
         reserved_cpu = sum(sample.cpu_reserved_cores * sample.hours for sample in samples)
         reserved_mem = sum(sample.mem_reserved_gib * sample.hours for sample in samples)
         unreserved_cpu = max(node.allocatable_cpu * hours - reserved_cpu, 0.0) / hours if hours > 0 else 0.0
         unreserved_mem = max(node.allocatable_mem * hours - reserved_mem, 0.0) / hours if hours > 0 else 0.0
+        cost_cpu = _rescale(impact.cost_allocated.cpu, node.prices.cpu_core_hour, modeled.cpu_core_hour)
+        cost_ram = _rescale(impact.cost_allocated.ram, node.prices.ram_gib_hour, modeled.ram_gib_hour)
         first = rows[0]
         timestamp = fields.get("timestamp") or first.timestamp
         if timestamp is None:
@@ -338,10 +351,10 @@ class MetricRowAllocator:
             joules=impact.energy_kwh.total * JOULES_PER_KWH,
             co2e_grams=impact.co2e_operational_g,
             embodied_co2e_grams=impact.co2e_embodied_g,
-            total_cost=impact.cost_allocated.total,
-            cost_cpu=impact.cost_allocated.cpu,
-            cost_ram=impact.cost_allocated.ram,
-            cost_source=node.prices.source.value,
+            total_cost=cost_cpu + cost_ram,
+            cost_cpu=cost_cpu,
+            cost_ram=cost_ram,
+            cost_source=modeled.source.value,
             cpu_unreserved_cores=unreserved_cpu,
             memory_unreserved_bytes=unreserved_mem * BYTES_PER_GIB,
             gpu_power_watts=node.gpu_unattributed_watts or None,

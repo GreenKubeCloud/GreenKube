@@ -204,6 +204,37 @@ async def test_observed_costs_are_kept(stores):
     assert pods["b"].cost_source in {"pricing_catalog", "custom_rate"}
 
 
+async def test_recompute_never_reads_modeled_costs_back_as_observed_prices(stores):
+    """Modeled rows of a node with one OpenCost pod stay identical across recomputes (idempotence)."""
+    repository, node_repository = stores
+    await _seed(repository, node_repository, total_cost=1.0, cost_cpu=0.6, cost_ram=0.4, cost_source="opencost")
+    # A second pod without OpenCost: modeled rows now outnumber the observed one.
+    await repository.write_combined_metrics([_pod("c", 500, 100, 1 * GIB)])
+    recomputer = MetricRecomputer(Config(), repository, node_repository)
+    window = (T0, T0 + timedelta(seconds=STEP))
+
+    await recomputer.run(T0, T0 + timedelta(hours=1))
+    first = {row.pod_name: row for row in await repository.read_combined_metrics(*window)}
+    (first_idle,) = await repository.read_idle_metrics(*window)
+    await recomputer.run(T0, T0 + timedelta(hours=1), only_outdated=False)
+    second = {row.pod_name: row for row in await repository.read_combined_metrics(*window)}
+    (second_idle,) = await repository.read_idle_metrics(*window)
+
+    assert second["a"].cost_source == "opencost" and second["a"].total_cost == pytest.approx(1.0)
+    for pod in ("b", "c"):
+        assert first[pod].cost_source in {"pricing_catalog", "custom_rate"}
+        assert (second[pod].cost_source, second[pod].total_cost) == (
+            first[pod].cost_source,
+            pytest.approx(first[pod].total_cost),
+        )
+    # OpenCost idle cost is not queried: the idle row is modeled and labeled so.
+    assert first_idle.cost_source in {"pricing_catalog", "custom_rate"}
+    assert (second_idle.cost_source, second_idle.total_cost) == (
+        first_idle.cost_source,
+        pytest.approx(first_idle.total_cost),
+    )
+
+
 def test_container_weights_fall_back_like_collection():
     base = CombinedMetric(pod_name="p", namespace="n", container_name="c")
     cpu, memory = container_weights(
