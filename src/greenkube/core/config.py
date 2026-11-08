@@ -565,6 +565,20 @@ class Config(BaseSettings):
             raise ValueError(f"{info.field_name} must be a positive duration such as '30m', '12h' or '7d'.")
         return text
 
+    @field_validator("AUTH_LOGIN_RATE_LIMIT", mode="after")
+    @classmethod
+    def _validate_login_rate_limit(cls, value: str) -> str:
+        from limits import parse_many
+
+        text = str(value).strip()
+        try:
+            parsed = parse_many(text) if "/" in text else []
+        except ValueError:
+            parsed = []
+        if len(parsed) != 1 or parsed[0].amount <= 0:
+            raise ValueError("AUTH_LOGIN_RATE_LIMIT must be a single rate such as '5/minute' or '10/hour'.")
+        return text
+
     @field_validator("PROMETHEUS_SCRAPE_INTERVAL", "COLLECTION_SAFETY_LAG", "COLLECTION_MAX_BACKFILL", mode="after")
     @classmethod
     def _validate_collection_durations(cls, value: str, info) -> str:
