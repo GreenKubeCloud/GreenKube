@@ -219,29 +219,6 @@ class GitHubProvider(GitProvider):
             return
         raise GitProviderError(f"GitHub could not create branch '{branch}' in {repo.full_name}.", status_code=422)
 
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None:
-        body = {
-            "message": message,
-            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-            "branch": branch,
-            "committer": {"name": self.author_name, "email": self.author_email},
-        }
-        if sha:
-            body["sha"] = sha
-        await self._request(
-            "PUT",
-            f"/repos/{repo.owner}/{repo.name}/contents/{quote_git_path(path)}",
-            json_body=body,
-        )
-
     async def _branch_head_sha(self, repo: GitRepository, branch: str) -> str:
         response = await self._request(
             "GET",

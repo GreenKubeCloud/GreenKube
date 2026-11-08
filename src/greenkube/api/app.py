@@ -314,7 +314,7 @@ def _inline_worker_factory(worker):
     async def run_inline_worker(heartbeat) -> None:
         from greenkube.cli.automation_worker import run_worker
 
-        await run_worker(queue="plans", plan_worker=worker, heartbeat=heartbeat)
+        await run_worker(plan_worker=worker, heartbeat=heartbeat)
 
     return run_inline_worker
 

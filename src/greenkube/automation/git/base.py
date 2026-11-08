@@ -942,17 +942,6 @@ class GitProvider(ABC):
     @abstractmethod
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None: ...
 
-    @abstractmethod
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None: ...
-
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         """Creates one native atomic commit, or fails when the provider cannot guarantee it."""
         self._validate_commit_request(request)

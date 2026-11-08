@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Sequence, cast
 
 import pytest
+from typer.testing import CliRunner
 
 from greenkube.automation.plan_runtime import PlanProvidersNotConfiguredError
 from greenkube.automation.plan_worker import PlanWorker
@@ -58,7 +59,7 @@ async def test_plans_queue_builds_production_runtime_without_injected_worker(mon
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)
 
-    await automation_worker.run_worker(once=True, queue="plans")
+    await automation_worker.run_worker(once=True)
 
     assert runtime_calls == 1
     assert worker_ids
@@ -258,10 +259,21 @@ async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch, ou
     assert not await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
 
 
-@pytest.mark.asyncio
-async def test_annotation_based_queue_is_rejected():
-    with pytest.raises(ValueError, match="annotation-based operations are no longer supported"):
-        await automation_worker.process_once(queue="legacy")
+def test_deprecated_queue_flag_accepts_only_plans(monkeypatch):
+    runs: list[dict] = []
+
+    async def run_worker(**kwargs):
+        runs.append(kwargs)
+
+    monkeypatch.setattr(automation_worker, "run_worker", run_worker)
+    runner = CliRunner()
+
+    rejected = runner.invoke(automation_worker.app, ["--once", "--queue", "legacy"])
+    accepted = runner.invoke(automation_worker.app, ["--once", "--queue", "plans"])
+
+    assert rejected.exit_code == 2
+    assert accepted.exit_code == 0
+    assert [run["once"] for run in runs] == [True]
 
 
 @pytest.mark.asyncio
@@ -271,7 +283,7 @@ async def test_plans_queue_safely_idles_when_provider_json_is_absent(monkeypatch
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)
 
-    assert not await automation_worker.process_once(queue="plans")
+    assert not await automation_worker.process_once()
 
 
 @pytest.mark.asyncio
@@ -299,7 +311,7 @@ async def test_plan_worker_runtime_starts_and_cancels_pr_poller(monkeypatch):
 
     monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", create_poller)
     monkeypatch.setattr(automation_worker, "process_once", process_once)
-    task = asyncio.create_task(automation_worker.run_worker(poll_seconds=10, queue="plans", plan_worker=worker))
+    task = asyncio.create_task(automation_worker.run_worker(poll_seconds=10, plan_worker=worker))
 
     await started.wait()
     task.cancel()
@@ -337,7 +349,7 @@ async def test_pr_poller_failures_are_restarted_without_stopping_the_queue(monke
 
     with caplog.at_level("ERROR", logger="greenkube.cli.automation_worker"):
         with pytest.raises(_StopLoop):
-            await automation_worker.run_worker(poll_seconds=10, queue="plans", plan_worker=worker)
+            await automation_worker.run_worker(poll_seconds=10, plan_worker=worker)
 
     assert processed == 50
     assert poller_runs >= 2
@@ -377,7 +389,6 @@ async def test_dedicated_worker_supervises_metrics_listener_without_changing_que
     await automation_worker.run_worker(
         poll_seconds=10,
         once=True,
-        queue="plans",
         plan_worker=worker,
         metrics_port=8123,
     )

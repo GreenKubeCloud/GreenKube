@@ -339,28 +339,6 @@ class GitLabProvider(GitProvider):
         if response.status_code not in (200, 201):
             raise GitProviderError(f"Could not create branch '{branch}': {response.text[:200]}")
 
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None:
-        encoded_path = quote(path.lstrip("/"), safe="")
-        await self._request(
-            "PUT",
-            f"/projects/{self._project(repo)}/repository/files/{encoded_path}",
-            json_body={
-                "branch": branch,
-                "content": content,
-                "commit_message": message,
-                "encoding": "text",
-                **({"last_commit_id": sha} if sha else {}),
-            },
-        )
-
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         self._validate_commit_request(request)
         repo = request.repo
