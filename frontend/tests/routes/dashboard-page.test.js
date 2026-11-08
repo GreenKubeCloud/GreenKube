@@ -64,4 +64,18 @@ describe('DashboardPage', () => {
 
 		expect(signal.aborted).toBe(true);
 	});
+
+	it('reads recommendations without scheduling a scan and aborts them on unmount (BUG-25)', async () => {
+		const { unmount } = render(DashboardPage);
+		await waitFor(() => expect(api.getActiveRecommendations).toHaveBeenCalled());
+
+		const [params] = api.getActiveRecommendations.mock.calls.at(-1);
+		expect(params).not.toHaveProperty('refresh');
+		const savingsSignal = api.getRecommendationSavings.mock.calls.at(-1)[0].signal;
+
+		unmount();
+
+		expect(params.signal.aborted).toBe(true);
+		expect(savingsSignal.aborted).toBe(true);
+	});
 });

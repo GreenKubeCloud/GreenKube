@@ -127,13 +127,14 @@
 
 		if (seq !== loadSeq) return;
 
-		// Fetch recommendations + savings in the background
+		// Fetch recommendations + savings in the background. Plain reads only:
+		// scans run on the controller schedule, never on page load (BUG-25).
 		try {
 			const ns = $selectedNamespace || undefined;
 			const last = $selectedTimeRange;
 			const [recs, sav] = await Promise.all([
-				getActiveRecommendations({ namespace: ns, refresh: true }),
-				getRecommendationSavings({ namespace: ns, last })
+				getActiveRecommendations({ namespace: ns, signal }),
+				getRecommendationSavings({ namespace: ns, last, signal })
 			]);
 			if (seq !== loadSeq) return;
 			recommendations = recs;

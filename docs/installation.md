@@ -105,7 +105,7 @@ kubectl -n greenkube get secret greenkube \
 
 If you set `secrets.apiKey`, read it from `greenkube-values` instead; with `secrets.existingSecret`, from your own Secret.
 
-Paste the value into the dashboard's **API authentication required** dialog and select **Connect**. The browser keeps the key in memory only: it is never stored in `localStorage` or cookies, so a full page reload asks for it again.
+Paste the value into the **API key** field of the dashboard's **API authentication required** dialog and select **Connect**. The dialog is a regular sign-in form (account `api-key`), so your browser or password manager can save and autofill the key. The dashboard keeps the key in `sessionStorage` for the current tab: reloading the tab keeps you signed in, while closing the tab, selecting **Sign out**, or a `401` response forgets it. The key is never written to `localStorage` or cookies.
 
 For API clients:
 
@@ -399,7 +399,7 @@ Key-handling rules:
 
   kubectl -n greenkube rollout restart deploy/greenkube-api
   ```
-- The browser keeps the entered key in memory only; it is not persisted. Users must re-enter it after a reload.
+- The dashboard keeps the entered key in `sessionStorage` for the current browser tab only. It survives reloads of that tab and is forgotten when the tab closes, on **Sign out**, and on any `401` (for example after a rotation). It is never written to `localStorage` or cookies; password managers can store it because the dialog is a standard sign-in form.
 - Run the UI and API on the same origin. If they must differ, set `config.corsOrigins` explicitly and make sure the proxy forwards `Authorization` and `OPTIONS`.
 
 ### Credentials and GitOps (Argo CD, Flux)

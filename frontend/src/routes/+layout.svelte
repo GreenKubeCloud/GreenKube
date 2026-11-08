@@ -2,7 +2,16 @@
 	import '../app.css';
 	import { page } from '$app/stores';
 	import { sidebarCollapsed, servicesHealth, healthPopupDismissed } from '$lib/stores.js';
-	import { ApiError, clearApiToken, getHealth, getServicesHealth, setApiToken } from '$lib/api.js';
+	import {
+		ApiError,
+		AUTH_REQUIRED_EVENT,
+		clearApiToken,
+		getHealth,
+		getServicesHealth,
+		hasApiToken,
+		restoreApiToken,
+		setApiToken
+	} from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import HealthBadge from '$lib/components/HealthBadge.svelte';
 	import HealthPopup from '$lib/components/HealthPopup.svelte';
@@ -14,6 +23,10 @@
 	let authToken = '';
 	let authError = '';
 	let authenticating = false;
+	let signedIn = false;
+	// Bumped after a successful sign-in so the current page remounts and
+	// reloads the data its first, unauthenticated requests could not read.
+	let authEpoch = 0;
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard' },
@@ -24,6 +37,7 @@
 		{ href: '/settings', label: 'Settings' }
 	];
 
+	/** @returns {Promise<'ok'|'unauthorized'|'error'>} */
 	async function refreshServicesHealth() {
 		try {
 			const result = await getServicesHealth();
@@ -36,12 +50,13 @@
 			if (hasIssues && !$healthPopupDismissed) {
 				showHealthPopup = true;
 			}
-			return true;
+			return 'ok';
 		} catch (error) {
 			if (error instanceof ApiError && error.status === 401) {
 				showAuthDialog = true;
+				return 'unauthorized';
 			}
-			return false;
+			return 'error';
 		}
 	}
 
@@ -54,32 +69,50 @@
 		authenticating = true;
 		authError = '';
 		setApiToken(token);
-		if (await refreshServicesHealth()) {
+		// Only a 401 proves the key wrong; another failure (e.g. a degraded
+		// health endpoint) keeps the key so the user is not locked out.
+		if ((await refreshServicesHealth()) !== 'unauthorized') {
 			showAuthDialog = false;
 			authToken = '';
+			signedIn = hasApiToken();
+			authEpoch += 1;
 		} else {
 			clearApiToken();
+			signedIn = false;
 			authError = 'The API key was rejected.';
 		}
 		authenticating = false;
 	}
 
 	function handleAuthRequired() {
+		// api.js already forgot the rejected key.
+		signedIn = hasApiToken();
 		showAuthDialog = true;
 		authError = '';
 	}
 
-	onMount(async () => {
-		window.addEventListener('greenkube-auth-required', handleAuthRequired);
-		try {
-			health = await getHealth();
-		} catch {
-			healthError = true;
-		}
+	function signOut() {
+		clearApiToken();
+		signedIn = false;
+		authToken = '';
+		authError = '';
+		showAuthDialog = true;
+	}
 
-		await refreshServicesHealth();
+	onMount(() => {
+		restoreApiToken();
+		signedIn = hasApiToken();
+		window.addEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+		(async () => {
+			try {
+				health = await getHealth();
+			} catch {
+				healthError = true;
+			}
+			await refreshServicesHealth();
+		})();
 
-		return () => window.removeEventListener('greenkube-auth-required', handleAuthRequired);
+		return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
 	});
 
 	function handlePopupDismiss() {
@@ -126,18 +159,40 @@
 		>
 			<h2 id="api-auth-title" class="text-lg font-bold text-dark-100">API authentication required</h2>
 			<p class="mt-2 text-sm text-dark-400">
-				This GreenKube instance requires an API key. The key is kept in memory only.
+				This GreenKube instance requires an API key. It is kept for this browser tab only and
+				forgotten when the tab closes; your password manager can save it.
 			</p>
-			<form class="mt-5 space-y-4" on:submit|preventDefault={authenticate}>
-				<label for="api-token" class="block text-sm font-medium text-dark-300">API key</label>
-				<input
-					id="api-token"
-					type="password"
-					bind:value={authToken}
-					autocomplete="off"
-					class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
-					placeholder="Paste the GreenKube API key"
-				/>
+			<form
+				class="mt-5 space-y-4"
+				method="post"
+				action="/"
+				aria-label="Sign in with an API key"
+				on:submit|preventDefault={authenticate}
+			>
+				<div class="space-y-1">
+					<label for="api-username" class="block text-sm font-medium text-dark-300">Account</label>
+					<input
+						id="api-username"
+						name="username"
+						type="text"
+						value="api-key"
+						readonly
+						autocomplete="username"
+						class="w-full rounded-lg border border-dark-700 bg-dark-800/60 px-3 py-2 text-dark-400 outline-hidden"
+					/>
+				</div>
+				<div class="space-y-1">
+					<label for="api-token" class="block text-sm font-medium text-dark-300">API key</label>
+					<input
+						id="api-token"
+						name="password"
+						type="password"
+						bind:value={authToken}
+						autocomplete="current-password"
+						class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
+						placeholder="Paste the GreenKube API key"
+					/>
+				</div>
 				{#if authError}
 					<p class="text-sm text-red-400" role="alert">{authError}</p>
 				{/if}
@@ -223,6 +278,23 @@
 				{/if}
 			</div>
 
+			{#if signedIn}
+				<button
+					type="button"
+					on:click={signOut}
+					class="w-full flex items-center justify-center gap-2 mt-1 py-1.5 rounded-lg text-xs
+					       text-dark-500 hover:text-dark-200 hover:bg-dark-800 transition-colors"
+					aria-label="Sign out"
+					title="Forget the API key for this tab"
+				>
+					<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+							  d="M15 12H3m0 0l4-4m-4 4l4 4m6-10h5a2 2 0 012 2v12a2 2 0 01-2 2h-5" />
+					</svg>
+					{#if !$sidebarCollapsed}<span>Sign out</span>{/if}
+				</button>
+			{/if}
+
 			<!-- Collapse toggle -->
 			<button
 				on:click={() => sidebarCollapsed.update(v => !v)}
@@ -241,6 +313,8 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 overflow-y-auto">
-		<slot />
+		{#key authEpoch}
+			<slot />
+		{/key}
 	</main>
 </div>

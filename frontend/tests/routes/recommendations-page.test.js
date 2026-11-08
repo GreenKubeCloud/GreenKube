@@ -5,8 +5,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/svelte';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
 import * as api from '$lib/api.js';
+import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
 
 vi.mock('$lib/api.js', () => ({
+	discardAutomationPlan: vi.fn(),
+	getNamespaces: vi.fn(),
+	getOptimizationRun: vi.fn(),
+	listOptimizationRuns: vi.fn(),
+	requestOptimizationRun: vi.fn(),
 	getActiveRecommendations: vi.fn(),
 	getAppliedRecommendations: vi.fn(),
 	getAutomationStatus: vi.fn(),
@@ -104,6 +110,10 @@ const validatedPlan = {
 describe('RecommendationsPage GitOps plan flow', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		resetOptimizationRunsSupport();
+		api.discardAutomationPlan.mockResolvedValue({ discarded: true, status: 204 });
+		api.getNamespaces.mockResolvedValue(['production']);
+		api.listOptimizationRuns.mockResolvedValue([]);
 		api.getActiveRecommendations.mockResolvedValue([recommendation]);
 		api.getAppliedRecommendations.mockResolvedValue([]);
 		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, mode: 'inline' });
