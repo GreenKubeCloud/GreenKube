@@ -365,8 +365,12 @@ class Recommendation(BaseModel):
     risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
         None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
@@ -377,6 +381,20 @@ class Recommendation(BaseModel):
     impact: Optional[dict] = Field(
         None,
         description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
+    value: Optional[dict] = Field(
+        None,
+        description=(
+            "Risk-adjusted expected value (ValueScore, roadmap I1): value_annual, p_success, incident_cost, "
+            "effort_cost, ev and currency, with their components. A projection, never a measured value."
+        ),
+    )
+    eligibility: Optional[dict] = Field(
+        None,
+        description=(
+            "Delivery eligibility computed when the recommendation is read (roadmap F10): can_open_pr, "
+            "delivery_modes, blockers [{code, message, fix}] and warnings. Never persisted."
+        ),
     )
 
     @model_validator(mode="after")
@@ -435,8 +453,12 @@ class RecommendationRecord(BaseModel):
     risk_factors: List[str] = Field(default_factory=list, description="Explainable risk contributors.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[EffortLevel] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     action: Optional[ActionPlanV3] = Field(None, description="Typed container-aware action for GitOps planning.")
     patch: Optional[RecommendationPatchV2] = Field(
         None, description="Deprecated compatibility patch view over action; retained for legacy consumers."
@@ -447,6 +469,20 @@ class RecommendationRecord(BaseModel):
     impact: Optional[dict] = Field(
         None,
         description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
+    value: Optional[dict] = Field(
+        None,
+        description=(
+            "Risk-adjusted expected value (ValueScore, roadmap I1): value_annual, p_success, incident_cost, "
+            "effort_cost, ev and currency, with their components. A projection, never a measured value."
+        ),
+    )
+    eligibility: Optional[dict] = Field(
+        None,
+        description=(
+            "Delivery eligibility computed when the recommendation is read (roadmap F10): can_open_pr, "
+            "delivery_modes, blockers [{code, message, fix}] and warnings. Never persisted."
+        ),
     )
     # Applied lifecycle fields
     applied_at: Optional[datetime] = Field(None, description="When the recommendation was applied.")
@@ -561,6 +597,7 @@ class RecommendationRecord(BaseModel):
             reversible=rec.reversible,
             requires_restart=rec.requires_restart,
             impact=dict(rec.impact) if rec.impact is not None else None,
+            value=dict(rec.value) if rec.value is not None else None,
             created_at=created_at or datetime.now(timezone.utc),
         )
 
@@ -721,9 +758,15 @@ class TopRecommendation(BaseModel):
     risk_level: Optional[str] = Field(None, description="Reliability risk: low, medium or high.")
     confidence: Optional[float] = Field(None, description="Confidence in the recommendation, 0.0 to 1.0.")
     effort: Optional[str] = Field(None, description="Implementation effort: low, medium or high.")
-    ranking_score: Optional[float] = Field(None, description="Multi-criteria ranking score.")
-    ranking_factors: dict = Field(default_factory=dict, description="Ranking score breakdown.")
+    ranking_score: Optional[float] = Field(
+        None, description="Expected value (EV) in currency per year; the default ranking key (roadmap I1)."
+    )
+    ranking_factors: dict = Field(
+        default_factory=dict, description="EV breakdown in currency per year; the factors sum to ranking_score."
+    )
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
+    value: Optional[dict] = Field(None, description="Risk-adjusted expected value (ValueScore, roadmap I1).")
+    eligibility: Optional[dict] = Field(None, description="Delivery eligibility (roadmap F10).")
 
 
 class MetricsSummaryRow(BaseModel):

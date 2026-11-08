@@ -22,7 +22,7 @@ from greenkube.core.optimization.actions import build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.core.optimization.dedup import finalize_recommendations
-from greenkube.core.optimization.enrich import enrich_recommendations
+from greenkube.core.optimization.enrich import enrich_recommendations, rescore_with_track_record
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.registry import build_sources, parse_source_priority
@@ -230,8 +230,10 @@ class OptimizationEngine:
             )
             generation = await self.collect(context)
             outcomes = generation.source_outcomes
+            # Scans score with priors; fold in each source's measured track record (I3).
+            scored = await rescore_with_track_record(generation.recommendations, reco_repo, self.config)
             diff, persisted = await self._persist(
-                generation.recommendations,
+                scored,
                 reco_repo,
                 namespace=namespace,
                 incomplete_sources=generation.incomplete_sources,
