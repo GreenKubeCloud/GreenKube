@@ -24,7 +24,7 @@ from greenkube.auth.metrics import record_auth_failure
 from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, required_scope
 from greenkube.auth.service import AuthService, api_key_principal, user_principal
 from greenkube.auth.settings import AuthSettings
-from greenkube.auth.tokens import constant_time_equals
+from greenkube.auth.tokens import constant_time_equals, sha256_hex
 from greenkube.gitops.contracts import Operation, Plan
 from greenkube.gitops.discovery.kubernetes import KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime, create_gitops_discovery_runtime
@@ -175,7 +175,8 @@ async def _bearer_principal(request: Request, settings: AuthSettings, service: A
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     token = token.strip()
     if scheme.lower() == "bearer" and token:
-        if settings.legacy_api_key and constant_time_equals(token, settings.legacy_api_key):
+        # Compare digests so that neither the content nor the length of the key leaks through timing.
+        if settings.legacy_api_key and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key)):
             return _legacy_principal(token)
         if service is not None and token.startswith("gk_"):
             key = await service.resolve_api_key(token)
