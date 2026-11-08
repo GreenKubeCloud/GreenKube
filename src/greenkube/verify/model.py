@@ -233,6 +233,17 @@ ALLOWED_TRANSITIONS: dict[MeasurementState, frozenset[MeasurementState]] = {
 }
 
 
+def is_allowed_transition(current: MeasurementState, target: MeasurementState) -> bool:
+    """Whether ``current → target`` is a lifecycle transition.
+
+    ``measuring → measuring`` is the only self-transition: it records an event
+    (e.g. ``health_checked``) on a change that is still being measured.
+    """
+    if current is MeasurementState.MEASURING and target is MeasurementState.MEASURING:
+        return True
+    return target in ALLOWED_TRANSITIONS.get(current, frozenset())
+
+
 class ChangeOutcome(str, Enum):
     """Outcome of one measurement (C4)."""
 

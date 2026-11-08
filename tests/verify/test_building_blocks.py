@@ -14,9 +14,11 @@ from greenkube.verify.load_driver import LoadDriverResolver, PrometheusRangeRead
 from greenkube.verify.model import (
     ChangeOutcome,
     Confounder,
+    MeasurementState,
     SavingsEstimate,
     TimeWindow,
     WorkloadSpecObservation,
+    is_allowed_transition,
 )
 from greenkube.verify.series import hourly_buckets, quantity_series
 from greenkube.verify.strategy import MeasurementSettings, RequestRightsizingStrategy
@@ -163,6 +165,37 @@ async def test_resolver_series_reads_prometheus_candidates_and_cpu_usage():
     buckets = hourly_buckets(workload_rows(window), window, STEP)
     series = await resolver.series(change, window, buckets)
     assert set(series) == {"istio_rps", "cpu_usage"}
+
+
+async def test_resolver_names_the_prometheus_candidates_whose_query_failed():
+    change = change_event(hour_now() - timedelta(days=9), load_metric="sum(rate(jobs_total[5m]))")
+    window = TimeWindow(start=hour_now() - timedelta(hours=6), end=hour_now())
+
+    async def query_range(promql, start, end, step):
+        if "istio" in promql:
+            return None  # Prometheus unreachable for this query
+        return []  # reachable, no such series
+
+    resolver = LoadDriverResolver(PrometheusRangeReader(query_range=query_range))
+    buckets = hourly_buckets(workload_rows(window), window, STEP)
+    collected = await resolver.collect(change, window, buckets)
+    assert collected.unavailable == ["istio_rps"]
+    assert set(collected.series) == {"cpu_usage"}
+    # Without Prometheus configured, nothing is "unavailable": only CPU usage is a candidate.
+    unconfigured = await LoadDriverResolver(PrometheusRangeReader(settings=SimpleNamespace())).collect(
+        change, window, buckets
+    )
+    assert unconfigured.unavailable == [] and set(unconfigured.series) == {"cpu_usage"}
+
+
+def test_the_change_lifecycle_only_allows_its_transitions():
+    assert is_allowed_transition(MeasurementState.APPLIED, MeasurementState.MEASURING)
+    assert is_allowed_transition(MeasurementState.MEASURING, MeasurementState.MEASURING)
+    assert is_allowed_transition(MeasurementState.REALIZED, MeasurementState.REGRESSED)
+    assert not is_allowed_transition(MeasurementState.CLOSED, MeasurementState.MEASURING)
+    assert not is_allowed_transition(MeasurementState.REALIZED, MeasurementState.MEASURING)
+    assert not is_allowed_transition(MeasurementState.REALIZED, MeasurementState.REALIZED)
+    assert not is_allowed_transition(MeasurementState.APPLIED, MeasurementState.REALIZED)
 
 
 # ----------------------------------------------------------------------

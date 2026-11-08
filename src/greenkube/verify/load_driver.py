@@ -195,6 +195,19 @@ def coverage(values: Mapping[datetime, float], window: TimeWindow) -> float:
 
 
 @dataclass
+class CollectedLoad:
+    """Candidate load-driver series of one window, and the candidates whose query failed.
+
+    ``unavailable`` lists the Prometheus candidates whose query failed (as
+    opposed to returning no series): their absence says nothing about the
+    workload, so evidence is not frozen without them while a retry may succeed.
+    """
+
+    series: Dict[str, Dict[datetime, float]] = field(default_factory=dict)
+    unavailable: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ResolvedLoad:
     """The selected load driver and its hourly series in both windows."""
 
@@ -214,21 +227,27 @@ class LoadDriverResolver:
         self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[HourBucket]
     ) -> Dict[str, Dict[datetime, float]]:
         """Hourly series of every available candidate over ``window`` (stored in the baseline snapshot)."""
-        found: Dict[str, Dict[datetime, float]] = {}
+        return (await self.collect(change, window, buckets)).series
+
+    async def collect(self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[HourBucket]) -> CollectedLoad:
+        """Like :meth:`series`, also naming the Prometheus candidates whose query failed."""
+        collected = CollectedLoad()
         for candidate in candidates_for(change):
             if candidate.promql is None:
                 values = quantity_series(buckets, "cpu_usage_cores")
             elif self.reader is not None and self.reader.available:
                 try:
                     values = await self.reader.hourly_means(candidate.promql, window)
-                except Exception as exc:  # a driver is optional: never fail the measurement
+                except Exception as exc:
                     logger.info("Load driver %s unavailable for change %s: %s", candidate.key, change.change_id, exc)
                     values = None
+                if values is None:
+                    collected.unavailable.append(candidate.key)
             else:
                 values = None
             if values:
-                found[candidate.key] = values
-        return found
+                collected.series[candidate.key] = values
+        return collected
 
     def resolve(
         self,

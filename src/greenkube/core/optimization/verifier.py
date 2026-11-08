@@ -822,12 +822,15 @@ class RecommendationVerifier:
     # Observation
     # ------------------------------------------------------------------
 
-    async def _read_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
+    async def _read_series(
+        self, record: RecommendationRecord, start: datetime, end: datetime, *, strict: bool = False
+    ) -> List:
         """Reads the metric series of a recommendation target (container rows for container targets).
 
         Within one ``verify_due`` pass the namespace-wide reads are shared by
         every group measured over the same window (e.g. the containers of one
-        rollout).
+        rollout). A failed read returns no rows, or raises with ``strict`` (so
+        a caller freezing evidence retries instead of recording missing data).
         """
         if not record.namespace:
             return []
@@ -860,15 +863,19 @@ class RecommendationVerifier:
                         start_time=start, end_time=end, namespace=record.namespace
                     )
             except Exception as exc:
+                if strict:
+                    raise
                 logger.warning("Could not read metrics for verification of %s: %s", record.id, exc)
                 return []
             if cache is not None:
                 cache[key] = metrics
         return _series_for_record(record, metrics)
 
-    async def _read_pod_series(self, record: RecommendationRecord, start: datetime, end: datetime) -> List:
+    async def _read_pod_series(
+        self, record: RecommendationRecord, start: datetime, end: datetime, *, strict: bool = False
+    ) -> List:
         """Reads the pod-level series of the record's workload (restarts and cost fallback)."""
-        return await self._read_series(record.model_copy(update={"container_name": None}), start, end)
+        return await self._read_series(record.model_copy(update={"container_name": None}), start, end, strict=strict)
 
     async def _observe(self, group: List[RecommendationRecord], windows: MeasurementWindows) -> _Observation:
         lead = group[0]
@@ -917,21 +924,24 @@ class RecommendationVerifier:
         return observation
 
     async def health_gates_for(
-        self, group: Sequence[RecommendationRecord], start: datetime, end: datetime
+        self, group: Sequence[RecommendationRecord], start: datetime, end: datetime, *, strict: bool = False
     ) -> List[HealthGateResult]:
         """Health gates of ``group`` (records of one container) over ``[start, end)``.
 
         Used by the change-measurement pipeline: the same per-replica usage,
         restart, OOM, readiness and throttling gates as a verification, without
-        reading a baseline window.
+        reading a baseline window. With ``strict`` a failed metrics read raises
+        instead of being evaluated as missing data.
         """
         members = list(group)
         if not members:
             return []
         lead = members[0]
         step = _step_seconds(self.config)
-        target = await self._read_series(lead, start, end)
-        pod_series = await self._read_pod_series(lead, start, end) if lead.container_name is not None else target
+        target = await self._read_series(lead, start, end, strict=strict)
+        pod_series = (
+            await self._read_pod_series(lead, start, end, strict=strict) if lead.container_name is not None else target
+        )
         pods = sorted({metric.pod_name for metric in (pod_series or target) if metric.pod_name})
         observation = _Observation(
             scope="workload",

@@ -20,7 +20,8 @@ import pytest
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
-from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository
+from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, InvalidChangeTransitionError
+from greenkube.verify.load_driver import PrometheusRangeReader
 from greenkube.verify.model import (
     ChangeMeasurement,
     ChangeOutcome,
@@ -29,7 +30,7 @@ from greenkube.verify.model import (
     WindowPlan,
     WorkloadSpecObservation,
 )
-from greenkube.verify.service import DECISION_GRACE
+from greenkube.verify.service import DECISION_GRACE, LOAD_DRIVER_RETRY, UNAVAILABLE_DRIVERS_KEY
 from greenkube.verify.strategy import HOURS_PER_YEAR
 from tests.verify.fixtures import (  # pyrefly: ignore[missing-import]
     Scenario,
@@ -114,6 +115,12 @@ async def test_change_tables_are_insert_only_and_transitions_compare_and_swap(da
     assert measuring.version == 2
     with pytest.raises(ChangeConflictError):
         await repo.transition(status, MeasurementState.CLOSED, event_type="stale")
+    # The lifecycle is enforced by the repository: a decided state cannot be skipped or reversed.
+    with pytest.raises(InvalidChangeTransitionError):
+        await repo.transition(measuring, MeasurementState.APPLIED, event_type="rewind")
+    with pytest.raises(InvalidChangeTransitionError):
+        await repo.transition(measuring, MeasurementState.REGRESSED, event_type="skip")
+    assert (await repo.get_status(change.change_id)) == measuring
     events = await repo.list_events(change.change_id)
     assert [(event.event_type, event.from_state, event.to_state) for event in events] == [
         ("change_recorded", None, MeasurementState.APPLIED),
@@ -427,3 +434,146 @@ async def test_an_unrecorded_change_is_repaired_from_its_recommendations(databas
     assert change is not None and change.recommendation_ids == [record.id]
     status = await scenario.changes.get_status("lost-change")
     assert status is not None and status.state is MeasurementState.MEASURING
+
+
+class _Outage:
+    """Makes the scenario's metrics reads raise while ``active`` (a database timeout)."""
+
+    def __init__(self, scenario: Scenario):
+        self.active = False
+        metrics = scenario.metrics
+        pod_read, container_read = metrics.read_combined_metrics_smart, metrics.read_container_metrics_smart
+
+        async def failing_pods(*args, **kwargs):
+            if self.active:
+                raise TimeoutError("statement timeout")
+            return await pod_read(*args, **kwargs)
+
+        async def failing_containers(*args, **kwargs):
+            if self.active:
+                raise TimeoutError("statement timeout")
+            return await container_read(*args, **kwargs)
+
+        metrics.read_combined_metrics_smart = failing_pods  # type: ignore[method-assign]
+        metrics.read_container_metrics_smart = failing_containers  # type: ignore[method-assign]
+
+
+async def test_a_failed_metrics_read_freezes_no_evidence_and_is_retried(database):
+    """A transient read failure never becomes an empty baseline or a frozen inconclusive decision."""
+    scenario = Scenario(database)
+    outage = _Outage(scenario)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+
+    # The baseline read fails when the change is recorded and on the next pass: nothing is frozen.
+    outage.active = True
+    change, _ = await scenario.apply()
+    assert await scenario.changes.get_snapshot_for_change(change.change_id) is None
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    assert await scenario.changes.get_snapshot_for_change(change.change_id) is None
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.APPLIED
+
+    # Once the database answers, the snapshot holds the real baseline.
+    outage.active = False
+    await scenario.service.run_due(now=completed + timedelta(hours=3))
+    snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
+    assert snapshot is not None and snapshot.verify_digest()
+    assert sum(1 for bucket in snapshot.hours if bucket.coverage > 0) >= 7 * 24 * 0.8
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.MEASURING and status.post_window_end is not None
+
+    # The interim health check is not recorded from a failed read.
+    outage.active = True
+    interim = status.post_window_start + timedelta(hours=72) + DECISION_GRACE
+    assert await scenario.service.run_due(now=interim) == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and not status.details.get("health_checked")
+
+    # The decision pass fails: no measurement row, the change keeps measuring.
+    decision = status.post_window_end + DECISION_GRACE
+    assert await scenario.service.run_due(now=decision) == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.MEASURING
+    assert await scenario.changes.list_measurements(change.change_id) == []
+    assert await scenario.measurements.list_for_change(change.change_id) == []
+    assert all(record_status(record) == "verifying" for record in await scenario.records())
+
+    # The next pass decides on the real post-window.
+    outage.active = False
+    updated = await scenario.service.run_due(now=decision + timedelta(minutes=5))
+    assert len(updated) == 2
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    measurement = (await scenario.changes.list_measurements(change.change_id))[0]
+    assert measurement.outcome is ChangeOutcome.REALIZED
+    assert all(record_status(record) == "verified" for record in await scenario.records())
+
+
+async def test_an_unreachable_load_driver_delays_the_baseline_until_its_retry_deadline(database):
+    """A Prometheus outage does not silently degrade a change to the weak CPU driver forever."""
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+    reachable = False
+
+    async def query_range(promql, start, end, step):
+        if not reachable:
+            return None
+        if "istio" in promql:
+            hours = int((end - start).total_seconds() // 3600)
+            return [{"values": [[(start + timedelta(hours=i)).timestamp(), "50"] for i in range(hours + 1)]}]
+        return []
+
+    scenario.service.resolver.reader = PrometheusRangeReader(query_range=query_range)
+    change, _ = await scenario.apply()
+    assert await scenario.changes.get_snapshot_for_change(change.change_id) is None
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    assert await scenario.changes.get_snapshot_for_change(change.change_id) is None
+
+    # Prometheus is back before the deadline: the snapshot holds the Istio series.
+    reachable = True
+    await scenario.service.run_due(now=completed + timedelta(hours=3))
+    snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
+    assert snapshot is not None and "istio_rps" in snapshot.load_series
+    assert UNAVAILABLE_DRIVERS_KEY not in snapshot.collector_versions
+
+    # Prometheus is down at the decision: deferred, then measured without it after the deadline.
+    reachable = False
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    decision = status.post_window_end + DECISION_GRACE
+    await scenario.service.run_due(now=decision)
+    assert await scenario.changes.list_measurements(change.change_id) == []
+    await scenario.service.run_due(now=decision + LOAD_DRIVER_RETRY)
+    measurement = (await scenario.changes.list_measurements(change.change_id))[0]
+    assert measurement.load_driver is not None and measurement.load_driver.key == "cpu_usage"
+    assert measurement.counterfactual_params[UNAVAILABLE_DRIVERS_KEY] == {
+        "pre": [],
+        "post": ["ingress_nginx_rps", "istio_rps", "linkerd_rps"],
+    }
+
+
+async def test_a_baseline_is_frozen_without_a_driver_that_stays_unreachable(database):
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed + timedelta(days=1)))
+
+    async def query_range(promql, start, end, step):
+        return None
+
+    scenario.service.resolver.reader = PrometheusRangeReader(query_range=query_range)
+    change, _ = await scenario.apply()
+    await scenario.service.run_due(now=completed + LOAD_DRIVER_RETRY - timedelta(minutes=5))
+    assert await scenario.changes.get_snapshot_for_change(change.change_id) is None
+    await scenario.service.run_due(now=completed + LOAD_DRIVER_RETRY)
+    snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
+    assert snapshot is not None and set(snapshot.load_series) == {"cpu_usage"}
+    assert snapshot.collector_versions[UNAVAILABLE_DRIVERS_KEY] == ["ingress_nginx_rps", "istio_rps", "linkerd_rps"]
+    assert snapshot.verify_digest()

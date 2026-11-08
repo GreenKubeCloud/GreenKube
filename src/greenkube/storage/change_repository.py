@@ -34,6 +34,7 @@ from greenkube.verify.model import (
     MeasurementState,
     WorkloadRef,
     WorkloadSpecObservation,
+    is_allowed_transition,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ _STATUS_TIMESTAMPS = ("post_window_start", "post_window_end", "updated_at")
 
 class ChangeConflictError(RuntimeError):
     """A compare-and-swap transition found a different state or version."""
+
+
+class InvalidChangeTransitionError(ValueError):
+    """The requested transition is not part of the change lifecycle (C2)."""
 
 
 def change_identity(
@@ -425,8 +430,14 @@ class ChangeRepository:
         """Compare-and-swap ``current`` to ``to_state`` and append its event, atomically.
 
         Raises :class:`ChangeConflictError` when the stored state or version
-        differs from ``current`` (a concurrent transition won).
+        differs from ``current`` (a concurrent transition won), and
+        :class:`InvalidChangeTransitionError` when ``to_state`` cannot follow
+        ``current.state`` in the lifecycle.
         """
+        if not is_allowed_transition(current.state, to_state):
+            raise InvalidChangeTransitionError(
+                f"Change {current.change_id} cannot move from {current.state.value} to {to_state.value}."
+            )
         moment = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
         updated = current.model_copy(
             update={

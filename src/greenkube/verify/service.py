@@ -42,7 +42,7 @@ from greenkube.storage.change_repository import ChangeConflictError, ChangeRepos
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate
 from greenkube.verify.confounders import ConfounderDetector, confidence_score
-from greenkube.verify.load_driver import LoadDriverResolver, PrometheusRangeReader
+from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     Allocation,
     BaselineSnapshot,
@@ -74,6 +74,16 @@ logger = logging.getLogger(__name__)
 
 #: A decision waits this long after the post-window so late samples are collected.
 DECISION_GRACE = timedelta(hours=1)
+#: How long evidence waits for an unreachable Prometheus load driver before it is frozen without it.
+LOAD_DRIVER_RETRY = timedelta(hours=24)
+#: Key of the snapshot's ``collector_versions`` (and of the measurement's
+#: ``counterfactual_params``) listing the load drivers that could not be read.
+UNAVAILABLE_DRIVERS_KEY = "load_drivers_unavailable"
+
+
+class MeasurementReadError(RuntimeError):
+    """A read needed for immutable evidence failed: nothing is frozen and the next pass retries."""
+
 
 #: Recommendation statuses whose current measurement may still be decided.
 _AWAITING_STATUSES = frozenset({RecommendationStatus.APPLIED.value, RecommendationStatus.VERIFYING.value})
@@ -204,7 +214,12 @@ class ChangeMeasurementService:
         return strategy
 
     async def _read_workload(self, target: WorkloadRef, window: TimeWindow) -> List[Any]:
-        """Pod-level rows of the workload in ``window`` (the change is measured on its workload, C5)."""
+        """Pod-level rows of the workload in ``window`` (the change is measured on its workload, C5).
+
+        A failed read raises :class:`MeasurementReadError`: these rows become
+        insert-only evidence (a baseline snapshot or a decision), and an empty
+        result must mean "no data", never "the database timed out".
+        """
         from greenkube.core.optimization.targeting import target_key
 
         if window.end <= window.start:
@@ -214,9 +229,27 @@ class ChangeMeasurementService:
                 start_time=window.start, end_time=window.end, namespace=target.namespace
             )
         except Exception as exc:
-            logger.warning("Could not read metrics of %s for change measurement: %s", "/".join(target.key), exc)
-            return []
+            raise MeasurementReadError(f"metrics of {'/'.join(target.key)} could not be read: {exc}") from exc
         return [row for row in rows or [] if target_key(row) == target.key]
+
+    async def _collect_load(
+        self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[Any], *, retry_until: datetime, now: datetime
+    ) -> CollectedLoad:
+        """Load-driver series of ``window``; raises while a failed Prometheus driver may still be retried."""
+        collected = await self.resolver.collect(change, window, buckets)
+        if collected.unavailable:
+            if now < retry_until:
+                raise MeasurementReadError(
+                    f"load drivers {', '.join(collected.unavailable)} of change {change.change_id} could not be "
+                    f"read; retried until {retry_until.isoformat()}"
+                )
+            logger.warning(
+                "Load drivers %s of change %s stayed unreadable until %s; measuring without them.",
+                ", ".join(collected.unavailable),
+                change.change_id,
+                retry_until.isoformat(),
+            )
+        return collected
 
     async def _records(self, ids: Iterable[int]) -> List[RecommendationRecord]:
         records = []
@@ -449,7 +482,13 @@ class ChangeMeasurementService:
         plan = self._strategy(change).required_windows(change, self.settings)
         rows = await self._read_workload(change.target, plan.pre)
         buckets = hourly_buckets(rows, plan.pre, self._step())
-        load = await self.resolver.series(change, plan.pre, buckets)
+        collected = await self._collect_load(
+            change, plan.pre, buckets, retry_until=ensure_utc(change.created_at) + LOAD_DRIVER_RETRY, now=now
+        )
+        load = collected.series
+        collectors: Dict[str, Any] = {"greenkube": __version__, "query_step_seconds": self._step()}
+        if collected.unavailable:
+            collectors[UNAVAILABLE_DRIVERS_KEY] = sorted(collected.unavailable)
         sources: Dict[str, int] = {}
         for row in rows:
             source = getattr(row, "intensity_source", None)
@@ -467,7 +506,7 @@ class ChangeMeasurementService:
             price_card=_price_card(buckets, getattr(self.config, "CURRENCY", None)),
             intensity_source=max(sources, key=lambda key: sources[key]) if sources else None,
             impact_model_version=IMPACT_MODEL_VERSION,
-            collector_versions={"greenkube": __version__, "query_step_seconds": self._step()},
+            collector_versions=collectors,
             created_at=now,
         ).with_digest()
 
@@ -634,17 +673,22 @@ class ChangeMeasurementService:
     async def _health(
         self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
     ) -> List[HealthGateResult]:
-        """Health gates per container of the change (one failure flags the whole change)."""
+        """Health gates per container of the change (one failure flags the whole change).
+
+        Raises :class:`MeasurementReadError` when the gates cannot be read, so
+        no health check or decision is recorded from missing metrics.
+        """
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
         gates: List[HealthGateResult] = []
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                results = await self.verifier.health_gates_for(group, start, end)
+                results = await self.verifier.health_gates_for(group, start, end, strict=True)
             except Exception as exc:
-                logger.warning("Health gates of %s could not be evaluated: %s", container or "workload", exc)
-                continue
+                raise MeasurementReadError(
+                    f"health gates of {container or 'workload'} could not be evaluated: {exc}"
+                ) from exc
             for gate in results:
                 if container and len(by_container) > 1:
                     gate = gate.model_copy(update={"detail": f"[{container}] {gate.detail}".strip()})
@@ -656,7 +700,11 @@ class ChangeMeasurementService:
     ) -> Tuple[ChangeStatus, List[RecommendationRecord]]:
         """Evaluate health gates once the interim window elapsed, so a harmful change is flagged early."""
         members = [member for member in await self._members(change) if _awaiting(member)]
-        gates = await self._health(members, ensure_utc(plan.post.start), health_end) if members else []
+        try:
+            gates = await self._health(members, ensure_utc(plan.post.start), health_end) if members else []
+        except MeasurementReadError as exc:
+            logger.warning("Interim health check of change %s is retried next pass: %s", change.change_id, exc)
+            return status, []
         failed = [gate for gate in gates if gate.status is HealthGateStatus.FAILED]
         flagged: List[RecommendationRecord] = []
         if failed:
@@ -739,7 +787,14 @@ class ChangeMeasurementService:
         snapshot = await self._ensure_snapshot(change, now)
         post_rows = await self._read_workload(change.target, plan.post)
         post_buckets = hourly_buckets(post_rows, plan.post, self._step())
-        post_load = await self.resolver.series(change, plan.post, post_buckets)
+        collected = await self._collect_load(
+            change,
+            plan.post,
+            post_buckets,
+            retry_until=ensure_utc(plan.post.end) + DECISION_GRACE + LOAD_DRIVER_RETRY,
+            now=now,
+        )
+        post_load = collected.series
         pre_load = {
             key: {utc_hour(hour): float(value) for hour, value in series.items()}
             for key, series in snapshot.load_series.items()
@@ -802,7 +857,9 @@ class ChangeMeasurementService:
             baseline_sha256=snapshot.content_sha256,
             windows=plan,
             load_driver=load.info if load is not None else None,
-            counterfactual_params=result.counterfactual_params,
+            counterfactual_params=_with_unavailable_drivers(
+                result.counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
+            ),
             estimates=result.estimates,
             confounders=confounders,
             confidence=confidence_score(confounders, result.coverage, load),
@@ -1010,6 +1067,17 @@ class ChangeMeasurementService:
         return await self.changes.transition(
             status, MeasurementState.REGRESSED, event_type="regressed", actor=actor, reason=reason, now=self._now()
         )
+
+
+def _with_unavailable_drivers(params: Mapping[str, Any], pre: Any, post: CollectedLoad) -> Dict[str, Any]:
+    """Counterfactual parameters, naming the load drivers that could not be read in either window."""
+    unavailable = {
+        "pre": sorted(str(item) for item in pre or []),
+        "post": sorted(post.unavailable),
+    }
+    if not unavailable["pre"] and not unavailable["post"]:
+        return dict(params)
+    return {**params, UNAVAILABLE_DRIVERS_KEY: unavailable}
 
 
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
