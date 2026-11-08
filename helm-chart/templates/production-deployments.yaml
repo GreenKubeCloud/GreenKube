@@ -160,7 +160,7 @@ spec:
               protocol: TCP
           {{- else if and (eq $component "controller") (gt (int (include "greenkube.controllerMetricsPort" $root)) 0) }}
           ports:
-            - name: controller-metrics
+            - name: ctrl-metrics
               containerPort: {{ include "greenkube.controllerMetricsPort" $root }}
               protocol: TCP
           {{- end }}

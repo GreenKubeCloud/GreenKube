@@ -26,7 +26,7 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].ports
           content:
-            name: controller-metrics
+            name: ctrl-metrics
             containerPort: 9102
             protocol: TCP
 
@@ -52,7 +52,7 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].ports
           content:
-            name: controller-metrics
+            name: ctrl-metrics
             containerPort: 9102
             protocol: TCP
 
@@ -67,7 +67,7 @@ tests:
           value: 9102
       - equal:
           path: spec.ports[0].targetPort
-          value: controller-metrics
+          value: ctrl-metrics
       - equal:
           path: spec.selector["app.kubernetes.io/component"]
           value: app
@@ -102,7 +102,7 @@ tests:
           value: controller-metrics
       - equal:
           path: spec.endpoints[0].port
-          value: controller-metrics
+          value: ctrl-metrics
       - equal:
           path: spec.endpoints[0].path
           value: /prometheus/metrics
