@@ -1,5 +1,6 @@
 # src/greenkube/storage/base_repository.py
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -72,6 +73,55 @@ class NodeRepository(ABC):
         pass
 
 
+@dataclass(frozen=True)
+class IntensityPoint:
+    """One stored carbon-intensity value and how much it can be trusted."""
+
+    value: float
+    observed_at: Optional[datetime] = None
+    is_estimated: Optional[bool] = None
+    estimation_method: Optional[str] = None
+
+    def age(self, at: datetime) -> Optional[timedelta]:
+        """Return how old the point is at ``at`` (``None`` when its time is unknown)."""
+        if self.observed_at is None:
+            return None
+        point_time = self.observed_at if self.observed_at.tzinfo else self.observed_at.replace(tzinfo=timezone.utc)
+        at_time = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+        return at_time - point_time
+
+
+#: ``estimationMethod`` used by providers for static zone defaults. Such
+#: records are computed at read time and never persisted (A8, BUG-07).
+DEFAULT_FALLBACK_ESTIMATION_METHOD = "default_fallback"
+
+
+def is_persistable_intensity_record(record: object) -> bool:
+    """Return whether a provider record is a real measurement worth storing."""
+    if not isinstance(record, dict):
+        return False
+    if record.get("estimationMethod") == DEFAULT_FALLBACK_ESTIMATION_METHOD:
+        return False
+    return record.get("carbonIntensity") is not None
+
+
+def is_default_fallback_point(point: object) -> bool:
+    """Return whether a stored intensity point is a persisted zone default, not a measurement."""
+    return getattr(point, "estimation_method", None) == DEFAULT_FALLBACK_ESTIMATION_METHOD
+
+
+def measured_intensity_sql(alias: str = "") -> str:
+    """SQL predicate (SQLite and PostgreSQL) that skips zone defaults persisted before A8.
+
+    Older collectors stored zone defaults in ``carbon_intensity_history`` with
+    ``estimation_method = 'default_fallback'``. Migration 0039 purges them; every
+    intensity lookup also ignores them so such a row can never pass for a
+    measurement (BUG-07).
+    """
+    column = f"{alias}.estimation_method" if alias else "estimation_method"
+    return f"COALESCE({column}, '') <> '{DEFAULT_FALLBACK_ESTIMATION_METHOD}'"
+
+
 class CarbonIntensityRepository(ABC):
     """
     Abstract base class for carbon intensity data repositories.
@@ -83,6 +133,10 @@ class CarbonIntensityRepository(ABC):
         """
         Retrieves the latest carbon intensity for a given zone at or before a specific timestamp.
 
+        SQL implementations ignore values older than ``INTENSITY_MAX_AGE`` so a
+        stale value is never used silently; callers then fall back to the zone
+        default computed at read time.
+
         Args:
             zone: The geographical zone (e.g., 'FR').
             timestamp: The ISO 8601 timestamp to query against.
@@ -91,6 +145,18 @@ class CarbonIntensityRepository(ABC):
             The carbon intensity value, or None if not found.
         """
         pass
+
+    async def get_intensity_point(self, zone: str, timestamp: str) -> Optional[IntensityPoint]:
+        """Return the latest stored point at or before ``timestamp``, whatever its age.
+
+        Unlike :meth:`get_for_zone_at_time` the point carries its time and
+        estimation flag so callers can classify it (realtime, consolidated or
+        stale). The default implementation wraps :meth:`get_for_zone_at_time`.
+        """
+        value = await self.get_for_zone_at_time(zone, timestamp)
+        if value is None:
+            return None
+        return IntensityPoint(value=float(value))
 
     @abstractmethod
     async def save_history(self, history_data: list, zone: str) -> int:
@@ -536,61 +602,107 @@ class CombinedMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> int:
-        """Recompute ``grid_intensity`` and ``co2e_grams`` for combined metrics
-        in the given window using the latest stored carbon intensities.
+        """Recompute ``grid_intensity``, ``co2e_grams`` and ``intensity_source``
+        for pod **and container** rows in ``[start_time, end_time)`` from the
+        latest stored carbon intensities.
 
         Providers such as Wattnet publish provisional values that are
         consolidated a few hours later (``valid=false`` → ``valid=true``).
-        This method refreshes **every** metric in the window — not only those
+        This method refreshes **every** row in the window — not only those
         without an intensity — so rows calculated from provisional data are
-        corrected in place once the final values are available.
+        corrected in place once the final values are available. Container
+        rows are refreshed with the same rule so they never drift from their
+        pod aggregate (A9, BUG-06).
 
-        The recomputation reuses :class:`CarbonCalculator` so the result is
-        identical to the original calculation (same formula, same timestamp
-        normalization). Rows whose intensity is unchanged are left untouched.
+        Only measured points younger than ``INTENSITY_MAX_AGE`` at the row's
+        normalized lookup time are applied (persisted ``default_fallback``
+        records are ignored); rows without such a point keep their current
+        figures and provenance. Rows whose intensity and provenance are
+        unchanged are left untouched. An updated row also loses the
+        "Carbon intensity uses the ..." entry of the deprecated
+        ``estimation_reasons``, and ``is_estimated`` is cleared when that was
+        its only reason.
 
         Default implementation loads rows and recomputes in Python. SQL
-        backends override this with a single bulk UPDATE for efficiency.
+        backends override this with set-based UPDATE statements.
 
         Args:
             carbon_intensity_repo: The carbon intensity data source.
             start_time: Start of the window (inclusive).
-            end_time: End of the window (inclusive).
+            end_time: End of the window (exclusive).
             namespace: Optional namespace filter.
 
         Returns:
-            The number of rows whose carbon figures were updated.
+            The number of pod and container rows whose carbon figures were updated.
         """
-        from ..core.calculator import CarbonCalculator
+        from ..core.config import get_config
+        from ..models.provenance import IntensitySource, drop_intensity_fallback_reasons
 
-        calculator = CarbonCalculator(carbon_intensity_repo)
+        cfg = get_config()
+        max_age = cfg.intensity_max_age
+        granularity = getattr(cfg, "NORMALIZATION_GRANULARITY", "hour")
 
-        metrics = await self.read_combined_metrics(start_time, end_time)
-        if namespace:
-            metrics = [m for m in metrics if m.namespace == namespace]
+        async def refreshed(metrics: List[CombinedMetric]) -> List[CombinedMetric]:
+            changed: List[CombinedMetric] = []
+            for m in metrics:
+                if namespace and m.namespace != namespace:
+                    continue
+                if not m.emaps_zone or m.timestamp is None:
+                    continue
+                lookup_at = normalize_intensity_time(m.timestamp, granularity)
+                try:
+                    point = await carbon_intensity_repo.get_intensity_point(m.emaps_zone, to_iso_z(lookup_at))
+                except Exception:
+                    point = None
+                if point is None or is_default_fallback_point(point):
+                    continue
+                age = point.age(lookup_at)
+                if age is not None and age > max_age:
+                    continue
+                source = IntensitySource.REALTIME if point.is_estimated is not False else IntensitySource.CONSOLIDATED
+                if m.grid_intensity == point.value and m.intensity_source == source:
+                    continue
+                kwh = (m.joules or 0.0) / cfg.JOULES_PER_KWH
+                pue = m.pue if m.pue is not None else cfg.DEFAULT_PUE
+                m.grid_intensity = point.value
+                m.co2e_grams = kwh * pue * point.value
+                m.intensity_source = source.value
+                # The intensity is measured now: the default no longer explains the legacy flags.
+                kept = drop_intensity_fallback_reasons(m.estimation_reasons)
+                if len(kept) != len(m.estimation_reasons or []):
+                    m.estimation_reasons = kept
+                    m.is_estimated = bool(m.is_estimated) and bool(kept)
+                changed.append(m)
+            return changed
 
-        updated: List[CombinedMetric] = []
-        for m in metrics:
-            if not m.emaps_zone or m.timestamp is None:
-                continue
-            try:
-                intensity = await carbon_intensity_repo.get_for_zone_at_time(m.emaps_zone, to_iso_z(m.timestamp))
-            except Exception:
-                intensity = None
-            if intensity is None:
-                continue
-            await calculator.prefetch_intensity(m.emaps_zone, to_iso_z(m.timestamp), intensity)
-            result = await calculator.calculate_emissions(
-                joules=m.joules, zone=m.emaps_zone, timestamp=m.timestamp, pue=m.pue
-            )
-            if result is not None and result.grid_intensity != m.grid_intensity:
-                m.co2e_grams = result.co2e_grams
-                m.grid_intensity = result.grid_intensity
-                updated.append(m)
+        pod_rows = [
+            m
+            for m in await self.read_combined_metrics(start_time, end_time)
+            if m.timestamp is None or m.timestamp < end_time
+        ]
+        updated = await refreshed(pod_rows)
+        count = await self.write_combined_metrics(updated) if updated else 0
+        if isinstance(self, ContainerMetricsRepository):
+            container_rows = [
+                m
+                for m in await self.read_container_metrics(start_time, end_time, namespace)
+                if m.timestamp is None or m.timestamp < end_time
+            ]
+            updated_containers = await refreshed(container_rows)
+            if updated_containers:
+                count += await self.write_container_metrics(updated_containers)
+        return count
 
-        if not updated:
-            return 0
-        return await self.write_combined_metrics(updated)
+
+def normalize_intensity_time(timestamp: datetime, granularity: str = "hour") -> datetime:
+    """Normalize a metric time the way the calculator does before an intensity lookup."""
+    value = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc)
+    if granularity == "hour":
+        return value.replace(minute=0, second=0, microsecond=0)
+    if granularity == "day":
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    return value
 
 
 class RecommendationRepository(ABC):

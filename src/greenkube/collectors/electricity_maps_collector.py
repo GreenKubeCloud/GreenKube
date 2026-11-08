@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import httpx
 
 from ..core.config import config
-from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
+from ..core.observability import elapsed, record_collection_request, start_timer
 from ..utils.http_client import get_async_http_client
 from .base_electricity_provider import BaseElectricityProvider
 
@@ -24,7 +24,9 @@ class ElectricityMapsCollector(BaseElectricityProvider):
         Initializes the collector. The 'zone' argument is no longer needed here.
         """
         if not config.ELECTRICITY_MAPS_TOKEN:
-            logger.warning("ELECTRICITY_MAPS_TOKEN is not set in the environment. Using default values.")
+            logger.warning(
+                "ELECTRICITY_MAPS_TOKEN is not set in the environment. Zone default intensities will be used."
+            )
             self.api_token = None
             self.headers = {}
         else:
@@ -49,49 +51,38 @@ class ElectricityMapsCollector(BaseElectricityProvider):
     async def collect(self, zone: str, target_datetime: datetime | None = None) -> list:  # type: ignore[override]
         """
         Retrieves historical data for a specific zone and returns it.
-        If the token is missing or the API call fails, it returns the default value.
+
+        Only measured values are returned. When the token is missing or the API
+        call fails, an empty list is returned: static zone defaults are applied
+        at read time by the calculator (tagged ``intensity_source=zone_default``)
+        and never written into the intensity history (A8, BUG-07).
         """
-        if self.api_token:
-            history_url = f"{API_BASE_URL}/carbon-intensity/history?zone={zone}"
-            if target_datetime:
-                if target_datetime.tzinfo is None:
-                    target_datetime = target_datetime.replace(tzinfo=timezone.utc)
-                history_url += f"&datetime={target_datetime.isoformat()}"
-            logger.info("Fetching carbon intensity history for zone: %s...", zone)
+        if not self.api_token:
+            logger.info("No Electricity Maps token: zone %s will use its default intensity at read time.", zone)
+            record_collection_request("electricity_maps", "skipped")
+            return []
 
-            client = await self._get_client()
-            try:
-                response = await client.get(history_url, headers=self.headers)
-                response.raise_for_status()
-                data = response.json()
-                return data.get("history", [])
-            except httpx.HTTPError as e:
-                logger.error("Error fetching data from Electricity Maps API: %s", e)
-                # Fallback to default values below
-            except Exception as e:
-                logger.error("Unexpected error fetching data from Electricity Maps API: %s", e)
+        history_url = f"{API_BASE_URL}/carbon-intensity/history?zone={zone}"
+        if target_datetime:
+            if target_datetime.tzinfo is None:
+                target_datetime = target_datetime.replace(tzinfo=timezone.utc)
+            history_url += f"&datetime={target_datetime.isoformat()}"
+        logger.info("Fetching carbon intensity history for zone: %s...", zone)
 
-        # Fallback to default values
-        logger.info("Using default grid intensity for zone: %s", zone)
-        default_intensity = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
-        if default_intensity is not None:
-            if target_datetime:
-                # Ensure target_datetime is aware (UTC) for isoformat
-                if target_datetime.tzinfo is None:
-                    target_datetime = target_datetime.replace(tzinfo=timezone.utc)
-                dt_iso = target_datetime.isoformat()
-            else:
-                dt_iso = datetime.now(timezone.utc).isoformat()
-
-            return [
-                {
-                    "carbonIntensity": default_intensity,
-                    "datetime": dt_iso,
-                    "zone": zone,
-                    "isEstimated": True,
-                    "estimationMethod": "default_fallback",
-                }
-            ]
-
-        logger.warning("No default grid intensity found for zone: %s", zone)
-        return []
+        client = await self._get_client()
+        timer = start_timer()
+        try:
+            response = await client.get(history_url, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+            history = data.get("history", []) if isinstance(data, dict) else []
+        except httpx.HTTPError as e:
+            logger.error("Error fetching data from Electricity Maps API: %s", e)
+            record_collection_request("electricity_maps", "error", elapsed(timer))
+            return []
+        except Exception as e:
+            logger.error("Unexpected error fetching data from Electricity Maps API: %s", e)
+            record_collection_request("electricity_maps", "error", elapsed(timer))
+            return []
+        record_collection_request("electricity_maps", "success" if history else "empty", elapsed(timer))
+        return history

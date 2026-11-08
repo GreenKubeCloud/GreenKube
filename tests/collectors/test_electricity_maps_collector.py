@@ -48,7 +48,7 @@ async def test_collect_success(mock_config):
 @patch("greenkube.collectors.electricity_maps_collector.config")
 async def test_collect_api_error_fallback(mock_config):
     """
-    Tests that the collector returns the default value in case of an API error.
+    An API error returns no record: defaults are applied at read time, never persisted (A8).
     """
     # Arrange
     mock_config.ELECTRICITY_MAPS_TOKEN = "test-token"
@@ -63,17 +63,14 @@ async def test_collect_api_error_fallback(mock_config):
     result = await collector.collect(zone="FR")
 
     # Assert
-    assert len(result) == 1
-    assert result[0]["zone"] == "FR"
-    assert result[0]["carbonIntensity"] == 26  # Default for FR
-    assert result[0]["isEstimated"] is True
+    assert result == []
 
 
 @pytest.mark.asyncio
 @patch("greenkube.collectors.electricity_maps_collector.config")
 async def test_collect_no_token_fallback(mock_config):
     """
-    Tests that the collector returns the default value if no token is configured.
+    Without a token no record is returned (A8): the zone default is computed at read time.
     """
     # Arrange
     mock_config.ELECTRICITY_MAPS_TOKEN = None
@@ -84,11 +81,7 @@ async def test_collect_no_token_fallback(mock_config):
     result = await collector.collect(zone="FR")
 
     # Assert
-    assert len(result) == 1
-    assert result[0]["zone"] == "FR"
-    # Note: 26 is the hardcoded default for FR in our default map or test setup
-    assert result[0]["carbonIntensity"] == 26
-    assert result[0]["isEstimated"] is True
+    assert result == []
 
 
 @pytest.mark.asyncio

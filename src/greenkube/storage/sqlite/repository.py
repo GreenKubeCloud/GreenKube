@@ -6,20 +6,65 @@ from typing import Any, List, Mapping, Optional
 
 import aiosqlite
 
+from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
+from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
-from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository, ContainerMetricsRepository
+from ..base_repository import (
+    CarbonIntensityRepository,
+    CombinedMetricsRepository,
+    ContainerMetricsRepository,
+    IntensityPoint,
+    is_persistable_intensity_record,
+    measured_intensity_sql,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _oldest_fresh_intensity(normalized_ts: str) -> str:
+    """Lower bound of the intensity points still fresh at ``normalized_ts`` (INTENSITY_MAX_AGE)."""
+    from greenkube.core.config import get_config
+
+    try:
+        reference = ensure_utc(normalized_ts)
+    except ValueError:
+        return ""
+    return to_iso_z(reference - get_config().intensity_max_age)
+
+
+#: Provenance and cost-component columns shared by every metrics table (A4, A11).
+PROVENANCE_COLUMNS: tuple[str, ...] = (
+    "cost_cpu",
+    "cost_ram",
+    "cost_storage",
+    "cost_network",
+    "cost_lb",
+    "cost_source",
+    "usage_source",
+    "power_source",
+    "intensity_source",
+)
+#: Extra container-scoped columns (A7 limits, A9 intensity zone).
+CONTAINER_EXTRA_COLUMNS: tuple[str, ...] = ("emaps_zone", "cpu_limit", "memory_limit")
+
+
+def _provenance_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in PROVENANCE_COLUMNS)
+
+
+def _provenance_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = set(row.keys())
+    return {column: row[column] for column in PROVENANCE_COLUMNS if column in keys}
 
 
 def _container_metric_from_row(row: Mapping[str, Any], *, hourly: bool = False) -> CombinedMetric:
     data = dict(row)
     data.pop("id", None)
     if hourly:
-        data.pop("sample_count", None)
+        # sample_count is kept: hourly rows stand for several raw samples (BUG-29).
         data["timestamp"] = data.pop("hour_bucket", None)
         data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
         data["cpu_usage_max_millicores"] = data.pop("cpu_usage_max", None)
@@ -64,14 +109,15 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                 except ValueError:
                     normalized_ts = timestamp
 
-                query = """
+                query = f"""
                     SELECT carbon_intensity
                     FROM carbon_intensity_history
-                    WHERE zone = ? AND datetime <= ?
+                    WHERE zone = ? AND datetime <= ? AND datetime >= ?
+                      AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
-                params = (zone, normalized_ts)
+                params = (zone, normalized_ts, _oldest_fresh_intensity(normalized_ts))
 
                 async with conn.execute(query, params) as cursor:
                     result = await cursor.fetchone()
@@ -83,10 +129,42 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
             logger.error("Unexpected error in get_for_zone_at_time: %s", e)
             raise QueryError(f"Unexpected error in get_for_zone_at_time: {e}") from e
 
+    async def get_intensity_point(self, zone: str, timestamp: str) -> Optional[IntensityPoint]:
+        """Return the latest stored point at or before ``timestamp`` with its time and flags."""
+        try:
+            normalized_ts = to_iso_z(ensure_utc(timestamp))
+        except ValueError:
+            normalized_ts = timestamp
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    f"""
+                    SELECT carbon_intensity, datetime, is_estimated, estimation_method
+                    FROM carbon_intensity_history
+                    WHERE zone = ? AND datetime <= ? AND {measured_intensity_sql()}
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                    """,
+                    (zone, normalized_ts),
+                ) as cursor:
+                    row = await cursor.fetchone()
+        except sqlite3.Error as e:
+            raise QueryError(f"Database error in get_intensity_point: {e}") from e
+        if row is None or row["carbon_intensity"] is None:
+            return None
+        return IntensityPoint(
+            value=float(row["carbon_intensity"]),
+            observed_at=ensure_utc(row["datetime"]) if row["datetime"] else None,
+            is_estimated=None if row["is_estimated"] is None else bool(row["is_estimated"]),
+            estimation_method=row["estimation_method"],
+        )
+
     async def save_history(self, history_data: list, zone: str) -> int:
         """
         Saves historical carbon intensity data to the SQLite database.
         It ignores records that would be duplicates based on zone and datetime.
+        Static zone defaults are never persisted: they are computed at read time.
         """
         saved_count = 0
 
@@ -96,6 +174,9 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
                     # Basic validation that record is a dictionary
                     if not isinstance(record, dict):
                         logging.warning("Skipping invalid record (not a dict): %s", record)
+                        continue
+                    if not is_persistable_intensity_record(record):
+                        logger.debug("Skipping non-measured intensity record for zone %s: %s", zone, record)
                         continue
 
                     try:
@@ -197,12 +278,15 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                   period, "timestamp", duration_seconds,
                                   grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
                                   is_estimated, estimation_reasons, embodied_co2e_grams,
-                                  calculation_version)
+                                  calculation_version,
+                                  cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                                  cost_source, usage_source, power_source, intensity_source)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?
+                                ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?
                             )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                                 total_cost = excluded.total_cost,
@@ -236,7 +320,16 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 is_estimated = excluded.is_estimated,
                                 estimation_reasons = excluded.estimation_reasons,
                                 embodied_co2e_grams = excluded.embodied_co2e_grams,
-                                calculation_version = excluded.calculation_version;
+                                calculation_version = excluded.calculation_version,
+                                cost_cpu = excluded.cost_cpu,
+                                cost_ram = excluded.cost_ram,
+                                cost_storage = excluded.cost_storage,
+                                cost_network = excluded.cost_network,
+                                cost_lb = excluded.cost_lb,
+                                cost_source = excluded.cost_source,
+                                usage_source = excluded.usage_source,
+                                power_source = excluded.power_source,
+                                intensity_source = excluded.intensity_source;
                         """,
                             (
                                 metric.pod_name,
@@ -274,6 +367,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                                 metric.embodied_co2e_grams,
                                 metric.calculation_version,
+                                *_provenance_values(metric),
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -289,6 +383,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         except Exception as e:
             logging.error("Unexpected error in write_combined_metrics: %s", e)
             raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
+        record_metric_provenance(metrics)
         if container_metrics:
             saved_count += await self.write_container_metrics(container_metrics)
         return saved_count
@@ -310,7 +405,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            period, "timestamp", duration_seconds,
                            grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
                            is_estimated, estimation_reasons, embodied_co2e_grams,
-                           calculation_version
+                           calculation_version,
+                           cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                           cost_source, usage_source, power_source, intensity_source
                     FROM combined_metrics
                     WHERE "timestamp" >= ? AND "timestamp" < ?
                 """,
@@ -365,6 +462,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 estimation_reasons=estimation_reasons,
                                 embodied_co2e_grams=row["embodied_co2e_grams"],
                                 calculation_version=row["calculation_version"],
+                                **_provenance_from_row(row),
                             )
                         )
                     return metrics
@@ -505,7 +603,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            ephemeral_storage_usage_bytes, gpu_usage_millicores, restart_count,
                            owner_kind, owner_name, period, "timestamp", duration_seconds,
                            grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
-                           is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version
+                           is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version,
+                           cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                           cost_source, usage_source, power_source, intensity_source
                     FROM combined_metrics WHERE {where}
                     ORDER BY "timestamp", namespace, pod_name
                     LIMIT ?
@@ -899,6 +999,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 is_estimated=bool(row["is_estimated"]),
                                 estimation_reasons=estimation_reasons,
                                 calculation_version=row["calculation_version"],
+                                **_provenance_from_row(row),
                             )
                         )
                     return metrics
@@ -925,9 +1026,13 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             embodied_co2e_grams, pue, grid_intensity, joules,
                             cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
                             memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
-                            timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version
+                            timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
+                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                            cost_source, usage_source, power_source, intensity_source,
+                            emaps_zone, cpu_limit, memory_limit
                         ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
                             total_cost = excluded.total_cost,
@@ -947,7 +1052,19 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             duration_seconds = excluded.duration_seconds,
                             is_estimated = excluded.is_estimated,
                             estimation_reasons = excluded.estimation_reasons,
-                            calculation_version = excluded.calculation_version
+                            calculation_version = excluded.calculation_version,
+                            cost_cpu = excluded.cost_cpu,
+                            cost_ram = excluded.cost_ram,
+                            cost_storage = excluded.cost_storage,
+                            cost_network = excluded.cost_network,
+                            cost_lb = excluded.cost_lb,
+                            cost_source = excluded.cost_source,
+                            usage_source = excluded.usage_source,
+                            power_source = excluded.power_source,
+                            intensity_source = excluded.intensity_source,
+                            emaps_zone = excluded.emaps_zone,
+                            cpu_limit = excluded.cpu_limit,
+                            memory_limit = excluded.memory_limit
                         """,
                         (
                             metric.pod_name,
@@ -972,10 +1089,15 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             metric.is_estimated,
                             json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                             metric.calculation_version,
+                            *_provenance_values(metric),
+                            metric.emaps_zone,
+                            metric.cpu_limit,
+                            metric.memory_limit,
                         ),
                     )
                     saved_count += cursor.rowcount
                 await conn.commit()
+            record_metric_provenance(metrics)
             return saved_count
         except sqlite3.Error as e:
             logging.error("Could not write container metrics: %s", e)
@@ -1038,6 +1160,96 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         except sqlite3.Error as e:
             logging.error("Could not read hourly container metrics: %s", e)
             raise QueryError(f"Could not read hourly container metrics: {e}") from e
+
+    async def recompute_carbon_with_latest_intensities(
+        self,
+        carbon_intensity_repo: CarbonIntensityRepository,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Set-based recompute of pod and container carbon figures (A9, BUG-06).
+
+        One ``UPDATE ... FROM`` per table joins each row in ``[start, end)`` to
+        the latest measured intensity at or before its normalized lookup time,
+        provided that point is younger than ``INTENSITY_MAX_AGE``. Only rows
+        whose intensity or ``intensity_source`` changes are written. See the
+        base-class docstring for the full semantics.
+        """
+        from greenkube.core.config import get_config
+
+        cfg = get_config()
+        lookup_formats = {"hour": "%Y-%m-%dT%H:00:00Z", "day": "%Y-%m-%dT00:00:00Z"}
+        lookup_format = lookup_formats.get(getattr(cfg, "NORMALIZATION_GRANULARITY", "hour"), "%Y-%m-%dT%H:%M:%SZ")
+        max_age_seconds = cfg.intensity_max_age.total_seconds()
+        prefix = INTENSITY_FALLBACK_REASON_PREFIX
+        total = 0
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                for table in ("combined_metrics", "container_metrics"):
+                    ns_clause = "AND namespace = ?" if namespace else ""
+                    # Legacy flags: drop the intensity-default reason, and clear
+                    # is_estimated when it was the only one (rows written by json.dumps).
+                    reasons = f"{table}.estimation_reasons"
+                    has_fallback_reason = f"""json_valid({reasons}) AND {reasons} LIKE '[%"{prefix}%]'"""
+                    other_reasons = f"FROM json_each({reasons}) AS r WHERE r.value NOT LIKE '{prefix}%'"
+                    params: list[Any] = [to_iso_z(start_time), to_iso_z(end_time)]
+                    if namespace:
+                        params.append(namespace)
+                    # Positional parameters follow their order of appearance in the statement.
+                    params += [max_age_seconds, cfg.JOULES_PER_KWH, cfg.DEFAULT_PUE]
+                    await conn.execute(
+                        f"""
+                        WITH lookup AS (
+                            SELECT id AS row_id,
+                                   emaps_zone AS zone,
+                                   strftime('{lookup_format}', "timestamp") AS lookup_ts
+                            FROM {table}
+                            WHERE "timestamp" >= ? AND "timestamp" < ? {ns_clause}
+                              AND emaps_zone IS NOT NULL
+                        ),
+                        latest AS (
+                            SELECT row_id, zone, lookup_ts,
+                                   (SELECT MAX(ci.datetime) FROM carbon_intensity_history AS ci
+                                    WHERE ci.zone = lookup.zone AND ci.datetime <= lookup.lookup_ts
+                                      AND {measured_intensity_sql("ci")}) AS point_ts
+                            FROM lookup
+                        ),
+                        fresh AS (
+                            SELECT latest.row_id,
+                                   ci.carbon_intensity AS intensity,
+                                   CASE WHEN ci.is_estimated = 0 THEN 'consolidated' ELSE 'realtime' END AS source
+                            FROM latest
+                            JOIN carbon_intensity_history AS ci
+                              ON ci.zone = latest.zone AND ci.datetime = latest.point_ts
+                            WHERE (julianday(latest.lookup_ts) - julianday(latest.point_ts)) * 86400.0 <= ?
+                        )
+                        UPDATE {table}
+                        SET grid_intensity = fresh.intensity,
+                            co2e_grams = (COALESCE({table}.joules, 0) / ?)
+                                         * COALESCE({table}.pue, ?) * fresh.intensity,
+                            intensity_source = fresh.source,
+                            estimation_reasons = CASE WHEN {has_fallback_reason}
+                                THEN (SELECT json_group_array(r.value) {other_reasons})
+                                ELSE {reasons} END,
+                            is_estimated = CASE WHEN {has_fallback_reason}
+                                THEN CASE WHEN EXISTS (SELECT 1 {other_reasons}) THEN {table}.is_estimated ELSE 0 END
+                                ELSE {table}.is_estimated END
+                        FROM fresh
+                        WHERE {table}.id = fresh.row_id
+                          AND ({table}.grid_intensity IS NOT fresh.intensity
+                               OR {table}.intensity_source IS NOT fresh.source)
+                        """,
+                        params,
+                    )
+                    # cursor.rowcount is -1 for WITH-prefixed statements; changes() is exact.
+                    async with conn.execute("SELECT changes()") as changes_cursor:
+                        total += int((await changes_cursor.fetchone())[0] or 0)
+                await conn.commit()
+            return total
+        except sqlite3.Error as e:
+            logging.error("Could not recompute carbon figures: %s", e)
+            raise QueryError(f"Could not recompute carbon figures: {e}") from e
 
     async def list_namespaces(self) -> List[str]:
         """Return namespaces from the cache table (fast, no table scan)."""

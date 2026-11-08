@@ -36,6 +36,7 @@ image:
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
 | `config.defaultZone` | `""` | Fallback Electricity Maps zone code for nodes whose zone or region cannot be mapped (e.g. `FR`, `DE`, `US-CAL-CISO`) |
 | `config.defaultIntensity` | `500.0` | Global fallback grid intensity in gCO₂e/kWh when no zone-specific intensity is available |
+| `config.intensityMaxAge` | `6h` | `INTENSITY_MAX_AGE`. Maximum age of a stored grid intensity (`<number><ms\|s\|m\|h>`). An older value is stale: the zone default is used instead and rows are tagged `intensity_source=zone_default` (or `stale` when no zone default exists). Defaults are computed at read time and never written to the intensity history. |
 | `config.electricityProvider` | `electricity_maps` | Grid intensity data provider: `electricity_maps` (default) or `wattnet` (EU-only, free — see [docs/wattnet.md](wattnet.md)) |
 | `config.normalizationGranularity` | `hour` | Carbon intensity lookup granularity (`hour`, `day`, `none`) |
 | `config.nodeAnalysisInterval` | `5m` | Interval for analysing node state |
@@ -61,8 +62,8 @@ image:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `config.metricsCompressionAgeHours` | `24` | Age in hours after which 5-min raw metrics are compressed into hourly aggregates |
-| `config.metricsRawRetentionDays` | `7` | Days to retain raw metrics before deletion after compression |
+| `config.metricsCompressionAgeHours` | `24` | Age in hours after which 5-min raw metrics are compressed into hourly aggregates. Only closed hours are compressed, each from its complete raw set, behind a per-table compression watermark. Compressed hours are never re-read, so keep it at `24` or more: the carbon-intensity recompute refreshes only the last 24 hours of raw rows (a lower value logs a warning). |
+| `config.metricsRawRetentionDays` | `7` | Days to retain raw metrics. Pruning removes whole hours only, and never rows that are not compressed yet, whatever the retention (even `0`). |
 | `config.metricsAggregatedRetentionDays` | `-1` | Days to retain hourly aggregates. `-1` means indefinite (useful for multi-year trend analysis) |
 
 ### Database (`config.db`)
@@ -332,6 +333,14 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 | `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
 
 Rendering never uses `lookup` or random functions, so `helm template` output is stable under Argo CD and Flux. Values set above go to the Secret `<release>-values`; generated credentials (`GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database) are created once by the credentials bootstrap hook in the Secret `<release>`, which is not part of the release and survives `helm uninstall`. See [Credentials and GitOps](installation.md#credentials-and-gitops-argo-cd-flux).
+
+### Controller metrics endpoint (`collector.metricsPort`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `collector.metricsPort` | `9102` | `CONTROLLER_METRICS_PORT`. Port of the controller's Prometheus endpoint at `/prometheus/metrics` (also served at `/metrics`) (collection source requests/errors, collection window duration, provenance mix of written rows, verification outcomes, GitOps sync telemetry). Served through the `<release>-controller-metrics` ClusterIP Service and scraped by a dedicated ServiceMonitor when `monitoring.serviceMonitor.enabled`. `0` disables the listener, the Service and the ServiceMonitor. |
+
+The chart keeps the API key out of the controller (least privilege), so this endpoint is reachable on the pod network only and serves bounded, non-sensitive counters; enable `monitoring.networkPolicy` to restrict it to Prometheus. When an API key is present in the controller's environment, scrapes must send it as a bearer token.
 
 ### Monitoring (`monitoring`)
 

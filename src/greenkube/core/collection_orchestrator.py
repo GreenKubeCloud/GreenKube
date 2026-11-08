@@ -32,7 +32,7 @@ class CollectionResult:
 
     prom_metrics: Optional[PrometheusMetric] = None
     node_instance_map: Dict[str, str] = field(default_factory=dict)
-    cost_map: Dict[str, CostMetric] = field(default_factory=dict)
+    cost_map: Dict[tuple[str, str], CostMetric] = field(default_factory=dict)
     pod_metrics_list: List[PodMetric] = field(default_factory=list)
     pod_request_map_simple: Dict[tuple, float] = field(default_factory=dict)
     pod_request_map_agg: dict = field(default_factory=dict)
@@ -110,7 +110,8 @@ class CollectionOrchestrator:
             try:
                 cost_metrics = await self.opencost_collector.collect()
                 logger.info("Successfully collected %d metrics from OpenCost.", len(cost_metrics))
-                return {metric.pod_name: metric for metric in cost_metrics if metric.pod_name}
+                # Keyed by (namespace, pod): same-named pods never share a cost (BUG-04).
+                return {(metric.namespace, metric.pod_name): metric for metric in cost_metrics if metric.pod_name}
             except Exception as e:
                 logger.error("Failed to collect data from OpenCost: %s", e)
                 return {}

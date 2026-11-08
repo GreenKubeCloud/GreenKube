@@ -1,13 +1,39 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Mapping, Optional
 
 from ...core.exceptions import QueryError
+from ...core.observability import record_metric_provenance
 from ...models.metrics import CombinedMetric
-from ..base_repository import CarbonIntensityRepository, CombinedMetricsRepository, ContainerMetricsRepository
+from ...models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from ..base_repository import (
+    CarbonIntensityRepository,
+    CombinedMetricsRepository,
+    ContainerMetricsRepository,
+    IntensityPoint,
+    is_persistable_intensity_record,
+    measured_intensity_sql,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Provenance and cost-component columns shared by every metrics table (A4, A11).
+PROVENANCE_COLUMNS: tuple[str, ...] = (
+    "cost_cpu",
+    "cost_ram",
+    "cost_storage",
+    "cost_network",
+    "cost_lb",
+    "cost_source",
+    "usage_source",
+    "power_source",
+    "intensity_source",
+)
+
+
+def _provenance_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in PROVENANCE_COLUMNS)
 
 
 def _container_metric_from_row(
@@ -19,7 +45,7 @@ def _container_metric_from_row(
     data = dict(row)
     data.pop("id", None)
     if hourly:
-        data.pop("sample_count", None)
+        # sample_count is kept: hourly rows stand for several raw samples (BUG-29).
         data["timestamp"] = data.pop(timestamp_column, None)
         data["cpu_usage_millicores"] = data.pop("cpu_usage_avg", None)
         data["cpu_usage_max_millicores"] = data.pop("cpu_usage_max", None)
@@ -46,15 +72,21 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                 else:
                     ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
-                # Use $n placeholders for asyncpg
-                query = """
+                # Use $n placeholders for asyncpg. Values older than
+                # INTENSITY_MAX_AGE are stale and never used silently (A8).
+                from ...core.config import get_config
+
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                query = f"""
                     SELECT carbon_intensity
                     FROM carbon_intensity_history
-                    WHERE zone = $1 AND datetime <= $2
+                    WHERE zone = $1 AND datetime <= $2 AND datetime >= $3
+                      AND {measured_intensity_sql()}
                     ORDER BY datetime DESC
                     LIMIT 1
                 """
-                row = await conn.fetchrow(query, zone, ts)
+                row = await conn.fetchrow(query, zone, ts, ts - get_config().intensity_max_age)
                 if row:
                     return row["carbon_intensity"]
                 return None
@@ -62,7 +94,39 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
             logger.error("Error getting carbon intensity from Postgres: %s", e)
             raise QueryError(f"Error getting carbon intensity: {e}") from e
 
+    async def get_intensity_point(self, zone: str, timestamp: str) -> Optional[IntensityPoint]:
+        """Return the latest stored point at or before ``timestamp`` with its time and flags."""
+        ts = timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT carbon_intensity, datetime, is_estimated, estimation_method
+                    FROM carbon_intensity_history
+                    WHERE zone = $1 AND datetime <= $2 AND {measured_intensity_sql()}
+                    ORDER BY datetime DESC
+                    LIMIT 1
+                    """,
+                    zone,
+                    ts,
+                )
+        except Exception as e:
+            logger.error("Error getting carbon intensity point from Postgres: %s", e)
+            raise QueryError(f"Error getting carbon intensity point: {e}") from e
+        if row is None or row["carbon_intensity"] is None:
+            return None
+        return IntensityPoint(
+            value=float(row["carbon_intensity"]),
+            observed_at=row["datetime"],
+            is_estimated=row["is_estimated"],
+            estimation_method=row["estimation_method"],
+        )
+
     async def save_history(self, history_data: list, zone: str) -> int:
+        # Static zone defaults are computed at read time, never persisted (A8).
+        history_data = [record for record in history_data or [] if is_persistable_intensity_record(record)]
         if not history_data:
             return 0
 
@@ -78,7 +142,9 @@ class PostgresCarbonIntensityRepository(CarbonIntensityRepository):
                     ON CONFLICT (zone, datetime) DO UPDATE SET
                         carbon_intensity = EXCLUDED.carbon_intensity,
                         updated_at = EXCLUDED.updated_at,
-                        emission_factor_type = EXCLUDED.emission_factor_type;
+                        emission_factor_type = EXCLUDED.emission_factor_type,
+                        is_estimated = EXCLUDED.is_estimated,
+                        estimation_method = EXCLUDED.estimation_method;
                 """
 
                 records = []
@@ -149,7 +215,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         duration_seconds, grid_intensity_timestamp,
                         node, node_instance_type, node_zone,
                         emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams,
-                        calculation_version
+                        calculation_version,
+                        cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                        cost_source, usage_source, power_source, intensity_source
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -164,7 +232,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $26, $27,
                         $28, $29, $30,
                         $31, $32, $33, $34,
-                        $35
+                        $35,
+                        $36, $37, $38, $39, $40,
+                        $41, $42, $43, $44
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -198,7 +268,16 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         estimation_reasons = EXCLUDED.estimation_reasons,
                         is_estimated = EXCLUDED.is_estimated,
                         embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
-                        calculation_version = EXCLUDED.calculation_version;
+                        calculation_version = EXCLUDED.calculation_version,
+                        cost_cpu = EXCLUDED.cost_cpu,
+                        cost_ram = EXCLUDED.cost_ram,
+                        cost_storage = EXCLUDED.cost_storage,
+                        cost_network = EXCLUDED.cost_network,
+                        cost_lb = EXCLUDED.cost_lb,
+                        cost_source = EXCLUDED.cost_source,
+                        usage_source = EXCLUDED.usage_source,
+                        power_source = EXCLUDED.power_source,
+                        intensity_source = EXCLUDED.intensity_source;
                 """
 
                 metrics_data = []
@@ -243,12 +322,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             metric.is_estimated,
                             metric.embodied_co2e_grams,
                             metric.calculation_version,
+                            *_provenance_values(metric),
                         )
                     )
 
                 await conn.executemany(query, metrics_data)
                 logger.info("Saved %s combined metrics to Postgres.", len(metrics))
                 saved_count = len(metrics)
+            record_metric_provenance(metrics)
         except Exception as e:
             logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
@@ -347,11 +428,16 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 embodied_co2e_grams, pue, grid_intensity, joules,
                 cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
                 memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
-                timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version
+                timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
+                cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                cost_source, usage_source, power_source, intensity_source,
+                emaps_zone, cpu_limit, memory_limit
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
-                $18, $19, $20, $21, $22
+                $18, $19, $20, $21, $22,
+                $23, $24, $25, $26, $27, $28, $29, $30, $31,
+                $32, $33, $34
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
                 total_cost = EXCLUDED.total_cost,
@@ -371,7 +457,19 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 duration_seconds = EXCLUDED.duration_seconds,
                 is_estimated = EXCLUDED.is_estimated,
                 estimation_reasons = EXCLUDED.estimation_reasons,
-                calculation_version = EXCLUDED.calculation_version
+                calculation_version = EXCLUDED.calculation_version,
+                cost_cpu = EXCLUDED.cost_cpu,
+                cost_ram = EXCLUDED.cost_ram,
+                cost_storage = EXCLUDED.cost_storage,
+                cost_network = EXCLUDED.cost_network,
+                cost_lb = EXCLUDED.cost_lb,
+                cost_source = EXCLUDED.cost_source,
+                usage_source = EXCLUDED.usage_source,
+                power_source = EXCLUDED.power_source,
+                intensity_source = EXCLUDED.intensity_source,
+                emaps_zone = EXCLUDED.emaps_zone,
+                cpu_limit = EXCLUDED.cpu_limit,
+                memory_limit = EXCLUDED.memory_limit
         """
         rows = []
         for metric in metrics:
@@ -403,11 +501,16 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     metric.is_estimated,
                     json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
                     metric.calculation_version,
+                    *_provenance_values(metric),
+                    metric.emaps_zone,
+                    metric.cpu_limit,
+                    metric.memory_limit,
                 )
             )
         try:
             async with self.db_manager.connection_scope() as conn:
                 await conn.executemany(query, rows)
+            record_metric_provenance(metrics)
             return len(rows)
         except Exception as e:
             logger.error("Error writing container metrics to Postgres: %s", e)
@@ -1259,7 +1362,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             duration_seconds, grid_intensity_timestamp,
                             node, node_instance_type, node_zone,
                             emaps_zone, estimation_reasons, is_estimated,
-                            embodied_co2e_grams, calculation_version
+                            embodied_co2e_grams, calculation_version,
+                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                            cost_source, usage_source, power_source, intensity_source
                         FROM combined_metrics
                         WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
@@ -1290,7 +1395,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             duration_seconds, NULL::timestamptz AS grid_intensity_timestamp,
                             node, node_instance_type, node_zone,
                             emaps_zone, estimation_reasons, is_estimated,
-                            embodied_co2e_grams, calculation_version
+                            embodied_co2e_grams, calculation_version,
+                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                            cost_source, usage_source, power_source, intensity_source
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
@@ -1381,45 +1488,86 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> int:
-        """Bulk SQL recompute of ``grid_intensity``/``co2e_grams``.
+        """Set-based recompute of pod and container carbon figures (A9, BUG-06).
 
-        Single UPDATE that joins each combined metric to the most recent
-        carbon intensity point at or before its timestamp. See the base-class
-        docstring for the full semantics.
+        One UPDATE per table joins each row in ``[start, end)`` to the latest
+        measured carbon intensity at or before its normalized lookup time,
+        provided the point is younger than ``INTENSITY_MAX_AGE``. Only rows
+        whose intensity or ``intensity_source`` changes are written. Both
+        UPDATEs run in one transaction so container rows never drift from
+        their pod rows. See the base-class docstring for the full semantics.
         """
         from ...core.config import get_config as _get_cfg
 
+        cfg = _get_cfg()
+        granularity = getattr(cfg, "NORMALIZATION_GRANULARITY", "hour")
+        if granularity in ("hour", "day"):
+            lookup_expr = f"date_trunc('{granularity}', t.timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+        else:
+            lookup_expr = "t.timestamp"
+        prefix = INTENSITY_FALLBACK_REASON_PREFIX
+        # Legacy flags: drop the intensity-default reason and clear is_estimated when it
+        # was the only one. Nested CASEs keep the jsonb cast to rows written by json.dumps.
+        has_fallback_reason = f"""t.estimation_reasons LIKE '[%"{prefix}%]'"""
+        other_reasons = (
+            "FROM jsonb_array_elements_text(t.estimation_reasons::jsonb) WITH ORDINALITY AS r(value, ord) "
+            f"WHERE r.value NOT LIKE '{prefix}%'"
+        )
+        total = 0
         try:
-            async with self.db_manager.connection_scope() as conn:
-                default_pue = _get_cfg().DEFAULT_PUE
-                ns_clause = "AND cm.namespace = $4" if namespace else ""
-                query = f"""
-                    WITH updated AS (
-                        UPDATE combined_metrics AS cm
-                        SET grid_intensity = ci.carbon_intensity,
-                            co2e_grams = (cm.joules / 3600000.0)
-                                         * COALESCE(cm.pue, $1)
-                                         * ci.carbon_intensity
-                        FROM carbon_intensity_history AS ci
-                        WHERE cm.emaps_zone = ci.zone
-                          AND cm.timestamp >= $2
-                          AND cm.timestamp <= $3
-                          {ns_clause}
-                          AND ci.datetime = (
-                              SELECT MAX(c.datetime)
-                              FROM carbon_intensity_history c
-                              WHERE c.zone = cm.emaps_zone AND c.datetime <= cm.timestamp
-                          )
-                          AND cm.grid_intensity IS DISTINCT FROM ci.carbon_intensity
-                        RETURNING cm.id
-                    )
-                    SELECT count(*) FROM updated
-                """
-                params: list = [default_pue, start_time, end_time]
-                if namespace:
-                    params.append(namespace)
-                count = await conn.fetchval(query, *params)
-                return int(count or 0)
+            async with self.db_manager.connection_scope() as conn, conn.transaction():
+                for table in ("combined_metrics", "container_metrics"):
+                    ns_clause = "AND t.namespace = $6" if namespace else ""
+                    query = f"""
+                        WITH lookup AS (
+                            SELECT t.id AS row_id, t.emaps_zone AS zone, {lookup_expr} AS lookup_ts
+                            FROM {table} AS t
+                            WHERE t.timestamp >= $2 AND t.timestamp < $3
+                              AND t.emaps_zone IS NOT NULL
+                              {ns_clause}
+                        ),
+                        fresh AS (
+                            SELECT l.row_id,
+                                   ci.carbon_intensity AS intensity,
+                                   CASE WHEN ci.is_estimated IS FALSE THEN 'consolidated'
+                                        ELSE 'realtime' END AS source
+                            FROM lookup AS l
+                            JOIN LATERAL (
+                                SELECT c.carbon_intensity, c.is_estimated, c.datetime
+                                FROM carbon_intensity_history AS c
+                                WHERE c.zone = l.zone AND c.datetime <= l.lookup_ts
+                                  AND {measured_intensity_sql("c")}
+                                ORDER BY c.datetime DESC
+                                LIMIT 1
+                            ) AS ci ON TRUE
+                            WHERE ci.datetime >= l.lookup_ts - $4::interval
+                        ),
+                        updated AS (
+                            UPDATE {table} AS t
+                            SET grid_intensity = f.intensity,
+                                co2e_grams = (COALESCE(t.joules, 0) / $5) * COALESCE(t.pue, $1) * f.intensity,
+                                intensity_source = f.source,
+                                estimation_reasons = CASE WHEN {has_fallback_reason}
+                                    THEN (SELECT COALESCE(jsonb_agg(r.value ORDER BY r.ord), '[]'::jsonb)::text
+                                          {other_reasons})
+                                    ELSE t.estimation_reasons END,
+                                is_estimated = CASE WHEN {has_fallback_reason}
+                                    THEN CASE WHEN EXISTS (SELECT 1 {other_reasons}) THEN t.is_estimated ELSE FALSE END
+                                    ELSE t.is_estimated END
+                            FROM fresh AS f
+                            WHERE t.id = f.row_id
+                              AND (t.grid_intensity IS DISTINCT FROM f.intensity
+                                   OR t.intensity_source IS DISTINCT FROM f.source)
+                            RETURNING t.id
+                        )
+                        SELECT count(*) FROM updated
+                    """
+                    params: list = [cfg.DEFAULT_PUE, start_time, end_time, cfg.intensity_max_age, cfg.JOULES_PER_KWH]
+                    if namespace:
+                        params.append(namespace)
+                    count = await conn.fetchval(query, *params)
+                    total += int(count or 0)
+                return total
         except Exception as e:
             logger.error("Error recomputing combined metrics carbon: %s", e)
             raise QueryError(f"Error recomputing combined metrics carbon: {e}") from e

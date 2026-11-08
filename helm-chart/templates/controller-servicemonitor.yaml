@@ -1,0 +1,29 @@
+{{- if and .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "greenkube.fullname" . }}-controller
+  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: kube-prometheus
+    {{- with .Values.monitoring.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller-metrics
+  endpoints:
+    - port: controller-metrics
+      path: /prometheus/metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
+      # The controller never receives the API key (least privilege). Its endpoint
+      # serves only bounded operational counters on the pod network; enable
+      # monitoring.networkPolicy to restrict it to Prometheus.
+{{- end }}

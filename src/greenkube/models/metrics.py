@@ -33,6 +33,10 @@ class EnergyMetric(BaseModel):
     region: Optional[str] = Field(None, description="The cloud region of the node.")
     is_estimated: bool = Field(False, description="Whether the metric relies on estimated values.")
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
+    power_source: Optional[str] = Field(
+        None,
+        description="Provenance of the node power profile (see greenkube.models.provenance.PowerSource).",
+    )
 
 
 class CostMetric(BaseModel):
@@ -46,10 +50,21 @@ class CostMetric(BaseModel):
     cpu_cost: float = Field(..., description="The calculated cost of CPU usage for the pod.")
     ram_cost: float = Field(..., description="The calculated cost of RAM usage for the pod.")
     total_cost: float = Field(..., description="The total cost for the pod (CPU + RAM + other costs).")
+    storage_cost: float = Field(0.0, description="Persistent-volume cost of the pod over the window.")
+    network_cost: float = Field(0.0, description="Network egress cost of the pod over the window.")
+    lb_cost: float = Field(0.0, description="LoadBalancer cost allocated to the pod over the window.")
+    gpu_cost: float = Field(0.0, description="GPU cost of the pod over the window.")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="The timestamp of the cost calculation.",
     )
+    window_start: Optional[datetime] = Field(None, description="Inclusive start of the allocation window.")
+    window_end: Optional[datetime] = Field(None, description="Exclusive end of the allocation window.")
+    minutes: Optional[float] = Field(
+        None,
+        description="Minutes the pod ran inside the allocation window, as reported by the cost source.",
+    )
+    source: str = Field("opencost", description="Cost provenance (greenkube.models.provenance.CostSource).")
 
 
 class CarbonEmissionMetric(BaseModel):
@@ -78,6 +93,15 @@ class PodMetric(BaseModel):
     cpu_request: int = Field(..., description="CPU request in millicores.")
     memory_request: int = Field(..., description="Memory request in bytes.")
     ephemeral_storage_request: int = Field(0, description="Ephemeral storage request in bytes.")
+    cpu_limit: Optional[int] = Field(None, description="CPU limit in millicores; None when unlimited.")
+    memory_limit: Optional[int] = Field(None, description="Memory limit in bytes; None when unlimited.")
+    kind: str = Field(
+        "container",
+        description=(
+            "Container kind: 'container' (spec.containers), 'sidecar' (native sidecar: init container with "
+            "restartPolicy Always) or 'init' (classic init container, excluded from steady-state sums)."
+        ),
+    )
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
 
@@ -768,6 +792,18 @@ class CombinedMetric(BaseModel):
 
     # From CostMetric
     total_cost: float = 0.0
+    # Cost components (A4). ``total_cost`` is their sum plus any GPU, shared or
+    # external cost reported by the cost source. ``None`` on legacy rows.
+    cost_cpu: Optional[float] = Field(None, description="CPU share of total_cost.")
+    cost_ram: Optional[float] = Field(None, description="RAM share of total_cost.")
+    cost_storage: Optional[float] = Field(None, description="Persistent-volume share of total_cost.")
+    cost_network: Optional[float] = Field(None, description="Network share of total_cost.")
+    cost_lb: Optional[float] = Field(None, description="LoadBalancer share of total_cost.")
+    # Per-dimension provenance (A11); see greenkube.models.provenance.
+    cost_source: Optional[str] = Field(None, description="Provenance of the cost figures.")
+    usage_source: Optional[str] = Field(None, description="Provenance of the CPU/memory usage figures.")
+    power_source: Optional[str] = Field(None, description="Provenance of the node power profile.")
+    intensity_source: Optional[str] = Field(None, description="Provenance of the grid carbon intensity.")
 
     # From CarbonEmissionMetric
     co2e_grams: float = Field(
@@ -788,6 +824,9 @@ class CombinedMetric(BaseModel):
     # From PodMetric (Note: This may be an aggregation of containers)
     cpu_request: int = 0  # in millicores
     memory_request: int = 0  # in bytes
+    # Container limits (A7); only set on container rows.
+    cpu_limit: Optional[int] = Field(None, description="Container CPU limit in millicores (None = unlimited).")
+    memory_limit: Optional[int] = Field(None, description="Container memory limit in bytes (None = unlimited).")
     # Actual usage metrics (from Prometheus)
     sample_count: int = Field(1, description="Number of raw samples represented by this metric point.")
     cpu_usage_millicores: Optional[int] = Field(None, description="Actual CPU usage in millicores.")
@@ -836,7 +875,13 @@ class CombinedMetric(BaseModel):
     node_instance_type: Optional[str] = None
     node_zone: Optional[str] = Field(None, description="Cloud provider zone")
     emaps_zone: Optional[str] = Field(None, description="Electricity Maps zone")
-    is_estimated: Optional[bool] = Field(False, description="Whether the metric relies on estimated values.")
+    is_estimated: Optional[bool] = Field(
+        False,
+        description=(
+            "Deprecated coarse flag kept for API v1 compatibility; use the per-dimension provenance fields "
+            "(cost_source, usage_source, power_source, intensity_source) to decide what to trust."
+        ),
+    )
     estimation_reasons: List[str] = Field(default_factory=list, description="Reasons for estimation.")
     embodied_co2e_grams: Optional[float] = Field(
         0.0,

@@ -190,9 +190,16 @@ initContainer:
     tag: '1.37'
     pullPolicy: IfNotPresent
 
-# Probes for the collector process. The collector has no HTTP listener, so
+# Probes for the collector process. The collector has no HTTP API, so
 # these process-heartbeat probes verify that its PID is still alive.
 collector:
+  # Port of the controller's Prometheus endpoint (/prometheus/metrics and
+  # /metrics): collection health, provenance mix and verification telemetry.
+  # The chart keeps the API key out of the controller, so the endpoint is
+  # unauthenticated; monitoring.networkPolicy restricts it to Prometheus.
+  # Exposed through the <release>-controller-metrics Service and, when
+  # monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it.
+  metricsPort: 9102
   livenessProbe:
     enabled: true
     initialDelaySeconds: 15
@@ -243,6 +250,9 @@ config:
                   # Used when an individual node's zone and region cannot be mapped.
                   # Leave empty to rely on mapped node zones.
   defaultIntensity: 500.0 # gCO2e/kWh, global fallback when no zone-specific intensity is available
+  # Maximum age of a stored grid carbon intensity. Older values are stale: the
+  # zone default is used instead and rows are tagged intensity_source=zone_default.
+  intensityMaxAge: 6h
   # Grid carbon intensity data provider: "electricity_maps" (default) or "wattnet".
   # Wattnet (https://wattnet.eu) provides free EU-wide data at 15-min resolution;
   # set secrets.wattnetEmail / secrets.wattnetPassword when using it.
@@ -260,6 +270,8 @@ config:
   # --- Metrics Retention & Compression ---
   # Age threshold (hours) after which raw 5-min metrics are compressed
   # into hourly aggregates. Aligns with Electricity Maps hourly granularity.
+  # Keep it >= 24: the carbon-intensity recompute only refreshes raw rows of
+  # the last 24 hours, and compressed hours are never re-read.
   metricsCompressionAgeHours: 24
   # Maximum number of days to retain raw (uncompressed) 5-min metrics.
   # Older raw rows are deleted after compression. Set -1 to disable deletion.

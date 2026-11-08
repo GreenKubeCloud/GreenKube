@@ -315,6 +315,21 @@ inline
 {{- end -}}
 
 {{/*
+Validate and return the controller metrics port (0 disables the listener).
+*/}}
+{{- define "greenkube.controllerMetricsPort" -}}
+{{- $rawPort := .Values.collector.metricsPort | default 0 | toString -}}
+{{- if not (regexMatch "^[0-9]+$" $rawPort) -}}
+{{- fail "collector.metricsPort must be an integer between 0 (disabled) and 65535" -}}
+{{- end -}}
+{{- $port := int $rawPort -}}
+{{- if gt $port 65535 -}}
+{{- fail "collector.metricsPort must be an integer between 0 (disabled) and 65535" -}}
+{{- end -}}
+{{- $port -}}
+{{- end -}}
+
+{{/*
 Validate and return the dedicated worker metrics port.
 */}}
 {{- define "greenkube.workerMetricsPort" -}}

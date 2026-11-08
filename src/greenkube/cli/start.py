@@ -187,7 +187,13 @@ async def analyze_nodes() -> None:
 
 async def async_write_combined_metrics_to_database(last: Optional[str] = None):
     """Wrapper to make write_combined_metrics_to_database suitable for scheduler."""
-    await write_combined_metrics_to_database(last=last)
+    from ..core.observability import elapsed, record_collection_window, start_timer
+
+    timer = start_timer()
+    try:
+        await write_combined_metrics_to_database(last=last)
+    finally:
+        record_collection_window(elapsed(timer))
 
 
 async def scheduled_write_metrics():
@@ -511,6 +517,10 @@ async def _async_start(last: Optional[str]):
     processor = None
     scheduler = None
     sync_task = None
+    # Serve the controller's own telemetry (verification, collection, provenance mix; A12, BUG-14).
+    from .controller_metrics import start_controller_metrics_server, stop_controller_metrics_server
+
+    metrics_endpoint = await start_controller_metrics_server(getattr(cfg, "CONTROLLER_METRICS_PORT", 0))
     try:
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
@@ -637,6 +647,7 @@ async def _async_start(last: Optional[str]):
             await asyncio.gather(*tasks, return_exceptions=True)
             if processor is not None:
                 await processor.close()
+            await stop_controller_metrics_server(metrics_endpoint)
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 

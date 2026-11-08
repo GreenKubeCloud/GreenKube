@@ -1,11 +1,11 @@
 # src/greenkube/collectors/pod_collector.py
 """
-Collects resource 'request' data (CPU, memory) for all pods
-from the Kubernetes API.
+Collects resource requests and limits (CPU, memory) for every steady-state
+container of every pod (including native sidecars) from the Kubernetes API.
 """
 
 import logging
-from typing import List
+from typing import Iterator, List, Optional
 
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.core.config import config as global_config
@@ -15,6 +15,44 @@ from greenkube.models.metrics import PodMetric
 from ..utils.k8s_utils import parse_cpu_request, parse_memory_request, parse_storage_request
 
 logger = logging.getLogger(__name__)
+
+
+def _containers_with_kind(spec, include_init_containers: bool) -> Iterator[tuple[object, str]]:
+    """Yield ``(container, kind)`` for steady-state containers, then init containers."""
+    for container in spec.containers or []:
+        yield container, "container"
+    for container in getattr(spec, "init_containers", None) or []:
+        if getattr(container, "restart_policy", None) == "Always":
+            yield container, "sidecar"
+        elif include_init_containers:
+            yield container, "init"
+
+
+def _container_metric(
+    container,
+    *,
+    kind: str,
+    pod_name: str,
+    namespace: str,
+    owner_kind: Optional[str],
+    owner_name: Optional[str],
+) -> PodMetric:
+    resources = getattr(container, "resources", None)
+    requests = (getattr(resources, "requests", None) or {}) if resources else {}
+    limits = (getattr(resources, "limits", None) or {}) if resources else {}
+    return PodMetric(
+        pod_name=pod_name,
+        namespace=namespace,
+        container_name=container.name,
+        cpu_request=parse_cpu_request(requests.get("cpu")),
+        memory_request=parse_memory_request(requests.get("memory")),
+        ephemeral_storage_request=parse_storage_request(requests.get("ephemeral-storage")),
+        cpu_limit=parse_cpu_request(limits["cpu"]) if limits.get("cpu") else None,
+        memory_limit=parse_memory_request(limits["memory"]) if limits.get("memory") else None,
+        kind=kind,
+        owner_kind=owner_kind,
+        owner_name=owner_name,
+    )
 
 
 class PodCollector(BaseCollector):
@@ -39,9 +77,15 @@ class PodCollector(BaseCollector):
 
         return self._api
 
-    async def collect(self) -> List[PodMetric]:
+    async def collect(self, include_init_containers: bool = False) -> List[PodMetric]:
         """
-        Fetches all pods and extracts their container resource requests.
+        Fetches all pods and extracts their container resource requests and limits.
+
+        Steady-state containers are ``spec.containers`` (``kind="container"``)
+        and native sidecars — init containers with ``restartPolicy: Always``
+        (``kind="sidecar"``). Classic init containers only run before the pod
+        starts, so they are excluded from steady-state sums and returned only
+        when ``include_init_containers`` is true (``kind="init"``).
         """
         pod_metrics: List[PodMetric] = []
         api = await self._ensure_client()
@@ -82,26 +126,13 @@ class PodCollector(BaseCollector):
                             owner_kind = "Deployment"
                             owner_name = parts[0]
 
-                for container in pod.spec.containers:
-                    container_name = container.name
-                    requests = container.resources.requests or {}
-
-                    cpu_request_str = requests.get("cpu")
-                    memory_request_str = requests.get("memory")
-                    ephemeral_storage_str = requests.get("ephemeral-storage")
-
-                    cpu_request = parse_cpu_request(cpu_request_str)
-                    memory_request = parse_memory_request(memory_request_str)
-                    ephemeral_storage_request = parse_storage_request(ephemeral_storage_str)
-
+                for container, kind in _containers_with_kind(pod.spec, include_init_containers):
                     pod_metrics.append(
-                        PodMetric(
+                        _container_metric(
+                            container,
+                            kind=kind,
                             pod_name=pod_name,
                             namespace=namespace,
-                            container_name=container_name,
-                            cpu_request=cpu_request,
-                            memory_request=memory_request,
-                            ephemeral_storage_request=ephemeral_storage_request,
                             owner_kind=owner_kind,
                             owner_name=owner_name,
                         )

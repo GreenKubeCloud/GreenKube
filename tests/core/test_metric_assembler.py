@@ -405,10 +405,10 @@ class TestPrometheusResourceProvenance:
             "web": 20,
             "telemetry-sidecar": 10,
         }
-        assert all(metric.is_estimated for metric in result)
-        assert all(
-            any("allocated from pod-level" in reason for reason in metric.estimation_reasons) for metric in result
-        )
+        # BUG-29: container rows inherit the pod's provenance instead of being blanket-estimated.
+        assert all(metric.is_estimated == aggregates[0].is_estimated for metric in result)
+        assert all(metric.cost_source == "opencost" for metric in result)
+        assert all(metric.usage_source == "prometheus" for metric in result)
         assert all(metric.restart_count is None for metric in result)
         assert all(metric.network_receive_bytes is None for metric in result)
         assert sum(metric.total_cost for metric in result) == pytest.approx(aggregates[0].total_cost)

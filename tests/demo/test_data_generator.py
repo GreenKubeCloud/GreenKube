@@ -203,6 +203,14 @@ class TestGenerateCombinedMetrics:
         for m in metrics:
             assert m.total_cost >= 0
 
+    def test_metrics_carry_trusted_provenance(self):
+        """Demo rows simulate an instrumented cluster, so measurement gates (A11, C0.3) can trust them."""
+        from greenkube.models.provenance import is_cost_trusted, is_intensity_measured, is_usage_trusted
+
+        metrics = generate_combined_metrics(days=1)
+        assert all(is_cost_trusted(m) and is_usage_trusted(m) and is_intensity_measured(m) for m in metrics)
+        assert {m.power_source for m in metrics} == {"instance_profile"}
+
     def test_energy_is_non_negative(self):
         """Energy (joules) should never be negative."""
         metrics = generate_combined_metrics(days=1)

@@ -8,7 +8,7 @@ append them to its scrape without importing the composition root.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from math import isfinite
 from time import monotonic, time
 from typing import Optional
@@ -234,6 +234,32 @@ GITOPS_SYNC_LAG = Histogram(
     registry=REGISTRY,
 )
 
+COLLECTION_SOURCE_REQUESTS = Counter(
+    "greenkube_collection_source_requests_total",
+    "Requests to measurement sources by bounded source and outcome.",
+    ["source", "outcome"],
+    registry=REGISTRY,
+)
+COLLECTION_SOURCE_DURATION = Histogram(
+    "greenkube_collection_source_duration_seconds",
+    "Duration of requests to measurement sources.",
+    ["source"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+    registry=REGISTRY,
+)
+COLLECTION_WINDOW_DURATION = Histogram(
+    "greenkube_collection_window_duration_seconds",
+    "Wall-clock duration of one metrics collection window (collect, assemble and write).",
+    buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+    registry=REGISTRY,
+)
+METRIC_ROWS_BY_PROVENANCE = Counter(
+    "greenkube_metric_rows_written_total",
+    "Metric rows written, by scope and per-dimension provenance (the provenance mix).",
+    ["scope", "dimension", "source"],
+    registry=REGISTRY,
+)
+
 _PLAN_STATUSES = frozenset(
     {
         "draft",
@@ -277,6 +303,31 @@ _BINDING_STATUSES = frozenset({"resolved", "ambiguous", "unresolved", "blocked",
 _DISCOVERY_REFRESH_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 _SYNC_OUTCOMES = frozenset({"synced", "pending", "failed", "timeout", "skipped", "error"})
 _FAILURE_REASONS = frozenset({"plan", "worker", "polling", "webhook", "discovery", "sync", "other"})
+_COLLECTION_SOURCES = frozenset({"prometheus", "opencost", "electricity_maps", "wattnet", "kubernetes", "other"})
+_COLLECTION_OUTCOMES = frozenset({"success", "empty", "error", "skipped"})
+_PROVENANCE_DIMENSIONS = ("cost_source", "usage_source", "power_source", "intensity_source")
+_PROVENANCE_VALUES = frozenset(
+    {
+        "opencost",
+        "kubecost",
+        "pricing_catalog",
+        "custom_rate",
+        "none",
+        "prometheus",
+        "metrics_server",
+        "instance_profile",
+        "node_capacity_derived",
+        "default_profile",
+        "kepler",
+        "realtime",
+        "consolidated",
+        "stale",
+        "zone_default",
+        "global_default",
+        "unknown",
+        "mixed",
+    }
+)
 
 AUTOMATION_WORKER_UP.set(0)
 AUTOMATION_WORKER_HEARTBEAT_TIMESTAMP.set(0)
@@ -340,6 +391,36 @@ def record_verification(outcome: str, failed_gates: Optional[list[str]] = None) 
             "failed_gates": list(failed_gates or []),
         },
     )
+
+
+def record_collection_request(source: str, outcome: str, duration_seconds: float | None = None) -> None:
+    """Count one request to a measurement source (Prometheus, OpenCost, intensity providers)."""
+    safe_source = _bounded_label(source, _COLLECTION_SOURCES, "other")
+    COLLECTION_SOURCE_REQUESTS.labels(
+        source=safe_source,
+        outcome=_bounded_label(outcome, _COLLECTION_OUTCOMES, "error"),
+    ).inc()
+    if duration_seconds is not None:
+        COLLECTION_SOURCE_DURATION.labels(source=safe_source).observe(_nonnegative_seconds(duration_seconds))
+
+
+def record_collection_window(duration_seconds: float) -> None:
+    """Observe the wall-clock duration of one metrics collection window."""
+    COLLECTION_WINDOW_DURATION.observe(_nonnegative_seconds(duration_seconds))
+
+
+def record_metric_provenance(rows: Iterable[object]) -> None:
+    """Count written metric rows by scope and provenance value of each dimension (A12)."""
+    counts: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        scope = "container" if getattr(row, "container_name", None) else "pod"
+        for dimension in _PROVENANCE_DIMENSIONS:
+            value = getattr(row, dimension, None)
+            source = _bounded_label(value, _PROVENANCE_VALUES, "unset") if value is not None else "unset"
+            key = (scope, dimension.removesuffix("_source"), source)
+            counts[key] = counts.get(key, 0) + 1
+    for (scope, dimension, source), count in counts.items():
+        METRIC_ROWS_BY_PROVENANCE.labels(scope=scope, dimension=dimension, source=source).inc(count)
 
 
 def generate_latest_observability() -> bytes:

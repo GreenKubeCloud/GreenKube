@@ -464,42 +464,96 @@ class FakePostgresDb:
 
 
 class TestPostgresCompressionBranches:
-    """PostgreSQL SQL branches parse asyncpg status strings correctly."""
+    """PostgreSQL branches parse asyncpg status strings and respect the watermark.
+
+    End-to-end PostgreSQL behaviour is covered by
+    ``tests/core/test_metrics_compressor_lossless.py`` against a real server.
+    """
 
     @pytest.mark.asyncio
-    async def test_compress_to_hourly_uses_postgres_branch(self):
-        conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["INSERT 0 7", "INSERT 0 0"])
-        compressor = MetricsCompressor(FakePostgresDb(conn))
-
-        result = await compressor._compress_to_hourly()
-
-        assert result == {"hours": 7, "rows": 7}
-        assert conn.execute.await_count == 2
-        assert "INSERT INTO combined_metrics_hourly" in conn.execute.await_args_list[0].args[0]
-        assert "INSERT INTO container_metrics_hourly" in conn.execute.await_args_list[1].args[0]
-        assert isinstance(conn.execute.await_args_list[0].args[1], datetime)
-
-    @pytest.mark.asyncio
-    async def test_postgres_pruning_parses_deleted_row_counts(self):
+    async def test_postgres_pruning_never_runs_before_a_compression_watermark(self):
         from greenkube.core.config import Config
 
         cfg = Config()
         cfg.METRICS_RAW_RETENTION_DAYS = 7
-        cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2", "DELETE 1", "DELETE 3"])
+        conn.fetchval = AsyncMock(return_value=None)
+        conn.execute = AsyncMock(return_value="DELETE 4")
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
 
-        assert await compressor._prune_raw() == 6
+        assert await compressor._prune_raw() == 0
+        conn.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_postgres_raw_pruning_uses_hour_aligned_cutoff_below_watermark(self):
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.METRICS_RAW_RETENTION_DAYS = 7
+        now = datetime(2026, 10, 10, 12, 37, 12, tzinfo=timezone.utc)
+        watermark = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+        conn = type("Conn", (), {})()
+        conn.fetchval = AsyncMock(return_value=watermark)
+        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2"])
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+
+        assert await compressor._prune_raw(now) == 6
+        cutoffs = {call.args[1] for call in conn.execute.await_args_list}
+        assert cutoffs == {datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)}
+
+    @pytest.mark.asyncio
+    async def test_postgres_hourly_pruning_parses_deleted_row_counts(self):
+        from greenkube.core.config import Config
+
+        cfg = Config()
+        cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
+        conn = type("Conn", (), {})()
+        conn.execute = AsyncMock(side_effect=["DELETE 1", "DELETE 3"])
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+
         assert await compressor._prune_hourly() == 4
-        assert conn.execute.await_count == 4
+        assert conn.execute.await_count == 2
 
     @pytest.mark.asyncio
     async def test_postgres_namespace_cache_refresh_and_empty_status_counts(self):
+        from greenkube.core.metrics_compressor import _status_count
+
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["INSERT 0 3", "", ""])
+        conn.execute = AsyncMock(side_effect=["INSERT 0 3"])
         compressor = MetricsCompressor(FakePostgresDb(conn))
 
         assert await compressor.refresh_namespace_cache() == 3
-        assert await compressor._compress_postgres(datetime.now(timezone.utc)) == {"hours": 0, "rows": 0}
+        assert _status_count("") == 0
+        assert _status_count(None) == 0
+        assert _status_count("INSERT 0 7") == 7
+
+
+@pytest.mark.asyncio
+async def test_short_compression_age_warns_once_about_the_carbon_recompute(db, caplog, monkeypatch):
+    """Compressed hours are never re-read: an age below the 24h carbon recompute window freezes hourly carbon."""
+    import logging
+
+    from greenkube.core.config import Config
+
+    monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
+    cfg = Config()
+    cfg.METRICS_COMPRESSION_AGE_HOURS = 6
+    compressor = MetricsCompressor(db_manager=db, config=cfg)
+
+    with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
+        await compressor.run()
+        await compressor.run()
+
+    warnings = [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_compression_age_does_not_warn(db, caplog, monkeypatch):
+    import logging
+
+    monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
+    with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
+        await MetricsCompressor(db_manager=db).run()
+
+    assert not [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]
