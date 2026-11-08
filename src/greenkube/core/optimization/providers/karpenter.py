@@ -136,7 +136,12 @@ def _pool_request_utilization(
     request_field: str,
     capacity_field: str,
 ) -> Optional[float]:
-    """Time-weighted request utilization of one resource across a pool's nodes."""
+    """Time-weighted request utilization of one resource across a pool's nodes.
+
+    Reads the per-node average requested capacity of the usage snapshot (roadmap
+    E3): the sum of the requests of the pods on the node, averaged over the
+    collection steps the node was observed.
+    """
     if not pool.node_names:
         return None
 
@@ -147,25 +152,16 @@ def _pool_request_utilization(
         if name and capacity:
             capacities[name] = float(capacity)
 
-    requests: Dict[object, Dict[str, float]] = {}
-    for metric in context.metrics:
-        node_name = metric.node
-        if node_name and node_name in pool.node_names:
-            timestamp = metric.timestamp or len(requests)
-            requests.setdefault(timestamp, {})
-            requested = float(getattr(metric, request_field, 0) or 0)
-            requests[timestamp][node_name] = requests[timestamp].get(node_name, 0.0) + requested
-
-    ratios = []
-    for point in requests.values():
-        point_ratios = []
-        for node_name, capacity in capacities.items():
-            if node_name in pool.node_names and capacity > 0:
-                point_ratios.append(min(point.get(node_name, 0.0) / capacity, 1.0))
-        if point_ratios:
-            ratios.append(sum(point_ratios) / len(point_ratios))
-    if not ratios:
+    node_usage = context.usage_snapshot().nodes
+    attribute = "cpu_request_avg" if request_field == "cpu_request" else "memory_request_avg"
+    pool_nodes = [name for name, capacity in capacities.items() if name in pool.node_names and capacity > 0]
+    if not any(name in node_usage for name in pool_nodes):
         return None
+    ratios = []
+    for node_name in pool_nodes:
+        usage = node_usage.get(node_name)
+        requested = float(getattr(usage, attribute, 0.0) or 0.0) if usage is not None else 0.0
+        ratios.append(min(requested / capacities[node_name], 1.0))
     return sum(ratios) / len(ratios)
 
 

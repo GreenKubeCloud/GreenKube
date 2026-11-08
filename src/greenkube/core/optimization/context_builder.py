@@ -3,6 +3,13 @@
 
 This module centralizes the data loading that used to be duplicated across the
 API router, the startup scan and the CLI command.
+
+Scans on the SQL backends are memory-bounded (roadmap E3, BUG-12): instead of
+materializing every metric row of the lookback, the builder reads one usage
+summary per target container, computed in SQL from the ``workload_usage_hourly``
+rollup, plus a few baseline rows per target for the Impact Model. Memory then
+grows with the number of targets, not with pods x lookback x samples. Other
+repositories (custom backends, tests) keep the bounded row-loading path.
 """
 
 import logging
@@ -18,7 +25,9 @@ from greenkube.storage.base_repository import ContainerMetricsRepository
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
+    from greenkube.models.workload_usage import UsageSnapshot
     from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository
+    from greenkube.storage.base_workload_usage_repository import WorkloadUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +60,39 @@ async def get_active_k8s_namespaces() -> Optional[set[str]]:
         return None
 
 
+def usage_repository_for(combined_repo: object) -> Optional["WorkloadUsageRepository"]:
+    """The rollup repository sharing the database of a SQL combined-metrics repository, if any."""
+    from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
+    from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
+    from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+
+    if isinstance(combined_repo, PostgresCombinedMetricsRepository):
+        return create_workload_usage_repository(combined_repo.db_manager, "postgres")
+    if isinstance(combined_repo, SQLiteCombinedMetricsRepository):
+        return create_workload_usage_repository(combined_repo.db_manager, "sqlite")
+    return None
+
+
+def _keep_namespaces(snapshot: "UsageSnapshot", namespaces: set[str]) -> None:
+    """Drop summaries of namespaces that no longer exist, so reconciliation can mark them stale."""
+    for target in [target for target in snapshot.summaries if target[0] not in namespaces]:
+        del snapshot.summaries[target]
+        snapshot.hour_profiles.pop(target, None)
+        snapshot.hour_profile_samples.pop(target, None)
+
+
 class ContextBuilder:
     """Loads metrics and cluster side inputs into an :class:`OptimizationContext`."""
 
-    def __init__(self, config: Optional["Config"] = None):
+    def __init__(
+        self,
+        config: Optional["Config"] = None,
+        usage_repo: Optional["WorkloadUsageRepository"] = None,
+    ):
         from greenkube.core.config import get_config
 
         self.config = config if config is not None else get_config()
+        self.usage_repo = usage_repo
 
     async def build(
         self,
@@ -66,6 +101,81 @@ class ContextBuilder:
         namespace: Optional[str] = None,
     ) -> OptimizationContext:
         """Reads the configured lookback window and builds a full context."""
+        usage_repo = self.usage_repo if self.usage_repo is not None else usage_repository_for(combined_repo)
+        if usage_repo is not None:
+            return await self.build_from_rollup(usage_repo, node_repo, namespace=namespace)
+        return await self._build_from_rows(combined_repo, node_repo, namespace=namespace)
+
+    async def build_from_rollup(
+        self,
+        usage_repo: "WorkloadUsageRepository",
+        node_repo: "NodeRepository",
+        namespace: Optional[str] = None,
+        *,
+        now: Optional[datetime] = None,
+    ) -> OptimizationContext:
+        """Builds the context from usage summaries computed in SQL (memory bounded by targets)."""
+        from greenkube.core.workload_usage import WorkloadUsageRollup, floor_hour
+        from greenkube.utils.time import parse_query_step_seconds
+
+        cfg = self.config
+        end = now or datetime.now(timezone.utc)
+        lookback_days = max(int(cfg.RECOMMENDATION_LOOKBACK_DAYS), 1)
+        start = floor_hour(end - timedelta(days=lookback_days))
+        read_end = floor_hour(end) + timedelta(hours=1)
+
+        # Roll the hours collected since the last compression run, so the scan
+        # sees the newest data; this is cheap (usually one or two hours).
+        await WorkloadUsageRollup(
+            usage_repo,
+            step_seconds=parse_query_step_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP),
+            backfill_hours=lookback_days * 24,
+        ).refresh(end, refresh_hours=1)
+
+        snapshot = await usage_repo.read_usage_snapshot(start, read_end, namespace=namespace)
+        pod_rows, container_rows = await usage_repo.read_baseline_rows(
+            start, read_end, namespace=namespace, snapshot=snapshot
+        )
+
+        active_namespaces = await get_active_k8s_namespaces()
+        if active_namespaces is not None:
+            _keep_namespaces(snapshot, active_namespaces)
+            pod_rows = [row for row in pod_rows if row.namespace in active_namespaces]
+            container_rows = [row for row in container_rows if row.namespace in active_namespaces]
+
+        # Annualize over the span actually observed: a cluster with three days
+        # of history is not extrapolated as if it had fourteen.
+        observed_start = start
+        if snapshot.first_hour is not None and snapshot.first_hour > start:
+            observed_start = snapshot.first_hour
+        analysis_window_seconds = max((end - observed_start).total_seconds(), 3600.0)
+        logger.debug(
+            "Recommendation scan reads %d target summaries and %d baseline rows over %.0f hours.",
+            sum(len(containers) for containers in snapshot.summaries.values()),
+            len(pod_rows) + len(container_rows),
+            analysis_window_seconds / 3600,
+        )
+
+        side_inputs = await self._collect_side_inputs(node_repo, end)
+        return OptimizationContext(
+            config=cfg,
+            metrics=list(pod_rows),
+            container_metrics=list(container_rows),
+            namespace=namespace,
+            analysis_window_seconds=analysis_window_seconds,
+            window_start=observed_start,
+            window_end=end,
+            usage=snapshot,
+            **side_inputs,
+        )
+
+    async def _build_from_rows(
+        self,
+        combined_repo: "CombinedMetricsRepository",
+        node_repo: "NodeRepository",
+        namespace: Optional[str] = None,
+    ) -> OptimizationContext:
+        """Bounded row-loading path for repositories without the usage rollup."""
         cfg = self.config
         end = datetime.now(timezone.utc)
         start, expected_rows = await self._bounded_window(combined_repo, end, namespace=namespace)

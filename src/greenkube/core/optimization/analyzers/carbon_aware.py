@@ -1,4 +1,3 @@
-# src/greenkube/core/optimization/analyzers/carbon_aware.py
 """Carbon-aware scheduling: workloads running during high-intensity periods."""
 
 from collections import defaultdict
@@ -22,32 +21,22 @@ class CarbonAwareAnalyzer(Analyzer):
         recs: List[Recommendation] = []
         cfg = self.config
 
-        zone_intensities: Dict[str, List[float]] = defaultdict(list)
-        for m in context.metrics:
-            if m.emaps_zone and m.grid_intensity:
-                zone_intensities[m.emaps_zone].append(m.grid_intensity)
+        # Zone average weighted by samples, over every pod of the zone.
+        zone_totals: Dict[str, List[float]] = defaultdict(lambda: [0.0, 0.0])
+        summaries = list(context.workload_summaries())
+        for _target, summary in summaries:
+            if summary.emaps_zone and summary.grid_intensity and summary.intensity_sample_count:
+                totals = zone_totals[summary.emaps_zone]
+                totals[0] += summary.grid_intensity * summary.intensity_sample_count
+                totals[1] += summary.intensity_sample_count
+        zone_avg = {zone: total / count for zone, (total, count) in zone_totals.items() if count}
 
-        zone_avg: Dict[str, float] = {}
-        for zone, vals in zone_intensities.items():
-            zone_avg[zone] = sum(vals) / len(vals)
-
-        for (ns, target_kind, target_name), series in context.target_series().items():
-            agg: Dict = {"intensities": [], "zone": None, "co2e": 0.0}
-            for metric in series:
-                if metric.grid_intensity:
-                    agg["intensities"].append(metric.grid_intensity)
-                if metric.emaps_zone:
-                    agg["zone"] = metric.emaps_zone
-                agg["co2e"] += metric.co2e_grams
-
-            zone = agg.get("zone")
-            if not zone or zone not in zone_avg:
-                continue
-            intensities = agg["intensities"]
-            if not intensities:
+        for (ns, target_kind, target_name), summary in summaries:
+            zone = summary.emaps_zone
+            if not zone or zone not in zone_avg or not summary.grid_intensity:
                 continue
 
-            pod_avg_intensity = sum(intensities) / len(intensities)
+            pod_avg_intensity = summary.grid_intensity
             zone_average = zone_avg[zone]
 
             if zone_average == 0:
@@ -56,7 +45,7 @@ class CarbonAwareAnalyzer(Analyzer):
             ratio = pod_avg_intensity / zone_average
             if ratio > cfg.CARBON_AWARE_THRESHOLD:
                 label = target_label(target_kind, target_name)
-                annual_co2e = annualized_window_total(agg["co2e"], context.analysis_window_seconds)
+                annual_co2e = annualized_window_total(summary.co2e_grams, context.analysis_window_seconds)
                 recs.append(
                     Recommendation(
                         pod_name=target_name,

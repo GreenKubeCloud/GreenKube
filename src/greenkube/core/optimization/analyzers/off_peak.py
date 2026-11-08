@@ -1,8 +1,6 @@
-# src/greenkube/core/optimization/analyzers/off_peak.py
 """Off-peak scaling: workloads active only during certain hours."""
 
-from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
@@ -11,6 +9,9 @@ from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
     from greenkube.core.optimization.context import OptimizationContext
+
+#: Fewer timestamped CPU samples than this give no meaningful daily profile.
+MIN_PROFILE_SAMPLES = 6
 
 
 def find_longest_consecutive_hours(hours: List[int]) -> List[int]:
@@ -36,32 +37,30 @@ def find_longest_consecutive_hours(hours: List[int]) -> List[int]:
 
 
 class OffPeakAnalyzer(Analyzer):
-    """Identifies workloads active only during certain hours."""
+    """Identifies workloads active only during certain hours.
+
+    Reads the pod-level average CPU per UTC hour of day of each target, from
+    the usage snapshot (roadmap E3).
+    """
 
     capability = "off_peak"
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
+        snapshot = context.usage_snapshot()
 
-        for (ns, target_kind, target_name), series in context.target_series().items():
-            timed = [
-                (m.timestamp, m.cpu_usage_millicores)
-                for m in series
-                if m.timestamp is not None and m.cpu_usage_millicores is not None
-            ]
-            if len(timed) < 6:
+        for target, _summary in context.workload_summaries():
+            ns, target_kind, target_name = target
+            profile = snapshot.hour_profiles.get(target)
+            if not profile or snapshot.hour_profile_samples.get(target, 0) < MIN_PROFILE_SAMPLES:
                 continue
 
-            hourly_usage: Dict[int, List[float]] = defaultdict(list)
-            for ts, usage in timed:
-                hourly_usage[ts.hour].append(float(usage))
-
-            if not hourly_usage:
+            hourly_avg = {hour: value for hour, value in enumerate(profile) if value is not None}
+            if not hourly_avg:
                 continue
 
-            hourly_avg = {h: sum(v) / len(v) for h, v in hourly_usage.items()}
-            peak_usage = max(hourly_avg.values()) if hourly_avg else 0
+            peak_usage = max(hourly_avg.values())
             if peak_usage == 0:
                 continue
 
@@ -80,7 +79,7 @@ class OffPeakAnalyzer(Analyzer):
                 projector = ImpactProjector.for_context(context)
                 delta = projector.replica_schedule(
                     projector.workload_ref(ns, target_kind, target_name),
-                    series,
+                    context.workload_rows(target),
                     consecutive,
                 )
 
