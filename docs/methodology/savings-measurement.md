@@ -18,7 +18,7 @@ This page is the reference for reviewing and auditing a measurement. When a rule
 | Append-only ledger entries, hash chain and restatement (C6) | Not yet. Measured savings reach the existing ledger through the recommendation (method `measured`). |
 | Drift monitor (`realized → regressed`, C8) | The state exists; nothing sets it automatically yet. A newer change on the workload closes the older realized one. |
 
-Changes applied before this release, and every change when `CHANGE_MEASUREMENT_ENABLED=false`, are still measured by the interim verifier described in [recommendation.md](../recommendation.md#lifecycle-states).
+Changes applied before this release, recommendations marked applied by hand (`PATCH /api/v1/recommendations/{id}/apply`, which apply detection never sees), and every change when `CHANGE_MEASUREMENT_ENABLED=false` are still measured by the interim verifier described in [recommendation.md](../recommendation.md#lifecycle-states).
 
 ## Vocabulary
 
