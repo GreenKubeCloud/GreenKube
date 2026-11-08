@@ -53,7 +53,7 @@ The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on 
 
 When NetworkPolicy is enabled, the chart covers standalone app/worker pods and production API/controller/worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API, controller or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
 
-When `secrets.apiKey` or `secrets.existingSecret` is configured, the chart adds bearer-token authentication to the `ServiceMonitor`. The referenced Secret must be available in `monitoring.serviceMonitor.namespace` and contain the `GREENKUBE_API_KEY` key. If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
+The chart adds bearer-token authentication to the `ServiceMonitor`. Recommended: create an API key with only the `metrics:read` scope (**Settings > API keys**), store it in a Secret in `monitoring.serviceMonitor.namespace`, and set `monitoring.serviceMonitor.bearerTokenSecret.name` (and `.key`, default `token`). Without it, the ServiceMonitor uses the deprecated bootstrap key `GREENKUBE_API_KEY`, whose Secret must then be available in that namespace. See [Authentication](authentication.md#prometheus). If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
 
 ### Without the Prometheus Operator
 

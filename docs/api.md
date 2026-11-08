@@ -4,16 +4,39 @@ The GreenKube REST API is available under `/api/v1`. Interactive documentation a
 
 ## Authentication
 
-When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The chart defaults to `config.environment: production` and generates a random `GREENKUBE_API_KEY` once, with its credentials bootstrap hook, in the Secret `<release>`. In production, a missing key makes protected routes fail closed with `503`; in development, an installation whose Secret has no key leaves protected routes open. The current API middleware supports API-key authentication; selecting another mode does not enable an OIDC or session implementation.
+See [Authentication](authentication.md) for the full model. In short:
 
-The browser dashboard sends the key only after you enter it in the authentication dialog. It keeps the key in `sessionStorage` for the current tab (it survives reloads, and is forgotten when the tab closes, on **Sign out**, or on any `401`) and never writes it to `localStorage` or cookies. The dialog is a standard sign-in form (account `api-key`), so password managers can save and autofill the key. Retrieve the key with:
+- **Machines** send a scoped API key as `Authorization: Bearer gk_<id>_<secret>`. Administrators create keys in
+  **Settings > API keys** or with `POST /api/v1/auth/api-keys`; the key is shown once. Scopes: `read`, `write`,
+  `approve`, `signals:write`, `metrics:read`, `admin`. A request outside its key's scopes answers `403` with code
+  `INSUFFICIENT_SCOPE`.
+- **The dashboard** signs in with `POST /api/v1/auth/login` and then uses an `HttpOnly` session cookie. Mutations
+  authenticated by that cookie need a same-origin `Origin` and the `X-CSRF-Token` header returned by
+  `GET /api/v1/auth/me`.
+- **The bootstrap key** `GREENKUBE_API_KEY` (generated once by the chart in the Secret `<release>`) is still accepted
+  as an admin Bearer key for one more minor release (deprecated):
 
-```bash
-kubectl -n <namespace> get secret <release-secret> \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
-```
+  ```bash
+  kubectl -n <namespace> get secret <release-secret> \
+    -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
+  ```
 
-The exact Secret name is `<release>` for a generated key, `<release>-values` for a key set with `secrets.apiKey`, or the value of `secrets.existingSecret`; `helm install` prints the exact command. See the [Installation guide](installation.md#production-api-key-handling).
+Unauthenticated requests answer `401`. A production instance that cannot authenticate anybody answers `503`; a
+development instance without any account and without a bootstrap key stays open.
+
+### Authentication endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/auth/login` | Sign in with `{username, password, remember}`; sets the session cookie. Rate-limited (`429` with `Retry-After`). |
+| `POST` | `/auth/logout` | Revoke the current session (`204`). |
+| `GET` | `/auth/me` | Current principal, scopes, `must_change_password` and, for sessions, the CSRF token. |
+| `POST` | `/auth/password` | Change the password; revokes every session and sets a new cookie. |
+| `GET` | `/auth/sessions` | Active sessions of the signed-in user. |
+| `DELETE` | `/auth/sessions/{id}` | Sign out one session. |
+| `GET` | `/auth/api-keys` | List API keys (`admin`); secrets are never returned. |
+| `POST` | `/auth/api-keys` | Create a key `{name, scopes, expires_in_days?}` (`admin`); the response holds the key once. |
+| `DELETE` | `/auth/api-keys/{id}` | Revoke a key (`admin`). |
 
 ## Endpoints
 
@@ -28,7 +51,7 @@ All paths below are relative to `/api/v1`.
 | `GET` | `/config` | Current runtime configuration. |
 | `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). |
 | `GET` | `/health/services/{service_name}` | Health check for one data source. |
-| `POST` | `/config/services` | Apply selected integration URLs or tokens at runtime; see [Configuration](configuration.md). |
+| `POST` | `/config/services` | Removed: answers `410 Gone`. Data sources are configuration as code; see [Configuration](configuration.md#data-sources-are-configuration-as-code). |
 
 The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from the OpenAPI schema.
 
