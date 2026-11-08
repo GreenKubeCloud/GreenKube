@@ -17,7 +17,8 @@ from greenkube.storage.base_collection_watermark_repository import create_collec
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
-BASE = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+# Recent enough that summaries read raw rows (older data is served from hourly rollups).
+BASE = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
 STEP = timedelta(minutes=5)
 
 
