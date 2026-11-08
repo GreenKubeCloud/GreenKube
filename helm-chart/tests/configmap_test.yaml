@@ -467,3 +467,24 @@ tests:
       - equal:
           path: data.CARBON_PRICE_PER_TONNE
           value: "0"
+
+  - it: should render the expected-value ranking costs
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_INCIDENT_COST
+          value: "100"
+      - equal:
+          path: data.RECOMMENDATION_ENGINEER_HOUR_COST
+          value: "0"
+
+  - it: should render custom expected-value ranking costs, zero included
+    set:
+      config.recommendations.incidentCost: 0
+      config.recommendations.engineerHourCost: 85.5
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_INCIDENT_COST
+          value: "0"
+      - equal:
+          path: data.RECOMMENDATION_ENGINEER_HOUR_COST
+          value: "85.5"
