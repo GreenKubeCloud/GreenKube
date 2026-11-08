@@ -330,7 +330,7 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
 
 3. **Karpenter (`karpenter`, optional)** — node-pool consolidation recommendations when compatible Karpenter CRDs are available.
 
-**Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) combine impact, confidence, risk, effort, actionability and source authority.
+**Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Recommendations are ranked by risk-adjusted expected value in one currency (`core/optimization/scoring.py`): projected value (cost plus carbon at a carbon price) times a success probability that combines confidence with each source's measured track record (`track_record.py`), minus the expected incident and effort costs. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) are presets over those parameters. Delivery eligibility (`eligibility.py`) is computed when a recommendation is read: action kind, GitOps binding, warm-up and the automation policy gates.
 
 For the user-facing automation workflow and supported source layouts, see [GitOps automation](automation.md).
 
@@ -650,7 +650,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
    ├─ Normalize provenance and arbitrate conflicts by capability/priority
    ├─ Deduplicate and clamp values to configured minimums
    ├─ Attach evidence, risk/confidence/effort and expiry
-   └─ Compute multi-criteria ranking score and factors
+   └─ Compute the expected value (EV) and its factors in currency, with the source track record
    ```
 
 3. **Output:**

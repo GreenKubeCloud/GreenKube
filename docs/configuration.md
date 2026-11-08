@@ -123,6 +123,10 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.maxMetricRows` | `RECOMMENDATION_MAX_METRIC_ROWS` | `750000` | Hard bound on combined and container rows loaded by one recommendation scan. The lookback window is shortened automatically before loading above this bound. |
 | `config.recommendations.sourcePriority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). |
 | `config.recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
+| `config.recommendations.rankingProfile` | `RECOMMENDATION_RANKING_PROFILE` | `balanced` | Default ranking profile: `balanced`, `cost_first`, `carbon_first`, `low_risk` or `quick_wins`, presets over the carbon price, risk aversion and effort weight of the expected value. Requests override it with `?profile=`. See [ranking](recommendation.md#sources-evidence-and-ranking). |
+| `config.recommendations.rankingWeights` | `RECOMMENDATION_RANKING_WEIGHTS` | `""` | Deprecated and ignored: weights of the former batch-normalized score. |
+| `config.recommendations.incidentCost` | `RECOMMENDATION_INCIDENT_COST` | `100` | Expected cost (projection currency) of a failed high-risk change on one workload of normal criticality. Scaled by risk level, blast radius (scope, `greenkube.io/criticality`, single replica) and the profile's risk aversion. |
+| `config.recommendations.engineerHourCost` | `RECOMMENDATION_ENGINEER_HOUR_COST` | `0` | Cost of one engineer hour used to weigh implementation effort. `0` ignores effort, except in the `quick_wins` profile (at least 100 per hour). |
 | `config.recommendations.verification.windowHours` | `VERIFICATION_WINDOW_HOURS` | `72` | Fixed post-apply measurement window, starting at rollout completion; the baseline window has the same length and ends at the PR merge. Extended once when trusted samples are missing. |
 | `config.recommendations.verification.minSamples` | `VERIFICATION_MIN_SAMPLES` | `36` | Trusted samples (query steps) required in each window; below it after one extension the measurement is `inconclusive`. |
 | `config.recommendations.verification.minSavingsRatio` | `VERIFICATION_MIN_SAVINGS_RATIO` | `0.5` | Projection accuracy below which a realized saving is flagged in the measurement notes. Reported only: the projection is not a gate. |
@@ -143,7 +147,7 @@ The [Impact Model](methodology/impact-model.md) prices every recommendation proj
 | `impact.pricing.ramGiBHour` | `IMPACT_PRICING_RAM_GIB_HOUR` | unset (`0.004237`) | Price of one GiB-hour of memory, same fallback rules. |
 | `impact.pricing.currency` | `IMPACT_PRICING_CURRENCY` | `USD` | ISO 4217 code of all projected costs: the custom rates and observed OpenCost costs (set it to OpenCost's currency). Only bundled catalogs in this currency are used, so set `EUR` to use the OVHcloud and Scaleway catalogs. GreenKube never converts currencies. |
 | `impact.realizationFactor` | `IMPACT_REALIZATION_FACTOR` | `1.0` | Share (0–1) of released capacity expected to become removed billable node-hours. `potential_savings_*` equal the allocated projection times this factor. Per-pool realization (RealizationContext) will replace it. |
-| `impact.carbonPricePerTonne` | `CARBON_PRICE_PER_TONNE` | `100` | Currency per tonne CO₂e used to compute `value_annual = expected cost + price × tCO₂e`. Set `0` to rank on cost alone. |
+| `impact.carbonPricePerTonne` | `CARBON_PRICE_PER_TONNE` | `100` | Currency per tonne CO₂e used to compute `value_annual = expected cost + price × tCO₂e`, the value the expected-value ranking starts from. Set `0` to rank on cost alone; the `carbon_first` profile uses 4 × this price, `cost_first` 0, and `?carbon_price=` overrides it per request. |
 
 On-premises clusters should set both `cpuCoreHour` and `ramGiBHour`; every projection records which tier priced it in `impact.assumptions.unit_prices`.
 

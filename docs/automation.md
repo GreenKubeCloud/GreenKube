@@ -99,7 +99,7 @@ After configuring a Git provider, repository allowlist, and secure renderer boun
 
 1. Check `GET /api/v1/automation/status`. Automation must be enabled and ready, the provider token must be configured, and the worker must be healthy.
 2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
-3. In **Recommendations**, choose a CPU or memory rightsizing recommendation marked **Container action ready**. Review its **Evidence** and check `GET /api/v1/recommendations/{id}/apply-pr/eligibility` before previewing.
+3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Preview plan**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`). Review its **Evidence** before previewing.
 4. Select **Preview plan**. Review every policy check, source and rendered diff, validation result, and digest. Approve only the exact plan you intend to propose.
 5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
 
@@ -109,19 +109,16 @@ Automation does not create a PR for every visible recommendation. By default, ea
 
 Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
 
-Inspect the recommendation's **Evidence** panel or read the recommendation and eligibility result through the API. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
+Inspect the recommendation's **Evidence** panel and its blockers, or read its `eligibility` through the API: `can_open_pr`, then each blocker's `code`, `message` and `fix` ([eligibility codes](reference/eligibility-codes.md)). Eligibility runs the same policy evaluator as plan creation, read-only. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
 
 ```bash
 REC_ID=123 # replace with the recommendation ID shown in GreenKube
 curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
   "http://localhost:8000/api/v1/recommendations/${REC_ID}" |
-  jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}}'
-curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
-  "http://localhost:8000/api/v1/recommendations/${REC_ID}/apply-pr/eligibility" |
-  jq '{eligible, reason, code, policy_result}'
+  jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}, eligibility}'
 ```
 
-If a gate rejects the plan, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at`. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 

@@ -85,7 +85,7 @@ Each finished run records:
 2. `OptimizationEngine.run_scan()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers.
 3. Enabled **sources** run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes. A source that raises or times out is recorded as `failed` and the scan continues with the others. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
 4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
-5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with the multi-criteria ranking profile.
+5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with its risk-adjusted expected value (EV, see below). Before persisting, the scan folds each source's measured track record into the score.
 6. Recommended CPU and memory requests are floored to configured minimums.
 7. The scan converts recommendations to `RecommendationRecord` objects, upserts active records, reconciles missing active records as stale (per source, see below) and records the run outcome.
 
@@ -99,7 +99,53 @@ The controller is the only process that runs and persists scans; the API reads p
 
 **Risk and confidence.** `risk_level` (low/medium/high) is derived from the observed headroom, restart/OOM history and blast radius; `confidence` (0–1) aggregates sample count, coverage and source authority. Both are explainable via `risk_factors` and the confidence factors inside the evidence block.
 
-**Ranking.** `ranking_score` combines carbon impact, cost impact, confidence, risk, effort, actionability and source authority. Profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) can be selected per request; `ranking_factors` exposes the contribution of each criterion.
+Risk model v2 (roadmap I4) adds the workload facts the pooled usage distribution hides. Each one is listed in `risk_factors`; a fact that was not observed never lowers or raises the risk:
+
+| Factor | Effect |
+|---|---|
+| `replica_p95_exceeds_proposal` / `replica_p95_close_to_proposal` | The hottest replica's p95 usage is above, or within 10% of, the proposed per-container request: high / at least medium. |
+| `singleton_workload` | One replica and the change restarts pods: one level higher. |
+| `oom_history`, `cpu_throttling_history` | OOM kills make a memory decrease high; CPU throttling above 5% (25%) makes a CPU decrease at least medium (high). |
+| `hpa_scales_on_resource`, `hpa_present` | An HPA scales on the changed resource: at least medium. An HPA with unknown metrics is only reported. |
+| `vpa_conflicting_writer` | A VPA in `Auto`, `Recreate`, `InPlace` or `InPlaceOrRecreate` mode also writes the requests: high. |
+| `pdb_blocks_disruption` | A PodDisruptionBudget blocks the rollout: at least medium. |
+| `jvm_heap_not_observable`, `jvm_startup_cpu` | The workload is flagged as a JVM (`greenkube.io/jvm: "true"` or `greenkube.io/runtime: jvm`, label or annotation): a memory decrease is high, a CPU decrease at least medium. |
+| `memory_decrease_best_effort`, `static_cpu_manager_incompatible` | In-place resize constraints: memory decreases apply on restart (reported); CPU resizes under the static CPU manager are high risk. |
+| `criticality_critical`, `criticality_high`, `criticality_low` | The `greenkube.io/criticality` label: `critical` raises one level, `high` is at least medium. |
+
+Scans observe replicas, per-replica usage and HPA targets. Labels, annotations, VPAs and PodDisruptionBudgets come from GitOps discovery evidence: they shape the expected value (criticality) and the eligibility of a pull request (policy gates) when a recommendation is read.
+
+**Ranking: risk-adjusted expected value.** Every recommendation carries a `value` block (roadmap I1) in the projection currency (`impact.pricing.currency`), per year:
+
+```text
+value_annual  = expected_billable_cost_annual + carbon_price × tCO2e_expected_annual
+p_success     = Beta posterior mean (confidence prior + source track record) × risk-class factor
+incident_cost = risk_aversion × incident_cost × severity[risk_level] × blast_radius
+effort_cost   = effort_hours[effort, delivery mode] × engineer_hour_cost × effort_weight
+EV            = p_success × value_annual − (1 − p_success) × incident_cost − effort_cost
+```
+
+- `value_annual` uses the Impact Model projection (`impact`); rows without one use `potential_savings_*`. Carbon is valued only when the model covers it (`co2e_modeled`).
+- `p_success` treats the analyzer's confidence as a prior worth four observations and updates it with the measured outcomes of the same source family and capability (see the track record below), then multiplies by 1.0, 0.95 or 0.85 for a low, medium or high risk.
+- `incident_cost` is `RECOMMENDATION_INCIDENT_COST` scaled by severity (0.05, 0.25, 1.0 by risk level) and blast radius: ×3 for node or cluster scope, ×2 for a namespace, ×4 / ×2 / ×0.5 for a `critical` / `high` / `low` criticality label, ×1.5 for a single replica.
+- `effort_cost` uses 0.5, 2 or 8 engineer hours by effort level, halved when GreenKube opens the pull request; `RECOMMENDATION_ENGINEER_HOUR_COST` defaults to 0 (effort ignored).
+- Reliability recommendations (`value_annual < 0`: the change costs money) are in the `reliability` lane and also count the incident cost they avoid (`incident_cost_avoided`).
+
+`ranking_score` is the EV and `ranking_factors` break it down in currency (`cost`, `carbon`, `incident_risk`, `effort`, and `reliability` when present); the factors sum to the score. Scores are absolute, so filtering a list never reorders what remains (BUG-23: the former score normalized each batch). `value.components` keeps every input (carbon price, prior, track record, blast radius, delivery mode) so the score can be reproduced.
+
+**Profiles** are presets over the EV parameters. Select the default with `RECOMMENDATION_RANKING_PROFILE` and override it per request with `?profile=`; `?carbon_price=` overrides the carbon price of any profile.
+
+| Profile | Carbon price | Risk aversion | Effort |
+|---|---|---|---|
+| `balanced` | `CARBON_PRICE_PER_TONNE` | 1 | weight 1 |
+| `cost_first` | 0 | 1 | weight 1 |
+| `carbon_first` | 4 × `CARBON_PRICE_PER_TONNE` | 1 | weight 1 |
+| `low_risk` | `CARBON_PRICE_PER_TONNE` | 4 | weight 1 |
+| `quick_wins` | `CARBON_PRICE_PER_TONNE` | 1 | weight 3, at least 100 per engineer hour |
+
+**Source track record.** `GET /api/v1/sources/track-record` returns a Beta(α, β) distribution per source family and capability, with a uniform prior: a `realized` outcome adds one to α, `not_realized` or `rollback_review` adds one to β, and `inconclusive` outcomes are only counted (for example `vpa: 14/16 realized`). Until change measurement exposes outcome counts, they are derived from the verification state of applied recommendations (`method: recommendation_verification_status`). Goldilocks counts as `vpa`, since it runs the VPA recommender.
+
+**Eligibility.** Every recommendation read through the API carries an `eligibility` block: `can_open_pr`, `delivery_modes` (`direct`, `manual`), `blockers` and `warnings` with a `code`, a `message` and a `fix`, and `eligible_at` while evidence is warming up. It is computed when the recommendation is read, with the same policy evaluator that guards plan creation. The codes are listed in [Eligibility codes](reference/eligibility-codes.md).
 
 
 ## Recommendation Types
@@ -154,13 +200,14 @@ All recommendation API paths are under `/api/v1`.
 
 | Method | Path | Behavior |
 |---|---|---|
-| `GET` | `/recommendations?namespace=` | Returns persisted active records (never generates them). |
-| `GET` | `/recommendations/active?namespace=&source=&risk_level=&capability=` | Returns persisted active records ordered by `ranking_score` (highest first, unscored last), then projected annual cost savings (highest first, unknown last), then `id`. Optional filters by source, risk level and capability. |
-| `GET` | `/recommendations/top?limit=5&metric=co2&profile=&namespace=` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. With `profile` (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`), the multi-criteria `ranking_score` drives the order. |
+| `GET` | `/recommendations?namespace=&profile=&carbon_price=` | Returns persisted active records (never generates them) with their live `value` and `eligibility`, ordered by expected value. |
+| `GET` | `/recommendations/active?namespace=&source=&risk_level=&capability=&profile=&carbon_price=` | Returns persisted active records with their live `value` and `eligibility`, ordered by expected value (`ranking_score`, highest first, unscored last), then value, projected cost savings and identity. Optional filters by source, risk level and capability; `profile` and `carbon_price` re-score the list for this request (`422` for an unknown profile or a negative price). |
+| `GET` | `/recommendations/top?limit=5&metric=co2&profile=&carbon_price=&namespace=` | Returns ranked active recommendations. `metric` is `co2` or `cost` (recommendations with a positive projection of that saving) or `value` (every recommendation, by expected value); `limit` is 1 to 50. With `profile` or `carbon_price`, recommendations are re-scored and ranked by expected value. |
+| `GET` | `/sources/track-record` | Returns the measured realization rate of each source family and capability as Beta(α, β) entries (`realized`, `not_realized`, `rollback_review`, `inconclusive`, `alpha`, `beta`, `mean`, `summary`). |
 | `POST` | `/optimization/runs` | Queues a scan for the controller (optional body `{"namespace": "..."}`); returns `202 {"run_id", "status"}`, deduplicated while a run is queued for the same scope. |
 | `GET` | `/optimization/runs?limit=20` | Lists recent runs, newest first (`limit` 1 to 100), with per-source health and diff counts. |
 | `GET` | `/optimization/runs/{run_id}` | Returns one run: `status` (`queued`, `running`, `succeeded`, `failed`), `requested_at`, `started_at`, `completed_at`, `recommendation_count`, `error`, `sources`, diff counts and `diff`. |
-| `GET` | `/recommendations/{id}` | Returns a single record including its full evidence block, risk/confidence assessment, patch plan and expiry. |
+| `GET` | `/recommendations/{id}?profile=&carbon_price=` | Returns a single record including its full evidence block, risk/confidence assessment, patch plan, expiry, live `value` and `eligibility`. |
 | `GET` | `/recommendations/ignored?namespace=` | Returns ignored records. |
 | `GET` | `/recommendations/applied?namespace=` | Returns applied, verifying, verified and rollback-review records ordered by most recent application. |
 | `GET` | `/recommendations/history?start=&end=&type=&namespace=` | Returns records in a creation-time range, any status. |
@@ -220,11 +267,12 @@ The `/recommendations` page currently provides:
 - Type filtering for active and ignored records.
 - Potential annual CO2e and cost savings summaries for active records.
 - Source badges (GreenKube, VPA, Karpenter), risk badges and confidence indicators.
-- The ranking score and its top contributing factor on each card; hover the score for the full factor breakdown.
-- A sort selector. **Ranking score (default)** keeps the server order. **Projected cost savings** and **Projected CO₂e savings** sort the loaded list by annual savings. The **Profile** options (balanced, carbon first, cost first, quick wins, low risk) re-rank the top 50 recommendations of the selected namespace through `GET /recommendations/top?profile=` and show that profile's scores. That endpoint does not take the source, risk or capability filters, so with those filters active the remaining matches keep the server order below the re-ranked ones.
+- The expected value on each card ("≈ €412/yr expected · 82% success"), its top contributing factor, and the full breakdown in currency on hover. Reliability recommendations carry a **Reliability** badge.
+- The eligibility of each card: a **Preview plan** button when the server says a pull request can be opened (`eligibility.can_open_pr`), otherwise the blockers with their fix (for example "Collecting evidence — eligible in ~31h").
+- A sort selector. **Expected value (default)** keeps the server order. **Projected cost savings** and **Projected CO₂e savings** sort the loaded list by annual savings. The **Profile** options (balanced, carbon first, cost first, quick wins, low risk) reload the list with `?profile=`, so the server re-scores and re-orders every recommendation matching the filters.
 - A **Rescan** button: it requests a scan with `POST /optimization/runs`, polls `GET /optimization/runs/{id}` and reloads the page's data when the run succeeds or fails. When the server also offers the optional run list (`GET /optimization/runs?limit=1`, newest first) and the page opens while a scan is already queued or running, it follows that run and reloads when it completes; a server without the list still accepts Rescan. Only when `POST /optimization/runs` itself answers `404` or `405` does the button fall back to reloading persisted results.
 - An expandable evidence panel per active recommendation (window, coverage, utilization distribution, proposed change, rollback conditions, expiry).
-- A **Preview plan** action on eligible container-targeted rightsizing cards: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available. Closing the dialog of a preview that was not approved discards it with `DELETE /automation/plans/{id}`, so the next preview of the same workload is not blocked. A plan whose approval was requested is never discarded, even if the dialog is closed while the approval is still in flight.
+- A **Preview plan** action on cards the server marks eligible: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available. Closing the dialog of a preview that was not approved discards it with `DELETE /automation/plans/{id}`, so the next preview of the same workload is not blocked. A plan whose approval was requested is never discarded, even if the dialog is closed while the approval is still in flight.
 - Ignore with a required reason from the Active tab.
 - Restore from the Ignored tab.
 - Applied recommendation details, verification state (`applied`, `verifying`, `verified`, `rollback_review`), measured vs projected savings and an expandable lifecycle event trail.
@@ -310,7 +358,9 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RECOMMENDATION_SOURCE_PRIORITY` | `config.recommendations.sourcePriority` | `vpa,karpenter,greenkube` |
 | `RECOMMENDATION_TTL_DAYS` | `config.recommendations.ttlDays` | `14` |
 | `RECOMMENDATION_RANKING_PROFILE` | `config.recommendations.rankingProfile` | `balanced` |
-| `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (profile defaults) |
+| `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (deprecated, ignored) |
+| `RECOMMENDATION_INCIDENT_COST` | `config.recommendations.incidentCost` | `100` |
+| `RECOMMENDATION_ENGINEER_HOUR_COST` | `config.recommendations.engineerHourCost` | `0` |
 | `RECOMMENDATION_MIN_SAMPLES` | `config.recommendations.minSamples` | `36` |
 | `VERIFICATION_WINDOW_HOURS` | `config.recommendations.verification.windowHours` | `72` |
 | `VERIFICATION_MIN_SAMPLES` | `config.recommendations.verification.minSamples` | `36` |
