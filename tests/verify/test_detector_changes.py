@@ -1,6 +1,7 @@
 """Apply detection records changes and baseline snapshots (C1)."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -177,3 +178,49 @@ async def test_disabled_change_measurement_keeps_the_interim_verifier(stores):
     assert applied[0].baseline.model_dump().get("change_id") is None
     assert await change_repo.list_statuses(["applied"]) == []
     assert await service.run_due() == []
+
+
+async def test_a_failed_hpa_listing_is_not_recorded_as_an_hpa_change(stores):
+    reco_repo, change_repo = stores
+    _, service = _service(reco_repo, change_repo, WindowedMetricsRepo())
+    key = ("prod", "Deployment", "api")
+    now = hour_now()
+    with_hpa = WorkloadSnapshot(namespace="prod", kind="Deployment", name="api", uid="uid-api", generation=2)
+    with_hpa.spec_digest, with_hpa.hpa_digest = "digest-after", "hpa-1"
+    assert await service.observe_workloads({key: with_hpa}, now=now) == 1
+
+    unknown = WorkloadSnapshot(namespace="prod", kind="Deployment", name="api", uid="uid-api", generation=2)
+    unknown.spec_digest, unknown.hpa_observed = "digest-after", False
+    assert await service.observe_workloads({key: unknown}, now=now + timedelta(minutes=5)) == 0
+    assert (await change_repo.latest_spec_observations())[key].hpa_digest == "hpa-1"
+
+    # A listing that succeeds without an HPA for the workload is a real removal.
+    removed = WorkloadSnapshot(namespace="prod", kind="Deployment", name="api", uid="uid-api", generation=2)
+    removed.spec_digest = "digest-after"
+    assert await service.observe_workloads({key: removed}, now=now + timedelta(minutes=10)) == 1
+    assert (await change_repo.latest_spec_observations())[key].hpa_digest is None
+
+
+async def test_hpa_digests_are_unknown_when_hpas_cannot_be_listed(monkeypatch):
+    from greenkube.core import k8s_client
+    from greenkube.core.optimization import applied_detector
+
+    class FailingApi:
+        async def list_horizontal_pod_autoscaler_for_all_namespaces(self):
+            raise RuntimeError("403 forbidden")
+
+    async def failing():
+        return FailingApi()
+
+    monkeypatch.setattr(k8s_client, "get_autoscaling_v2_api", failing)
+    assert await applied_detector._read_hpa_digests() is None
+
+    class EmptyApi:
+        async def list_horizontal_pod_autoscaler_for_all_namespaces(self):
+            return SimpleNamespace(items=[])
+
+    async def empty():
+        return EmptyApi()
+
+    monkeypatch.setattr(k8s_client, "get_autoscaling_v2_api", empty)
+    assert await applied_detector._read_hpa_digests() == {}

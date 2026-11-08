@@ -285,6 +285,11 @@ class ChangeMeasurementService:
             latest = await self.changes.latest_spec_observations()
             fresh: List[WorkloadSpecObservation] = []
             for key, snapshot in snapshots.items():
+                previous = latest.get(key)
+                hpa = getattr(snapshot, "hpa_digest", None)
+                if not getattr(snapshot, "hpa_observed", True):
+                    # HPAs could not be listed: keep the last known digest rather than record a removal.
+                    hpa = previous.hpa_digest if previous is not None else None
                 observation = WorkloadSpecObservation(
                     namespace=key[0],
                     kind=key[1],
@@ -292,10 +297,9 @@ class ChangeMeasurementService:
                     workload_uid=getattr(snapshot, "uid", None),
                     generation=getattr(snapshot, "generation", None),
                     spec_digest=getattr(snapshot, "spec_digest", None),
-                    hpa_digest=getattr(snapshot, "hpa_digest", None),
+                    hpa_digest=hpa,
                     observed_at=moment,
                 )
-                previous = latest.get(key)
                 if previous is None or not previous.same_revision(observation):
                     fresh.append(observation)
             return await self.changes.insert_spec_observations(fresh)

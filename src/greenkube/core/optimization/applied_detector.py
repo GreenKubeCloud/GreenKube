@@ -76,6 +76,8 @@ class WorkloadSnapshot:
     # Change measurement (C1): pod-template and HPA digests, custom load-driver PromQL.
     spec_digest: str | None = None
     hpa_digest: str | None = None
+    # False when HPAs could not be listed: ``hpa_digest`` is then unknown, not "no HPA".
+    hpa_observed: bool = True
     load_metric: str | None = None
 
 
@@ -370,19 +372,23 @@ def _load_metric_annotation(metadata) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-async def _read_hpa_digests() -> Dict[Tuple[str, str, str], str]:
-    """Digest of the HPA spec targeting each workload (best effort: empty when HPAs cannot be listed)."""
+async def _read_hpa_digests() -> Optional[Dict[Tuple[str, str, str], str]]:
+    """Digest of the HPA spec targeting each workload; ``None`` when HPAs cannot be listed.
+
+    ``None`` (unknown) is distinct from an empty mapping (no HPA): a failed
+    listing must not look like every HPA was removed and re-added.
+    """
     digests: Dict[Tuple[str, str, str], str] = {}
     try:
         from greenkube.core.k8s_client import get_autoscaling_v2_api
 
         api = await get_autoscaling_v2_api()
         if api is None:
-            return digests
+            return None
         result = await api.list_horizontal_pod_autoscaler_for_all_namespaces()
     except Exception as exc:
         logger.debug("Apply detection: could not list HPAs: %s", exc)
-        return digests
+        return None
     for item in getattr(result, "items", []) or []:
         metadata = _resource_field(item, "metadata")
         spec = _resource_field(item, "spec")
@@ -453,7 +459,8 @@ class K8sWorkloadReader:
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
                     spec_digest=pod_template_digest(template),
-                    hpa_digest=hpas.get((namespace, kind, name)),
+                    hpa_digest=hpas.get((namespace, kind, name)) if hpas is not None else None,
+                    hpa_observed=hpas is not None,
                     load_metric=_load_metric_annotation(metadata),
                     **_rollout_fields(kind, spec, status),
                 )
