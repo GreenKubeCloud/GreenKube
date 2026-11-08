@@ -187,11 +187,6 @@ curl "http://localhost:8000/api/v1/report/export?start=2025-01-01&end=2025-12-31
 # Download an unaggregated JSON report
 curl -OJ "http://localhost:8000/api/v1/report/export?format=json&last=30d&namespace=production"
 
-# Preview the GitOps patch without touching Git
-curl -X POST "http://localhost:8000/api/v1/recommendations/42/apply-pr" \
-  -H "Content-Type: application/json" \
-  -d '{"dry_run": true}'
-
 # Create a digest-addressed GitOps plan preview
 curl -X POST "http://localhost:8000/api/v1/automation/plans" \
   -H "Authorization: Bearer $GREENKUBE_API_KEY" \

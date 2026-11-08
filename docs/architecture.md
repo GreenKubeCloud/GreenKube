@@ -42,14 +42,11 @@ flowchart TB
         end
 
         subgraph Core["Core (Business Logic)"]
-            DP["DataProcessor<br/>(Facade)"]
-            CO["CollectionOrchestrator<br/>(Parallel Fetch)"]
+            DP["DataProcessor<br/>(Composition)"]
             Est["BasicEstimator<br/>(CPU → Joules)"]
             Calc["CarbonCalculator<br/>(Joules → CO₂e)"]
             MA["MetricAssembler<br/>(Build CombinedMetric)"]
             NZM["NodeZoneMapper<br/>(Cloud → eMaps Zone)"]
-            PRM["PrometheusResourceMapper<br/>(Per-Pod Resources)"]
-            CN["CostNormalizer<br/>(Per-Step Cost)"]
             ESvc["EmbodiedEmissionsService<br/>(Boavizta Cache + Fallback)"]
             SR["SummaryRefresher<br/>(Pre-computed Cache)"]
             HRP["HistoricalRangeProcessor<br/>(Chunked Range)"]
@@ -86,23 +83,19 @@ flowchart TB
     WN --> WNC
     Boavizta --> BC
 
-    PC --> CO
-    OCC --> CO
-    PodC --> CO
-    NC --> DP
-
-    CO --> DP
+    PC --> HRP
+    OCC --> HRP
+    PodC --> HRP
+    NC --> HRP
     EMC --> DP
     WNC --> DP
     BC --> ESvc
 
-    DP --> Est
-    DP --> NZM
-    DP --> PRM
-    DP --> CN
-    DP --> MA
     DP --> HRP
     DP --> SR
+    HRP --> Est
+    HRP --> NZM
+    HRP --> MA
 
     MA --> Calc
     MA --> ESvc
@@ -155,8 +148,8 @@ Supported backends:
 
 ### 2. Cloud Provider Agnosticism
 Cloud-specific details (AWS, GCP, Azure, OVH, Scaleway) are isolated in:
-- **Mapping files:** `src/greenkube/utils/region_mapping.py` (cloud region → carbon zone)
-- **Instance profiles:** `src/greenkube/energy/instance_profiles.py` (instance type → power characteristics)
+- **Mapping files:** `src/greenkube/data/region_mapping.py` (cloud region → carbon zone)
+- **Instance profiles:** `src/greenkube/data/instance_profiles.py` (instance type → power characteristics)
 - **Adapters:** Cloud-specific logic stays in collectors, never leaks into core
 
 ### 3. Asynchronous & Non-Blocking
@@ -257,9 +250,9 @@ All collectors are fully asynchronous and implement a common pattern.
 ### Processor (Use Case Orchestrator)
 
 #### **DataProcessor**
-The main orchestrator that coordinates the data pipeline from collection to metric assembly.
+The composition root of the collection pipeline: it builds the collectors and collaborators, delegates each window to `HistoricalRangeProcessor` and closes the collectors.
 
-**Architecture:** The processor acts as a facade, delegating specialized work to focused collaborators while managing the overall pipeline flow.
+**Architecture:** The processor wires focused collaborators (`HistoricalRangeProcessor`, `MetricAssembler`, `NodeZoneMapper`, `EmbodiedEmissionsService`); the range processor runs the pipeline.
 
 **Key Responsibilities:**
 1. **Data Collection:** Coordinates parallel collection from Prometheus, Kubernetes, OpenCost, and external APIs
@@ -269,24 +262,18 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 5. **Metric Assembly:** Combines energy, cost, resources, and metadata into unified metrics
 6. **Embodied Emissions:** Integrates hardware manufacturing emissions
 
-**Pipeline Stages:**
-- **Instant Mode (`run()`):** Real-time collection using Prometheus instant queries, structured into four explicit phases:
-  - **Phase 1** — Node discovery (sequential, single K8s API call)
-  - **Phase 2** — Zone resolution (NodeZoneMapper, depends on Phase 1)
-  - **Phase 3** — Parallel metrics collection + Boavizta profiles (Prometheus, OpenCost, Pods, embodied emissions — all concurrent, safe because nodes are already resolved)
-  - **Phase 4** — Carbon-intensity prefetch and CombinedMetric assembly
-- **Range Mode (`run_range()`):** The production path. Collects every step of a half-open, step-aligned window `[start, end)` with day-sized chunking for memory efficiency; driven by the watermark-based catch-up job (see *Historical Analysis* below)
+**Pipeline:** `run_range()` is the only collection path. It collects every step of a half-open, step-aligned window `[start, end)` with day-sized chunking for memory efficiency, driven by the watermark-based catch-up job (see *Collection* under *Data Flow*). The former instant-query path (`run()`) was removed (roadmap M4).
 
 **Implementation Pattern:**
 - Follows Clean Architecture principles with dependency injection
-- Uses internal collaborators for collection orchestration, zone mapping, resource aggregation, and metric assembly
+- Uses internal collaborators for range processing, zone mapping, embodied emissions, and metric assembly
 - Maintains separation between business logic and infrastructure concerns
 
 ### Calculator (Business Logic)
 
 #### **CarbonCalculator**
 - **Purpose:** Convert energy to carbon emissions
-- **Formula:** `CO2e = (kWh * grid_intensity * PUE) / 1000`
+- **Formula:** `CO2e (g) = kWh × PUE × grid_intensity (gCO₂e/kWh)`, with `kWh = joules / 3.6e6`
 - **Features:**
   - Per-run in-memory cache: `(zone, timestamp) → intensity`
   - Supports both 'Z' and '+00:00' ISO timestamp formats
@@ -456,7 +443,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `GET /api/v1/recommendations` — Optimization suggestions
 - `GET /api/v1/recommendations/{id}` — Full evidence, risk, ranking, and lifecycle detail
 - `GET /api/v1/recommendations/{id}/events` — Recommendation audit trail
-- `POST /api/v1/recommendations/{id}/apply-pr` — Compatibility route through the validated GitOps plan path
+- `POST /api/v1/recommendations/{id}/apply-pr` — Deprecated compatibility route through the validated GitOps plan path (use `/api/v1/automation/plans`)
 - `GET /api/v1/gitops/status` — Controller capability and discovery freshness
 - `GET /api/v1/gitops/bindings` — Workload binding pages and manual-resolution candidates
 - `POST /api/v1/gitops/refresh` — Explicit discovery refresh
@@ -493,7 +480,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 
 **Features:**
 - Client-side routing for smooth navigation
-- Responsive design (mobile-first)
+- Desktop-first layout; narrow screens are not fully supported yet
 - Data fetched on page load/navigation — no polling or live push updates
 - Export functionality (CSV, JSON) — from the Report page
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
@@ -520,73 +507,7 @@ The REST API is started by the separate `greenkube-api` entry point (`greenkube.
 
 ## Data Flow
 
-### Instant Collection (run())
-Used for real-time monitoring and scheduled collection.
-
-1. **Phase 1 — Node Discovery** (sequential, single K8s API call):
-   ```
-   NodeCollector.collect()
-   └─ Node metadata (instance type, zone, capacity, provider)
-   └─ Build node_instance_map directly from Phase-1 data
-   ```
-
-2. **Phase 2 — Zone Resolution** (depends on Phase-1 data):
-   ```
-   NodeZoneMapper.map_nodes(nodes_info)
-   └─ Map cloud region → Electricity Maps zone per node
-   ```
-
-3. **Phase 3 — Parallel Collection + Boavizta** (concurrent, Phase-1/2 data used for enrichment):
-   ```
-   asyncio.gather(
-     ┌─ CollectionOrchestrator.collect_all(nodes_info):
-     │   ├─ PrometheusCollector.collect()
-     │   │   ├─ CPU usage (8 concurrent queries)
-     │   │   ├─ Memory usage
-     │   │   ├─ Network I/O (rx + tx)
-     │   │   ├─ Disk I/O (read + write)
-     │   │   ├─ Restart counts
-     │   │   └─ Node labels (enriched with Phase-1 data)
-     │   ├─ OpenCostCollector.collect()
-     │   │   └─ Cost allocation data
-     │   └─ PodCollector.collect()
-     │       └─ Resource requests (CPU, memory, storage)
-     └─ EmbodiedEmissionsService.prepare_embodied_data(nodes_info):
-         ├─ Check EmbodiedRepository cache
-         ├─ Fetch missing profiles from Boavizta API
-         └─ Inject fallback profile (DEFAULT_EMBODIED_EMISSIONS_KG) for unknowns
-   )
-   ```
-
-4. **Phase 4 — Assembly:**
-   ```
-   ├─ BasicEstimator.estimate() → EnergyMetric per pod (Joules)
-   ├─ MetricAssembler.prefetch_intensities()
-   │   ├─ Group pods by zone
-   │   └─ Prefetch intensity for (zone, timestamp) pairs
-   └─ MetricAssembler.assemble()
-       ├─ CarbonCalculator.calculate_emissions()
-       ├─ EmbodiedEmissionsService.calculate_pod_embodied()
-       │   └─ Mark metric is_estimated=True if fallback used
-       └─ Build CombinedMetric (energy + carbon + cost + resources + metadata)
-   ```
-
-5. **Persistence:**
-   ```
-   Repository.write_combined_metrics()
-   └─ Batch insert to database (Postgres/SQLite)
-   ```
-
-6. **Background (hourly scheduler):**
-   ```
-   SummaryRefresher.run()
-   ├─ For each window (24h, 7d, 30d, 1y, ytd):
-   │   ├─ aggregate_summary() → MetricsSummaryRow → upsert metrics_summary
-   │   └─ aggregate_timeseries() → TimeseriesCachePoint[] → upsert metrics_timeseries_cache
-   └─ Repeated for each namespace
-   ```
-
-### Historical Analysis (run_range()) — the production collection path
+### Collection (run_range())
 The controller's `collect_metrics` job is the only production writer of usage, energy, cost and carbon rows.
 
 1. **Catch-up planning** (`core/collection.py`, `MetricsCollectionJob`):
@@ -962,7 +883,7 @@ The API liveness endpoint does not probe optional providers. Readiness is marked
 **New Collectors:**
 1. Implement collector interface
 2. Add to `core/factory.py`
-3. Update `DataProcessor` to use it
+3. Wire it into `HistoricalRangeProcessor` through `DataProcessor`
 4. Add tests
 
 **New Storage Backend:**
@@ -972,9 +893,9 @@ The API liveness endpoint does not probe optional providers. Readiness is marked
 4. Add tests
 
 **New Cloud Provider:**
-1. Add region mappings to `utils/region_mapping.py`
-2. Add instance profiles to `energy/instance_profiles.py`
-3. Add PUE values to `core/config.py`
+1. Add region mappings to `data/region_mapping.py`
+2. Add instance profiles to `data/instance_profiles.py`
+3. Add PUE values to `data/datacenter_pue_profiles.py`
 4. Update tests
 
 ## Resources

@@ -99,7 +99,7 @@ After configuring a Git provider, repository allowlist, and secure renderer boun
 
 1. Check `GET /api/v1/automation/status`. Automation must be enabled and ready, the provider token must be configured, and the worker must be healthy.
 2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
-3. In **Recommendations**, choose a CPU or memory rightsizing recommendation marked **Container action ready**. Review its **Evidence** and check `GET /api/v1/recommendations/{id}/apply-pr/eligibility` before previewing.
+3. In **Recommendations**, choose a CPU or memory rightsizing recommendation marked **Container action ready**. Review its **Evidence** before previewing.
 4. Select **Preview plan**. Review every policy check, source and rendered diff, validation result, and digest. Approve only the exact plan you intend to propose.
 5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
 
@@ -109,19 +109,16 @@ Automation does not create a PR for every visible recommendation. By default, ea
 
 Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
 
-Inspect the recommendation's **Evidence** panel or read the recommendation and eligibility result through the API. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
+Inspect the recommendation's **Evidence** panel or read the recommendation through the API. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
 
 ```bash
 REC_ID=123 # replace with the recommendation ID shown in GreenKube
 curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
   "http://localhost:8000/api/v1/recommendations/${REC_ID}" |
   jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}}'
-curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
-  "http://localhost:8000/api/v1/recommendations/${REC_ID}/apply-pr/eligibility" |
-  jq '{eligible, reason, code, policy_result}'
 ```
 
-If a gate rejects the plan, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+**Preview plan** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint is deprecated (see [API](api.md)). If a gate rejects the plan, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 
@@ -154,9 +151,10 @@ Only CPU and memory rightsizing recommendations currently have GitOps action pla
 |---|---|---|
 | Argo CD raw YAML | Yes | Uses the Application's resource inventory and a raw manifest planner. |
 | Argo CD Kustomize | Yes | Plans the overlay and render-validates the result. |
-| Argo CD Helm with Git-managed values files | Yes | Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. |
+| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. |
+| Argo CD Helm with a remote chart (Helm repository, OCI, or another Git repository) | No | The chart is not in the snapshot; fails closed. |
 | Argo CD Helm with inline `valuesObject` / `parameters` | No | Fails closed; move values to a Git-managed values file. |
-| Argo CD multi-source Helm | Yes | Values must resolve to a Git-managed source; source indices are handled server-side. |
+| Argo CD multi-source Helm | Partial | Only when the chart is local to the values repository; source indices are handled server-side. A remote chart source fails closed. |
 | Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. |
 | Flux HelmRelease with local same-revision Git chart | Yes | Renders `valuesFiles`, `valuesFrom`, and inline values, then applies the managed post-renderer edit. |
 | Flux HelmRelease `chartRef` to a Git-backed HelmChart | Yes | The HelmChart must exist in the same immutable snapshot. |
