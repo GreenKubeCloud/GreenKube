@@ -248,11 +248,24 @@ class Config(BaseSettings):
     ENVIRONMENT: str = "development"
     SERVICE_URL_ALLOWLIST: str = ""
     API_KEY: str = Field(default="", validation_alias="GREENKUBE_API_KEY")
-    API_AUTH_MODE: str = "api_key"
+    # session (default): browser sign-in with server-side sessions plus Bearer
+    # API keys for machines (F14, F15). api_key: Bearer API keys only.
+    API_AUTH_MODE: str = "session"
     OIDC_ISSUER: Optional[str] = None
     OIDC_AUDIENCE: Optional[str] = None
     SESSION_COOKIE_NAME: str = "greenkube_session"
-    SESSION_COOKIE_SECURE: bool = True
+    # auto: Secure when the request is HTTPS (directly or via X-Forwarded-Proto
+    # from TRUSTED_PROXY_IPS); always; never (local plain-HTTP testing only).
+    SESSION_COOKIE_SECURE: str = "auto"
+    AUTH_SESSION_IDLE_TIMEOUT: str = "12h"
+    AUTH_SESSION_ABSOLUTE_LIFETIME: str = "7d"
+    AUTH_SESSION_REMEMBER_LIFETIME: str = "30d"
+    AUTH_LOGIN_RATE_LIMIT: str = "5/minute"
+    AUTH_ADMIN_USERNAME: str = "admin"
+    # Optional bootstrap password for the first admin (Helm auth.admin.existingSecret).
+    AUTH_ADMIN_PASSWORD: Optional[str] = None
+    # Secret holding the generated initial admin password (Helm: <release>-initial-admin).
+    AUTH_INITIAL_ADMIN_SECRET: str = ""
     API_RATE_LIMIT: str = "60/minute"
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
@@ -532,6 +545,26 @@ class Config(BaseSettings):
                 raise ValueError("PROMETHEUS_QUERY_RANGE_STEP must be a divisor of 24 hours.")
         return v
 
+    @field_validator("SESSION_COOKIE_SECURE", mode="before")
+    @classmethod
+    def _validate_session_cookie_secure(cls, value: Any) -> str:
+        normalized = str(value).strip().lower() if value is not None else "auto"
+        aliases = {"true": "always", "1": "always", "yes": "always", "false": "never", "0": "never", "no": "never"}
+        normalized = aliases.get(normalized, normalized or "auto")
+        if normalized not in ("auto", "always", "never"):
+            raise ValueError("SESSION_COOKIE_SECURE must be 'auto', 'always' or 'never'.")
+        return normalized
+
+    @field_validator(
+        "AUTH_SESSION_IDLE_TIMEOUT", "AUTH_SESSION_ABSOLUTE_LIFETIME", "AUTH_SESSION_REMEMBER_LIFETIME", mode="after"
+    )
+    @classmethod
+    def _validate_session_durations(cls, value: str, info) -> str:
+        text = str(value).strip().lower()
+        if not re.match(r"^\d+[smhd]$", text) or int(text[:-1]) <= 0:
+            raise ValueError(f"{info.field_name} must be a positive duration such as '30m', '12h' or '7d'.")
+        return text
+
     @field_validator("PROMETHEUS_SCRAPE_INTERVAL", "COLLECTION_SAFETY_LAG", "COLLECTION_MAX_BACKFILL", mode="after")
     @classmethod
     def _validate_collection_durations(cls, value: str, info) -> str:
@@ -790,6 +823,7 @@ class ConfigService:
             "WATTNET_EMAIL",
             "WATTNET_PASSWORD",
             "API_KEY",
+            "AUTH_ADMIN_PASSWORD",
         }
     )
     DISCOVERY_KEYS: ClassVar[frozenset[str]] = frozenset({"CLUSTER_NAME"})
