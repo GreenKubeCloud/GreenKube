@@ -550,3 +550,77 @@ tests:
       - equal:
           path: data.RECOMMENDATION_ENGINEER_HOUR_COST
           value: "85.5"
+
+  # --------------------------------------------------------------------------
+  # Pull-request experience (roadmap J1-J5)
+  # --------------------------------------------------------------------------
+  - it: enables the pull-request experience by default without deep links
+    asserts:
+      - equal:
+          path: data.GITOPS_PR_TITLE_PREFIX
+          value: "greenkube"
+      - equal:
+          path: data.GITOPS_PR_TEMPLATE
+          value: ""
+      - equal:
+          path: data.GITOPS_PR_DEFAULT_LABELS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_DRAFT_HIGH_RISK
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_CODEOWNERS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_COMMIT_STATUS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_COMMENTS
+          value: "true"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS
+          value: "30"
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: ""
+
+  - it: passes the PR template, switches and external URL from values
+    set:
+      config.externalUrl: https://greenkube.example.com/
+      automation.pr:
+        titlePrefix: ""
+        template: "{{ summary }}\n\n{{ diffs }}\n"
+        defaultLabels: false
+        draftHighRisk: false
+        codeowners: false
+        commitStatus: false
+        lifecycleComments: false
+        lifecycleLookbackDays: 7
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: "https://greenkube.example.com"
+      - equal:
+          path: data.GITOPS_PR_TITLE_PREFIX
+          value: ""
+      - equal:
+          path: data.GITOPS_PR_TEMPLATE
+          value: "{{ summary }}\n\n{{ diffs }}\n"
+      - equal:
+          path: data.GITOPS_PR_DEFAULT_LABELS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_DRAFT_HIGH_RISK
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_CODEOWNERS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_COMMIT_STATUS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_COMMENTS
+          value: "false"
+      - equal:
+          path: data.GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS
+          value: "7"
