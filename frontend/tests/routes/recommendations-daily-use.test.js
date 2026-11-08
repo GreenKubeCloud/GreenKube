@@ -359,7 +359,7 @@ describe('ordering and ranking (K2, BUG-20)', () => {
 		await screen.findByText('first-by-score');
 
 		const [first, second] = screen.getAllByTestId('ranking-score');
-		expect(first).toHaveTextContent('≈ €412/yr expected · 82% success · top factor: Carbon savings');
+		expect(first).toHaveTextContent('≈ €412/yr expected · 82% success · top factor: Carbon value');
 		expect(first).toHaveAttribute('title', 'Carbon value €400 · Cost savings €20 · Incident risk -€7.60');
 		expect(second).toHaveTextContent('≈ €35/yr expected · 90% success · top factor: Cost savings');
 	});
@@ -371,7 +371,7 @@ describe('ordering and ranking (K2, BUG-20)', () => {
 		render(RecommendationsPage);
 		await screen.findByText('legacy');
 
-		expect(screen.getByTestId('ranking-score')).toHaveTextContent('Score 0.90 · top factor: Carbon savings');
+		expect(screen.getByTestId('ranking-score')).toHaveTextContent('Score 0.90 · top factor: Carbon value');
 	});
 
 	it('marks reliability recommendations', async () => {

@@ -31,6 +31,7 @@
 	import {
 		describeRankingFactors,
 		formatRankingScore,
+		rankingFactorLabel,
 		topRankingFactor
 	} from '$lib/utils/ranking.js';
 	import {
@@ -431,17 +432,9 @@
 		return Object.entries(factors)
 			.filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount !== 0)
 			.sort((a, b) => b[1] - a[1])
-			.map(([key, amount]) => `${FACTOR_NAMES[key] ?? key} ${formatMoney(amount, rec?.value?.currency)}`)
+			.map(([key, amount]) => `${rankingFactorLabel(key)} ${formatMoney(amount, rec?.value?.currency)}`)
 			.join(' · ');
 	}
-
-	const FACTOR_NAMES = {
-		cost: 'Cost savings',
-		carbon: 'Carbon value',
-		reliability: 'Incidents avoided',
-		incident_risk: 'Incident risk',
-		effort: 'Effort'
-	};
 
 	function blockerText(entry) {
 		return [entry.message, entry.fix].filter(Boolean).join(' ');
