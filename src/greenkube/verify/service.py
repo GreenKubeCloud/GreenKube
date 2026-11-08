@@ -911,9 +911,23 @@ class ChangeMeasurementService:
         stored = await self.changes.get_measurement_for_cycle(change.change_id, status.sequence)
         if stored is None:
             return []
+        # A realized change is measured once (it ends regressed or closed): a re-measurement
+        # requested by one of its recommendations is answered with the existing decision.
+        declined = (
+            f"re-measurement not started: change {change.change_id} is {status.state.value} and is measured once"
+            if requested
+            else None
+        )
+        requested_ids = {member.id for member in requested}
         updated: List[RecommendationRecord] = []
         for member in awaiting:
-            record = await self._apply_to_member(change, stored, member, status.sequence)
+            record = await self._apply_to_member(
+                change,
+                stored,
+                member,
+                status.sequence,
+                note=declined if member.id in requested_ids else None,
+            )
             if record is not None:
                 updated.append(record)
         return updated
@@ -928,6 +942,8 @@ class ChangeMeasurementService:
         measurement: ChangeMeasurement,
         member: RecommendationRecord,
         change_sequence: int,
+        *,
+        note: Optional[str] = None,
     ) -> Optional[RecommendationRecord]:
         assert member.id is not None
         sequence = _sequence(member)
@@ -944,6 +960,7 @@ class ChangeMeasurementService:
                 sequence,
                 gates_apply=sequence == change_sequence,
                 previous=previous_ids[-1] if previous_ids else None,
+                note=note,
             )
             stored = await self.measurement_repo.insert(row) if self.measurement_repo is not None else row
         else:
@@ -980,6 +997,7 @@ class ChangeMeasurementService:
         *,
         gates_apply: bool,
         previous: Optional[str],
+        note: Optional[str] = None,
     ) -> SavingsMeasurement:
         assert member.id is not None
         allocation = next((item for item in measurement.allocations if item.recommendation_id == member.id), None)
@@ -996,8 +1014,20 @@ class ChangeMeasurementService:
             estimate = measurement.estimate(allocation.quantity)
             share = allocation.share
             basis = allocation.basis
+            if (
+                measurement.outcome is ChangeOutcome.REALIZED
+                and estimate is not None
+                and not estimate.claimed
+                and estimate.outcome is not ChangeOutcome.REALIZED
+            ):
+                # The share comes from a cost component (e.g. ``cost_ram``): the recommendation
+                # claims it only when that component's own interval shows a saving.
+                outcome = _OUTCOME_TO_RECOMMENDATION.get(estimate.outcome, MeasurementOutcome.INCONCLUSIVE)
+                reasons = [estimate.reason or f"{allocation.quantity} saving not realized", *reasons]
         if measurement.outcome is ChangeOutcome.CONTAMINATED:
             reasons = [f"contaminated: {reason}" for reason in reasons] or ["contaminated"]
+        if note:
+            reasons = [note, *reasons]
         if failed:
             outcome = MeasurementOutcome.ROLLBACK_REVIEW
             reasons = [gate.detail for gate in failed]

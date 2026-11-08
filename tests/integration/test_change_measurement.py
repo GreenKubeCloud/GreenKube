@@ -577,3 +577,81 @@ async def test_a_baseline_is_frozen_without_a_driver_that_stays_unreachable(data
     assert snapshot is not None and set(snapshot.load_series) == {"cpu_usage"}
     assert snapshot.collector_versions[UNAVAILABLE_DRIVERS_KEY] == ["ingress_nginx_rps", "istio_rps", "linkerd_rps"]
     assert snapshot.verify_digest()
+
+
+async def test_a_component_share_is_claimed_only_when_that_component_saved(database):
+    """A realized change does not verify a recommendation whose own cost component grew."""
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    # CPU requests cut from 1000m to 300m, but memory requests grew from 2 GiB to 3 GiB.
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=3 * 1024**3
+    )
+    change, applied = await scenario.apply()
+    cpu_id, memory_id = (record.id for record in applied)
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    await scenario.service.run_due(now=status.post_window_end + DECISION_GRACE)
+    assert (await scenario.changes.get_status(change.change_id)).state is MeasurementState.REALIZED
+    measurement = (await scenario.changes.list_measurements(change.change_id))[0]
+    ram = measurement.estimate("cost_ram")
+    assert ram is not None and ram.rate_per_hour is not None and ram.rate_per_hour < 0
+
+    records = {record.id: record for record in await scenario.records()}
+    assert record_status(records[cpu_id]) == "verified" and records[cpu_id].measured_cost_saved > 0
+    memory = records[memory_id]
+    assert record_status(memory) == "applied" and memory.verification_status == "failed"
+    rows = {row.recommendation_id: row for row in await scenario.measurements.list_for_change(change.change_id)}
+    assert rows[memory_id].outcome.value == "not_realized"
+    cost = next(item for item in rows[memory_id].estimates if item.quantity == "cost")
+    assert cost.claimed_annualized == 0.0 and cost.annualized is not None and cost.annualized < 0
+
+
+async def test_a_realized_change_answers_a_late_re_measurement_request_explicitly(database):
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+    change, _ = await scenario.apply()
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    decided = status.post_window_end + DECISION_GRACE
+    await scenario.service.run_due(now=decided)
+
+    # A recommendation of the same change is recorded after the decision.
+    await scenario.reco_repo.save_recommendations(
+        [
+            RecommendationRecord(
+                pod_name="api",
+                namespace="prod",
+                scope="workload",
+                owner_kind="Deployment",
+                owner_name="api",
+                container_name="sidecar",
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description="oversized",
+                current_cpu_request_millicores=200,
+                recommended_cpu_request_millicores=100,
+            )
+        ]
+    )
+    late = next(record for record in await scenario.records() if record.container_name == "sidecar")
+    assert late.id is not None
+    await scenario.lifecycle.apply(late.id, actual_cpu=100, applied_at=completed, change_id=change.change_id)
+    await scenario.service.run_due(now=decided + timedelta(hours=1))
+    late = next(record for record in await scenario.records() if record.id == late.id)
+    assert late.verification_status == "inconclusive"
+
+    await scenario.lifecycle.request_remeasure(late.id, reason="please", now=decided + timedelta(hours=2))
+    await scenario.service.run_due(now=decided + timedelta(hours=2))
+    assert (await scenario.changes.get_status(change.change_id)).state is MeasurementState.REALIZED
+    rows = [
+        row for row in await scenario.measurements.list_for_change(change.change_id) if row.recommendation_id == late.id
+    ]
+    latest = max(rows, key=lambda row: row.sequence)
+    assert latest.sequence == 2 and latest.reasons[0].startswith("re-measurement not started")
