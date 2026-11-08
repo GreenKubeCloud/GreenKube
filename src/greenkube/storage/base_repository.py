@@ -192,11 +192,11 @@ class CombinedMetricsRepository(ABC):
     @abstractmethod
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
-        Reads CombinedMetric objects from the repository within a given time range.
+        Reads CombinedMetric objects whose timestamp is in the half-open range ``[start_time, end_time)``.
 
         Args:
             start_time: Start datetime (inclusive).
-            end_time: End datetime (inclusive).
+            end_time: End datetime (exclusive).
 
         Returns:
             A list of CombinedMetric objects.

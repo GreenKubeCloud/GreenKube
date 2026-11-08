@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+import time
 from typing import Callable, Coroutine, List
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,29 @@ class Scheduler:
         self.tasks: List[asyncio.Task] = []
         logger.info("AsyncScheduler initialized.")
 
+    @staticmethod
+    def seconds_until_boundary(interval_seconds: float, offset_seconds: float = 0.0, now: float | None = None) -> float:
+        """Seconds until the next ``k × interval + offset`` instant (Unix time), always > 0."""
+        current = time.time() if now is None else now
+        elapsed = (current - offset_seconds) % interval_seconds
+        return interval_seconds - elapsed if elapsed > 0 else interval_seconds
+
     async def _run_periodically(
         self,
         interval_seconds: int | float,
         job_func: Callable[[], Coroutine],
         skip_initial: bool = False,
+        align_offset_seconds: float | None = None,
     ):
-        """Internal loop to run a job periodically with jitter and exponential backoff."""
+        """Internal loop to run a job periodically with jitter and exponential backoff.
+
+        With ``align_offset_seconds`` the job runs at ``k × interval + offset``
+        wall-clock instants instead (no jitter), so a collection job fires right
+        after each window closes; a failed run simply retries at the next boundary.
+        """
+        if align_offset_seconds is not None:
+            await self._run_aligned(interval_seconds, job_func, align_offset_seconds, skip_initial)
+            return
         consecutive_failures = 0
         first_run = True
         loop = asyncio.get_running_loop()
@@ -65,6 +82,30 @@ class Scheduler:
             logger.info("Job '%s' cancelled.", job_func.__name__)
             raise
 
+    async def _run_aligned(
+        self,
+        interval_seconds: int | float,
+        job_func: Callable[[], Coroutine],
+        offset_seconds: float,
+        skip_initial: bool,
+    ) -> None:
+        try:
+            if not skip_initial:
+                await self._run_once(job_func)
+            while True:
+                await asyncio.sleep(self.seconds_until_boundary(interval_seconds, offset_seconds))
+                await self._run_once(job_func)
+        except asyncio.CancelledError:
+            logger.info("Job '%s' cancelled.", job_func.__name__)
+            raise
+
+    @staticmethod
+    async def _run_once(job_func: Callable[[], Coroutine]) -> None:
+        try:
+            await job_func()
+        except Exception as e:
+            logger.exception("Error in scheduled job '%s': %s", job_func.__name__, e)
+
     def add_job(
         self,
         job_func: Callable[[], Coroutine],
@@ -96,9 +137,18 @@ class Scheduler:
                 job_func.__name__,
             )
 
-    def add_job_from_string(self, job_func: Callable[[], Coroutine], interval_str: str, skip_initial: bool = False):
+    def add_job_from_string(
+        self,
+        job_func: Callable[[], Coroutine],
+        interval_str: str,
+        skip_initial: bool = False,
+        align_offset_seconds: float | None = None,
+    ):
         """
         Adds a job based on a Prometheus-style duration string like '5m' or '1h'.
+
+        ``align_offset_seconds`` runs the job on wall-clock boundaries of the
+        interval shifted by the offset (see :meth:`_run_periodically`).
         """
         match = re.match(r"^(\d+)([smh])$", interval_str.lower())
         if not match:
@@ -110,7 +160,14 @@ class Scheduler:
         multipliers = {"s": 1, "m": 60, "h": 3600}
         interval_seconds = value * multipliers[unit]
 
-        task = asyncio.create_task(self._run_periodically(interval_seconds, job_func, skip_initial=skip_initial))
+        task = asyncio.create_task(
+            self._run_periodically(
+                interval_seconds,
+                job_func,
+                skip_initial=skip_initial,
+                align_offset_seconds=align_offset_seconds,
+            )
+        )
         self.tasks.append(task)
         logger.info("Scheduled job '%s' to run every %s.", job_func.__name__, interval_str)
 

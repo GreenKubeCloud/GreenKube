@@ -98,6 +98,19 @@ config:
     url: "http://opencost.opencost.svc.cluster.local:9003"
 ```
 
+### Metric collection (`config.prometheus`, `config.collection`)
+
+The controller collects half-open, step-aligned windows `[start, end)` and records, per source, the end of the last window it fully wrote (the *collection watermark*). Every run collects all missing windows oldest first, so a restart or a Prometheus outage is backfilled automatically instead of leaving a gap.
+
+| Helm value | Environment variable | Default | Description |
+|---|---|---|---|
+| `config.prometheus.queryRangeStep` | `PROMETHEUS_QUERY_RANGE_STEP` | `5m` | Collection step and stored row duration. Must divide 24 hours. |
+| `config.prometheus.scrapeInterval` | `PROMETHEUS_SCRAPE_INTERVAL` | `30s` | cAdvisor scrape interval. Rate windows span `max(step, 4 × scrapeInterval)` so each rate sees at least four scrapes. |
+| `config.collection.safetyLag` | `COLLECTION_SAFETY_LAG` | `1m` | A window is collected once its end is at least this old, so late scrapes and remote-write delays are included. Increase it for Thanos/Mimir or agent-mode Prometheus. |
+| `config.collection.maxBackfill` | `COLLECTION_MAX_BACKFILL` | `24h` | Catch-up horizon after downtime. Windows older than this are skipped and counted in `greenkube_collection_gap_windows_total`. Keep it within your Prometheus retention. |
+
+Durations accept `s`, `m`, `h` and `d` suffixes. The watermark lag is exported as `greenkube_collection_watermark_lag_seconds{source}`; it stays below two steps in steady state.
+
 ### Recommendation engine (`config.recommendations`)
 
 Analyzer thresholds and source selection live under `config.recommendations`. The values are wired to `RECOMMENDATION_*` environment variables. Key entries:

@@ -11,6 +11,8 @@ The targets below are example operational objectives, not service guarantees or 
 | Successful optimization runs | >= 99% over 30 days | `rate(greenkube_optimization_runs_total{status="succeeded"}[30d]) / rate(greenkube_optimization_runs_total[30d])` |
 | Verification rollback reviews | < 5% of completed verifications | `rate(greenkube_verification_outcomes_total{outcome="rollback_review"}[6h]) / rate(greenkube_verification_outcomes_total[6h])` |
 | Fresh collection data | < 15 minutes old | `time() - greenkube_last_collection_timestamp_seconds` |
+| Collection watermark lag | < 2 collection steps | `greenkube_collection_watermark_lag_seconds{source="combined_metrics"}` |
+| No abandoned collection windows | 0 per day | `increase(greenkube_collection_gap_windows_total[1d])` |
 | Fresh GitOps discovery | < 15 minutes old | `time() - greenkube_gitops_discovery_last_success_timestamp_seconds` |
 | Supported-layout binding coverage | >= 95% | `greenkube_gitops_coverage_ratio` |
 | Plan creation p95 | < 30 seconds | `histogram_quantile(0.95, sum by (le, renderer) (rate(greenkube_automation_plan_duration_seconds_bucket[15m])))` |
@@ -46,6 +48,17 @@ groups:
     labels: { severity: critical }
     annotations:
       summary: "GreenKube metrics collection is stale"
+  - alert: GreenKubeCollectionWatermarkLagging
+    expr: greenkube_collection_watermark_lag_seconds{source="combined_metrics"} > 900
+    for: 15m
+    labels: { severity: warning }
+    annotations:
+      summary: "GreenKube has not completed a collection window for 15 minutes (it will backfill on recovery)"
+  - alert: GreenKubeCollectionGap
+    expr: increase(greenkube_collection_gap_windows_total[1h]) > 0
+    labels: { severity: warning }
+    annotations:
+      summary: "Collection windows older than COLLECTION_MAX_BACKFILL were skipped"
   - alert: GreenKubeGitOpsDiscoveryStale
     expr: time() - greenkube_gitops_discovery_last_success_timestamp_seconds > 900
     for: 10m
@@ -59,6 +72,22 @@ groups:
     annotations:
       summary: "A merged GreenKube plan exceeded its GitOps sync timeout"
 ```
+
+## Collection telemetry
+
+The metric collection job publishes, on the control-loop registry:
+
+| Metric | Meaning |
+| --- | --- |
+| `greenkube_collection_watermark_lag_seconds{source}` | Seconds between now and the end of the last fully written window. |
+| `greenkube_collection_windows_total{source}` | Collection chunks written and committed. |
+| `greenkube_collection_window_errors_total{source,reason}` | Runs stopped before committing a window (`collection_failed`, `leadership_lost`); the window is retried. |
+| `greenkube_collection_window_duration_seconds{source}` | Time to collect and write one chunk. |
+| `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
+| `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |
+| `greenkube_unknown_power_profile_nodes` | Nodes that fell back to `DEFAULT_INSTANCE_PROFILE` in the latest collection. |
+
+These metrics are produced in the controller process; they are scraped once the controller serves its own metrics endpoint (roadmap A12).
 
 ## Auditability
 

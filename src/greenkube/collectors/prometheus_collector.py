@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
+from greenkube.collectors.promql import PromQLCatalog
 from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
     NodeInstanceType,
@@ -30,6 +31,10 @@ from greenkube.utils.http_client import get_async_http_client
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+class PrometheusQueryError(RuntimeError):
+    """Prometheus could not answer a query (not configured, unreachable or error status)."""
 
 
 class PrometheusCollector(BaseCollector):
@@ -56,36 +61,17 @@ class PrometheusCollector(BaseCollector):
         # Reusable HTTP client (lazily initialized)
         self._client: Optional[httpx.AsyncClient] = None
 
-        # Query for average CPU usage in cores over the last step.
-        # We filter for containers with a name, which is standard.
-        self.cpu_usage_query = (
-            f"sum(rate(container_cpu_usage_seconds_total{{container!=''}}[{self.query_range_step}])) "
-            "by (namespace, pod, container, node)"
-        )
-
-        # Query for memory working set bytes (actual memory usage).
-        self.memory_usage_query = "sum(container_memory_working_set_bytes) by (namespace, pod, container, node)"
-
-        # Query for network I/O rates (bytes/sec received and transmitted).
-        self.network_receive_query = (
-            f"sum(rate(container_network_receive_bytes_total[{self.query_range_step}])) by (namespace, pod, node)"
-        )
-        self.network_transmit_query = (
-            f"sum(rate(container_network_transmit_bytes_total[{self.query_range_step}])) by (namespace, pod, node)"
-        )
-
-        # Query for disk I/O rates (bytes/sec read and written).
-        self.disk_read_query = (
-            f"sum(rate(container_fs_reads_bytes_total{{container!=''}}[{self.query_range_step}])) "
-            "by (namespace, pod, node)"
-        )
-        self.disk_write_query = (
-            f"sum(rate(container_fs_writes_bytes_total{{container!=''}}[{self.query_range_step}])) "
-            "by (namespace, pod, node)"
-        )
-
-        # Query for container restart counts.
-        self.restart_count_query = "sum(kube_pod_container_status_restarts_total) by (namespace, pod, container)"
+        # Every PromQL expression comes from the catalog (A1): container-scoped
+        # series exclude the pod cgroup and pause container, see promql.py.
+        self.promql = PromQLCatalog.from_config(settings)
+        self.cpu_usage_query = self.promql.container_cpu_usage()
+        self.cpu_fallback_query = self.promql.pod_cgroup_cpu_usage()
+        self.memory_usage_query = self.promql.container_memory_working_set()
+        self.network_receive_query = self.promql.pod_network_receive()
+        self.network_transmit_query = self.promql.pod_network_transmit()
+        self.disk_read_query = self.promql.pod_disk_read()
+        self.disk_write_query = self.promql.pod_disk_write()
+        self.restart_count_query = self.promql.container_restarts()
 
         # Prometheus label key used to map node -> instance type may vary across setups.
         self.node_instance_label_key = getattr(
@@ -94,7 +80,7 @@ class PrometheusCollector(BaseCollector):
             "label_node_kubernetes_io_instance_type",
         )
         # Build a query that filters nodes which have the configured instance-type label.
-        self.node_labels_query = f"kube_node_labels{{{self.node_instance_label_key}!=''}}"
+        self.node_labels_query = self.promql.node_instance_labels(self.node_instance_label_key)
         # Use a BaseDiscovery instance to access in-cluster and DNS helpers
         # without duplicating logic.
         self._discovery = BaseDiscovery()
@@ -149,13 +135,10 @@ class PrometheusCollector(BaseCollector):
             restart_future,
         )
 
-        # If the standard grouped query returned no results, try fallback
+        # If the standard grouped query returned no results, try the pod cgroup series
         if not cpu_results:
-            fallback_query = (
-                f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}])) by (namespace, pod, node)"
-            )
-            logger.info("Falling back to container_cpu_usage grouped without 'container' label")
-            cpu_results = await self._query_prometheus(client, fallback_query)
+            logger.info("Falling back to the pod cgroup CPU series (no 'container' label)")
+            cpu_results = await self._query_prometheus(client, self.cpu_fallback_query)
 
         parsed_cpu_usage = []
         malformed_cpu_count = 0
@@ -471,17 +454,30 @@ class PrometheusCollector(BaseCollector):
         query: Optional[str] = None,
         allow_cpu_fallback: bool = True,
     ) -> List[Dict[str, Any]]:
+        """Run a range query; evaluation points are ``start, start + step, ..., end``.
+
+        An empty list means Prometheus answered with no series.  When
+        Prometheus is not configured, unreachable or rejects the query,
+        :class:`PrometheusQueryError` is raised so that callers never record
+        an outage as an empty collection window (A2).
+        """
         step = step or self.query_range_step
         q = query or self.cpu_usage_query
+        try:
+            params: Dict[str, Any] = {
+                "query": q,
+                "start": to_iso_z(ensure_utc(start)),
+                "end": to_iso_z(ensure_utc(end)),
+                "step": step,
+            }
+        except (TypeError, ValueError, AttributeError) as error:
+            raise ValueError(f"Invalid range query bounds: {start!r} -> {end!r}") from error
 
         client = await self._get_client()
         if not self.base_url:
-            # Attempt discovery
             await self._discover_and_update_url(client)
-
         if not self.base_url:
-            # log warning
-            return []
+            raise PrometheusQueryError("Prometheus URL is not configured and could not be discovered.")
 
         base = self.base_url.rstrip("/")
         candidates = [
@@ -489,12 +485,6 @@ class PrometheusCollector(BaseCollector):
             f"{base}/query_range",
             f"{base}/prometheus/api/v1/query_range",
         ]
-        params: Dict[str, Any] = {"query": q, "start": None, "end": None, "step": step}
-        try:
-            params["start"] = to_iso_z(ensure_utc(start))
-            params["end"] = to_iso_z(ensure_utc(end))
-        except ValueError:
-            return []
 
         headers = {}
         if self.bearer_token:
@@ -503,33 +493,27 @@ class PrometheusCollector(BaseCollector):
         if self.username and self.password:
             auth = (self.username, self.password)
 
+        last_error: str = "no endpoint answered"
         for query_url in candidates:
             try:
                 response = await client.get(query_url, params=params, headers=headers, auth=auth)
                 response.raise_for_status()
                 data = response.json()
-                # Check success
-                if data.get("status") != "success":
-                    continue
-
-                results = data.get("data", {}).get("result", [])
-                if not results and allow_cpu_fallback and "container_cpu_usage_seconds_total" in q and "container" in q:
-                    # Fallback for CPU query only: retry without container label.
-                    # The fallback query itself matches the condition above, so
-                    # disable the fallback on the retry to avoid infinite recursion.
-                    fallback_query = (
-                        f"sum(rate(container_cpu_usage_seconds_total[{self.query_range_step}]))"
-                        " by (namespace, pod, node)"
-                    )
-                    return await self.collect_range(
-                        start, end, step=step, query=fallback_query, allow_cpu_fallback=False
-                    )
-
-                return results
-
-            except Exception:
+            except Exception as error:
+                last_error = f"{query_url}: {error}"
                 continue
-        return []
+            if data.get("status") != "success":
+                last_error = f"{query_url}: {data.get('error') or data.get('status')}"
+                continue
+
+            results = data.get("data", {}).get("result", [])
+            if not results and allow_cpu_fallback and q == self.cpu_usage_query:
+                # No container series at all: use the pod cgroup series, counted once.
+                return await self.collect_range(
+                    start, end, step=step, query=self.cpu_fallback_query, allow_cpu_fallback=False
+                )
+            return results
+        raise PrometheusQueryError(f"Prometheus range query failed ({last_error}).")
 
     # Keeping parsing methods
     def _parse_cpu_data(self, item: Dict[str, Any]) -> Optional[PodCPUUsage]:

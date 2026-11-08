@@ -257,7 +257,8 @@ class TestSQLiteCompression:
 
         stats = await compressor.run()
         repo = SQLiteCombinedMetricsRepository(db)
-        hourly = await repo.read_hourly_container_metrics(timestamp, timestamp)
+        # Range reads are half-open [start, end): the bucket is read with a one-hour window.
+        hourly = await repo.read_hourly_container_metrics(timestamp, timestamp + timedelta(hours=1))
 
         assert await _count_container_raw(db) == 2
         assert await _count_container_hourly(db) == 2

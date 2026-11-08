@@ -110,6 +110,34 @@ tests:
           path: data.PROMETHEUS_QUERY_RANGE_STEP
           value: "5m"
 
+  - it: should set the collection catch-up settings
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_SCRAPE_INTERVAL
+          value: "30s"
+      - equal:
+          path: data.COLLECTION_SAFETY_LAG
+          value: "1m"
+      - equal:
+          path: data.COLLECTION_MAX_BACKFILL
+          value: "24h"
+
+  - it: should allow overriding the collection catch-up settings
+    set:
+      config.prometheus.scrapeInterval: 15s
+      config.collection.safetyLag: 2m
+      config.collection.maxBackfill: 6h
+    asserts:
+      - equal:
+          path: data.PROMETHEUS_SCRAPE_INTERVAL
+          value: "15s"
+      - equal:
+          path: data.COLLECTION_SAFETY_LAG
+          value: "2m"
+      - equal:
+          path: data.COLLECTION_MAX_BACKFILL
+          value: "6h"
+
   - it: should set PROMETHEUS_NODE_INSTANCE_LABEL
     asserts:
       - equal:

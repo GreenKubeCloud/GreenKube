@@ -265,7 +265,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             async with self.db_manager.connection_scope() as conn:
                 query = """
                     SELECT * FROM combined_metrics
-                    WHERE timestamp >= $1 AND timestamp <= $2
+                    WHERE timestamp >= $1 AND timestamp < $2
                     ORDER BY timestamp
                 """
                 results = await conn.fetch(query, start_time, end_time)
@@ -303,7 +303,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 if namespace:
                     query = """
                         SELECT * FROM combined_metrics_hourly
-                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                        WHERE hour_bucket >= $1 AND hour_bucket < $2
                           AND namespace = $3
                         ORDER BY hour_bucket
                     """
@@ -311,7 +311,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 else:
                     query = """
                         SELECT * FROM combined_metrics_hourly
-                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                        WHERE hour_bucket >= $1 AND hour_bucket < $2
                         ORDER BY hour_bucket
                     """
                     results = await conn.fetch(query, start_time, end_time)
@@ -425,7 +425,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     rows = await conn.fetch(
                         """
                         SELECT * FROM container_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3
+                        WHERE timestamp >= $1 AND timestamp < $2 AND namespace = $3
                         ORDER BY timestamp
                         """,
                         start_time,
@@ -436,7 +436,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     rows = await conn.fetch(
                         """
                         SELECT * FROM container_metrics
-                        WHERE timestamp >= $1 AND timestamp <= $2
+                        WHERE timestamp >= $1 AND timestamp < $2
                         ORDER BY timestamp
                         """,
                         start_time,
@@ -459,7 +459,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     rows = await conn.fetch(
                         """
                         SELECT * FROM container_metrics_hourly
-                        WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3
+                        WHERE hour_bucket >= $1 AND hour_bucket < $2 AND namespace = $3
                         ORDER BY hour_bucket
                         """,
                         start_time,
@@ -470,7 +470,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     rows = await conn.fetch(
                         """
                         SELECT * FROM container_metrics_hourly
-                        WHERE hour_bucket >= $1 AND hour_bucket <= $2
+                        WHERE hour_bucket >= $1 AND hour_bucket < $2
                         ORDER BY hour_bucket
                         """,
                         start_time,
@@ -552,7 +552,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -570,7 +570,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -678,7 +678,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT {group_cols}, {raw_ts_expr} AS ts_bucket
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -692,7 +692,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -763,7 +763,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         SELECT timestamp AS ts, co2e_grams, embodied_co2e_grams,
                                total_cost, joules, cpu_usage_millicores, memory_usage_bytes
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -782,7 +782,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                                total_cost, joules, cpu_usage_avg AS cpu_usage_millicores,
                                memory_usage_avg AS memory_usage_bytes
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -883,7 +883,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -899,7 +899,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -959,7 +959,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -975,7 +975,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -1019,7 +1019,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         limit = min(max(limit, 1), 1000)
         try:
             async with self.db_manager.connection_scope() as conn:
-                filters = ["timestamp >= $1", "timestamp <= $2"]
+                filters = ["timestamp >= $1", "timestamp < $2"]
                 params: list = [start_time, end_time]
                 idx = 3
                 if namespace:
@@ -1093,7 +1093,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM combined_metrics "
-                                "WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3",
+                                "WHERE timestamp >= $1 AND timestamp < $2 AND namespace = $3",
                                 raw_start,
                                 end_aware,
                                 namespace,
@@ -1103,7 +1103,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     else:
                         total += int(
                             await conn.fetchval(
-                                "SELECT COUNT(*) FROM combined_metrics WHERE timestamp >= $1 AND timestamp <= $2",
+                                "SELECT COUNT(*) FROM combined_metrics WHERE timestamp >= $1 AND timestamp < $2",
                                 raw_start,
                                 end_aware,
                             )
@@ -1115,7 +1115,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM combined_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3",
+                                "WHERE hour_bucket >= $1 AND hour_bucket < $2 AND namespace = $3",
                                 start_aware,
                                 hourly_end,
                                 namespace,
@@ -1126,7 +1126,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM combined_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2",
+                                "WHERE hour_bucket >= $1 AND hour_bucket < $2",
                                 start_aware,
                                 hourly_end,
                             )
@@ -1160,7 +1160,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM container_metrics "
-                                "WHERE timestamp >= $1 AND timestamp <= $2 AND namespace = $3",
+                                "WHERE timestamp >= $1 AND timestamp < $2 AND namespace = $3",
                                 raw_start,
                                 end_aware,
                                 namespace,
@@ -1170,7 +1170,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     else:
                         total += int(
                             await conn.fetchval(
-                                "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= $1 AND timestamp <= $2",
+                                "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= $1 AND timestamp < $2",
                                 raw_start,
                                 end_aware,
                             )
@@ -1182,7 +1182,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM container_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2 AND namespace = $3",
+                                "WHERE hour_bucket >= $1 AND hour_bucket < $2 AND namespace = $3",
                                 start_aware,
                                 hourly_end,
                                 namespace,
@@ -1193,7 +1193,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         total += int(
                             await conn.fetchval(
                                 "SELECT COUNT(*) FROM container_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket <= $2",
+                                "WHERE hour_bucket >= $1 AND hour_bucket < $2",
                                 start_aware,
                                 hourly_end,
                             )
@@ -1261,7 +1261,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             emaps_zone, estimation_reasons, is_estimated,
                             embodied_co2e_grams, calculation_version
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp <= ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
                     """)
                     params.extend([raw_start, end_time])
                     idx += 2
@@ -1292,7 +1292,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             emaps_zone, estimation_reasons, is_estimated,
                             embodied_co2e_grams, calculation_version
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ${idx} AND hour_bucket <= ${idx + 1}{ns_clause}
+                        WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
                     params.extend([start_time, hourly_end])
                     idx += 2
@@ -1353,7 +1353,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 query = """
                     SELECT DISTINCT ON (namespace, pod_name) *
                     FROM combined_metrics
-                    WHERE timestamp >= $1 AND timestamp <= $2
+                    WHERE timestamp >= $1 AND timestamp < $2
                     ORDER BY namespace, pod_name, timestamp DESC
                 """
                 rows = await conn.fetch(query, start_time, end_time)

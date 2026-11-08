@@ -246,3 +246,54 @@ def test_add_job_from_string_rejects_zero_interval():
 
     with pytest.raises(ValueError, match="greater than zero"):
         scheduler.add_job_from_string(noop, "0m")
+
+
+def test_seconds_until_boundary_targets_step_plus_offset():
+    # 10:06:20 UTC with a 5-minute step and a 60s offset -> next run at 10:11:00.
+    now = 1_762_509_980.0  # 2025-11-07T10:06:20Z
+    assert Scheduler.seconds_until_boundary(300, 60, now=now) == pytest.approx(280.0)
+    # Exactly on the boundary waits a full interval (never a zero-second hot loop).
+    assert Scheduler.seconds_until_boundary(300, 60, now=1_762_509_960.0) == pytest.approx(300.0)
+
+
+@pytest.mark.asyncio
+async def test_aligned_job_runs_on_boundaries_and_survives_failures(monkeypatch):
+    sleeps: list[float] = []
+    calls = {"count": 0}
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    async def flaky_job():
+        calls["count"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("greenkube.core.scheduler.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(Scheduler, "seconds_until_boundary", staticmethod(lambda *_args, **_kw: 42.0))
+
+    with pytest.raises(asyncio.CancelledError):
+        await Scheduler()._run_periodically(300, flaky_job, skip_initial=True, align_offset_seconds=60)
+
+    assert sleeps == [42.0, 42.0, 42.0]
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_add_job_from_string_passes_alignment(monkeypatch):
+    captured = {}
+
+    async def fake_run(self, interval_seconds, job_func, skip_initial=False, align_offset_seconds=None):
+        captured.update(interval=interval_seconds, offset=align_offset_seconds, skip=skip_initial)
+
+    monkeypatch.setattr(Scheduler, "_run_periodically", fake_run)
+    scheduler = Scheduler()
+
+    async def job():
+        return None
+
+    scheduler.add_job_from_string(job, "5m", skip_initial=True, align_offset_seconds=60)
+    await asyncio.gather(*scheduler.tasks)
+
+    assert captured == {"interval": 300, "offset": 60, "skip": True}

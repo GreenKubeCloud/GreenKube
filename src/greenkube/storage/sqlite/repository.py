@@ -312,7 +312,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            is_estimated, estimation_reasons, embodied_co2e_grams,
                            calculation_version
                     FROM combined_metrics
-                    WHERE "timestamp" BETWEEN ? AND ?
+                    WHERE "timestamp" >= ? AND "timestamp" < ?
                 """,
                     (to_iso_z(start_time), to_iso_z(end_time)),
                 ) as cursor:
@@ -394,7 +394,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 total = 0
                 if end_aware >= cutoff - timedelta(minutes=1):
                     raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    query = 'SELECT COUNT(*) FROM combined_metrics WHERE "timestamp" BETWEEN ? AND ?'
+                    query = 'SELECT COUNT(*) FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?'
                     params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
                     if namespace:
                         query += " AND namespace = ?"
@@ -404,7 +404,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         total += int(row[0] or 0)
                 if start_aware < cutoff:
                     hourly_end = min(end_aware, cutoff)
-                    query = "SELECT COUNT(*) FROM combined_metrics_hourly WHERE hour_bucket BETWEEN ? AND ?"
+                    query = "SELECT COUNT(*) FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?"
                     params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
                     if namespace:
                         query += " AND namespace = ?"
@@ -436,7 +436,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 total = 0
                 if end_aware >= cutoff - timedelta(minutes=1):
                     raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    query = "SELECT COUNT(*) FROM container_metrics WHERE timestamp BETWEEN ? AND ?"
+                    query = "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= ? AND timestamp < ?"
                     params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
                     if namespace:
                         query += " AND namespace = ?"
@@ -446,7 +446,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         total += int(row[0] or 0)
                 if start_aware < cutoff:
                     hourly_end = min(end_aware, cutoff)
-                    query = "SELECT COUNT(*) FROM container_metrics_hourly WHERE hour_bucket BETWEEN ? AND ?"
+                    query = "SELECT COUNT(*) FROM container_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?"
                     params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
                     if namespace:
                         query += " AND namespace = ?"
@@ -472,7 +472,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         try:
             async with self.db_manager.connection_scope() as conn:
                 conn.row_factory = aiosqlite.Row
-                filters = ['"timestamp" >= ?', '"timestamp" <= ?']
+                filters = ['"timestamp" >= ?', '"timestamp" < ?']
                 params: list = [to_iso_z(start_time), to_iso_z(end_time)]
                 if namespace:
                     filters.append("namespace = ?")
@@ -571,7 +571,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
@@ -585,7 +585,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                        WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
@@ -686,7 +686,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(
                         f"SELECT {group_cols}, {raw_ts_expr} AS ts_bucket "
-                        f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" <= ?{ns_clause}'
+                        f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}'
                     )
                     params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
@@ -697,7 +697,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(
                         f"SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket "
-                        f"FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket <= ?{ns_clause}"
+                        f"FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}"
                     )
                     params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
@@ -771,7 +771,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         SELECT "timestamp" AS ts, co2e_grams, embodied_co2e_grams,
                                total_cost, joules, cpu_usage_millicores, memory_usage_bytes
                         FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
@@ -786,7 +786,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                total_cost, joules, cpu_usage_avg AS cpu_usage_millicores,
                                memory_usage_avg AS memory_usage_bytes
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                        WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
@@ -840,7 +840,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 if namespace:
                     query = """
                         SELECT * FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        WHERE hour_bucket >= ? AND hour_bucket < ?
                           AND namespace = ?
                         ORDER BY hour_bucket
                     """
@@ -848,7 +848,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 else:
                     query = """
                         SELECT * FROM combined_metrics_hourly
-                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        WHERE hour_bucket >= ? AND hour_bucket < ?
                         ORDER BY hour_bucket
                     """
                     params = (to_iso_z(start_time), to_iso_z(end_time))
@@ -993,14 +993,14 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 if namespace:
                     query = """
                         SELECT * FROM container_metrics
-                        WHERE timestamp >= ? AND timestamp <= ? AND namespace = ?
+                        WHERE timestamp >= ? AND timestamp < ? AND namespace = ?
                         ORDER BY timestamp
                     """
                     params = (to_iso_z(start_time), to_iso_z(end_time), namespace)
                 else:
                     query = """
                         SELECT * FROM container_metrics
-                        WHERE timestamp >= ? AND timestamp <= ?
+                        WHERE timestamp >= ? AND timestamp < ?
                         ORDER BY timestamp
                     """
                     params = (to_iso_z(start_time), to_iso_z(end_time))
@@ -1022,14 +1022,14 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 if namespace:
                     query = """
                         SELECT * FROM container_metrics_hourly
-                        WHERE hour_bucket >= ? AND hour_bucket <= ? AND namespace = ?
+                        WHERE hour_bucket >= ? AND hour_bucket < ? AND namespace = ?
                         ORDER BY hour_bucket
                     """
                     params = (to_iso_z(start_time), to_iso_z(end_time), namespace)
                 else:
                     query = """
                         SELECT * FROM container_metrics_hourly
-                        WHERE hour_bucket >= ? AND hour_bucket <= ?
+                        WHERE hour_bucket >= ? AND hour_bucket < ?
                         ORDER BY hour_bucket
                     """
                     params = (to_iso_z(start_time), to_iso_z(end_time))
@@ -1127,7 +1127,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
@@ -1139,7 +1139,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                        WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:
@@ -1196,7 +1196,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE "timestamp" BETWEEN ? AND ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
                     if namespace:
@@ -1208,7 +1208,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
-                        WHERE hour_bucket BETWEEN ? AND ?{ns_clause}
+                        WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
                     params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
                     if namespace:

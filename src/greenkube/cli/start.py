@@ -345,6 +345,15 @@ async def run_recommendation_lifecycle() -> None:
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
+def _collection_offset_seconds(cfg) -> float:
+    from ..collectors.promql import parse_duration_seconds
+
+    try:
+        return float(parse_duration_seconds(getattr(cfg, "COLLECTION_SAFETY_LAG", "1m")))
+    except ValueError:
+        return 60.0
+
+
 def _create_controller_leader_election(cfg):
     """Build the optional controller Lease elector from the chart-provided settings."""
     if not getattr(cfg, "LEADER_ELECTION_ENABLED", False):
@@ -376,11 +385,19 @@ def _leader_gated_callback(
     @wraps(callback)
     async def guarded() -> None:
         if should_run():
-            await callback()
+            with _leader_fence_scope(should_run):
+                await callback()
         else:
             logger.debug("Skipping controller task %s while this process is not the Lease holder.", callback.__name__)
 
     return guarded
+
+
+def _leader_fence_scope(should_run: Callable[[], bool] | None):
+    """Give the job a LeaderFence so it can re-check the Lease before committing (A14)."""
+    from ..core.leader_election import LeaderGate, leader_fence_scope
+
+    return leader_fence_scope(should_run.fence() if isinstance(should_run, LeaderGate) else None)
 
 
 async def _run_initial_controller_task(
@@ -392,7 +409,8 @@ async def _run_initial_controller_task(
     if should_run is not None and not should_run():
         logger.info("Skipping remaining initial controller work while this process is not the Lease holder.")
         return False
-    await callback(*args, **kwargs)
+    with _leader_fence_scope(should_run):
+        await callback(*args, **kwargs)
     return True
 
 
@@ -500,8 +518,9 @@ async def _async_start(last: Optional[str]):
         else:
             await leader_election.try_acquire_or_renew()
 
-            def should_run() -> bool:
-                return leader_election.is_leader
+            from ..core.leader_election import LeaderGate
+
+            should_run = LeaderGate(leader_election)
 
             leader_election_task = asyncio.create_task(
                 leader_election.run(controller_stop_event),
@@ -533,10 +552,13 @@ async def _async_start(last: Optional[str]):
             skip_initial=True,
         )
 
+        # Fire right after each window closes (step boundary + safety lag); the
+        # job itself catches up every window missed since the watermark.
         scheduler.add_job_from_string(
             _leader_gated_callback(scheduled_write_metrics, should_run),
             cfg.PROMETHEUS_QUERY_RANGE_STEP,
             skip_initial=True,
+            align_offset_seconds=_collection_offset_seconds(cfg),
         )
         scheduler.add_job_from_string(
             _leader_gated_callback(analyze_nodes, should_run),

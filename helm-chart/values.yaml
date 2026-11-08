@@ -320,6 +320,8 @@ config:
     verifyCerts: true
     # Prometheus query step (e.g., "5m", "1h"). Must be a divisor of 24 hours.
     queryRangeStep: 5m
+    # cAdvisor scrape interval; rate windows span max(queryRangeStep, 4 x scrapeInterval).
+    scrapeInterval: 30s
     # Maximum number of data points to fetch in a single range query.
     queryRangeMaxSamples: 10000
     # The node label to use for discovering the instance type.
@@ -330,6 +332,13 @@ config:
     # If empty, GreenKube will attempt in-cluster discovery.
     url: ''
     verifyCerts: true
+
+  # Metric collection catch-up. Each window [start, end) is collected once it is
+  # older than safetyLag; after downtime the controller backfills missing windows
+  # up to maxBackfill in the past (older windows are reported as gaps).
+  collection:
+    safetyLag: 1m
+    maxBackfill: 24h
 
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05

@@ -206,6 +206,9 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `config.rootPath` | `""` | Sub-path when served behind a reverse proxy, for example `/greenkube`. |
 | `config.prometheus.url` | `""` | Empty attempts in-cluster discovery. |
 | `config.prometheus.queryRangeStep` | `5m` | Prometheus range-query step. Must divide 24 hours. |
+| `config.prometheus.scrapeInterval` | `30s` | cAdvisor scrape interval; rate windows span at least four scrapes. |
+| `config.collection.safetyLag` | `1m` | Age a window must reach before it is collected. Raise it for remote-write or Thanos/Mimir setups. |
+| `config.collection.maxBackfill` | `24h` | How far back the controller backfills missing windows after downtime. |
 | `config.opencost.url` | `""` | Empty attempts in-cluster discovery. |
 | `config.kubernetesMetricsApiEnabled` | `true` | Read per-container usage from `metrics.k8s.io` when available. |
 | `config.serviceUrlAllowlist` | `[]` | Exact hosts allowed for runtime service-URL overrides from the Settings page. |

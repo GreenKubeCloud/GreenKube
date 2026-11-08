@@ -14,7 +14,7 @@ import respx
 from httpx import Response
 
 from greenkube.collectors.discovery.prometheus import PrometheusDiscovery
-from greenkube.collectors.prometheus_collector import PrometheusCollector
+from greenkube.collectors.prometheus_collector import PrometheusCollector, PrometheusQueryError
 from greenkube.core.config import Config
 from greenkube.models.prometheus_metrics import (
     PodCPUUsage,
@@ -536,12 +536,50 @@ async def test_discover_and_update_url_uses_well_known_in_cluster_url(collector)
 
 
 @pytest.mark.asyncio
-async def test_collect_range_returns_empty_for_invalid_dates_or_failed_discovery(collector):
+async def test_collect_range_rejects_invalid_dates_and_reports_missing_prometheus(collector):
+    """An unreachable or unconfigured Prometheus must never look like an empty window (A2)."""
     collector.base_url = None
     collector._discover_and_update_url = AsyncMock(return_value=False)
 
-    assert await collector.collect_range("not-a-date", datetime.now(timezone.utc)) == []
-    assert await collector.collect_range(datetime.now(timezone.utc), datetime.now(timezone.utc)) == []
+    with pytest.raises(ValueError):
+        await collector.collect_range("not-a-date", datetime.now(timezone.utc))
+    with pytest.raises(PrometheusQueryError):
+        await collector.collect_range(datetime.now(timezone.utc), datetime.now(timezone.utc))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_raises_when_every_endpoint_fails(collector):
+    respx.get(url__startswith=collector.base_url).mock(side_effect=httpx.ConnectError("Connection refused"))
+    end_time = datetime.now(timezone.utc)
+
+    with pytest.raises(PrometheusQueryError):
+        await collector.collect_range(end_time - timedelta(minutes=5), end_time)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collect_range_raises_on_prometheus_error_status(collector):
+    respx.get(url__startswith=collector.base_url).mock(
+        return_value=Response(200, json={"status": "error", "error": "bad_data"})
+    )
+    end_time = datetime.now(timezone.utc)
+
+    with pytest.raises(PrometheusQueryError, match="bad_data"):
+        await collector.collect_range(end_time - timedelta(minutes=5), end_time)
+
+
+def test_container_scoped_queries_exclude_pod_cgroup_and_pause_series(collector):
+    """BUG-01: instant and range paths share the catalog's container filters."""
+    for query in (
+        collector.cpu_usage_query,
+        collector.memory_usage_query,
+        collector.disk_read_query,
+        collector.disk_write_query,
+    ):
+        assert 'container!="",container!="POD"' in query
+    assert 'container=""' in collector.cpu_fallback_query
+    assert "container!=" not in collector.network_receive_query
 
 
 @pytest.mark.asyncio
