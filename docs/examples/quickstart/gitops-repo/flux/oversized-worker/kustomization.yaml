@@ -1,4 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# Keep equal to the Flux Kustomization's targetNamespace: GreenKube plans a
+# Flux targetNamespace only when the overlay declares the same namespace.
+namespace: greenkube-e2e-apps
 resources:
   - deployment.yaml

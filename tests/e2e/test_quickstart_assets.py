@@ -82,8 +82,10 @@ def test_gitops_objects_point_at_the_sample_repository() -> None:
     flux = {doc["kind"]: doc for doc in _load(QUICKSTART / "flux-kustomization.yaml")}
     assert flux["GitRepository"]["spec"]["url"] == REPO_URL
     kustomization_path = flux["Kustomization"]["spec"]["path"]
-    assert (GITOPS_REPO / kustomization_path / "kustomization.yaml").is_file()
+    overlay = yaml.safe_load((GITOPS_REPO / kustomization_path / "kustomization.yaml").read_text())
     assert flux["Kustomization"]["spec"]["sourceRef"]["name"] == flux["GitRepository"]["metadata"]["name"]
+    # GreenKube plans a Flux targetNamespace only when the overlay declares the same namespace.
+    assert overlay["namespace"] == flux["Kustomization"]["spec"]["targetNamespace"]
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
