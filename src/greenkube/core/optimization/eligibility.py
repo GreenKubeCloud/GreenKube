@@ -64,6 +64,9 @@ DELIVERY_MANUAL = "manual"
 
 #: Policy gates evaluated locally (for every recommendation, with or without a binding).
 _LOCAL_GATES = frozenset({"maximum_risk", "minimum_confidence", "change_freeze_window", "sample_count_coverage"})
+#: Policy gates reported as warnings: an unapproved preview of the workload is reused or
+#: replaced when a new one is prepared (D6), so it must not hide the preview action.
+_WARNING_GATES = frozenset({"active_plan"})
 
 #: Default message and fix of each code (docs/reference/eligibility-codes.md).
 CODES: Dict[str, Tuple[str, str]] = {
@@ -155,7 +158,7 @@ CODES: Dict[str, Tuple[str, str]] = {
     ),
     "workload_plan_already_exists": (
         "Another plan for this workload is still active.",
-        "Finish, cancel or let the other plan expire before preparing a new one.",
+        "A new preview reuses or replaces an unapproved one; an approved plan must finish or be cancelled first.",
     ),
     "rollout_in_progress": (
         "The workload has a rollout in progress.",
@@ -391,12 +394,20 @@ def _local_policy_blockers(record: Any, policy: AutomationPolicyConfig, now: dat
 def _evaluator_entries(result: AutomationPolicyResult) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     """Blockers and warnings of a policy evaluation, minus the gates evaluated locally."""
     details = {rejection.code.value: rejection.detail for rejection in result.rejections}
-    blockers = [
-        _entry(check.code, check.message, details.get(check.code))
+    rejected = [
+        check
         for check in result.checks
         if check.state.value == "rejected" and check.code and check.gate not in _LOCAL_GATES
     ]
-    warnings = [_entry(warning.code.value, warning.detail, warning.detail) for warning in result.warnings]
+    blockers = [
+        _entry(check.code, check.message, details.get(check.code))
+        for check in rejected
+        if check.gate not in _WARNING_GATES
+    ]
+    warnings = [
+        _entry(check.code, check.message, details.get(check.code)) for check in rejected if check.gate in _WARNING_GATES
+    ]
+    warnings += [_entry(warning.code.value, warning.detail, warning.detail) for warning in result.warnings]
     return blockers, warnings
 
 
@@ -557,7 +568,9 @@ async def evaluate_policies(
             or binding.source is None
             or _text(getattr(record, "type", None)) not in SUPPORTED_ACTION_KINDS
             or _text(getattr(record, "status", None)) not in ("active", "")
+            or validate_action(record)[0] is None
         ):
+            # Only records that could otherwise become a PR cost a plan-history read.
             continue
         try:
             results[rec_id] = await evaluator.evaluate([record], binding.source)

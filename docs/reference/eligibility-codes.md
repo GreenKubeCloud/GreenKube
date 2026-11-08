@@ -75,7 +75,6 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `change_freeze_active` | A freeze window is active or the workload carries a freeze label. | Wait for the window to end or remove the label. |
 | `workload_pr_limit_exceeded` | The workload has `maxOpenPullRequestsPerWorkload` open pull requests. | Merge or close one. |
 | `workload_cooldown_active` | The workload changed less than `cooldownMinutes` ago. | Wait for the cooldown. |
-| `workload_plan_already_exists` | Another plan for the workload is still active. | Finish, cancel or let it expire. |
 | `rollout_in_progress` | The workload is rolling out. | Wait for the rollout to complete. |
 | `controller_unhealthy` | The owning Argo CD or Flux object is suspended or unhealthy. | Restore it to a healthy, syncing state. |
 | `policy_interaction_conflict` | An HPA scales on the changed resource, a VPA writes requests (`Auto`, `Recreate`, `InPlace`, `InPlaceOrRecreate`) or a PodDisruptionBudget blocks the rollout. | Remove the conflicting writer or apply manually. |
@@ -89,3 +88,4 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `reliability_change` | The change increases resources (reliability lane) and costs money. | Weigh the incident risk it avoids against its cost. |
 | `policy_evidence_missing` | Live evidence is missing and `automation.policy.missingEvidence` is `warn`. | Refresh GitOps discovery. |
 | `policy_interaction_conflict` | An HPA scales on another resource than the one changed. | Review the HPA after the change. |
+| `workload_plan_already_exists` | Another plan for the workload is still active. Not a blocker: preparing a preview reuses or replaces an unapproved one; an approved plan makes the preview fail with this code. | Finish or cancel the approved plan. |

@@ -288,6 +288,38 @@ class TestLiveContext:
         assert "rollout_in_progress" in _codes(result)
         assert result["can_open_pr"] is False
 
+    async def test_an_active_plan_is_a_warning_not_a_blocker(self):
+        """An unapproved preview of the workload must not hide the preview action (D6)."""
+        from greenkube.automation.policy import AutomationPolicyResult, PolicyCheck, PolicyCheckState, PolicyRejection
+        from greenkube.gitops.contracts import AutomationErrorCode
+
+        result = AutomationPolicyResult(
+            allowed=False,
+            evaluated_at=NOW,
+            workload={},
+            policy={},
+            checks=[
+                PolicyCheck(
+                    gate="active_plan",
+                    state=PolicyCheckState.REJECTED,
+                    message="Another plan for this workload is still active.",
+                    code="workload_plan_already_exists",
+                )
+            ],
+            rejections=[
+                PolicyRejection(code=AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS, detail="Resolve the plan.")
+            ],
+        )
+        decision = assess_eligibility(_record(), _ctx(policy_results={7: result}))
+        assert decision["can_open_pr"] is True
+        assert [w["code"] for w in decision["warnings"]] == ["workload_plan_already_exists"]
+
+    async def test_evaluator_skips_records_without_a_safe_action(self):
+        plans = MagicMock()
+        plans.list_plan_records_for_workload = AsyncMock(return_value=[])
+        assert await evaluate_policies([_record(action=None)], _ctx(), plans) == {}
+        plans.list_plan_records_for_workload.assert_not_called()
+
     async def test_evaluator_skips_unresolved_and_disabled(self):
         plans = MagicMock()
         ctx = _ctx(bindings={KEY: _binding(BindingStatus.AMBIGUOUS)})
