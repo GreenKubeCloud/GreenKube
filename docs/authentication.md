@@ -103,7 +103,19 @@ over plain HTTP from anything other than `localhost`. Behind an Ingress that ter
 Failed sign-ins are counted per username and per client IP (four times the per-username budget). Past the budget,
 the username is locked for one rate-limit window, doubling at every further exhaustion up to 15 minutes; a
 successful sign-in resets it. Locked attempts answer `429` with `Retry-After`. Errors never say whether a username
-exists, and an unknown username costs the same password-hashing time as a known one.
+exists, and an unknown username costs the same password-hashing time as a known one. A wrong current password on
+`POST /api/v1/auth/password` counts as a failed sign-in for that user, so a stolen session cookie does not allow
+unthrottled guessing either.
+
+The per-username lockout applies before the password is checked, so anyone who can reach the sign-in page can keep a
+known username (for example `admin`) locked by sending wrong passwords. This is the price of resisting distributed
+guessing. API keys keep working while a username is locked; to limit exposure, keep the sign-in page off the public
+internet. Behind an Ingress or load balancer, set `config.trustedProxyIps` so GreenKube sees each client's address
+(the rightmost `X-Forwarded-For` entry that is not a trusted proxy); otherwise every user shares the proxy's per-IP
+budget.
+
+At most two password hashes run at once per API process (each scrypt run uses about 32 MiB), so a burst of sign-in
+requests queues instead of exhausting the Pod's memory.
 
 Counters live in each API process: with several replicas, an attacker gets at most the budget times the number of
 replicas. `greenkube_auth_failures_total{reason}` counts `bad_credentials`, `rate_limited`, `invalid_session`,
@@ -134,7 +146,7 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 |---|---|
 | `read` | Every `GET` under `/api/v1` |
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
-| `approve` | Plan approval (`POST /api/v1/automation/plans/{id}/approve`), which opens pull requests |
+| `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` and the compatibility endpoint `POST /api/v1/recommendations/{id}/apply-pr` (including its `dry_run` form) |
 | `signals:write` | The push API for recommendation signals (`/api/v1/signals`, roadmap G6) |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |

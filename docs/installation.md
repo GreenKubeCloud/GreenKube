@@ -647,7 +647,7 @@ kubectl -n greenkube rollout status deployment/greenkube-automation --timeout=10
 
 Upgrades never rotate generated API keys or PostgreSQL passwords: the credentials bootstrap hook only adds missing keys to the Secret `<release>`. That Secret also keeps service overrides written by the Settings page of earlier releases; they still apply, values you set in Helm take precedence, and GreenKube no longer writes them.
 
-Upgrading to session sign-in: the first upgrade creates `<release>-initial-admin`; sign in as `admin` with its password and choose a new one. Existing API clients keep working with the bootstrap key `GREENKUBE_API_KEY` (deprecated). The API no longer has RBAC to patch the Secret `<release>` (the former `<release>-secret-writer` Role is removed).
+Upgrading to session sign-in: the first upgrade creates `<release>-initial-admin`; sign in as `admin` with its password and choose a new one. Existing API clients keep working with the bootstrap key `GREENKUBE_API_KEY` (deprecated). The API no longer has RBAC to patch the Secret `<release>` (the former `<release>-secret-writer` Role is removed). If your values set `config.apiAuthMode: api_key` explicitly (or you upgrade with `--reuse-values` from such a release), browser sign-in stays disabled and the UI no longer offers the former API-key dialog: set `config.apiAuthMode: session` to use the UI. API keys that call `POST /api/v1/recommendations/{id}/apply-pr` need the `approve` scope.
 
 Changes to Helm-managed runtime configuration roll the standalone or production component Pods through a ConfigMap checksum. If you update an existing provider Secret or an API key outside Helm, restart the affected API/worker Pods so they reload the changed Secret values.
 
