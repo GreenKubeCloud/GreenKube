@@ -184,7 +184,8 @@ class TestImpactSettings:
     def test_defaults(self):
         config = Config()
         assert config.CARBON_PRICE_PER_TONNE == 100.0
-        assert config.IMPACT_REALIZATION_FACTOR == 1.0
+        assert config.IMPACT_REALIZATION_FACTOR is None
+        assert config.POWER_MEMORY_W_PER_GIB == 0.392
         assert config.IMPACT_PRICING_CPU_CORE_HOUR is None
         assert config.IMPACT_PRICING_CURRENCY == "USD"
 

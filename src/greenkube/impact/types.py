@@ -14,9 +14,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
-#: Version of the Impact Model methodology. Bump the major version when a
-#: formula changes the numbers it produces; persisted with every projection.
-IMPACT_MODEL_VERSION = "1.0.0"
+# One CostSource and one PowerSource for storage provenance and the Impact
+# Model: both import paths name the same enums.
+from greenkube.models.provenance import CostSource, PowerSource
+
+#: Version of the Impact Model methodology, persisted with every projection and
+#: every allocated metric row. Bump the major version when an existing formula
+#: changes the numbers it produces, the minor version when a new component is
+#: added and existing components keep their values (1.1.0: memory and GPU power).
+IMPACT_MODEL_VERSION = "1.1.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
 IDLE_WORKLOAD_NAME = "__idle__"
@@ -28,39 +34,23 @@ HOURS_PER_YEAR = 365 * 24
 BYTES_PER_GIB = 1024**3
 
 
-class CostSource(StrEnum):
-    """Where a unit price or cost comes from (values match roadmap A11)."""
-
-    OPENCOST = "opencost"
-    KUBECOST = "kubecost"
-    PRICING_CATALOG = "pricing_catalog"
-    CUSTOM_RATE = "custom_rate"
-    NONE = "none"
-
-
 def parse_cost_source(raw: Optional[str]) -> Tuple[CostSource, Optional[str]]:
-    """Maps a stored ``cost_source`` label to a :class:`CostSource`.
+    """Maps a stored ``cost_source`` label to the :class:`CostSource` that priced it.
 
     Observed costs are written by OpenCost/Kubecost collection, so a missing
-    label means ``opencost``. A label outside the enum (e.g. ``mixed`` on
-    hourly aggregates) also maps to ``opencost`` and is returned as the second
-    value, so callers can record it instead of hiding it.
+    label means ``opencost``. A label that names no single source (``mixed`` on
+    hourly aggregates, or an unknown label) also maps to ``opencost`` and is
+    returned as the second value, so callers can record it instead of hiding it.
     """
     if not raw:
         return CostSource.OPENCOST, None
     try:
-        return CostSource(raw), None
+        source = CostSource(raw)
     except ValueError:
         return CostSource.OPENCOST, str(raw)
-
-
-class PowerSource(StrEnum):
-    """Where a node power profile comes from (values match roadmap A11)."""
-
-    INSTANCE_PROFILE = "instance_profile"
-    NODE_CAPACITY_DERIVED = "node_capacity_derived"
-    DEFAULT_PROFILE = "default_profile"
-    KEPLER = "kepler"
+    if source == CostSource.MIXED:
+        return CostSource.OPENCOST, str(raw)
+    return source, None
 
 
 class ChangeKind(StrEnum):
@@ -178,26 +168,34 @@ class Co2eBreakdown:
     idle_operational: float = 0.0
     dynamic_operational: float = 0.0
     embodied: float = 0.0
+    #: Memory power (allocated by memory reservation), since model 1.1.0.
+    memory_operational: float = 0.0
+    #: GPU power attributed to the workload, since model 1.1.0.
+    gpu_operational: float = 0.0
 
     @property
     def operational(self) -> float:
-        return self.idle_operational + self.dynamic_operational
+        return self.idle_operational + self.dynamic_operational + self.memory_operational + self.gpu_operational
 
     @property
     def total(self) -> float:
-        return self.idle_operational + self.dynamic_operational + self.embodied
+        return self.operational + self.embodied
 
     def scaled(self, factor: float) -> "Co2eBreakdown":
         return Co2eBreakdown(
             idle_operational=self.idle_operational * factor,
             dynamic_operational=self.dynamic_operational * factor,
             embodied=self.embodied * factor,
+            memory_operational=self.memory_operational * factor,
+            gpu_operational=self.gpu_operational * factor,
         )
 
     def to_dict(self) -> Dict[str, float]:
         return {
             "idle_operational": self.idle_operational,
             "dynamic_operational": self.dynamic_operational,
+            "memory_operational": self.memory_operational,
+            "gpu_operational": self.gpu_operational,
             "embodied": self.embodied,
             "total": self.total,
         }
@@ -250,6 +248,11 @@ class NodeImpactProfile:
     provider: Optional[str] = None
     #: True when the profile was built from defaults because the node is unknown.
     is_fallback: bool = False
+    #: Memory power per GiB of allocatable memory (``MemoryPowerModel``, B5).
+    #: Value types default to 0 (no memory power); builders set the configured value.
+    memory_watts_per_gib: float = 0.0
+    #: Power of GPUs that DCGM attributes to no pod (idle GPUs), in W.
+    gpu_unattributed_watts: float = 0.0
 
     @property
     def allocatable_cpu(self) -> float:
@@ -270,6 +273,11 @@ class NodeImpactProfile:
     def dynamic_watts_per_used_core(self) -> float:
         cores = self.cpu_capacity_cores
         return max(self.max_watts - self.idle_watts, 0.0) / cores if cores > 0 else 0.0
+
+    @property
+    def memory_watts(self) -> float:
+        """Memory power of the whole node (allocatable GiB × W/GiB)."""
+        return self.allocatable_mem * max(self.memory_watts_per_gib, 0.0)
 
     @property
     def embodied_g_per_reserved_core_hour(self) -> float:
@@ -324,6 +332,8 @@ class ResourceSample:
     observed_cost_network: Optional[float] = None
     observed_cost_lb: Optional[float] = None
     observed_cost_source: Optional[str] = None
+    #: GPU power attributed to the sample by DCGM (average W over ``hours``).
+    gpu_watts: Optional[float] = None
 
     @property
     def cpu_reserved_cores(self) -> float:
@@ -413,13 +423,35 @@ class NodePoolContext:
     realization_factor: float
     carbon_price_per_tonne: float
     currency: str
-    #: Where the realization factor comes from (``config`` until RealizationContext, B6).
+    #: Where the realization factor comes from: ``config:IMPACT_REALIZATION_FACTOR``,
+    #: ``realization_context`` (B6) or ``realization_context:unobserved``.
     realization_source: str = "config"
+    #: Why the factor has its value (rendered with the projection).
+    realization_reasons: Tuple[str, ...] = ()
+    #: Per-pool realization observed in the cluster (``greenkube.impact.realization``);
+    #: None means ``realization_factor`` applies to every node.
+    realization: Optional[Any] = None
 
     def node_for(self, name: Optional[str]) -> NodeImpactProfile:
         if name and name in self.nodes:
             return self.nodes[name]
         return self.default_node
+
+    def realization_for(self, samples: Sequence["ResourceSample"]) -> Tuple[float, str, Tuple[str, ...], Tuple]:
+        """Realization factor, source, reasons and pools for the nodes ``samples`` ran on.
+
+        With an observed context the factor is the hours-weighted factor of the
+        samples' node pools; otherwise the pool-wide ``realization_factor``.
+        """
+        if self.realization is None:
+            return self.realization_factor, self.realization_source, self.realization_reasons, ()
+        from greenkube.impact.realization import realization_for_nodes
+
+        weights: Dict[Optional[str], float] = {}
+        for sample in samples:
+            weights[sample.node] = weights.get(sample.node, 0.0) + max(sample.hours, 0.0)
+        resolved = realization_for_nodes(self.realization, weights)
+        return resolved.factor, resolved.source, resolved.reasons, resolved.pools
 
 
 @dataclass(frozen=True)

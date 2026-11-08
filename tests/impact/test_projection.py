@@ -544,10 +544,18 @@ class TestBug16:
         assert breakdown["idle_operational"] > 0
         assert breakdown["embodied"] > 0
 
-    def test_memory_cut_projects_no_co2e_until_memory_power_is_modeled(self):
+    def test_memory_cut_projects_memory_power_released(self):
+        """B5: memory power is allocated by memory reservation, so a memory cut releases it."""
         recs = _analyze(_container_rows())
         memory = next(rec for rec in recs if rec.type == RecommendationType.RIGHTSIZING_MEMORY)
-        assert memory.potential_savings_co2e_grams == 0.0
+        breakdown = _impact(memory)["co2e_breakdown_annual_g"]
+        current, proposed = _impact(memory)["assumptions"]["change"]["mem_request_gib"]
+        # One replica all year: released GiB × W/GiB × PUE × intensity, per year.
+        expected = (current - proposed) * 0.392 * HOURS_PER_YEAR / 1000.0 * 1.2 * 300.0
+        assert breakdown["memory_operational"] == pytest.approx(expected)
+        assert breakdown["idle_operational"] == 0.0
+        assert breakdown["embodied"] == 0.0
+        assert memory.potential_savings_co2e_grams == pytest.approx(expected)
 
     def test_realization_factor_scales_expected_values(self):
         recs = _analyze(_container_rows(), config=Config(IMPACT_REALIZATION_FACTOR=0.25))

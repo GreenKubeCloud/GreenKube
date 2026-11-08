@@ -6,6 +6,10 @@ Pure functions only. For one node and one window:
 * **Dynamic power** ``util × (max − min)`` is allocated by CPU **usage** share.
 * **Idle power** (``min`` watts) and **embodied emissions** are allocated by CPU
   **reservation** share ``max(request, usage) / allocatable``.
+* **Memory power** (``W/GiB × allocatable GiB``, model 1.1.0) is allocated by
+  memory **reservation** share, like the node RAM cost.
+* **GPU power** is allocated to the pod DCGM attributes each GPU to; GPUs
+  attributed to no pod go to ``__idle__``.
 * **Cost** is allocated by reservation share per resource: the node CPU cost by
   CPU reservation, the node RAM cost by memory reservation.
 * Unreserved capacity goes to an explicit ``__idle__`` workload, so the sum of
@@ -72,10 +76,22 @@ class NodeTotals:
     dynamic_energy_kwh: float
     co2e_operational_g: float
     co2e_embodied_g: float
+    memory_energy_kwh: float = 0.0
+    gpu_energy_kwh: float = 0.0
 
     @property
     def energy_kwh(self) -> float:
-        return self.idle_energy_kwh + self.dynamic_energy_kwh
+        return self.idle_energy_kwh + self.dynamic_energy_kwh + self.memory_energy_kwh + self.gpu_energy_kwh
+
+
+def _sample_gpu_kwh(sample: ResourceSample) -> float:
+    return max(sample.gpu_watts or 0.0, 0.0) * max(sample.hours, 0.0) / 1000.0
+
+
+def memory_basis_gib_hours(node: NodeImpactProfile, samples: Sequence[ResourceSample], hours: float) -> float:
+    """GiB-hours the node's memory power applies to: allocatable, or the total reservation when over-committed."""
+    reserved = sum(sample.mem_reserved_gib * max(sample.hours, 0.0) for sample in samples)
+    return max(node.allocatable_mem * hours, reserved)
 
 
 def node_totals(node: NodeImpactProfile, samples: Sequence[ResourceSample], hours: float) -> NodeTotals:
@@ -85,6 +101,9 @@ def node_totals(node: NodeImpactProfile, samples: Sequence[ResourceSample], hour
     utilization = min(cpu_used_core_hours / capacity_core_hours, 1.0) if capacity_core_hours > 0 else 0.0
     idle_kwh = node.idle_watts * hours / 1000.0
     dynamic_kwh = utilization * max(node.max_watts - node.idle_watts, 0.0) * hours / 1000.0
+    memory_kwh = max(node.memory_watts_per_gib, 0.0) * memory_basis_gib_hours(node, samples, hours) / 1000.0
+    gpu_kwh = sum(_sample_gpu_kwh(sample) for sample in samples)
+    gpu_kwh += max(node.gpu_unattributed_watts, 0.0) * hours / 1000.0
     return NodeTotals(
         cost=CostBreakdown(
             cpu=node.cpu_capacity_cores * node.prices.cpu_core_hour * hours,
@@ -92,7 +111,9 @@ def node_totals(node: NodeImpactProfile, samples: Sequence[ResourceSample], hour
         ),
         idle_energy_kwh=idle_kwh,
         dynamic_energy_kwh=dynamic_kwh,
-        co2e_operational_g=(idle_kwh + dynamic_kwh) * node.pue * node.grid_intensity_g_per_kwh,
+        memory_energy_kwh=memory_kwh,
+        gpu_energy_kwh=gpu_kwh,
+        co2e_operational_g=(idle_kwh + dynamic_kwh + memory_kwh + gpu_kwh) * node.pue * node.grid_intensity_g_per_kwh,
         co2e_embodied_g=node.embodied_g_per_hour * hours,
     )
 
@@ -133,6 +154,8 @@ def allocate_node(
         group = groups[ref]
         idle_kwh = cpu_shares[index] * totals.idle_energy_kwh
         dynamic_kwh = dynamic_shares[index] * totals.dynamic_energy_kwh
+        memory_kwh = mem_shares[index] * totals.memory_energy_kwh
+        gpu_kwh = sum(_sample_gpu_kwh(sample) for sample in group)
         impacts.append(
             WorkloadImpact(
                 ref=ref,
@@ -147,8 +170,10 @@ def allocate_node(
                     cpu=cpu_shares[index] * totals.cost.cpu,
                     ram=mem_shares[index] * totals.cost.ram,
                 ),
-                energy_kwh=EnergyBreakdown(dynamic_cpu=dynamic_kwh, idle_share=idle_kwh),
-                co2e_operational_g=(idle_kwh + dynamic_kwh) * intensity,
+                energy_kwh=EnergyBreakdown(
+                    dynamic_cpu=dynamic_kwh, dynamic_mem=memory_kwh, idle_share=idle_kwh, gpu=gpu_kwh
+                ),
+                co2e_operational_g=(idle_kwh + dynamic_kwh + memory_kwh + gpu_kwh) * intensity,
                 co2e_embodied_g=cpu_shares[index] * totals.co2e_embodied_g,
                 scope="workload",
                 provenance=provenance,
@@ -156,9 +181,11 @@ def allocate_node(
         )
 
     # Dynamic energy only exists when workloads report usage (utilization is 0
-    # otherwise), so the idle workload receives unreserved idle power, cost and
-    # embodied emissions only.
+    # otherwise), so the idle workload receives unreserved idle and memory
+    # power, unattributed GPU power, cost and embodied emissions only.
     idle_kwh = cpu_idle_share * totals.idle_energy_kwh
+    memory_idle_kwh = mem_idle_share * totals.memory_energy_kwh
+    gpu_idle_kwh = max(node.gpu_unattributed_watts, 0.0) * hours / 1000.0
     impacts.append(
         WorkloadImpact(
             ref=WorkloadRef(cluster_uid=cluster_uid, namespace="", kind=IDLE_KIND, name=IDLE_WORKLOAD_NAME),
@@ -170,8 +197,8 @@ def allocate_node(
             mem_gib_hours_requested=0.0,
             mem_gib_hours_used=0.0,
             cost_allocated=CostBreakdown(cpu=cpu_idle_share * totals.cost.cpu, ram=mem_idle_share * totals.cost.ram),
-            energy_kwh=EnergyBreakdown(idle_share=idle_kwh),
-            co2e_operational_g=idle_kwh * intensity,
+            energy_kwh=EnergyBreakdown(idle_share=idle_kwh, dynamic_mem=memory_idle_kwh, gpu=gpu_idle_kwh),
+            co2e_operational_g=(idle_kwh + memory_idle_kwh + gpu_idle_kwh) * intensity,
             co2e_embodied_g=cpu_idle_share * totals.co2e_embodied_g,
             scope="idle",
             provenance=provenance,

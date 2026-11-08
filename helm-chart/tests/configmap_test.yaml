@@ -415,12 +415,14 @@ tests:
       - equal:
           path: data.IMPACT_PRICING_CURRENCY
           value: USD
-      - equal:
+      - notExists:
           path: data.IMPACT_REALIZATION_FACTOR
-          value: "1"
       - equal:
           path: data.CARBON_PRICE_PER_TONNE
           value: "100"
+      - equal:
+          path: data.POWER_MEMORY_W_PER_GIB
+          value: "0.392"
 
   - it: should render custom impact rates and carbon price
     set:
@@ -429,7 +431,11 @@ tests:
       impact.pricing.currency: EUR
       impact.realizationFactor: 0.6
       impact.carbonPricePerTonne: 85
+      impact.memoryWattsPerGiB: 0.5
     asserts:
+      - equal:
+          path: data.POWER_MEMORY_W_PER_GIB
+          value: "0.5"
       - equal:
           path: data.IMPACT_PRICING_CPU_CORE_HOUR
           value: "0.05"

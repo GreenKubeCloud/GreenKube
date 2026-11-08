@@ -7,6 +7,7 @@ import pytest
 
 from greenkube.impact import (
     IDLE_WORKLOAD_NAME,
+    IMPACT_MODEL_VERSION,
     ClusterSnapshot,
     CostSource,
     NodeImpactProfile,
@@ -130,7 +131,7 @@ class TestGoldenFixture:
         idle = [impact for impact in result.impacts if impact.scope == "idle"]
         assert len(idle) == 3
         assert all(impact.ref.name == IDLE_WORKLOAD_NAME for impact in idle)
-        assert all(impact.model_version == "1.0.0" for impact in result.impacts)
+        assert all(impact.model_version == IMPACT_MODEL_VERSION for impact in result.impacts)
 
 
 class TestConservation:
