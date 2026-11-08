@@ -1,78 +1,36 @@
 /**
  * GreenKube API client.
- * 
+ *
  * The API base URL is resolved at runtime:
  * - In development, Vite proxies /api to localhost:8000
- * - In production (K8s), NGINX proxies /api to the greenkube-api service
+ * - In production (K8s), the API serves the UI from the same origin
+ *
+ * Browsers authenticate with the HttpOnly session cookie set by
+ * POST /auth/login (F14); the client never sees or stores it. Mutations send
+ * the session's CSRF token, learnt from /auth/me or the sign-in response and
+ * kept in memory only. Machines use Bearer API keys directly, not this client.
  */
 
 const BASE = '/api/v1';
 
-/**
- * sessionStorage key holding the API key for the current browser tab.
- *
- * Stopgap until server-side sessions (F14): the key survives reloads of the
- * same tab and is forgotten when the tab closes. It is never written to
- * localStorage, which would keep a long-lived admin credential on disk.
- */
-export const API_TOKEN_STORAGE_KEY = 'greenkube.apiKey';
-
-/** Window event dispatched when the API rejects the current credentials. */
+/** Window event dispatched when the API rejects the current credentials (401). */
 export const AUTH_REQUIRED_EVENT = 'greenkube-auth-required';
 
-function sessionStore() {
-	try {
-		return typeof window !== 'undefined' ? window.sessionStorage ?? null : null;
-	} catch {
-		// Accessing sessionStorage throws when site data is blocked.
-		return null;
-	}
+/** Window event dispatched when the account must change its initial password. */
+export const PASSWORD_CHANGE_REQUIRED_EVENT = 'greenkube-password-change-required';
+
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+let csrfToken = '';
+
+/** Remember the session's CSRF token (from /auth/me, sign-in or password change). */
+export function setCsrfToken(token) {
+	csrfToken = typeof token === 'string' ? token : '';
 }
 
-function readStoredToken() {
-	try {
-		const value = sessionStore()?.getItem(API_TOKEN_STORAGE_KEY);
-		return typeof value === 'string' ? value : '';
-	} catch {
-		return '';
-	}
-}
-
-function writeStoredToken(token) {
-	try {
-		const storage = sessionStore();
-		if (!storage) return;
-		if (token) storage.setItem(API_TOKEN_STORAGE_KEY, token);
-		else storage.removeItem(API_TOKEN_STORAGE_KEY);
-	} catch {
-		// Storage can be full, disabled or blocked: keep the in-memory key.
-	}
-}
-
-let apiToken = readStoredToken();
-
-/** Set the bearer token for this tab: kept in memory and in sessionStorage. */
-export function setApiToken(token) {
-	apiToken = typeof token === 'string' ? token.trim() : '';
-	writeStoredToken(apiToken);
-}
-
-/** Forget the bearer token (sign out, or rejected by the API). */
-export function clearApiToken() {
-	apiToken = '';
-	writeStoredToken('');
-}
-
-/** Reload the token persisted for this tab, e.g. after a page reload. */
-export function restoreApiToken() {
-	const stored = readStoredToken();
-	if (stored) apiToken = stored;
-	return apiToken;
-}
-
-/** Whether a bearer token is configured for this tab. */
-export function hasApiToken() {
-	return Boolean(apiToken);
+/** Forget the CSRF token (sign-out, or the session ended). */
+export function clearCsrfToken() {
+	csrfToken = '';
 }
 
 export class ApiError extends Error {
@@ -105,10 +63,13 @@ function addSearchParam(url, key, value) {
 	}
 }
 
-function requestOptions(options = {}, token = apiToken) {
+function requestOptions(options = {}) {
 	const headers = { ...(options.headers || {}) };
-	if (token) headers.Authorization = `Bearer ${token}`;
-	return { ...options, headers, credentials: 'include' };
+	const method = String(options.method || 'GET').toUpperCase();
+	if (csrfToken && UNSAFE_METHODS.has(method) && !headers['X-CSRF-Token']) {
+		headers['X-CSRF-Token'] = csrfToken;
+	}
+	return { ...options, headers, credentials: 'same-origin' };
 }
 
 function jsonOptions(method, body, options = {}) {
@@ -136,38 +97,50 @@ function errorDetails(body, status) {
 	};
 }
 
-function notifyAuthRequired() {
+function notify(eventName) {
 	if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
 	try {
-		window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+		window.dispatchEvent(new CustomEvent(eventName));
 	} catch {
 		// A missing CustomEvent implementation must not hide the API error.
 	}
 }
 
-/**
- * Send one API request and return the raw Response.
- *
- * Every helper goes through here so that a 401 always clears the rejected
- * key and opens the authentication dialog, whatever the HTTP method.
- */
-async function send(path, params = {}, options = {}) {
+function buildUrl(path, params) {
 	const url = new URL(path, window.location.origin);
 	Object.entries(params).forEach(([k, v]) => {
 		addSearchParam(url, k, v);
 	});
+	return url.toString();
+}
 
-	const token = apiToken;
-	const res = await fetch(url.toString(), requestOptions(options, token));
+/**
+ * Send one API request and return the raw Response.
+ *
+ * Every helper goes through here so that a 401 always opens the sign-in view
+ * and a stale CSRF token (another tab changed the password, for example) is
+ * refreshed once, whatever the HTTP method.
+ */
+async function send(path, params = {}, options = {}, { retryCsrf = true } = {}) {
+	const res = await fetch(buildUrl(path, params), requestOptions(options));
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		const details = errorDetails(body, res.status);
-		// Only react to a rejection of the current credentials: a key entered
-		// while this request was in flight must survive a stale 401, and must
-		// not reopen the sign-in dialog.
-		if (res.status === 401 && apiToken === token) {
-			if (token) clearApiToken();
-			notifyAuthRequired();
+		if (res.status === 403 && details.code === 'CSRF_REJECTED' && retryCsrf && !path.startsWith(`${BASE}/auth/me`)) {
+			const me = await fetch(buildUrl(`${BASE}/auth/me`, {}), requestOptions({})).catch(() => null);
+			const refreshed = me?.ok ? await me.json().catch(() => null) : null;
+			if (refreshed?.csrf_token) {
+				setCsrfToken(refreshed.csrf_token);
+				const headers = { ...(options.headers || {}) };
+				delete headers['X-CSRF-Token'];
+				return send(path, params, { ...options, headers }, { retryCsrf: false });
+			}
+		}
+		if (res.status === 401) {
+			clearCsrfToken();
+			notify(AUTH_REQUIRED_EVENT);
+		} else if (res.status === 403 && details.code === 'PASSWORD_CHANGE_REQUIRED') {
+			notify(PASSWORD_CHANGE_REQUIRED_EVENT);
 		}
 		throw new ApiError(details.message, { status: res.status, ...details });
 	}
@@ -197,30 +170,6 @@ export function getServicesHealth(force = false) {
  */
 export function getServiceHealth(serviceName, force = false) {
 	return request(`${BASE}/health/services/${serviceName}`, { force: force || undefined });
-}
-
-/**
- * Update service URLs/tokens at runtime.
- * @param {Object} config
- * @param {string} [config.prometheus_url]
- * @param {string} [config.opencost_url]
- * @param {string} [config.electricity_maps_token]
- * @param {string} [config.boavizta_url]
- * @param {string} [config.wattnet_email]
- * @param {string} [config.wattnet_password]
- * @returns {Promise<Object>}
- */
-export async function updateServiceConfig(config) {
-	const res = await send(`${BASE}/config/services`, {}, jsonOptions('POST', config));
-	const data = await res.json();
-	Object.defineProperty(data, 'configurationAcknowledgement', {
-		value: {
-			version: res.headers?.get?.('X-Configuration-Version') || data.configuration_version || null,
-			persisted: res.headers?.get?.('X-Configuration-Persisted') === 'true' || data.configuration_persisted === true
-		},
-		enumerable: false
-	});
-	return data;
 }
 
 /** @returns {Promise<{version: string}>} */
@@ -747,4 +696,77 @@ export async function downloadReport(params = {}) {
 	} finally {
 		URL.revokeObjectURL(objectUrl);
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Authentication (F14, F15)
+// ---------------------------------------------------------------------------
+
+function rememberCsrf(principal) {
+	if (principal && Object.prototype.hasOwnProperty.call(principal, 'csrf_token')) {
+		setCsrfToken(principal.csrf_token || '');
+	}
+	return principal;
+}
+
+/**
+ * The signed-in principal: {authenticated, kind, name, role, scopes,
+ * must_change_password, csrf_token, session}. Rejects with status 401 when
+ * nobody is signed in.
+ */
+export async function getMe({ signal } = {}) {
+	return rememberCsrf(await request(`${BASE}/auth/me`, {}, { signal }));
+}
+
+/** Sign in; the server sets the session cookie. */
+export async function login({ username, password, remember = false }) {
+	return rememberCsrf(await request(`${BASE}/auth/login`, {}, jsonOptions('POST', { username, password, remember })));
+}
+
+/** Revoke the current session server-side and clear the cookie. */
+export async function logout() {
+	try {
+		await send(`${BASE}/auth/logout`, {}, { method: 'POST' });
+	} finally {
+		clearCsrfToken();
+	}
+}
+
+/** Change the password; every other session is signed out and a new cookie is set. */
+export async function changePassword({ currentPassword, newPassword }) {
+	return rememberCsrf(
+		await request(
+			`${BASE}/auth/password`,
+			{},
+			jsonOptions('POST', { current_password: currentPassword, new_password: newPassword })
+		)
+	);
+}
+
+/** Active sessions of the signed-in user. */
+export function listSessions() {
+	return request(`${BASE}/auth/sessions`);
+}
+
+/** Sign out one session. */
+export function revokeSession(sessionId) {
+	return request(`${BASE}/auth/sessions/${encodeURIComponent(sessionId)}`, {}, { method: 'DELETE' });
+}
+
+/** Every API key (admin only); secrets are never returned. */
+export function listApiKeys() {
+	return request(`${BASE}/auth/api-keys`);
+}
+
+/** Create a scoped API key; the response `key` is shown once. */
+export function createApiKey({ name, scopes, expiresInDays = null }) {
+	const body = { name, scopes };
+	if (expiresInDays) body.expires_in_days = Number(expiresInDays);
+	return request(`${BASE}/auth/api-keys`, {}, jsonOptions('POST', body));
+}
+
+/** Revoke an API key immediately. */
+export function revokeApiKey(keyId) {
+	return request(`${BASE}/auth/api-keys/${encodeURIComponent(keyId)}`, {}, { method: 'DELETE' });
 }

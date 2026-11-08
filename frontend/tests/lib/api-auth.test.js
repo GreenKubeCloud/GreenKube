@@ -1,37 +1,42 @@
 /**
- * API client: per-tab key persistence (F13, BUG-63), 401 handling for every
+ * API client: cookie sessions with CSRF (F14, K11), 401 handling for every
  * helper including mutations (K9, BUG-25), read-only recommendation reads,
  * scan-run endpoints (E1) and preview discard (D6, BUG-48).
  *
- * Uses the real jsdom window so sessionStorage and window events are real.
+ * Uses the real jsdom window so window events and storage are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '$lib/api.js';
-import { createMemoryStorage, installBlockedStorage, installStorage } from '../helpers/storage.js';
+import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 
 const {
-	API_TOKEN_STORAGE_KEY,
 	AUTH_REQUIRED_EVENT,
+	PASSWORD_CHANGE_REQUIRED_EVENT,
 	applyRecommendation,
-	clearApiToken,
+	changePassword,
+	clearCsrfToken,
+	createApiKey,
 	discardAutomationPlan,
 	downloadReport,
 	getActiveRecommendations,
 	getAppliedRecommendations,
 	getHealth,
 	getIgnoredRecommendations,
+	getMe,
 	getOptimizationRun,
 	getRecommendationSavings,
-	hasApiToken,
 	ignoreRecommendation,
 	listOptimizationRuns,
+	login,
+	logout,
 	refreshDashboardSummary,
 	requestOptimizationRun,
-	restoreApiToken,
-	setApiToken,
-	unignoreRecommendation,
-	updateServiceConfig
+	revokeApiKey,
+	revokeSession,
+	unignoreRecommendation
 } = api;
+
+const TEST_PASSWORD = ['not', 'a', 'secret'].join('-');
 
 function okResponse(body, { status = 200, headers = {} } = {}) {
 	return {
@@ -59,145 +64,134 @@ beforeEach(() => {
 		installStorage('sessionStorage', createMemoryStorage()),
 		installStorage('localStorage', createMemoryStorage())
 	];
-	clearApiToken();
+	clearCsrfToken();
 });
 
 afterEach(() => {
-	clearApiToken();
+	clearCsrfToken();
 	restoreStorages.reverse().forEach((restore) => restore());
 	vi.restoreAllMocks();
 });
 
-describe('API key persistence (F13)', () => {
-	it('keeps the key in sessionStorage for this tab and never in localStorage', async () => {
-		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ status: 'ok' })));
+describe('cookie sessions (F14)', () => {
+	it('signs in with a JSON body and never stores anything in browser storage', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ kind: 'user', name: 'admin', csrf_token: 'csrf-1' })));
 
-		setApiToken('  gk-secret  ');
-		await getHealth();
+		await login({ username: 'admin', password: TEST_PASSWORD, remember: true });
 
-		expect(window.sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBe('gk-secret');
+		const { url, options } = lastCall();
+		expect(url.pathname).toBe('/api/v1/auth/login');
+		expect(options.method).toBe('POST');
+		expect(options.credentials).toBe('same-origin');
+		expect(JSON.parse(options.body)).toEqual({ username: 'admin', password: TEST_PASSWORD, remember: true });
+		expect(options.headers.Authorization).toBeUndefined();
+		expect(window.sessionStorage.length).toBe(0);
 		expect(window.localStorage.length).toBe(0);
-		expect(lastCall().options.headers.Authorization).toBe('Bearer gk-secret');
-		expect(hasApiToken()).toBe(true);
 	});
 
-	it('restores the key after a reload of the same tab', async () => {
-		window.sessionStorage.setItem(API_TOKEN_STORAGE_KEY, 'gk-from-previous-load');
-		vi.resetModules();
-		const reloaded = await import('$lib/api.js');
-		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ status: 'ok' })));
+	it('sends the CSRF token learnt from /auth/me on mutations only', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ kind: 'user', csrf_token: 'csrf-me' })));
+		await getMe();
 
-		await reloaded.getHealth();
-
-		expect(reloaded.hasApiToken()).toBe(true);
-		expect(lastCall().options.headers.Authorization).toBe('Bearer gk-from-previous-load');
-		reloaded.clearApiToken();
-	});
-
-	it('restoreApiToken re-reads the stored key without wiping an in-memory key', () => {
-		window.sessionStorage.setItem(API_TOKEN_STORAGE_KEY, 'gk-stored');
-		expect(restoreApiToken()).toBe('gk-stored');
-
-		window.sessionStorage.clear();
-		expect(restoreApiToken()).toBe('gk-stored');
-	});
-
-	it('forgets the key on sign out', () => {
-		setApiToken('gk-secret');
-		clearApiToken();
-
-		expect(window.sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBeNull();
-		expect(hasApiToken()).toBe(false);
-	});
-
-	it.each([
-		['throws on every call', () => installStorage('sessionStorage', createMemoryStorage({ failing: true }))],
-		['is blocked for the document', () => installBlockedStorage('sessionStorage')]
-	])('keeps working in memory when sessionStorage %s', async (_label, install) => {
-		restoreStorages.push(install());
-		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ status: 'ok' })));
-
-		expect(() => setApiToken('gk-memory-only')).not.toThrow();
-		expect(restoreApiToken()).toBe('gk-memory-only');
 		await getHealth();
+		expect(lastCall().options.headers['X-CSRF-Token']).toBeUndefined();
 
-		expect(lastCall().options.headers.Authorization).toBe('Bearer gk-memory-only');
-		expect(() => clearApiToken()).not.toThrow();
-		expect(hasApiToken()).toBe(false);
+		await ignoreRecommendation(7, { reason: null });
+		expect(lastCall().options.headers['X-CSRF-Token']).toBe('csrf-me');
+		await unignoreRecommendation(7);
+		expect(lastCall().options.headers['X-CSRF-Token']).toBe('csrf-me');
 	});
 
-	it('clears a rejected key and asks for authentication on 401', async () => {
-		const listener = vi.fn();
-		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
-		globalThis.fetch = vi.fn(() => Promise.resolve(errorResponse(401, { detail: 'Invalid API key' })));
-		setApiToken('gk-rotated');
+	it('refreshes a stale CSRF token once and retries the mutation', async () => {
+		const responses = [
+			errorResponse(403, { detail: { code: 'CSRF_REJECTED', message: 'rejected' } }),
+			okResponse({ kind: 'user', csrf_token: 'csrf-new' }),
+			okResponse({ run_id: 1, status: 'queued' })
+		];
+		globalThis.fetch = vi.fn(() => Promise.resolve(responses.shift()));
+		api.setCsrfToken('csrf-old');
 
-		await expect(getHealth()).rejects.toMatchObject({ status: 401 });
+		await expect(requestOptimizationRun()).resolves.toEqual({ run_id: 1, status: 'queued' });
 
-		expect(listener).toHaveBeenCalledTimes(1);
-		expect(hasApiToken()).toBe(false);
-		expect(window.sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBeNull();
-		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
+		expect(fetch).toHaveBeenCalledTimes(3);
+		expect(new URL(fetch.mock.calls[1][0]).pathname).toBe('/api/v1/auth/me');
+		expect(lastCall().options.headers['X-CSRF-Token']).toBe('csrf-new');
 	});
 
-	it('does not forget a newer key when a request sent with an older key is rejected', async () => {
-		let reject;
-		globalThis.fetch = vi.fn(
-			() =>
-				new Promise((resolve) => {
-					reject = () => resolve(errorResponse(401));
-				})
+	it('gives up after one CSRF retry', async () => {
+		globalThis.fetch = vi.fn((url) =>
+			Promise.resolve(
+				new URL(url).pathname === '/api/v1/auth/me'
+					? okResponse({ csrf_token: 'csrf-new' })
+					: errorResponse(403, { detail: { code: 'CSRF_REJECTED', message: 'rejected' } })
+			)
 		);
-		setApiToken('gk-old');
-		const pending = getHealth();
-		setApiToken('gk-new');
-		reject();
 
-		await expect(pending).rejects.toMatchObject({ status: 401 });
-		expect(window.sessionStorage.getItem(API_TOKEN_STORAGE_KEY)).toBe('gk-new');
+		await expect(requestOptimizationRun()).rejects.toMatchObject({ status: 403, code: 'CSRF_REJECTED' });
+		expect(fetch).toHaveBeenCalledTimes(3);
 	});
 
-	it.each([
-		['no key', null],
-		['an older key', 'gk-old']
-	])('does not reopen the sign-in dialog for a stale 401 sent with %s', async (_label, oldKey) => {
+	it('asks for a password change when the API requires one', async () => {
 		const listener = vi.fn();
-		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
-		let reject;
-		globalThis.fetch = vi.fn(
-			() =>
-				new Promise((resolve) => {
-					reject = () => resolve(errorResponse(401));
-				})
+		window.addEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, listener);
+		globalThis.fetch = vi.fn(() =>
+			Promise.resolve(errorResponse(403, { detail: { code: 'PASSWORD_CHANGE_REQUIRED', message: 'change it' } }))
 		);
-		if (oldKey) setApiToken(oldKey);
-		else clearApiToken();
-		const pending = getHealth();
-		setApiToken('gk-new');
-		reject();
 
-		await expect(pending).rejects.toMatchObject({ status: 401 });
-		expect(listener).not.toHaveBeenCalled();
-		expect(hasApiToken()).toBe(true);
-		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
+		await expect(getHealth()).rejects.toMatchObject({ status: 403 });
+		expect(listener).toHaveBeenCalledTimes(1);
+		window.removeEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, listener);
 	});
 
-	it('asks for authentication when a request without any key is rejected', async () => {
-		const listener = vi.fn();
-		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
-		globalThis.fetch = vi.fn(() => Promise.resolve(errorResponse(401)));
-		clearApiToken();
+	it('signs out server-side and forgets the CSRF token', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ csrf_token: 'csrf-1' })));
+		await getMe();
+		globalThis.fetch = vi.fn(() =>
+			Promise.resolve({ ok: true, status: 204, json: () => Promise.reject(new Error('empty')) })
+		);
 
-		await expect(getHealth()).rejects.toMatchObject({ status: 401 });
+		await logout();
+		expect(lastCall().url.pathname).toBe('/api/v1/auth/logout');
+		expect(lastCall().options.method).toBe('POST');
+		expect(lastCall().options.headers['X-CSRF-Token']).toBe('csrf-1');
 
-		expect(listener).toHaveBeenCalledTimes(1);
-		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({})));
+		await ignoreRecommendation(1, {});
+		expect(lastCall().options.headers['X-CSRF-Token']).toBeUndefined();
+	});
+
+	it('maps account and API-key helpers to the auth endpoints', async () => {
+		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({ csrf_token: 'csrf-2' })));
+
+		await changePassword({ currentPassword: 'old-password-1', newPassword: 'new-password-12' });
+		expect(lastCall().url.pathname).toBe('/api/v1/auth/password');
+		expect(JSON.parse(lastCall().options.body)).toEqual({
+			current_password: 'old-password-1',
+			new_password: 'new-password-12'
+		});
+
+		await revokeSession('abc/1');
+		expect(lastCall().url.pathname).toBe('/api/v1/auth/sessions/abc%2F1');
+		expect(lastCall().options.method).toBe('DELETE');
+		expect(lastCall().options.headers['X-CSRF-Token']).toBe('csrf-2');
+
+		await createApiKey({ name: 'prom', scopes: ['metrics:read'], expiresInDays: '30' });
+		expect(lastCall().url.pathname).toBe('/api/v1/auth/api-keys');
+		expect(JSON.parse(lastCall().options.body)).toEqual({ name: 'prom', scopes: ['metrics:read'], expires_in_days: 30 });
+
+		await revokeApiKey('abcd1234');
+		expect(lastCall().url.pathname).toBe('/api/v1/auth/api-keys/abcd1234');
+	});
+
+	it('no longer exposes the per-tab API key flow (F13 replaced) or runtime config writes (A13)', () => {
+		expect(api.setApiToken).toBeUndefined();
+		expect(api.API_TOKEN_STORAGE_KEY).toBeUndefined();
+		expect(api.updateServiceConfig).toBeUndefined();
 	});
 });
 
 describe('mutation helpers route through request() (K9, BUG-25)', () => {
 	const mutations = [
-		['updateServiceConfig', () => updateServiceConfig({ prometheus_url: 'http://prom:9090' })],
 		['applyRecommendation', () => applyRecommendation(7, {})],
 		['ignoreRecommendation', () => ignoreRecommendation(7, { reason: null })],
 		['unignoreRecommendation', () => unignoreRecommendation(7)],
@@ -205,29 +199,26 @@ describe('mutation helpers route through request() (K9, BUG-25)', () => {
 		['downloadReport', () => downloadReport({ format: 'csv' })]
 	];
 
-	it.each(mutations)('%s opens the authentication dialog on 401', async (_name, call) => {
+	it.each(mutations)('%s opens the sign-in view on 401', async (_name, call) => {
 		const listener = vi.fn();
 		window.addEventListener(AUTH_REQUIRED_EVENT, listener);
 		globalThis.fetch = vi.fn(() => Promise.resolve(errorResponse(401, { detail: 'Unauthorized' })));
-		setApiToken('gk-secret');
 
 		await expect(call()).rejects.toMatchObject({ name: 'ApiError', status: 401 });
 
 		expect(listener).toHaveBeenCalledTimes(1);
-		expect(hasApiToken()).toBe(false);
 		window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
 	});
 
-	it.each(mutations)('%s sends the bearer key and same-origin credentials', async (_name, call) => {
+	it.each(mutations)('%s sends same-origin credentials', async (_name, call) => {
 		URL.createObjectURL = vi.fn(() => 'blob:report');
 		URL.revokeObjectURL = vi.fn();
 		globalThis.fetch = vi.fn(() => Promise.resolve(okResponse({})));
-		setApiToken('gk-secret');
 
 		await call();
 
-		expect(lastCall().options.headers.Authorization).toBe('Bearer gk-secret');
-		expect(lastCall().options.credentials).toBe('include');
+		expect(lastCall().options.credentials).toBe('same-origin');
+		expect(lastCall().options.headers.Authorization).toBeUndefined();
 	});
 
 	it('keeps the JSON bodies and methods of the recommendation mutations', async () => {

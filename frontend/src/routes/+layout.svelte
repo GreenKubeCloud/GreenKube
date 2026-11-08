@@ -1,32 +1,33 @@
 <script>
 	import '../app.css';
 	import { page } from '$app/stores';
-	import { sidebarCollapsed, servicesHealth, healthPopupDismissed } from '$lib/stores.js';
+	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope } from '$lib/stores.js';
 	import {
 		ApiError,
 		AUTH_REQUIRED_EVENT,
-		clearApiToken,
+		PASSWORD_CHANGE_REQUIRED_EVENT,
 		getHealth,
+		getMe,
 		getServicesHealth,
-		hasApiToken,
-		restoreApiToken,
-		setApiToken
+		logout
 	} from '$lib/api.js';
 	import { onMount } from 'svelte';
-	import HealthBadge from '$lib/components/HealthBadge.svelte';
 	import HealthPopup from '$lib/components/HealthPopup.svelte';
+	import LoginForm from '$lib/components/LoginForm.svelte';
+	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
 
 	let health = null;
 	let healthError = false;
 	let showHealthPopup = false;
-	let showAuthDialog = false;
-	let authToken = '';
+	/** loading | signed-out | password-change | ready | error */
+	let authState = 'loading';
 	let authError = '';
-	let authenticating = false;
-	let signedIn = false;
-	// Bumped after a successful sign-in so the current page remounts and
-	// reloads the data its first, unauthenticated requests could not read.
+	let initialSecretErased = false;
+	let insecureRemote = false;
+	// Bumped after a sign-in so the current page remounts and reloads its data.
 	let authEpoch = 0;
+
+	const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard' },
@@ -37,7 +38,6 @@
 		{ href: '/settings', label: 'Settings' }
 	];
 
-	/** @returns {Promise<'ok'|'unauthorized'|'error'>} */
 	async function refreshServicesHealth() {
 		try {
 			const result = await getServicesHealth();
@@ -50,78 +50,90 @@
 			if (hasIssues && !$healthPopupDismissed) {
 				showHealthPopup = true;
 			}
-			return 'ok';
-		} catch (error) {
-			if (error instanceof ApiError && error.status === 401) {
-				showAuthDialog = true;
-				return 'unauthorized';
-			}
-			return 'error';
+		} catch {
+			// The sidebar indicators stay empty; a 401 already switched to the sign-in view.
 		}
 	}
 
-	async function authenticate() {
-		const token = authToken.trim();
-		if (!token) {
-			authError = 'Enter an API key.';
+	function enter(principal) {
+		currentUser.set(principal);
+		authError = '';
+		if (principal?.must_change_password) {
+			authState = 'password-change';
 			return;
 		}
-		authenticating = true;
-		authError = '';
-		setApiToken(token);
-		// Only a 401 proves the key wrong; another failure (e.g. a degraded
-		// health endpoint) keeps the key so the user is not locked out.
-		if ((await refreshServicesHealth()) !== 'unauthorized') {
-			showAuthDialog = false;
-			authToken = '';
-			signedIn = hasApiToken();
-			authEpoch += 1;
-		} else {
-			clearApiToken();
-			signedIn = false;
-			authError = 'The API key was rejected.';
+		authState = 'ready';
+		authEpoch += 1;
+		refreshServicesHealth();
+	}
+
+	async function loadPrincipal() {
+		authState = 'loading';
+		try {
+			enter(await getMe());
+		} catch (error) {
+			currentUser.set(null);
+			if (error instanceof ApiError && error.status === 401) {
+				authState = 'signed-out';
+			} else {
+				authState = 'error';
+				authError = error?.message || 'GreenKube is not reachable.';
+			}
 		}
-		authenticating = false;
+	}
+
+	function handleSignedIn(event) {
+		enter(event.detail);
+	}
+
+	function handlePasswordChanged(event) {
+		initialSecretErased = Boolean(event.detail?.initial_admin_secret_erased);
+		enter(event.detail);
 	}
 
 	function handleAuthRequired() {
-		// api.js already forgot the rejected key.
-		signedIn = hasApiToken();
-		showAuthDialog = true;
-		authError = '';
+		currentUser.set(null);
+		showHealthPopup = false;
+		authState = 'signed-out';
 	}
 
-	function signOut() {
-		clearApiToken();
-		signedIn = false;
-		authToken = '';
-		authError = '';
-		showAuthDialog = true;
+	function handlePasswordChangeRequired() {
+		authState = 'password-change';
+	}
+
+	async function signOut() {
+		try {
+			await logout();
+		} catch {
+			// The server session may already be gone; forget it locally anyway.
+		}
+		currentUser.set(null);
+		showHealthPopup = false;
+		authState = 'signed-out';
 	}
 
 	onMount(() => {
-		restoreApiToken();
-		signedIn = hasApiToken();
+		insecureRemote = window.location.protocol === 'http:' && !LOCAL_HOSTS.has(window.location.hostname);
 		window.addEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+		window.addEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, handlePasswordChangeRequired);
 		(async () => {
 			try {
 				health = await getHealth();
 			} catch {
 				healthError = true;
 			}
-			await refreshServicesHealth();
 		})();
+		loadPrincipal();
 
-		return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+		return () => {
+			window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+			window.removeEventListener(PASSWORD_CHANGE_REQUIRED_EVENT, handlePasswordChangeRequired);
+		};
 	});
 
 	function handlePopupDismiss() {
 		showHealthPopup = false;
 		healthPopupDismissed.set(true);
-	}
-
-	function handlePopupUpdated(event) {
-		servicesHealth.set(event.detail);
 	}
 
 	function isActive(href, pathname) {
@@ -149,71 +161,62 @@
 	};
 </script>
 
-{#if showAuthDialog}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70" role="presentation">
-		<div
-			class="w-full max-w-md rounded-2xl border border-dark-700/50 bg-dark-900 p-6 shadow-2xl"
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby="api-auth-title"
-		>
-			<h2 id="api-auth-title" class="text-lg font-bold text-dark-100">API authentication required</h2>
-			<p class="mt-2 text-sm text-dark-400">
-				This GreenKube instance requires an API key. It is kept for this browser tab only and
-				forgotten when the tab closes; your password manager can save it.
-			</p>
-			<form
-				class="mt-5 space-y-4"
-				method="post"
-				action="/"
-				aria-label="Sign in with an API key"
-				on:submit|preventDefault={authenticate}
-			>
-				<div class="space-y-1">
-					<label for="api-username" class="block text-sm font-medium text-dark-300">Account</label>
-					<input
-						id="api-username"
-						name="username"
-						type="text"
-						value="api-key"
-						readonly
-						autocomplete="username"
-						class="w-full rounded-lg border border-dark-700 bg-dark-800/60 px-3 py-2 text-dark-400 outline-hidden"
-					/>
-				</div>
-				<div class="space-y-1">
-					<label for="api-token" class="block text-sm font-medium text-dark-300">API key</label>
-					<input
-						id="api-token"
-						name="password"
-						type="password"
-						bind:value={authToken}
-						autocomplete="current-password"
-						class="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-dark-100 outline-hidden focus:border-green-500"
-						placeholder="Paste the GreenKube API key"
-					/>
-				</div>
-				{#if authError}
-					<p class="text-sm text-red-400" role="alert">{authError}</p>
-				{/if}
-				<button
-					type="submit"
-					disabled={authenticating}
-					class="w-full rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-green-500 disabled:cursor-wait disabled:opacity-60"
-				>
-					{authenticating ? 'Connecting…' : 'Connect'}
-				</button>
-			</form>
-		</div>
+{#if authState === 'loading'}
+	<div class="flex h-screen items-center justify-center bg-dark-950 text-sm text-dark-500" role="status">
+		Loading…
 	</div>
-{/if}
-
+{:else if authState === 'signed-out' || authState === 'password-change' || authState === 'error'}
+	<div class="flex min-h-screen flex-col bg-dark-950">
+		{#if insecureRemote}
+			<div
+				class="border-b border-yellow-700/50 bg-yellow-900/40 px-4 py-2 text-center text-xs text-yellow-200"
+				role="status"
+				data-testid="tls-warning"
+			>
+				This connection is not encrypted (plain HTTP). Your password and session can be read on the
+				network: serve GreenKube over HTTPS (Ingress with TLS) for remote access.
+			</div>
+		{/if}
+		<main class="flex flex-1 items-center justify-center p-4">
+			<div class="w-full max-w-md rounded-2xl border border-dark-700/50 bg-dark-900 p-6 shadow-2xl">
+				<div class="mb-5 flex items-center gap-3">
+					<img src="/greenkube-logo.png" alt="" class="h-8 w-8 rounded-lg" />
+					<h1 class="text-lg font-bold text-dark-100">
+						{authState === 'password-change' ? 'Choose a new password' : 'Sign in to GreenKube'}
+					</h1>
+				</div>
+				{#if authState === 'signed-out'}
+					<LoginForm on:signedin={handleSignedIn} />
+					<p class="mt-4 text-xs text-dark-500">
+						First sign-in? Use the initial admin password printed by <code>helm install</code>.
+						Scripts and Prometheus use API keys instead.
+					</p>
+				{:else if authState === 'password-change'}
+					<p class="mb-4 text-sm text-dark-400">
+						You signed in with the initial password. Choose your own password to continue; the
+						initial password then stops working and is erased from its Kubernetes Secret.
+					</p>
+					<PasswordChangeForm
+						username={$currentUser?.name || ''}
+						submitLabel="Save and continue"
+						on:changed={handlePasswordChanged}
+					/>
+					<button type="button" class="mt-3 text-xs text-dark-500 hover:text-dark-300" on:click={signOut}>
+						Sign out
+					</button>
+				{:else}
+					<p class="text-sm text-red-400" role="alert">{authError}</p>
+					<button type="button" class="btn-secondary mt-4 text-sm" on:click={loadPrincipal}>Retry</button>
+				{/if}
+			</div>
+		</main>
+	</div>
+{:else}
 <!-- Health Popup (shown once on first load if issues detected) -->
 <HealthPopup
 	services={$servicesHealth?.services}
 	visible={showHealthPopup}
 	on:dismiss={handlePopupDismiss}
-	on:updated={handlePopupUpdated}
 />
 
 <div class="flex h-screen overflow-hidden">
@@ -278,21 +281,53 @@
 				{/if}
 			</div>
 
-			{#if signedIn}
-				<button
-					type="button"
-					on:click={signOut}
-					class="w-full flex items-center justify-center gap-2 mt-1 py-1.5 rounded-lg text-xs
-					       text-dark-500 hover:text-dark-200 hover:bg-dark-800 transition-colors"
-					aria-label="Sign out"
-					title="Forget the API key for this tab"
-				>
-					<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-							  d="M15 12H3m0 0l4-4m-4 4l4 4m6-10h5a2 2 0 012 2v12a2 2 0 01-2 2h-5" />
-					</svg>
-					{#if !$sidebarCollapsed}<span>Sign out</span>{/if}
-				</button>
+			{#if $currentUser}
+				<div class="mt-1 border-t border-dark-700/50 pt-2" data-testid="account-menu">
+					{#if $currentUser.kind === 'anonymous'}
+						{#if !$sidebarCollapsed}
+							<p class="px-2 text-[10px] text-yellow-500" title="No account exists yet and no API key is configured.">
+								Sign-in disabled (development)
+							</p>
+						{/if}
+					{:else}
+						{#if !$sidebarCollapsed}
+							<p class="truncate px-2 text-xs text-dark-300" title={$currentUser.actor}>
+								{$currentUser.name}
+								{#if $currentUser.role}<span class="text-dark-500">· {$currentUser.role}</span>{/if}
+							</p>
+						{/if}
+						{#if $currentUser.kind === 'user'}
+							<a
+								href="/settings/account"
+								class="block rounded-lg px-2 py-1 text-xs text-dark-500 hover:bg-dark-800 hover:text-dark-200"
+							>
+								{$sidebarCollapsed ? 'Acct' : 'Account & sessions'}
+							</a>
+						{/if}
+						{#if hasScope($currentUser, 'admin')}
+							<a
+								href="/settings/api-keys"
+								class="block rounded-lg px-2 py-1 text-xs text-dark-500 hover:bg-dark-800 hover:text-dark-200"
+							>
+								{$sidebarCollapsed ? 'Keys' : 'API keys'}
+							</a>
+						{/if}
+						{#if $currentUser.kind === 'user'}
+							<button
+								type="button"
+								on:click={signOut}
+								class="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-xs text-dark-500 transition-colors hover:bg-dark-800 hover:text-dark-200"
+								aria-label="Sign out"
+							>
+								<svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+										  d="M15 12H3m0 0l4-4m-4 4l4 4m6-10h5a2 2 0 012 2v12a2 2 0 01-2 2h-5" />
+								</svg>
+								{#if !$sidebarCollapsed}<span>Sign out</span>{/if}
+							</button>
+						{/if}
+					{/if}
+				</div>
 			{/if}
 
 			<!-- Collapse toggle -->
@@ -313,8 +348,24 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 overflow-y-auto">
+		{#if insecureRemote}
+			<div
+				class="border-b border-yellow-700/50 bg-yellow-900/40 px-4 py-2 text-center text-xs text-yellow-200"
+				role="status"
+				data-testid="tls-warning"
+			>
+				This connection is not encrypted (plain HTTP). Your password and session can be read on the
+				network: serve GreenKube over HTTPS (Ingress with TLS) for remote access.
+			</div>
+		{/if}
+		{#if initialSecretErased}
+			<div class="border-b border-green-700/40 bg-green-900/30 px-4 py-2 text-center text-xs text-green-300" role="status">
+				Password changed. The initial admin password was erased from its Kubernetes Secret.
+			</div>
+		{/if}
 		{#key authEpoch}
 			<slot />
 		{/key}
 	</main>
 </div>
+{/if}

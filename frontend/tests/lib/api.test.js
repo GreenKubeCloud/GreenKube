@@ -8,7 +8,6 @@ import {
 	getHealth,
 	getServicesHealth,
 	getServiceHealth,
-	updateServiceConfig,
 	getVersion,
 	getConfig,
 	getNamespaces,
@@ -34,8 +33,8 @@ import {
 	refreshGitOpsDiscovery,
 	getGitOpsCoverage,
 	getGitOpsBindings,
-	setApiToken,
-	clearApiToken
+	clearCsrfToken,
+	setCsrfToken
 } from '$lib/api.js';
 
 
@@ -68,7 +67,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	clearApiToken();
+	clearCsrfToken();
 	vi.restoreAllMocks();
 });
 
@@ -77,13 +76,14 @@ afterEach(() => {
 // getHealth
 // ---------------------------------------------------------------------------
 describe('getHealth', () => {
-	it('uses same-origin credentials and an in-memory bearer token when configured', async () => {
+	it('uses same-origin credentials and never sends a bearer token', async () => {
 		globalThis.fetch = mockFetchOk({ status: 'ok' });
-		setApiToken('short-lived-token');
+		setCsrfToken('csrf-token');
 		await getHealth();
 		const [, options] = fetch.mock.calls[0];
-		expect(options.credentials).toBe('include');
-		expect(options.headers.Authorization).toBe('Bearer short-lived-token');
+		expect(options.credentials).toBe('same-origin');
+		expect(options.headers.Authorization).toBeUndefined();
+		expect(options.headers['X-CSRF-Token']).toBeUndefined();
 	});
 
 	it('returns health data on success', async () => {
@@ -103,7 +103,7 @@ describe('getHealth', () => {
 				blob: () => Promise.resolve(new Blob(['csv']))
 			}));
 			await downloadReport({ namespace: 'prod', last: '24h', format: 'csv' });
-			expect(fetch.mock.calls[0][1].credentials).toBe('include');
+			expect(fetch.mock.calls[0][1].credentials).toBe('same-origin');
 			expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:report');
 		});
 	});
@@ -246,7 +246,7 @@ describe('GitOps operations API', () => {
 		expect(url.pathname).toBe('/api/v1/gitops/refresh');
 		expect(url.searchParams.get('cluster')).toBe('minikube');
 		expect(options.method).toBe('POST');
-		expect(options.credentials).toBe('include');
+		expect(options.credentials).toBe('same-origin');
 	});
 
 	it('reads persisted workload coverage from the GitOps coverage endpoint', async () => {
@@ -312,54 +312,6 @@ describe('getServiceHealth', () => {
 
 		const url = fetch.mock.calls[0][0];
 		expect(url).toContain('/health/services/prometheus');
-	});
-});
-
-
-// ---------------------------------------------------------------------------
-// updateServiceConfig
-// ---------------------------------------------------------------------------
-describe('updateServiceConfig', () => {
-	it('sends POST with JSON body', async () => {
-		globalThis.fetch = vi.fn(() =>
-			Promise.resolve({
-				ok: true,
-				json: () => Promise.resolve({ updated: true })
-			})
-		);
-
-		const config = { prometheus_url: 'http://prom:9090' };
-		const result = await updateServiceConfig(config);
-		expect(result).toEqual({ updated: true });
-
-		const [url, opts] = fetch.mock.calls[0];
-		expect(url).toContain('/config/services');
-		expect(opts.method).toBe('POST');
-		expect(opts.headers['Content-Type']).toBe('application/json');
-		expect(JSON.parse(opts.body)).toEqual(config);
-	});
-
-	it('throws on error response', async () => {
-		globalThis.fetch = vi.fn(() =>
-			Promise.resolve({
-				ok: false,
-				status: 400,
-				json: () => Promise.resolve({ detail: 'Invalid config' })
-			})
-		);
-		await expect(updateServiceConfig({})).rejects.toThrow('Invalid config');
-	});
-
-	it('exposes the configuration acknowledgement without changing the response shape', async () => {
-		globalThis.fetch = vi.fn(() => Promise.resolve({
-			ok: true,
-			headers: { get: (name) => name === 'X-Configuration-Version' ? '12' : 'true' },
-			json: () => Promise.resolve({ services: {} })
-		}));
-		const result = await updateServiceConfig({ prometheus_url: 'http://prom:9090' });
-		expect(result.services).toEqual({});
-		expect(result.configurationAcknowledgement).toEqual({ version: '12', persisted: true });
-		expect(Object.keys(result)).not.toContain('configurationAcknowledgement');
 	});
 });
 
@@ -655,13 +607,11 @@ describe('request error handling', () => {
 		});
 	});
 
-	it('keeps authentication request-scoped and never stores it in browser storage', async () => {
-		setApiToken('ephemeral-token');
+	it('relies on the session cookie and never sends a stored credential', async () => {
 		globalThis.fetch = mockFetchOk({});
 		await getHealth();
-		expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer ephemeral-token');
-		expect(fetch.mock.calls[0][1].credentials).toBe('include');
-		clearApiToken();
+		expect(fetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
+		expect(fetch.mock.calls[0][1].credentials).toBe('same-origin');
 	});
 });
 
