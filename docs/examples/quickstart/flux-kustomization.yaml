@@ -1,0 +1,33 @@
+# Flux source and Kustomization for the quickstart sample app (Kustomize under flux/).
+# hack/e2e/setup-gitops.sh applies this file after replacing the repository URL
+# when GITEA_* overrides are set.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: greenkube-e2e-quickstart
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/part-of: greenkube-quickstart
+spec:
+  interval: 30s
+  url: http://gitea-http.gitea.svc.cluster.local:3000/greenkube/greenkube-e2e-quickstart.git
+  ref:
+    branch: main
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: greenkube-e2e-quickstart
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/part-of: greenkube-quickstart
+spec:
+  interval: 1m
+  path: ./flux/oversized-worker
+  prune: true
+  wait: true
+  timeout: 2m
+  sourceRef:
+    kind: GitRepository
+    name: greenkube-e2e-quickstart
+  targetNamespace: greenkube-e2e-apps
