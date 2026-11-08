@@ -367,6 +367,25 @@ def test_totals_never_mix_currencies():
     assert "other currencies: USD" in body
 
 
+def test_mixed_currency_projections_are_left_out_of_cost_totals_and_the_title():
+    mixed = fx.impact(cost=500.0, co2e_g=6_000.0, currency="mixed")
+    records = [
+        fx.recommendation(41, cost=100.0),
+        fx.recommendation(42, cost=500.0, co2e_g=6_000.0, impact=mixed),
+    ]
+    context = _context(fx.rightsize_plan(), records)
+    body = render_body(context, SETTINGS)
+    assert "MIXED" not in body
+    assert "| Cost (USD) | $8.33 | $100.00 |" in body
+    assert "The cost of 1 recommendation priced in several currencies is not totalled" in body
+    title = render_title(context, PullRequestRenderSettings(max_title_chars=200))
+    assert "MIXED" not in title and "−$100/yr" in title
+    only_mixed = render_title(
+        _context(fx.rightsize_plan(), records[1:]), PullRequestRenderSettings(max_title_chars=200)
+    )
+    assert "$" not in only_mixed and "kgCO₂e" in only_mixed
+
+
 def test_unit_formatting():
     assert [cpu(value) for value in (200, 1000, 1500, 12_000, 12_345)] == ["200m", "1000m", "1500m", "12", "12345m"]
     assert [memory(value) for value in (512 * fx.MIB, fx.GIB, int(1.5 * fx.GIB), 1000)] == [

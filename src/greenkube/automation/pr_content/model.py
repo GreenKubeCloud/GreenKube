@@ -165,6 +165,9 @@ class SavingsTotals:
     realization_factors: tuple[float, ...] = ()
     allocated_cost_annual: float | None = None
     currencies: tuple[str, ...] = field(default_factory=tuple)
+    #: Recommendations whose projection spans several currencies (``currency: mixed``):
+    #: their cost cannot be expressed in one currency and is left out of the totals.
+    mixed_currency_records: int = 0
 
 
 def resource_changes(context: PullRequestContext) -> list[ResourceChange]:
@@ -230,16 +233,21 @@ def savings_totals(recommendations: Sequence[RecommendationRecord]) -> SavingsTo
     factors: list[float] = []
     allocated = 0.0
     has_allocated = False
+    mixed = 0
     for record in recommendations:
         impact = record.impact if isinstance(record.impact, dict) else {}
         currency = str(impact.get("currency") or "USD").upper()
-        cost = _finite(impact.get("expected_billable_cost_annual"))
-        if cost is None:
-            cost = _finite(record.potential_savings_cost)
-        if cost is not None:
-            by_currency.setdefault(currency, []).append(cost)
-            has_cost = True
-        allocated_cost = _finite(impact.get("allocated_cost_annual"))
+        if currency == "MIXED":
+            # The Impact Model summed prices of several currencies: no single-currency figure exists.
+            mixed += 1
+        else:
+            cost = _finite(impact.get("expected_billable_cost_annual"))
+            if cost is None:
+                cost = _finite(record.potential_savings_cost)
+            if cost is not None:
+                by_currency.setdefault(currency, []).append(cost)
+                has_cost = True
+        allocated_cost = _finite(impact.get("allocated_cost_annual")) if currency != "MIXED" else None
         if allocated_cost is not None:
             allocated += allocated_cost
             has_allocated = True
@@ -263,6 +271,7 @@ def savings_totals(recommendations: Sequence[RecommendationRecord]) -> SavingsTo
         realization_factors=tuple(factors),
         allocated_cost_annual=allocated if has_allocated and len(currencies) <= 1 else None,
         currencies=currencies,
+        mixed_currency_records=mixed,
     )
 
 

@@ -378,6 +378,12 @@ def _totals_table(context: PullRequestContext) -> list[str]:
         notes.append(
             f"Only {totals.currency} amounts are totalled; other currencies: {', '.join(totals.currencies[1:])}."
         )
+    if totals.mixed_currency_records:
+        count = totals.mixed_currency_records
+        notes.append(
+            f"The cost of {count} recommendation{'s' if count > 1 else ''} priced in several currencies is not "
+            "totalled; see the change page for its breakdown."
+        )
     return [*lines, "", *(f"_{note}_" for note in notes)]
 
 
