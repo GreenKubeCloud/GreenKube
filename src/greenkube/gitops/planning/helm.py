@@ -37,6 +37,7 @@ from greenkube.gitops.contracts import (
     canonical_repository_identity,
 )
 from greenkube.gitops.discovery.common import flux_release_name, text
+from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.kustomize import (
     KustomizePlanError,
     _canonical_repo_path,
@@ -1301,11 +1302,11 @@ def _file_plan(
         warnings=warnings,
     )
     plan_id = _plan_identifier(action, source, base_revision)
-    digest = _plan_digest(
+    digest = plan_digest(
         plan_id=plan_id,
         action=action,
         source=source,
-        edits=edits,
+        files=edits,
         diff=diff,
         rendered_diff=rendered_diff,
         base_revision=base_revision,
@@ -1313,6 +1314,7 @@ def _file_plan(
         validation=validation,
         warnings=warnings,
         renderer=renderer,
+        error_type=HelmPlanError,
     )
     return FilePlan(
         plan_id=plan_id,
@@ -1326,53 +1328,6 @@ def _file_plan(
         warnings=warnings,
         digest=digest,
     )
-
-
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    edits: Sequence[FileEdit],
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-    renderer: RendererKind,
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [edit.model_dump(mode="json") for edit in edits],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": renderer.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise HelmPlanError("plan inputs must be deterministically JSON-serializable") from exc
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) -> Mapping[str, Any]:

@@ -29,6 +29,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.raw_manifest import (
     _POD_SPEC_PATHS,
     _WORKLOAD_API_VERSIONS,
@@ -230,17 +231,19 @@ class KustomizePlanner:
             warnings=warnings,
         )
         source_revision = source.source_revision or source.revision
-        digest = _plan_digest(
+        digest = plan_digest(
             plan_id=plan_id,
             action=action,
             source=source,
-            edits=edits,
+            files=sorted(edits, key=lambda item: item.path),
             diff=diff,
             rendered_diff=rendered_diff,
             base_revision=base_revision,
             source_revision=source_revision,
             validation=validation,
             warnings=warnings,
+            renderer=RendererKind.KUSTOMIZE,
+            error_type=KustomizePlanError,
         )
         return FilePlan(
             plan_id=plan_id,
@@ -1204,55 +1207,3 @@ def _file_diff(edits: Sequence[FileEdit], originals: Mapping[str, str]) -> str:
         fromfile = "/dev/null" if edit.operation == "create" else f"a/{edit.path}"
         chunks.append(_unified_diff(old_content, new_content, fromfile, f"b/{edit.path}"))
     return "".join(chunks)
-
-
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    edits: Sequence[FileEdit],
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [edit.model_dump(mode="json") for edit in sorted(edits, key=lambda item: item.path)],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": RendererKind.KUSTOMIZE.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise KustomizePlanError("plan inputs must be deterministically JSON-serializable") from exc
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
