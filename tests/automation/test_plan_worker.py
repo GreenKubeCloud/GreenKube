@@ -406,7 +406,6 @@ class FakeGitProvider:
         self.pull_request_option_ensures: list[PullRequestOptions | None] = []
         self.pull_request_fail_mode: str | None = None
         self.next_pr_number = 17
-        self.updated_files = 0
         self.plan_repository: FakePlanRepository | None = None
         self.plan_id: str | None = None
         self.mutation_baselines: list[PreApplyWorkloadBaseline | None] = []
@@ -474,10 +473,6 @@ class FakeGitProvider:
             if from_ref != "main":
                 raise GitConflictError("unexpected branch base")
             self.branches[branch] = dict(self.base_tree)
-
-    async def update_file(self, *args: Any, **kwargs: Any) -> None:
-        self.updated_files += 1
-        raise AssertionError("the plan worker must use one atomic commit, not update_file")
 
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         self.commit_requests.append(request)
@@ -623,17 +618,6 @@ class FakeAuthorizedAdapter(GitProvider):
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         return None
 
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: str | None = None,
-    ) -> None:
-        return None
-
     async def create_pull_request(
         self,
         repo: GitRepository,
@@ -725,7 +709,6 @@ async def test_commits_all_file_plan_edits_atomically_and_records_one_pr_per_act
         (MANIFEST_PATH, "update", UPDATED_CONTENT),
         (NEW_PATH, "create", NEW_CONTENT),
     ]
-    assert provider.updated_files == 0
     assert provider.pull_request_creations == [(branch, "main")]
     assert len(provider.pull_requests) == 1
     assert {record.recommendation_id for record in pull_requests.records} == {41, 42}
@@ -1423,7 +1406,6 @@ async def test_existing_worker_entry_point_can_process_injected_plan_worker():
 
     assert await automation_worker.process_once(
         "worker-1",
-        queue="plans",
         plan_worker=cast(PlanWorker, plan_worker),
     )
     assert plan_worker.worker_ids == ["worker-1"]

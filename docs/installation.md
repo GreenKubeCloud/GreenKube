@@ -469,7 +469,7 @@ still takes precedence.
 kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
 ```
 
-Open <http://localhost:8000>. The API and UI share the origin, so no CORS or frontend build configuration is required. The login dialog appears on the first protected request. Paste the key from `greenkube-secrets`.
+Open <http://localhost:8000>. The API and UI share the origin, so no CORS or frontend build configuration is required. The login dialog appears on the first protected request. Paste the API key from the Secret named after the release (`greenkube` here), or from `secrets.existingSecret` when you set one; the install notes print the exact `kubectl` command.
 
 **Ingress or Gateway API**
 
@@ -542,7 +542,8 @@ The Secret must be in the Helm release namespace. Credential values are never wr
 Verify readiness:
 
 ```bash
-export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube-secrets \
+# The Secret named after the release; use your secrets.existingSecret name if you set one.
+export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube \
   -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d)"
 
 curl -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \

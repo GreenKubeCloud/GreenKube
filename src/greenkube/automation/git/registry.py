@@ -347,20 +347,6 @@ class _AuthorizedGitProvider(GitProvider):
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         await self._call(repo, lambda: self._provider.create_branch(repo, branch, from_ref))
 
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: str | None = None,
-    ) -> None:
-        await self._call(
-            repo,
-            lambda: self._provider.update_file(repo, path, content, message, branch, sha),
-        )
-
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         return await self._call(request.repo, lambda: self._provider.create_commit(request))
 

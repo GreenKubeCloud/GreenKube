@@ -37,6 +37,7 @@ from greenkube.gitops.contracts import (
     canonical_repository_identity,
 )
 from greenkube.gitops.discovery.common import flux_release_name, text
+from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.kustomize import (
     KustomizePlanError,
     _canonical_repo_path,
@@ -68,13 +69,12 @@ from greenkube.gitops.planning.raw_manifest import (
 )
 from greenkube.gitops.renderers.helm import HelmError, HelmRenderer
 from greenkube.gitops.renderers.raw import RawRenderError, RawRenderResult, render_raw
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
 from greenkube.gitops.snapshots.models import RepositorySnapshot as ArchiveSnapshot
 
 DEFAULT_HELM_VERSION = "v3.22.1+gd6c1a0e"
 _MAX_FLUX_VALUES_FILES = 32
 _MAX_FLUX_VALUES_BYTES = 8_388_608
-_FULL_SHA = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SNAPSHOT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HELMRELEASE_KIND = re.compile(r"(?m)^\s*kind\s*:\s*['\"]?HelmRelease(?:['\"])?\s*(?:#.*)?$")
 _HELMRELEASE_JSON_KIND = re.compile(r'"kind"\s*:\s*"HelmRelease"')
 _MANAGED_ANNOTATION = "greenkube.cloud/managed"
@@ -765,7 +765,7 @@ def _validate_common_request(
         raise error_type("source must be a resolved WorkloadSource")
     if not isinstance(snapshot, ArchiveSnapshot):
         raise error_type("snapshot must be an archive RepositorySnapshot")
-    if not isinstance(base_revision, str) or _FULL_SHA.fullmatch(base_revision) is None:
+    if not isinstance(base_revision, str) or GIT_OBJECT_SHA.fullmatch(base_revision) is None:
         raise error_type("resolved base revision must be a full 40- or 64-character commit SHA")
     if base_revision.lower() != snapshot.metadata.commit_sha.lower():
         raise error_type("base revision does not match the archive snapshot commit")
@@ -1234,7 +1234,7 @@ def _render_chart(
         not isinstance(result, RawRenderResult)
         or result.renderer is not RendererKind.HELM_RELEASE
         or not isinstance(result.output_digest, str)
-        or _SNAPSHOT_DIGEST.fullmatch(result.output_digest) is None
+        or SHA256_DIGEST.fullmatch(result.output_digest) is None
     ):
         raise error_type("Helm renderer did not return a validated render result")
     if planner_renderer not in {RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}:
@@ -1302,11 +1302,11 @@ def _file_plan(
         warnings=warnings,
     )
     plan_id = _plan_identifier(action, source, base_revision)
-    digest = _plan_digest(
+    digest = plan_digest(
         plan_id=plan_id,
         action=action,
         source=source,
-        edits=edits,
+        files=edits,
         diff=diff,
         rendered_diff=rendered_diff,
         base_revision=base_revision,
@@ -1314,6 +1314,7 @@ def _file_plan(
         validation=validation,
         warnings=warnings,
         renderer=renderer,
+        error_type=HelmPlanError,
     )
     return FilePlan(
         plan_id=plan_id,
@@ -1327,53 +1328,6 @@ def _file_plan(
         warnings=warnings,
         digest=digest,
     )
-
-
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    edits: Sequence[FileEdit],
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-    renderer: RendererKind,
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [edit.model_dump(mode="json") for edit in edits],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": renderer.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise HelmPlanError("plan inputs must be deterministically JSON-serializable") from exc
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) -> Mapping[str, Any]:
@@ -1549,7 +1503,7 @@ def _flux_chart_context(
         or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
     ):
         raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
-    source_revision = _revision_commit(source.source_revision) if source.source_revision else None
+    source_revision = revision_commit(source.source_revision) if source.source_revision else None
     if source_revision is None or source_revision != base_revision.lower():
         raise FluxHelmReleaseUnsupportedError(
             "Flux GitRepository artifact revision must match the immutable repository snapshot"
@@ -1998,7 +1952,7 @@ def _managed_postrenderer_patches(
             patch_target = _patch_target(patch, error_type)
             expected_selector = _target_selector(patch_target)
             selector_values = dict(selector)
-            if selector_values != expected_selector and selector_values != _legacy_target_selector(patch_target):
+            if selector_values != expected_selector:
                 raise error_type("managed post-renderer target selector does not match its patch identity")
             identity = _target_identity(patch_target)
             if identity in seen:
@@ -2105,19 +2059,6 @@ def _target_selector(target: ResourceTarget) -> dict[str, str]:
         "kind": re.escape(target.kind),
         "name": re.escape(target.name),
         "namespace": re.escape(target.namespace),
-    }
-
-
-def _legacy_target_selector(target: ResourceTarget) -> dict[str, str]:
-    group, separator, version = target.api_version.partition("/")
-    if not separator:
-        group, version = "", group
-    return {
-        "group": group,
-        "version": version,
-        "kind": target.kind,
-        "name": target.name,
-        "namespace": target.namespace,
     }
 
 
@@ -2588,10 +2529,3 @@ def _plain(value: Any) -> Any:
     if isinstance(value, str):
         return str(value)
     return value
-
-
-def _revision_commit(value: str) -> str | None:
-    if _FULL_SHA.fullmatch(value):
-        return value.lower()
-    match = re.search(r"(?:sha1|sha256):([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", value)
-    return match.group(1).lower() if match is not None else None

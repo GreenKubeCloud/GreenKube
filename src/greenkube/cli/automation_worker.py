@@ -77,11 +77,8 @@ class _WebhookOutboxRepository(Protocol):
 async def process_once(
     worker_id: str | None = None,
     *,
-    queue: str = "plans",
     plan_worker: PlanWorker | None = None,
 ) -> bool:
-    if queue != "plans":
-        raise ValueError("queue must be 'plans'; annotation-based operations are no longer supported.")
     if plan_worker is None:
         try:
             plan_worker = (await create_plan_runtime()).worker
@@ -108,13 +105,10 @@ async def run_worker(
     poll_seconds: float = 5.0,
     once: bool = False,
     *,
-    queue: str = "plans",
     plan_worker: PlanWorker | None = None,
     metrics_port: int | None = None,
     heartbeat: Callable[[], None] | None = None,
 ) -> None:
-    if queue != "plans":
-        raise ValueError("queue must be 'plans'; annotation-based operations are no longer supported.")
     if metrics_port is None:
         await _run_worker_loop(poll_seconds=poll_seconds, once=once, plan_worker=plan_worker, heartbeat=heartbeat)
         return
@@ -432,16 +426,11 @@ async def _process_pending_webhook_deliveries(plan_worker: PlanWorker) -> bool:
 def worker(
     once: bool = typer.Option(False, "--once", help="Process at most one plan operation."),
     poll_seconds: float = typer.Option(5.0, min=0.1, help="Delay when the queue is empty."),
-    queue: str = typer.Option("plans", "--queue", help="The supported queue is 'plans'."),
+    queue: str = typer.Option("plans", "--queue", hidden=True, help="Deprecated; 'plans' is the only queue."),
 ):
-    asyncio.run(
-        run_worker(
-            poll_seconds=poll_seconds,
-            once=once,
-            queue=queue,
-            metrics_port=parse_worker_metrics_port(),
-        )
-    )
+    if queue != "plans":
+        raise typer.BadParameter("the only queue is 'plans'.", param_hint="--queue")
+    asyncio.run(run_worker(poll_seconds=poll_seconds, once=once, metrics_port=parse_worker_metrics_port()))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -40,10 +39,12 @@ from greenkube.gitops.contracts import (
     BindingStatus,
     WorkloadSource,
     binding_candidate_generation_token,
+    public_repository_url,
 )
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime
 from greenkube.gitops.discovery.service import DiscoveryCoverage
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.storage.base_gitops_repository import (
     WorkloadBinding,
     WorkloadBindingConflictError,
@@ -52,14 +53,14 @@ from greenkube.storage.base_gitops_repository import (
     freshen_workload_binding,
     freshen_workload_source,
 )
+from greenkube.utils.time import ensure_utc
 
 router = APIRouter(prefix="/gitops")
 
 _MAX_BINDING_LIST_LIMIT = 100
 _MAX_BINDING_LIST_CANDIDATES = 20
 _MAX_BINDING_DETAIL_CANDIDATES = 50
-_REVISION_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|sha1:[0-9a-fA-F]{40}|sha256:[0-9a-fA-F]{64})$")
-_SCP_REPOSITORY_PATTERN = re.compile(r"^[^/@:\s]+@(?P<host>[^:/\s]+):(?P<path>[^?\s#]+)$")
+_REVISION_PATTERN = re.compile(rf"{GIT_OBJECT_SHA.pattern}|sha1:[0-9a-fA-F]{{40}}|sha256:[0-9a-fA-F]{{64}}")
 # Expose only reason codes emitted by the GitOps adapters and reconciler.
 _SAFE_REASON_CODES = frozenset(
     {
@@ -167,7 +168,7 @@ async def get_gitops_status(
     return GitOpsDiscoveryStatusResponse(
         cluster=cluster,
         discovery=_discovery_capabilities_response(availability),
-        last_refresh=_as_utc(summary.last_refresh) if summary.last_refresh is not None else None,
+        last_refresh=ensure_utc(summary.last_refresh) if summary.last_refresh is not None else None,
         coverage=_coverage_response(summary),
     )
 
@@ -376,8 +377,8 @@ def _workload_binding_response(
         candidates_truncated=binding.candidates_truncated or len(candidates) > candidate_limit,
         reason=_public_reason(binding.reason),
         provenance=[_provenance_response(candidate) for candidate in _provenance_sources(binding, visible_candidates)],
-        observed_at=_as_utc(binding.observed_at),
-        expires_at=_as_utc(binding.expires_at) if binding.expires_at is not None else None,
+        observed_at=ensure_utc(binding.observed_at),
+        expires_at=ensure_utc(binding.expires_at) if binding.expires_at is not None else None,
     )
 
 
@@ -390,7 +391,7 @@ def _source_response(source: WorkloadSource, *, now: datetime | None = None) -> 
         controller_name=_bounded_text(source.controller_name, 128),
         controller_namespace=_bounded_text(source.controller_namespace, 128),
         provider_id=_bounded_text(source.provider_id, 128),
-        repo_url=_safe_repository_url(source.repo_url),
+        repo_url=public_repository_url(source.repo_url),
         path=_bounded_text(source.path, 512),
         renderer=source.renderer,
         confidence=source.confidence,
@@ -398,8 +399,8 @@ def _source_response(source: WorkloadSource, *, now: datetime | None = None) -> 
         reason=_public_reason(reason),
         revision=_public_revision(source.revision),
         source_revision=_public_revision(source.source_revision),
-        observed_at=_as_utc(source.observed_at),
-        expires_at=_as_utc(source.expires_at) if source.expires_at is not None else None,
+        observed_at=ensure_utc(source.observed_at),
+        expires_at=ensure_utc(source.expires_at) if source.expires_at is not None else None,
         generation_token=binding_candidate_generation_token(source),
     )
 
@@ -421,12 +422,12 @@ def _provenance_response(source: WorkloadSource) -> GitOpsBindingProvenanceRespo
         controller_name=_bounded_text(source.controller_name, 128),
         controller_namespace=_bounded_text(source.controller_namespace, 128),
         provider_id=_bounded_text(source.provider_id, 128),
-        repo_url=_safe_repository_url(source.repo_url),
+        repo_url=public_repository_url(source.repo_url),
         path=_bounded_text(source.path, 512),
         renderer=source.renderer,
         revision=_public_revision(source.revision),
         source_revision=_public_revision(source.source_revision),
-        observed_at=_as_utc(source.observed_at),
+        observed_at=ensure_utc(source.observed_at),
     )
 
 
@@ -460,28 +461,6 @@ def _source_sort_key(source: WorkloadSource) -> tuple[str, str, str, str, str, s
     )
 
 
-def _safe_repository_url(value: str) -> str:
-    if value == "unresolved":
-        return value
-    if len(value) > 512 or any(ord(character) < 32 for character in value):
-        return "redacted"
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() in {"http", "https", "ssh", "git"} and host:
-        netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
-        if port is not None:
-            netloc = f"{netloc}:{port}"
-        return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
-    scp_match = _SCP_REPOSITORY_PATTERN.fullmatch(value)
-    if scp_match is not None:
-        return f"{scp_match.group('host')}:{scp_match.group('path')}"
-    return "redacted"
-
-
 def _bounded_text(value: str, limit: int) -> str:
     return value if len(value) <= limit and not any(ord(character) < 32 for character in value) else "redacted"
 
@@ -497,7 +476,3 @@ def _public_revision(value: str | None) -> str | None:
     if value is None or not _REVISION_PATTERN.fullmatch(value):
         return None
     return value
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

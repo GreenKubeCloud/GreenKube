@@ -73,6 +73,7 @@ from greenkube.automation.rollback import (
 from greenkube.core.config import get_config
 from greenkube.core.optimization.applied_detector import K8sWorkloadReader
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     UNRESOLVED_PROVIDER_ID,
     ActionPlanV3,
     ActionStatus,
@@ -91,6 +92,7 @@ from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanner
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots import (
     RepositorySnapshot,
     SnapshotError,
@@ -107,10 +109,10 @@ from greenkube.storage.base_gitops_repository import (
 from greenkube.storage.base_plan_operation_repository import PlanOperationRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
 
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
-_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _MAX_PROVIDER_CONFIG_BYTES = 1024 * 1024
 _MAX_CONFIGURED_PROVIDERS = 100
 
@@ -245,12 +247,7 @@ class ProviderSourceSnapshotResolver:
         self._limits = limits or SnapshotLimits()
 
     async def create_snapshot(self, source: WorkloadSource) -> RepositorySnapshot:
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} does not have a configured snapshot planner",
@@ -276,7 +273,7 @@ class ProviderSourceSnapshotResolver:
                 )
 
             revision = await _current_revision(target.provider, target.repository, source.ref)
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "the provider did not resolve the source ref to an immutable full Git commit SHA",
@@ -394,7 +391,7 @@ class RuntimePlanService:
             clock=selected_policy_clock or (lambda: datetime.now(timezone.utc)),
         )
 
-    async def create_plan(
+    async def prepare_plan(
         self,
         recommendation_ids: Sequence[int],
         *,
@@ -410,12 +407,7 @@ class RuntimePlanService:
             exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
         )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
@@ -455,32 +447,6 @@ class RuntimePlanService:
                 "the repository snapshot is unavailable or exceeds configured planning limits",
             ) from exc
 
-    async def create_plan_for_recommendations(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        change_set_id: str | None = None,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """Explicit alias for the source-safe plan creation entry point."""
-        return await self.create_plan(
-            recommendation_ids,
-            change_set_id=change_set_id,
-            actor=actor,
-            values_mapping=values_mapping,
-        )
-
-    async def prepare_plan(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """API protocol alias for source-safe preparation from persisted recommendation IDs."""
-        return await self.create_plan(recommendation_ids, actor=actor, values_mapping=values_mapping)
-
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune expired rendered content and terminal outbox rows while retaining plan metadata."""
         return await self._plan_service.prune_retained_history(cutoff=cutoff)
@@ -494,12 +460,7 @@ class RuntimePlanService:
             exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
         )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
@@ -619,9 +580,9 @@ class RuntimePlanService:
                 AutomationErrorCode.AMBIGUOUS_BINDING,
                 "resolved GitOps binding does not match the persisted recommendation target",
             )
-        now = _as_utc(self._policy_evaluator.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._policy_evaluator.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
@@ -757,12 +718,7 @@ class RuntimePlanService:
         await self._validate_rollback_source_plan(original_plan)
         await self._rollback_review_records(original_plan)
         source = await self._resolve_current_rollback_source(original_plan)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_UNSUPPORTED,
                 f"renderer {source.renderer.value!r} does not support exact-target rollback",
@@ -841,7 +797,7 @@ class RuntimePlanService:
                     "current rollback snapshot does not match the resolved provider repository",
                 )
             revision = metadata.commit_sha
-            if not isinstance(revision, str) or not _COMMIT_SHA.fullmatch(revision):
+            if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
                 raise AutomationPlanError(
                     AutomationErrorCode.PROVIDER_NOT_READY,
                     "current rollback snapshot does not identify an immutable full Git commit SHA",
@@ -986,9 +942,9 @@ class RuntimePlanService:
                 "the resolved workload source no longer matches the original plan",
             )
         source = _with_binding_policy_evidence(source, binding)
-        now = _as_utc(self._plan_service.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._plan_service.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
@@ -1003,7 +959,7 @@ class RuntimePlanService:
     ) -> dict[str, str | bytes]:
         file_plan = plan.file_plan
         assert file_plan is not None
-        if not _COMMIT_SHA.fullmatch(file_plan.base_revision):
+        if not GIT_OBJECT_SHA.fullmatch(file_plan.base_revision):
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_CONFLICT,
                 "original plan base revision is not an immutable full Git commit SHA",
@@ -1708,19 +1664,9 @@ def kustomize_rollback_renderer(
     return KustomizeRollbackRenderer(renderer, snapshot_limits=snapshot_limits)
 
 
-async def get_plan_service(**runtime_options: Any) -> RuntimePlanService:
-    """Create the source-safe plan API service from the production repositories."""
-    runtime = await create_plan_runtime(**runtime_options)
-    return runtime.plan_service
-
-
 async def build_plan_api_service(**runtime_options: Any) -> RuntimePlanService:
-    """Build the API plan facade from persisted recommendations and bindings."""
-    return await get_plan_service(**runtime_options)
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    """Build the source-safe API plan facade from the production repositories."""
+    return (await create_plan_runtime(**runtime_options)).plan_service
 
 
 def _with_binding_policy_evidence(source: WorkloadSource, binding: WorkloadBinding) -> WorkloadSource:

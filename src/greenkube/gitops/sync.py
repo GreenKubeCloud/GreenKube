@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Any
 
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, WorkloadSource
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ AncestryCheck = Callable[[str, str], Awaitable[bool | None]]
 #: plan's file changes (``None``: unknown)?
 PlannedChangeCheck = Callable[[str], Awaitable[bool | None]]
 
-_FULL_COMMIT_SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z", re.IGNORECASE)
 _SHA1_COMPONENT = re.compile(r"^.+@sha1:([0-9a-f]{40})\Z", re.IGNORECASE)
 _SHA256_COMPONENT = re.compile(r"^.+@sha256:([0-9a-f]{64})\Z", re.IGNORECASE)
 _EXPLICIT_SHA1 = re.compile(r"^sha1:([0-9a-f]{40})\Z", re.IGNORECASE)
@@ -164,7 +164,7 @@ async def _observe_gitops_sync(
 ) -> GitOpsSyncResult:
     if not isinstance(source, WorkloadSource):
         raise TypeError("source must be a WorkloadSource")
-    if not isinstance(merge_commit_sha, str) or _FULL_COMMIT_SHA.fullmatch(merge_commit_sha) is None:
+    if not isinstance(merge_commit_sha, str) or GIT_OBJECT_SHA.fullmatch(merge_commit_sha) is None:
         raise ValueError("merge_commit_sha must be a full commit SHA")
     if custom_objects_api is None:
         raise ValueError("custom_objects_api must be provided")
@@ -717,7 +717,7 @@ def _compare_revision(revision: str | None, merge_commit_sha: str) -> GitOpsSync
 def _revision_commit_sha(revision: str | None) -> str | None:
     if not isinstance(revision, str) or not revision or len(revision) > 512 or revision != revision.strip():
         return None
-    if _FULL_COMMIT_SHA.fullmatch(revision) is not None:
+    if GIT_OBJECT_SHA.fullmatch(revision) is not None:
         return revision.lower()
     for pattern in (_SHA1_COMPONENT, _SHA256_COMPONENT, _EXPLICIT_SHA1, _EXPLICIT_SHA256):
         match = pattern.fullmatch(revision)

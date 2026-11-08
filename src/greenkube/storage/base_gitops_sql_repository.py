@@ -57,6 +57,7 @@ from greenkube.storage.gitops_mapper import (
     row_to_workload_source,
 )
 from greenkube.storage.unit_of_work import UnitOfWork
+from greenkube.utils.time import ensure_utc
 
 _PRUNE_BATCH_SIZE = 100
 _PLAN_HYDRATION_BATCH_SIZE = 500
@@ -459,7 +460,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         """
 
     def _workload_binding_freshness_parameters(self, now: datetime) -> tuple[Any, Any, Any, Any]:
-        current = _as_utc(now)
+        current = ensure_utc(now)
         ttl = configured_binding_ttl()
         return (
             self._db_datetime(current),
@@ -816,11 +817,11 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         ):
             raise ValueError("manual binding source generation does not match its audit event")
 
-        observed_now = _as_utc(now)
+        observed_now = ensure_utc(now)
         if (
             binding.source.expires_at is None
-            or _as_utc(binding.source.expires_at) <= observed_now
-            or _as_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
+            or ensure_utc(binding.source.expires_at) <= observed_now
+            or ensure_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
         ):
             raise ValueError("manual binding expiry must be bounded by the binding TTL")
         async with self._serialized_transaction() as connection:
@@ -859,8 +860,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 or candidate.provider_id == "unresolved"
                 or candidate.repo_url == "unresolved"
                 or binding_candidate_generation_token(candidate) != expected_generation_token
-                or (candidate.expires_at is not None and _as_utc(candidate.expires_at) <= observed_now)
-                or observed_now - _as_utc(candidate.observed_at) >= configured_binding_ttl()
+                or (candidate.expires_at is not None and ensure_utc(candidate.expires_at) <= observed_now)
+                or observed_now - ensure_utc(candidate.observed_at) >= configured_binding_ttl()
             ):
                 raise WorkloadBindingConflictError("workload binding candidate generation changed")
             await self._save_workload_binding_on_connection(connection, binding)
@@ -1074,7 +1075,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         )
         if selected_statuses is not None and not selected_statuses:
             return WorkloadBindingPage((), None, False)
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
         if cluster is not None:
@@ -1136,7 +1137,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         cluster: str | None = None,
         now: datetime | None = None,
     ) -> WorkloadBindingCoverage:
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         status_expression = self._workload_binding_status_expression("b")
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
@@ -1895,18 +1896,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             record = await self._get_plan_record_on_connection(connection, plan_id)
             return record.plan if record is not None else None
 
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]:
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(
-                connection,
-                """
-                SELECT recommendation_id FROM automation_plan_recommendations
-                WHERE plan_id = ? ORDER BY recommendation_id
-                """,
-                (plan_id,),
-            )
-            return [int(row["recommendation_id"]) for row in rows]
-
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]:
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(
@@ -2002,18 +1991,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 (recommendation_id,),
             )
             return ActionStatus(row["action_status"]) if row is not None else None
-
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]:
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(
-                connection,
-                """
-                SELECT id FROM recommendation_history
-                WHERE action_status = ? ORDER BY id
-                """,
-                (status.value,),
-            )
-            return [int(row["id"]) for row in rows]
 
     async def record_webhook_delivery(
         self, event: PullRequestEvent, *, event_type: str = "pull_request"
@@ -2159,48 +2136,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
             return [row_to_webhook_delivery(row) for row in rows]
 
-    async def upsert_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat:
-        async with self._transaction() as connection:
-            await self._execute(
-                connection,
-                """
-                INSERT INTO automation_worker_heartbeats
-                    (worker_id, status, heartbeat_at, lease_id, lease_owner, lease_expires_at,
-                     lease_operation_id, lease_plan_operation_id, metadata, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (worker_id) DO UPDATE SET
-                    status = excluded.status,
-                    heartbeat_at = excluded.heartbeat_at,
-                    lease_id = excluded.lease_id,
-                    lease_owner = excluded.lease_owner,
-                    lease_expires_at = excluded.lease_expires_at,
-                    lease_operation_id = excluded.lease_operation_id,
-                    lease_plan_operation_id = excluded.lease_plan_operation_id,
-                    metadata = excluded.metadata,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    heartbeat.worker_id,
-                    heartbeat.status,
-                    self._db_datetime(heartbeat.heartbeat_at),
-                    heartbeat.lease_id,
-                    heartbeat.lease_owner,
-                    self._db_datetime(heartbeat.lease_expires_at),
-                    heartbeat.lease_operation_id,
-                    heartbeat.lease_plan_operation_id,
-                    json_text(heartbeat.metadata),
-                    self._db_datetime(datetime.now(timezone.utc)),
-                ),
-                json_positions=(9,),
-            )
-            row = await self._fetchrow(
-                connection,
-                "SELECT * FROM automation_worker_heartbeats WHERE worker_id = ?",
-                (heartbeat.worker_id,),
-            )
-            assert row is not None
-            return row_to_worker_heartbeat(row)
-
     async def get_worker_heartbeat(self, worker_id: str) -> WorkerHeartbeat | None:
         async with self.db_manager.connection_scope() as connection:
             row = await self._fetchrow(
@@ -2209,17 +2144,6 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 (worker_id,),
             )
             return row_to_worker_heartbeat(row) if row is not None else None
-
-    async def list_worker_heartbeats(self, *, status: str | None = None) -> list[WorkerHeartbeat]:
-        query = "SELECT * FROM automation_worker_heartbeats"
-        params: tuple[Any, ...] = ()
-        if status is not None:
-            query += " WHERE status = ?"
-            params = (status,)
-        query += " ORDER BY worker_id"
-        async with self.db_manager.connection_scope() as connection:
-            rows = await self._fetch(connection, query, params)
-            return [row_to_worker_heartbeat(row) for row in rows]
 
     async def get_automation_backlog_summary(self, *, stale_before: datetime) -> AutomationBacklogSummary:
         if stale_before.tzinfo is None or stale_before.utcoffset() is None:
@@ -2448,7 +2372,3 @@ def _same_binding_material_state(left: WorkloadBinding, right: WorkloadBinding) 
         and left.candidates_truncated == right.candidates_truncated
         and left_candidates == right_candidates
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

@@ -57,6 +57,7 @@ from greenkube.gitops.contracts import (
     SetContainerResources,
     WorkloadSource,
 )
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import (
     PullRequestRecord,
     PullRequestStatus,
@@ -68,9 +69,8 @@ from greenkube.storage.base_plan_operation_repository import (
     PlanOperationLease,
     PlanOperationLeaseError,
 )
+from greenkube.utils.time import ensure_utc
 
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
-_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
 _ACTIVE_PLAN_STATUSES = frozenset({PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _OPEN_PULL_REQUEST_STATES = frozenset({"open", "opened"})
@@ -350,7 +350,9 @@ class PlanWorker:
         plan: Plan | None = None
         operation_type = "unknown"
         timer = start_timer()
-        record_automation_queue_age((datetime.now(timezone.utc) - _as_utc(lease.operation.created_at)).total_seconds())
+        record_automation_queue_age(
+            (datetime.now(timezone.utc) - ensure_utc(lease.operation.created_at)).total_seconds()
+        )
         try:
             try:
                 await self._heartbeat(execution, force=True)
@@ -386,7 +388,7 @@ class PlanWorker:
         adopted = await self._adopt_open_pull_request(execution, plan)
         if adopted is not None:
             return adopted
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_operation_and_plan(operation, plan, now)
         await self._validate_current_binding(plan)
         await self._validate_rollback_review(plan)
@@ -432,7 +434,7 @@ class PlanWorker:
                 ) from exc
             if current_revision is None:
                 raise PlanWorkerError("Current source revision could not be resolved.", retryable=True)
-            if not isinstance(current_revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(current_revision):
+            if not isinstance(current_revision, str) or not GIT_OBJECT_SHA.fullmatch(current_revision):
                 raise PlanWorkerError(
                     "Current source revision is not an immutable full Git commit SHA.",
                     plan_status=PlanStatus.STALE,
@@ -448,7 +450,7 @@ class PlanWorker:
             persisted_plan = await self.plans.get_plan(plan.plan_id)
             if persisted_plan is None:
                 raise PlanWorkerError(f"Plan {operation.plan_id!r} disappeared during source revision validation.")
-            self._validate_operation_and_plan(operation, persisted_plan, _as_utc(self.clock()))
+            self._validate_operation_and_plan(operation, persisted_plan, ensure_utc(self.clock()))
             await self._validate_rollback_review(persisted_plan)
             if not _same_plan_content(plan, persisted_plan):
                 raise _replan_error("Persisted plan content changed during source revision validation.")
@@ -800,22 +802,6 @@ class PlanWorker:
                 records.append(record)
         return records, missing_ids
 
-    async def _recommendation_records_for_pr(
-        self,
-        plan: Plan,
-    ) -> tuple[list[RecommendationRecord], list[int]]:
-        if self.recommendation_repository is None:
-            return [], list(plan.recommendation_ids)
-        records: list[RecommendationRecord] = []
-        missing_ids: list[int] = []
-        for recommendation_id in plan.recommendation_ids:
-            record = await self.recommendation_repository.get_recommendation_by_id(recommendation_id)
-            if record is None or record.id != recommendation_id:
-                missing_ids.append(recommendation_id)
-            else:
-                records.append(record)
-        return records, missing_ids
-
     async def _validate_rollback_review(self, plan: Plan) -> None:
         rollback_of_plan_id = plan.rollback_of_plan_id
         if rollback_of_plan_id is None:
@@ -1028,7 +1014,7 @@ class PlanWorker:
     def _validate_operation_and_plan(self, operation: Operation, plan: Plan, now: datetime) -> None:
         if operation.plan_id != plan.plan_id:
             raise PlanWorkerError("Claimed operation does not match the loaded plan.")
-        if plan.digest is None or not _DIGEST_PATTERN.fullmatch(plan.digest):
+        if plan.digest is None or not SHA256_DIGEST.fullmatch(plan.digest):
             raise PlanWorkerError(
                 "Plan has no valid persisted digest.",
                 plan_status=PlanStatus.FAILED,
@@ -1054,7 +1040,7 @@ class PlanWorker:
                 plan_status=PlanStatus.FAILED,
                 action_status=ActionStatus.FAILED,
             )
-        if not _COMMIT_SHA_PATTERN.fullmatch(plan.file_plan.base_revision):
+        if not GIT_OBJECT_SHA.fullmatch(plan.file_plan.base_revision):
             raise PlanWorkerError(
                 "Plan base revision is not an immutable full Git commit SHA.",
                 plan_status=PlanStatus.STALE,
@@ -1062,7 +1048,7 @@ class PlanWorker:
             )
         if plan.status not in _ACTIVE_PLAN_STATUSES:
             raise PlanWorkerError(f"Plan cannot be applied from status {plan.status.value}.")
-        if plan.expires_at is not None and _as_utc(plan.expires_at) <= now:
+        if plan.expires_at is not None and ensure_utc(plan.expires_at) <= now:
             raise PlanWorkerError(
                 "Plan has expired; create and approve a new plan.",
                 plan_status=PlanStatus.STALE,
@@ -1074,7 +1060,7 @@ class PlanWorker:
                 plan_status=PlanStatus.STALE,
                 action_status=ActionStatus.NONE,
             )
-        if plan.source.expires_at is not None and _as_utc(plan.source.expires_at) <= now:
+        if plan.source.expires_at is not None and ensure_utc(plan.source.expires_at) <= now:
             raise PlanWorkerError(
                 "Plan source binding has expired; refresh the binding and re-plan.",
                 plan_status=PlanStatus.STALE,
@@ -1110,7 +1096,7 @@ class PlanWorker:
             result.branch != branch
             or result.files_changed != expected_paths
             or not isinstance(result.commit_sha, str)
-            or not _COMMIT_SHA_PATTERN.fullmatch(result.commit_sha)
+            or not GIT_OBJECT_SHA.fullmatch(result.commit_sha)
         ):
             raise PlanWorkerError(
                 "Git provider returned a commit result that does not match the atomic file plan.",
@@ -1380,7 +1366,7 @@ class PlanWorker:
         return await method(*args)
 
     async def _heartbeat(self, execution: _Execution, *, force: bool = False) -> None:
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         record_automation_worker_heartbeat(now.timestamp())
         refresh_margin = timedelta(seconds=max(1, self.lease_seconds // 3))
         if force or execution.lease.lease_expires_at <= now + refresh_margin:
@@ -1880,7 +1866,7 @@ def _pull_request_head_sha(pull_request: PullRequestInfo) -> str | None:
     head = raw.get("head")
     # GitHub and Gitea nest the head commit; GitLab merge requests expose ``sha``.
     sha = head.get("sha") if isinstance(head, dict) else raw.get("sha")
-    return sha if isinstance(sha, str) and _COMMIT_SHA_PATTERN.fullmatch(sha) else None
+    return sha if isinstance(sha, str) and GIT_OBJECT_SHA.fullmatch(sha) else None
 
 
 def _pull_request_status(status: PullRequestStatus | str) -> str:
@@ -1912,9 +1898,3 @@ def _is_retryable(error: Exception) -> bool:
 def _error_message(error: Exception) -> str:
     message = str(error).strip() or type(error).__name__
     return message[:1000]
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)

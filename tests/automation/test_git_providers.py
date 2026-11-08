@@ -89,9 +89,6 @@ async def test_github_full_flow():
     respx.post("https://api.github.com/repos/acme/manifests/git/refs").mock(
         return_value=Response(201, json={"ref": "refs/heads/greenkube/reco-1"})
     )
-    respx.put("https://api.github.com/repos/acme/manifests/contents/apps/api.yaml").mock(
-        return_value=Response(200, json={"content": {"sha": "new"}})
-    )
     respx.post("https://api.github.com/repos/acme/manifests/pulls").mock(
         return_value=Response(
             201,
@@ -111,7 +108,6 @@ async def test_github_full_flow():
         and git_file.content == content
     )
     await provider.create_branch(repo, "greenkube/reco-1", "main")
-    await provider.update_file(repo, "apps/api.yaml", content, "msg", "greenkube/reco-1", sha="abc123")
     pr = await provider.create_pull_request(repo, head="greenkube/reco-1", base="main", title="t", body="b")
     assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 7
@@ -316,9 +312,6 @@ async def test_gitlab_flow_maps_merge_request():
     respx.post(f"https://gitlab.com/api/v4/projects/{project}/repository/branches").mock(
         return_value=Response(201, json={"name": "greenkube/reco-1"})
     )
-    respx.put(f"https://gitlab.com/api/v4/projects/{project}/repository/files/apps%2Fapi.yaml").mock(
-        return_value=Response(200, json={"file_path": "apps/api.yaml"})
-    )
     respx.post(f"https://gitlab.com/api/v4/projects/{project}/merge_requests").mock(
         return_value=Response(201, json={"iid": 3, "web_url": "https://gitlab.com/x/-/mr/3", "state": "opened"})
     )
@@ -330,7 +323,6 @@ async def test_gitlab_flow_maps_merge_request():
     git_file = await provider.get_file(repo, "apps/api.yaml", "main")
     assert git_file is not None and git_file.sha == "sha1" and git_file.blob_sha == "blob-sha1"
     await provider.create_branch(repo, "greenkube/reco-1", "main")
-    await provider.update_file(repo, "apps/api.yaml", "content", "msg", "greenkube/reco-1")
     pr = await provider.create_pull_request(repo, head="h", base="main", title="t", body="b")
     assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 3
@@ -423,9 +415,6 @@ async def test_gitea_flow():
     respx.post("http://gitea.local/api/v1/repos/acme/manifests/branches").mock(
         return_value=Response(201, json={"name": "greenkube/reco-1"})
     )
-    respx.put("http://gitea.local/api/v1/repos/acme/manifests/contents/apps%2Fapi.yaml").mock(
-        return_value=Response(200, json={"content": {"sha": "new"}})
-    )
     respx.post("http://gitea.local/api/v1/repos/acme/manifests/pulls").mock(
         return_value=Response(
             201, json={"number": 11, "html_url": "http://gitea.local/acme/manifests/pulls/11", "state": "open"}
@@ -439,7 +428,6 @@ async def test_gitea_flow():
     git_file = await provider.get_file(repo, "apps/api.yaml", "main")
     assert git_file is not None and git_file.sha == "abc" and git_file.blob_sha == "abc"
     await provider.create_branch(repo, "greenkube/reco-1", "main")
-    await provider.update_file(repo, "apps/api.yaml", content, "msg", "greenkube/reco-1", sha="abc")
     pr = await provider.create_pull_request(repo, head="h", base="main", title="t", body="b")
     assert isinstance(pr, PullRequestInfo)
     assert pr["number"] == 11
@@ -1817,9 +1805,6 @@ async def test_portable_tree_fallback_compares_listed_files_by_blob_identity():
             return sorted(self.trees[ref])
 
         async def create_branch(self, repo, branch, from_ref):
-            return None
-
-        async def update_file(self, repo, path, content, message, branch, sha=None):
             return None
 
         async def create_pull_request(self, repo, *, head, base, title, body, options=None):

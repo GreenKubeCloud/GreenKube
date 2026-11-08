@@ -92,18 +92,15 @@ async def update_service_config(update: ServiceConfigUpdate, response: Response)
         logger.info("Wattnet password updated.")
 
     if updates:
-        acknowledgement = await service.apply(updates, persist=False)
+        version = service.apply(updates)
         invalidate_health_cache()
         logger.info("Configuration reloaded after service config update.")
 
         # Mounted external secrets remain read-only. The K8s API patch is a
         # separate, best-effort persistence channel for runtime overrides.
         persisted = await patch_k8s_secret(updates)
-        response.headers["X-Configuration-Version"] = str(acknowledgement.version)
+        response.headers["X-Configuration-Version"] = str(version)
         response.headers["X-Configuration-Persisted"] = str(persisted).lower()
         if not persisted:
-            logger.warning(
-                "Runtime configuration version %s was applied in memory only.",
-                acknowledgement.version,
-            )
+            logger.warning("Runtime configuration version %s was applied in memory only.", version)
     return await run_health_checks(force=True)

@@ -14,12 +14,12 @@ from unittest.mock import AsyncMock
 import pytest
 from ruamel.yaml import YAML
 
-from greenkube.automation.git.base import GitFile, GitProvider
+from greenkube.automation.git.base import GitFile
+from greenkube.automation.plan_runtime import AuthorizedGitBlobResolver
 from greenkube.automation.plans import (
     AutomationPlanError,
     AutomationPlanService,
     GitBlobFile,
-    ProviderGitBlobResolver,
     _archive_contents,
 )
 from greenkube.gitops.contracts import (
@@ -215,10 +215,6 @@ class MemoryPlanRepository(AutomationPlanRepository):
         self.plans[plan_id] = updated
         return updated
 
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]:
-        plan = self.plans.get(plan_id)
-        return list(plan.recommendation_ids) if plan is not None else []
-
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]:
         return [plan for plan in self.plans.values() if recommendation_id in plan.recommendation_ids]
 
@@ -237,9 +233,6 @@ class MemoryPlanRepository(AutomationPlanRepository):
 
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None:
         return self.action_status.get(recommendation_id)
-
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]:
-        return [recommendation_id for recommendation_id, current in self.action_status.items() if current is status]
 
 
 class FakeGitBlobResolver:
@@ -872,24 +865,24 @@ async def test_create_plan_rejects_failed_validation_result(monkeypatch: pytest.
     assert repository.plans == {}
 
 
+def _blob_resolver(git_file: GitFile) -> AuthorizedGitBlobResolver:
+    provider = SimpleNamespace(name="gitlab", get_file=AsyncMock(return_value=git_file), close=AsyncMock())
+    provider_resolver = SimpleNamespace(
+        resolve=AsyncMock(return_value=SimpleNamespace(provider=provider, repository="repo"))
+    )
+    return AuthorizedGitBlobResolver(cast(Any, provider_resolver))
+
+
 @pytest.mark.asyncio
 async def test_gitlab_provider_resolver_uses_blob_id_not_last_commit_id():
-    provider = cast(
-        GitProvider,
-        SimpleNamespace(
-            name="gitlab",
-            repository=lambda *args, **kwargs: "repo",
-            get_file=AsyncMock(
-                return_value=GitFile(
-                    path="apps/payments/deployment.yaml",
-                    content=DEPLOYMENT,
-                    sha="last-commit-sha",
-                    blob_sha=GIT_BLOB_SHA,
-                )
-            ),
-        ),
+    resolver = _blob_resolver(
+        GitFile(
+            path="apps/payments/deployment.yaml",
+            content=DEPLOYMENT,
+            sha="last-commit-sha",
+            blob_sha=GIT_BLOB_SHA,
+        )
     )
-    resolver = ProviderGitBlobResolver({"gitlab-main": provider})
 
     resolved = await resolver.get_blob_file(
         _source(provider_id="gitlab-main", repo_url="https://gitlab.com/acme/gitops.git"),
@@ -903,21 +896,7 @@ async def test_gitlab_provider_resolver_uses_blob_id_not_last_commit_id():
 
 @pytest.mark.asyncio
 async def test_gitlab_provider_resolver_fails_closed_without_blob_id():
-    provider = cast(
-        GitProvider,
-        SimpleNamespace(
-            name="gitlab",
-            repository=lambda *args, **kwargs: "repo",
-            get_file=AsyncMock(
-                return_value=GitFile(
-                    path="apps/payments/deployment.yaml",
-                    content=DEPLOYMENT,
-                    sha="last-commit-sha",
-                )
-            ),
-        ),
-    )
-    resolver = ProviderGitBlobResolver({"gitlab-main": provider})
+    resolver = _blob_resolver(GitFile(path="apps/payments/deployment.yaml", content=DEPLOYMENT, sha="last-commit-sha"))
 
     with pytest.raises(AutomationPlanError) as error:
         await resolver.get_blob_file(

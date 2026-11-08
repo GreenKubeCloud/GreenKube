@@ -9,6 +9,7 @@ from typing import TypeAlias
 
 from greenkube.gitops.contracts import DEFAULT_BINDING_TTL, BindingStatus, ControllerKind, RendererKind, WorkloadSource
 from greenkube.storage.base_gitops_repository import WorkloadBinding
+from greenkube.utils.time import ensure_utc
 
 WorkloadIdentity: TypeAlias = tuple[str, str, str, str]
 SourceUnit: TypeAlias = tuple[str, str, str | None, str, RendererKind]
@@ -17,8 +18,6 @@ SOURCE_PRECEDENCE: dict[ControllerKind, int] = {
     ControllerKind.ARGOCD: 1,
     ControllerKind.FLUX_KUSTOMIZATION: 1,
     ControllerKind.FLUX_HELM_RELEASE: 2,
-    ControllerKind.EXPLICIT_REPOSITORY: 3,
-    ControllerKind.ANNOTATION: 4,
 }
 
 _DUPLICATE_STATUS_PRIORITY = {
@@ -66,7 +65,7 @@ class WorkloadBindingResolver:
     ) -> WorkloadBinding:
         """Resolve the candidates for one workload, retaining every candidate."""
         items = list(candidates)
-        observed_at = _as_utc(now or datetime.now(timezone.utc))
+        observed_at = ensure_utc(now or datetime.now(timezone.utc))
         if not items:
             raise ValueError("at least one workload source candidate is required")
 
@@ -95,7 +94,7 @@ class WorkloadBindingResolver:
                 candidates=tuple(evaluated),
                 evidence=evidence,
                 reason="all-source-candidates-stale",
-                observed_at=max(_as_utc(candidate.observed_at) for candidate in evaluated),
+                observed_at=max(ensure_utc(candidate.observed_at) for candidate in evaluated),
                 expires_at=self._expiry(stale_source),
             )
 
@@ -127,7 +126,7 @@ class WorkloadBindingResolver:
                 evidence=evidence,
                 reason="conflicting-equal-priority-source-units",
                 confidence=max(candidate.confidence for candidate in top),
-                observed_at=max(_as_utc(candidate.observed_at) for candidate in top),
+                observed_at=max(ensure_utc(candidate.observed_at) for candidate in top),
                 expires_at=self._expiry(representative),
             )
 
@@ -143,7 +142,7 @@ class WorkloadBindingResolver:
                 evidence=evidence,
                 reason=_reason(top, BindingStatus.AMBIGUOUS, "highest-priority-source-is-ambiguous"),
                 confidence=max(candidate.confidence for candidate in top),
-                observed_at=max(_as_utc(candidate.observed_at) for candidate in top),
+                observed_at=max(ensure_utc(candidate.observed_at) for candidate in top),
                 expires_at=self._expiry(representative),
             )
 
@@ -159,7 +158,7 @@ class WorkloadBindingResolver:
                 evidence=evidence,
                 reason=_reason(top, BindingStatus.BLOCKED, "highest-priority-source-blocked"),
                 confidence=max(candidate.confidence for candidate in top),
-                observed_at=max(_as_utc(candidate.observed_at) for candidate in top),
+                observed_at=max(ensure_utc(candidate.observed_at) for candidate in top),
                 expires_at=self._expiry(representative),
             )
 
@@ -175,7 +174,7 @@ class WorkloadBindingResolver:
                 evidence=evidence,
                 reason=_reason(top, BindingStatus.UNRESOLVED, "highest-priority-source-unresolved"),
                 confidence=max(candidate.confidence for candidate in top),
-                observed_at=max(_as_utc(candidate.observed_at) for candidate in top),
+                observed_at=max(ensure_utc(candidate.observed_at) for candidate in top),
                 expires_at=self._expiry(representative),
             )
 
@@ -208,7 +207,7 @@ class WorkloadBindingResolver:
             evidence=evidence,
             reason=None,
             confidence=selected.confidence,
-            observed_at=max(_as_utc(candidate.observed_at) for candidate in merged),
+            observed_at=max(ensure_utc(candidate.observed_at) for candidate in merged),
             expires_at=self._expiry(selected),
         )
 
@@ -254,8 +253,8 @@ class WorkloadBindingResolver:
     def _mark_stale_if_expired(self, candidate: WorkloadSource, now: datetime) -> WorkloadSource:
         if candidate.status is BindingStatus.STALE:
             return candidate
-        observed_at = _as_utc(candidate.observed_at)
-        is_expired = candidate.expires_at is not None and _as_utc(candidate.expires_at) <= now
+        observed_at = ensure_utc(candidate.observed_at)
+        is_expired = candidate.expires_at is not None and ensure_utc(candidate.expires_at) <= now
         is_too_old = self._freshness_ttl is not None and now - observed_at >= self._freshness_ttl
         if not is_expired and not is_too_old:
             return candidate
@@ -279,10 +278,10 @@ class WorkloadBindingResolver:
 
     def _expiry(self, candidate: WorkloadSource) -> datetime | None:
         if candidate.expires_at is not None:
-            return _as_utc(candidate.expires_at)
+            return ensure_utc(candidate.expires_at)
         if self._freshness_ttl is None:
             return None
-        return _as_utc(candidate.observed_at) + self._freshness_ttl
+        return ensure_utc(candidate.observed_at) + self._freshness_ttl
 
     def _binding(
         self,
@@ -353,12 +352,8 @@ def _source_unit_sort_key(unit: SourceUnit) -> tuple[str, str, bool, str, str, s
     return provider_id, repo_url, revision is not None, revision or "", path, renderer.value
 
 
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
-
 def _representative_sort_key(candidate: WorkloadSource) -> tuple[float, float, str]:
-    return candidate.confidence, _as_utc(candidate.observed_at).timestamp(), candidate.id
+    return candidate.confidence, ensure_utc(candidate.observed_at).timestamp(), candidate.id
 
 
 def _candidate_sort_key(candidate: WorkloadSource) -> tuple[int, int, float, float, str]:
@@ -366,7 +361,7 @@ def _candidate_sort_key(candidate: WorkloadSource) -> tuple[int, int, float, flo
         1 if candidate.status is BindingStatus.STALE else 0,
         _source_precedence(candidate),
         -candidate.confidence,
-        -_as_utc(candidate.observed_at).timestamp(),
+        -ensure_utc(candidate.observed_at).timestamp(),
         candidate.id,
     )
 
@@ -383,7 +378,7 @@ def _duplicate_sort_key(candidate: WorkloadSource) -> tuple[int, int, float, int
     return (
         0 if candidate.status is BindingStatus.STALE else 1,
         1 if candidate.evidence.get("selected_via") == "manual" else 0,
-        _as_utc(candidate.observed_at).timestamp(),
+        ensure_utc(candidate.observed_at).timestamp(),
         _DUPLICATE_STATUS_PRIORITY[candidate.status],
         candidate.confidence,
     )

@@ -33,6 +33,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.renderers import RawRenderError, RawRenderResult, RenderedResource, render_raw
 
 _MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
@@ -210,17 +211,19 @@ class RawManifestPlanner:
             warnings=warnings,
         )
         plan_id = _plan_identifier(action, source, base_revision)
-        digest = _plan_digest(
+        digest = plan_digest(
             plan_id=plan_id,
             action=action,
             source=source,
-            file_edit=file_edit,
+            files=[file_edit],
             diff=diff,
             rendered_diff=rendered_diff,
             base_revision=base_revision,
             source_revision=source_revision,
             validation=validation,
             warnings=warnings,
+            renderer=RendererKind.RAW,
+            error_type=RawManifestPlanError,
         )
         return FilePlan(
             plan_id=plan_id,
@@ -794,59 +797,6 @@ def _unified_diff(before: str, after: str, fromfile: str, tofile: str) -> str:
             lineterm="\n",
         )
     )
-
-
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    file_edit: FileEdit,
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [file_edit.model_dump(mode="json")],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": RendererKind.RAW.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise RawManifestPlanError("plan inputs must be deterministically JSON-serializable") from exc
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
 
 
 def _plan_identifier(action: ActionPlanV3, source: WorkloadSource, base_revision: str) -> str:

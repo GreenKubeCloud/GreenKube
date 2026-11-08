@@ -182,9 +182,6 @@ class RecommendationStatus(str, Enum):
     ROLLBACK_REVIEW = "rollback_review"
     REVERTED = "reverted"
     FAILED = "failed"
-    PLAN_CREATED = "plan_created"
-    PLAN_STATUS_CHANGED = "plan_status_changed"
-    PLAN_ACTION_STATUS_CHANGED = "plan_action_status_changed"
 
 
 class ApplicationMethod(str, Enum):

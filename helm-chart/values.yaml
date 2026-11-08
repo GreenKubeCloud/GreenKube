@@ -340,8 +340,6 @@ config:
     queryRangeStep: 5m
     # cAdvisor scrape interval; rate windows span max(queryRangeStep, 4 x scrapeInterval).
     scrapeInterval: 30s
-    # Maximum number of data points to fetch in a single range query.
-    queryRangeMaxSamples: 10000
     # The node label to use for discovering the instance type.
     nodeInstanceLabel: label_node_kubernetes_io_instance_type
 
@@ -357,9 +355,6 @@ config:
   collection:
     safetyLag: 1m
     maxBackfill: 24h
-
-  # Threshold in cores below which Prometheus totals are considered too small
-  lowNodeCpuThreshold: 0.05
 
   # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
   # same-origin: the bundled UI needs no CORS. List exact origins (for example

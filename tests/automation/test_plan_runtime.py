@@ -894,7 +894,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
         "path": ["app", "resources"],
     }
     assert (
-        await service.create_plan(
+        await service.prepare_plan(
             [41],
             values_mapping=mapping if renderer is RendererKind.HELM_VALUES else None,
         )
@@ -916,13 +916,13 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
             current_source.model_copy(update={"renderer_config": {"values_files": ["apps/payments/other.yaml"]}}),
         )
         with pytest.raises(AutomationPlanError) as invalid_file:
-            await service.create_plan(
+            await service.prepare_plan(
                 [41],
                 values_mapping={**mapping, "file_path": "apps/payments/other.yaml"},
             )
         assert invalid_file.value.code is AutomationErrorCode.UNSUPPORTED_SOURCE
         with pytest.raises(AutomationPlanError) as forged_identity:
-            await service.create_plan([41], values_mapping={**mapping, "repo_url": "https://attacker.invalid/repo"})
+            await service.prepare_plan([41], values_mapping={**mapping, "repo_url": "https://attacker.invalid/repo"})
         assert forged_identity.value.code is AutomationErrorCode.UNSUPPORTED_SOURCE
         assert len(snapshot_resolver.snapshots) == 1
 
@@ -931,7 +931,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
             "mapping needed",
         )
         with pytest.raises(AutomationPlanError) as error:
-            await service.create_plan([41])
+            await service.prepare_plan([41])
         assert error.value.code is AutomationErrorCode.NEEDS_CHART_MAPPING
         assert error.value.mapping_options == {
             "files": ["apps/payments/values.yaml"],
@@ -939,7 +939,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
         }
         assert snapshot_resolver.snapshots[-1].closed
     with pytest.raises(TypeError):
-        await service.create_plan([41], source=source)  # type: ignore[call-arg]
+        await service.prepare_plan([41], source=source)  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio

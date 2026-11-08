@@ -6,7 +6,6 @@ import asyncio
 import logging
 import math
 import os
-import re
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from greenkube.core.observability import (
 )
 from greenkube.gitops.contracts import ActionStatus, FileEdit, FilePlan, Plan, PlanStatus, WorkloadSource
 from greenkube.gitops.planned_values import planned_values_present
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.sync import GitOpsSyncReason, GitOpsSyncStatus, observe_gitops_sync
 from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
@@ -51,7 +51,6 @@ DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS = 30
 GITOPS_SYNC_POLL_INTERVAL_ENV = "GITOPS_SYNC_POLL_INTERVAL"
 GITOPS_SYNC_TIMEOUT_ENV = "GITOPS_SYNC_TIMEOUT"
 DEFAULT_ANCESTRY_CACHE_SIZE = 1024
-_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +98,7 @@ class ProviderAncestryChecker:
         self._cache: OrderedDict[Hashable, bool] = OrderedDict()
 
     async def is_ancestor(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
-        if _COMMIT_SHA.fullmatch(ancestor_sha) is None or _COMMIT_SHA.fullmatch(descendant_sha) is None:
+        if GIT_OBJECT_SHA.fullmatch(ancestor_sha) is None or GIT_OBJECT_SHA.fullmatch(descendant_sha) is None:
             return None
         ancestor, descendant = ancestor_sha.lower(), descendant_sha.lower()
         key = ("ancestry", source.provider_id, source.repo_url, ancestor, descendant)
@@ -447,7 +446,7 @@ class GitOpsSyncRuntime:
             return "skipped"
 
         now = _utc_now(self.clock())
-        if not isinstance(merge_sha, str) or _COMMIT_SHA.fullmatch(merge_sha) is None:
+        if not isinstance(merge_sha, str) or GIT_OBJECT_SHA.fullmatch(merge_sha) is None:
             await self._mark_failed(record, plan, recommendation_ids, None, now, "invalid_merge_commit")
             return "failed"
         retry_after_timeout = plan.status is PlanStatus.SYNC_FAILED and record.sync_error_code == "sync_timeout"

@@ -16,8 +16,8 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     canonical_repository_identity,
 )
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 
-_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _ARTIFACT_SHA_PATTERN = re.compile(
     r"^(?:.*@sha1:([0-9a-fA-F]{40})|.*@sha256:([0-9a-fA-F]{64})|sha256:([0-9a-fA-F]{64}))$"
 )
@@ -93,7 +93,7 @@ def join_repo_path(base: str, relative: Any, *, allow_root: bool = False) -> str
 def immutable_revision(value: str | None) -> str | None:
     if value is None:
         return None
-    if _SHA_PATTERN.fullmatch(value):
+    if GIT_OBJECT_SHA.fullmatch(value):
         return value
     match = _ARTIFACT_SHA_PATTERN.fullmatch(value)
     if match is None:

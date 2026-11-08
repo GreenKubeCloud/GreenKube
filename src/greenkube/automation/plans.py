@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,10 +12,10 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from greenkube.automation.git.base import GitProvider
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     ActionPlanV3,
     ActionStatus,
     AutomationErrorCode,
@@ -49,6 +48,7 @@ from greenkube.gitops.planning.raw_manifest import (
 from greenkube.gitops.renderers import RawRenderError, render_raw
 from greenkube.gitops.renderers.helm import HelmError
 from greenkube.gitops.renderers.kustomize import KustomizeError
+from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.snapshots.models import (
     RepositorySnapshot as ArchiveRepositorySnapshot,
 )
@@ -56,10 +56,9 @@ from greenkube.gitops.snapshots.models import (
     SnapshotFile,
 )
 from greenkube.storage.base_gitops_repository import AutomationPlanRepository
+from greenkube.utils.time import ensure_utc
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
-_GIT_BLOB_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _STALEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
@@ -91,9 +90,6 @@ class AutomationPlanError(RuntimeError):
         super().__init__(message)
 
 
-PlanServiceError = AutomationPlanError
-
-
 @dataclass(frozen=True, slots=True)
 class GitBlobFile:
     """File contents paired with the Git object ID of the file blob."""
@@ -119,39 +115,6 @@ class PlanOperationEnqueuer(Protocol):
     """Enqueues approved plans; implementations must deduplicate by plan ID and digest."""
 
     async def enqueue(self, plan: Plan, *, idempotency_key: str) -> object: ...
-
-
-class ProviderGitBlobResolver:
-    """Resolve Git blob metadata where the existing provider adapter exposes a blob SHA."""
-
-    def __init__(self, providers: Mapping[str, GitProvider]) -> None:
-        self._providers = dict(providers)
-
-    async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
-        provider = self._providers.get(source.provider_id)
-        if provider is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"no Git provider is configured for {source.provider_id!r}",
-            )
-        if provider.name not in {"github", "gitea", "gitlab"}:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider {provider.name!r} has no verified Git blob SHA adapter",
-            )
-        repository = provider.repository(source.repo_url, base_branch=source.ref)
-        git_file = await provider.get_file(repository, path, revision)
-        if git_file is None:
-            return None
-        blob_sha = git_file.blob_sha
-        if blob_sha is None and provider.name in {"github", "gitea"}:
-            blob_sha = git_file.sha
-        if blob_sha is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider returned no Git blob SHA for {path!r} at {revision}",
-            )
-        return GitBlobFile(path=git_file.path, content=git_file.content, blob_sha=blob_sha)
 
 
 class AutomationPlanService:
@@ -253,7 +216,7 @@ class AutomationPlanService:
         persist: bool,
         actor: str,
     ) -> Plan:
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         contents, file_metadata, base_revision = _archive_contents(snapshot, source)
         if source.renderer is RendererKind.KUSTOMIZE:
@@ -375,7 +338,7 @@ class AutomationPlanService:
             if (
                 existing.status in _EXPIREABLE_STATUSES
                 and existing.expires_at is not None
-                and _as_utc(existing.expires_at) <= now
+                and ensure_utc(existing.expires_at) <= now
             ):
                 # A fresh request after the previous identical preview expired re-plans instead of 409.
                 existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
@@ -508,7 +471,7 @@ class AutomationPlanService:
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "the current source contains no forward-created files or updates to reverse",
             )
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         if source.renderer is not inverse.renderer:
             raise AutomationPlanError(
@@ -628,8 +591,8 @@ class AutomationPlanService:
         if plan is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, f"plan {plan_id!r} was not found")
 
-        now = _as_utc(self.clock())
-        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and _as_utc(plan.expires_at) <= now:
+        now = ensure_utc(self.clock())
+        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and ensure_utc(plan.expires_at) <= now:
             await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="plan_expired")
             raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
         if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED}:
@@ -715,8 +678,8 @@ class AutomationPlanService:
         plan = await self.repository.get_plan(plan_id)
         if plan is None or plan.expires_at is None or plan.status not in _EXPIREABLE_STATUSES:
             return plan
-        current_time = _as_utc(now if now is not None else self.clock())
-        if _as_utc(plan.expires_at) > current_time:
+        current_time = ensure_utc(now if now is not None else self.clock())
+        if ensure_utc(plan.expires_at) > current_time:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
@@ -730,7 +693,7 @@ class AutomationPlanService:
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("plan expiry limit must be a positive integer")
-        current_time = _as_utc(now if now is not None else self.clock())
+        current_time = ensure_utc(now if now is not None else self.clock())
         statuses = sorted(_EXPIREABLE_STATUSES, key=lambda status: status.value)
         expired_reader = getattr(self.repository, "list_expired_plans", None)
         if callable(expired_reader):
@@ -743,9 +706,9 @@ class AutomationPlanService:
                 for plan in candidates
                 if plan.status in _EXPIREABLE_STATUSES
                 and plan.expires_at is not None
-                and _as_utc(plan.expires_at) <= current_time
+                and ensure_utc(plan.expires_at) <= current_time
             ),
-            key=lambda item: (_as_utc(cast(datetime, item.expires_at)), item.plan_id),
+            key=lambda item: (ensure_utc(cast(datetime, item.expires_at)), item.plan_id),
         )[:limit]
         expired: list[Plan] = []
         for plan in due:
@@ -807,46 +770,6 @@ class AutomationPlanService:
                 f"plan cannot be superseded from status {plan.status.value}",
             )
         return await self._transition(plan, PlanStatus.SUPERSEDED, reason_code="replacement_plan")
-
-    async def create(
-        self,
-        action: ActionPlanV3,
-        source: WorkloadSource,
-        snapshot: ArchiveRepositorySnapshot,
-        *,
-        policy_result: dict[str, Any] | None = None,
-        change_set_id: str | None = None,
-        actor: str = "system",
-    ) -> Plan:
-        return await self.create_plan(
-            action,
-            source,
-            snapshot,
-            policy_result=policy_result,
-            change_set_id=change_set_id,
-            actor=actor,
-        )
-
-    async def read(self, plan_id: str) -> Plan | None:
-        return await self.read_plan(plan_id)
-
-    async def approve(self, plan_id: str, digest: str) -> Plan:
-        return await self.approve_plan(plan_id, digest)
-
-    async def stale(
-        self,
-        plan_id: str,
-        *,
-        actor: str = "system",
-        reason_code: str | None = None,
-    ) -> Plan | None:
-        return await self.mark_stale(plan_id, actor=actor, reason_code=reason_code)
-
-    async def expire(self, plan_id: str, *, now: datetime | None = None) -> Plan | None:
-        return await self.expire_plan(plan_id, now=now)
-
-    async def supersede(self, plan_id: str) -> Plan | None:
-        return await self.supersede_plan(plan_id)
 
     async def _get_git_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile:
         resolver = self.git_blob_resolver
@@ -918,7 +841,7 @@ class AutomationPlanService:
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "could not resolve the current source base revision",
             ) from exc
-        if not isinstance(revision, str) or not _COMMIT_SHA_PATTERN.fullmatch(revision):
+        if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise AutomationPlanError(
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "the current source resolver did not return an immutable full Git commit SHA",
@@ -984,21 +907,13 @@ class AutomationPlanService:
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"workload source binding is not resolved ({source.status.value})",
             )
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the automation plan service",
             )
-        if source.expires_at is not None and _as_utc(source.expires_at) <= now:
+        if source.expires_at is not None and ensure_utc(source.expires_at) <= now:
             raise AutomationPlanError(AutomationErrorCode.SOURCE_CHANGED, "workload source binding has expired")
-
-
-PlanService = AutomationPlanService
 
 
 def _archive_contents(
@@ -1016,7 +931,7 @@ def _archive_contents(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot repository identity does not match the resolved workload source",
         )
-    if not isinstance(metadata.commit_sha, str) or not _COMMIT_SHA_PATTERN.fullmatch(metadata.commit_sha):
+    if not isinstance(metadata.commit_sha, str) or not GIT_OBJECT_SHA.fullmatch(metadata.commit_sha):
         raise AutomationPlanError(
             AutomationErrorCode.SOURCE_CHANGED,
             "archive snapshot does not identify an immutable full Git commit SHA",
@@ -1165,7 +1080,7 @@ def _validated_blob_sha(
             AutomationErrorCode.SOURCE_CHANGED,
             f"provider content for {path!r} does not match the immutable archive snapshot",
         )
-    if not isinstance(sha, str) or not _GIT_BLOB_SHA_PATTERN.fullmatch(sha):
+    if not isinstance(sha, str) or not GIT_OBJECT_SHA.fullmatch(sha):
         raise AutomationPlanError(
             AutomationErrorCode.PROVIDER_NOT_READY,
             f"provider did not return a valid Git blob SHA for {path!r}; snapshot SHA-256 cannot be substituted",
@@ -1221,9 +1136,3 @@ def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)

@@ -18,13 +18,15 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterable, List, Literal, Optional, TypeGuard
+from typing import Iterable, List, Literal, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from greenkube.automation.git.budget import charge_provider_call
+from greenkube.gitops.sha import GIT_OBJECT_SHA
+from greenkube.gitops.sha import is_full_commit_sha as is_full_commit_sha  # re-exported for the adapters
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +181,6 @@ def pull_request_option_capabilities(options: PullRequestOptions) -> frozenset[G
 # the building blocks of URL/path injection, so both are rejected up front.
 _GIT_REF_FORBIDDEN_CHARS = re.compile(r"[\x00-\x1f\x7f ~^:?*\[\\]")
 _GIT_REF_FORBIDDEN_SEQUENCES = ("..", "@{", "//")
-_GIT_OBJECT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _GREENKUBE_PLAN_BRANCH = re.compile(r"greenkube/plan/[0-9a-f]{32}\Z")
 
 
@@ -209,11 +210,6 @@ def validate_greenkube_plan_branch(ref: str) -> str:
     return value
 
 
-def is_full_commit_sha(value: object) -> TypeGuard[str]:
-    """Return whether ``value`` is an immutable full SHA-1 or SHA-256 object ID."""
-    return isinstance(value, str) and _GIT_OBJECT_SHA.fullmatch(value) is not None
-
-
 def git_blob_id(content: str | bytes, *, object_format: Literal["sha1", "sha256"] = "sha1") -> str:
     """Return the Git blob object ID (``git hash-object``) of UTF-8 file content."""
     payload = content.encode("utf-8") if isinstance(content, str) else content
@@ -223,7 +219,7 @@ def git_blob_id(content: str | bytes, *, object_format: Literal["sha1", "sha256"
 
 
 def _validate_full_commit_sha(revision: object, *, provider: str, ref: str) -> str:
-    if not isinstance(revision, str) or _GIT_OBJECT_SHA.fullmatch(revision) is None:
+    if not isinstance(revision, str) or GIT_OBJECT_SHA.fullmatch(revision) is None:
         raise GitProviderError(f"{provider} returned an invalid full commit SHA for ref '{ref}'.")
     return revision
 
@@ -941,17 +937,6 @@ class GitProvider(ABC):
 
     @abstractmethod
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None: ...
-
-    @abstractmethod
-    async def update_file(
-        self,
-        repo: GitRepository,
-        path: str,
-        content: str,
-        message: str,
-        branch: str,
-        sha: Optional[str] = None,
-    ) -> None: ...
 
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         """Creates one native atomic commit, or fails when the provider cannot guarantee it."""

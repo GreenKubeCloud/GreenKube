@@ -167,14 +167,7 @@ class PromQLCatalog:
     def pod_restarts(self) -> str:
         return f"sum({self._pod('kube_pod_container_status_restarts_total')}) by (namespace,pod)"
 
-    def container_restarts(self) -> str:
-        return f"sum({self._pod('kube_pod_container_status_restarts_total')}) by (namespace,pod,container)"
-
     def pod_node(self) -> str:
         """Pod → node placement, used when cAdvisor series lack a ``node`` label."""
         selector = _selector('node!=""', *self.extra_matchers)
         return f"max(kube_pod_info{selector}) by (namespace,pod,node)"
-
-    @staticmethod
-    def node_instance_labels(label_key: str) -> str:
-        return f"kube_node_labels{{{label_key}!=''}}"

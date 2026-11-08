@@ -61,10 +61,10 @@ Print the GreenKube version.
 The production profile starts the plan worker as:
 
 ```bash
-python -m greenkube.cli.automation_worker --queue plans
+python -m greenkube.cli.automation_worker
 ```
 
-It should run as a single replica. The worker claims queued pull-request operations through database leases, polls linked provider pull requests, and exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Do not run it manually alongside `automation.mode=inline`; use the Helm chart so the mode and credentials are configured consistently.
+It should run as a single replica (the chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value). The worker claims queued pull-request operations through database leases, polls linked provider pull requests, and exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Do not run it manually alongside `automation.mode=inline`; use the Helm chart so the mode and credentials are configured consistently.
 
 ## Global flags
 

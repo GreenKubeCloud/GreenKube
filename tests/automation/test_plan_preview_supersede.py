@@ -122,8 +122,8 @@ async def preview_runtime(monkeypatch: pytest.MonkeyPatch):
 async def test_reopening_a_preview_returns_the_same_plan_instead_of_409(preview_runtime):
     runtime, repository, _, _ = preview_runtime
 
-    first = await runtime.create_plan([42])
-    second = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
+    second = await runtime.prepare_plan([42])
 
     assert first.status is PlanStatus.VALIDATED
     assert second.plan_id == first.plan_id
@@ -136,9 +136,9 @@ async def test_preview_close_preview_returns_a_new_plan_and_supersedes_the_old_o
     """Acceptance for D6: preview -> close (DELETE) -> preview."""
     runtime, repository, _, _ = preview_runtime
 
-    first = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
     cancelled = await runtime.cancel_plan(first.plan_id, actor="tester")
-    reopened = await runtime.create_plan([42])
+    reopened = await runtime.prepare_plan([42])
 
     assert cancelled is not None and cancelled.status is PlanStatus.SUPERSEDED
     assert reopened.plan_id != first.plan_id
@@ -152,9 +152,9 @@ async def test_preview_close_preview_returns_a_new_plan_and_supersedes_the_old_o
 async def test_new_source_revision_preview_supersedes_the_open_preview(preview_runtime):
     runtime, repository, snapshots, _ = preview_runtime
 
-    first = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
     snapshots.commit_sha = "c" * 40
-    second = await runtime.create_plan([42])
+    second = await runtime.prepare_plan([42])
 
     assert second.plan_id != first.plan_id
     assert second.status is PlanStatus.VALIDATED
@@ -166,9 +166,9 @@ async def test_new_source_revision_preview_supersedes_the_open_preview(preview_r
 async def test_reopening_an_expired_preview_replans_instead_of_409(preview_runtime):
     runtime, repository, _, now = preview_runtime
 
-    first = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
     now[0] = NOW + timedelta(minutes=31)
-    reopened = await runtime.create_plan([42])
+    reopened = await runtime.prepare_plan([42])
 
     assert reopened.plan_id != first.plan_id
     assert reopened.status is PlanStatus.VALIDATED
@@ -180,11 +180,11 @@ async def test_reopening_an_expired_preview_replans_instead_of_409(preview_runti
 async def test_approved_plans_still_block_a_new_preview(preview_runtime):
     runtime, repository, _, _ = preview_runtime
 
-    first = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
     assert await repository.set_plan_status(first.plan_id, PlanStatus.APPROVED) is not None
 
     with pytest.raises(AutomationPlanError) as error:
-        await runtime.create_plan([42])
+        await runtime.prepare_plan([42])
 
     assert error.value.code is AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS
     with pytest.raises(AutomationPlanError) as cancel_error:
@@ -196,7 +196,7 @@ async def test_approved_plans_still_block_a_new_preview(preview_runtime):
 async def test_concurrent_create_never_overwrites_an_advanced_plan(preview_runtime, monkeypatch):
     """D12 / BUG-56: save_plan was a check-then-act upsert that could reset an approved plan."""
     runtime, repository, snapshots, _ = preview_runtime
-    first = await runtime.create_plan([42])
+    first = await runtime.prepare_plan([42])
     assert await repository.set_plan_status(first.plan_id, PlanStatus.APPROVED) is not None
     original_get_plan = repository.get_plan
     calls = {"count": 0}

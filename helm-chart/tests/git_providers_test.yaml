@@ -34,7 +34,7 @@ tests:
           path: data.GITOPS_SECRET_MOUNT
           value: /etc/greenkube/git-providers
 
-  - it: accepts the documented nested tokenSecret and repositories shape
+  - it: rejects the removed nested tokenSecret alias with a migration hint
     set:
       automation.providers:
         - id: github-documented
@@ -42,14 +42,28 @@ tests:
           tokenSecret:
             name: git-auth
             key: pat
+          repositoryAllowlist:
+            - acme/platform
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: automation.providers[0].tokenSecret was removed; use secretName, secretKey and secretNamespace
+
+  - it: rejects the removed repositories alias with a migration hint
+    set:
+      automation.providers:
+        - id: github-documented
+          type: github
+          secretName: git-auth
+          secretKey: pat
           repositories:
             - acme/platform
     templates:
-      - templates/configmap.yaml
+      - templates/deployment.yaml
     asserts:
-      - equal:
-          path: data.GITOPS_PROVIDERS_JSON
-          value: '{"providers":[{"apiBaseUrl":"","id":"github-documented","repositories":["acme/platform"],"tokenSecret":{"key":"pat","name":"git-auth"},"type":"github"}]}'
+      - failedTemplate:
+          errorMessage: automation.providers[0].repositories was removed; use repositoryAllowlist
 
   - it: serializes a browser-facing Gitea URL separately from its API URL
     set:

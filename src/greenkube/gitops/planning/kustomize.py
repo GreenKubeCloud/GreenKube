@@ -29,6 +29,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.raw_manifest import (
     _POD_SPEC_PATHS,
     _WORKLOAD_API_VERSIONS,
@@ -43,6 +44,7 @@ from greenkube.gitops.planning.raw_manifest import (
 )
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.gitops.snapshots.models import RepositorySnapshot
 
 KUSTOMIZE_VERSION = "v5.8.3"
@@ -73,8 +75,6 @@ _SUPPORTED_KUSTOMIZATION_KEYS = frozenset(
     }
 )
 _REMOTE_HOST = re.compile(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::[0-9]+)?/")
-_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
-_SNAPSHOT_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PATCH_ENTRY_KEYS = frozenset({"path", "patch", "target", "options"})
 _PATCH_TARGET_KEYS = frozenset({"group", "version", "kind", "name", "namespace", "labelSelector", "annotationSelector"})
 _PATCH_METADATA_MARKERS = frozenset({"greenkube.cloud/managed", "greenkube.cloud/action-id"})
@@ -231,17 +231,19 @@ class KustomizePlanner:
             warnings=warnings,
         )
         source_revision = source.source_revision or source.revision
-        digest = _plan_digest(
+        digest = plan_digest(
             plan_id=plan_id,
             action=action,
             source=source,
-            edits=edits,
+            files=sorted(edits, key=lambda item: item.path),
             diff=diff,
             rendered_diff=rendered_diff,
             base_revision=base_revision,
             source_revision=source_revision,
             validation=validation,
             warnings=warnings,
+            renderer=RendererKind.KUSTOMIZE,
+            error_type=KustomizePlanError,
         )
         return FilePlan(
             plan_id=plan_id,
@@ -276,7 +278,7 @@ def _validate_request(
 ) -> list[SetContainerResources]:
     if not isinstance(snapshot, RepositorySnapshot):
         raise KustomizePlanError("snapshot must be an archive RepositorySnapshot")
-    if not isinstance(base_revision, str) or not _SHA_PATTERN.fullmatch(base_revision):
+    if not isinstance(base_revision, str) or not GIT_OBJECT_SHA.fullmatch(base_revision):
         raise KustomizePlanError("resolved base revision must be a full 40- or 64-character commit SHA")
     if base_revision.lower() != snapshot.metadata.commit_sha.lower():
         raise KustomizePlanError("base revision does not match the archive snapshot commit")
@@ -405,7 +407,7 @@ def _snapshot_file_map(snapshot: RepositorySnapshot) -> dict[str, Any]:
             raise KustomizePlanError(f"{path}: archive snapshot contains duplicate file metadata")
         if type(item.size_bytes) is not int or item.size_bytes < 0:
             raise KustomizePlanError(f"{path}: archive snapshot file size is invalid")
-        if not isinstance(item.digest, str) or not _SNAPSHOT_DIGEST_PATTERN.fullmatch(item.digest):
+        if not isinstance(item.digest, str) or not SHA256_DIGEST.fullmatch(item.digest):
             raise KustomizePlanError(f"{path}: archive snapshot file digest is invalid")
         files[path] = item
     return files
@@ -1100,7 +1102,7 @@ def _render(renderer: KustomizeRenderer, snapshot: RepositorySnapshot, overlay_p
         not isinstance(result, RawRenderResult)
         or result.renderer is not RendererKind.KUSTOMIZE
         or not isinstance(result.output_digest, str)
-        or not _SNAPSHOT_DIGEST_PATTERN.fullmatch(result.output_digest)
+        or not SHA256_DIGEST.fullmatch(result.output_digest)
     ):
         raise KustomizePlanError("Kustomize renderer did not return a validated render result")
     return result
@@ -1205,55 +1207,3 @@ def _file_diff(edits: Sequence[FileEdit], originals: Mapping[str, str]) -> str:
         fromfile = "/dev/null" if edit.operation == "create" else f"a/{edit.path}"
         chunks.append(_unified_diff(old_content, new_content, fromfile, f"b/{edit.path}"))
     return "".join(chunks)
-
-
-def _plan_digest(
-    *,
-    plan_id: str,
-    action: ActionPlanV3,
-    source: WorkloadSource,
-    edits: Sequence[FileEdit],
-    diff: str,
-    rendered_diff: str,
-    base_revision: str,
-    source_revision: str | None,
-    validation: ValidationResult,
-    warnings: list[str],
-) -> str:
-    payload = {
-        "plan_id": plan_id,
-        "action": action.model_dump(mode="json"),
-        "binding": {
-            "id": source.id,
-            "provider_id": source.provider_id,
-            "repo_url": source.repo_url,
-            "ref": source.ref,
-            "path": source.path,
-            "namespace": source.namespace,
-            "workload_kind": source.workload_kind,
-            "workload_name": source.workload_name,
-            "renderer": source.renderer.value,
-            "status": source.status.value,
-            "revision": source.revision,
-            "source_revision": source.source_revision,
-        },
-        "files": [edit.model_dump(mode="json") for edit in sorted(edits, key=lambda item: item.path)],
-        "diff": diff,
-        "rendered_diff": rendered_diff,
-        "base_revision": base_revision,
-        "source_revision": source_revision,
-        "renderer": RendererKind.KUSTOMIZE.value,
-        "validation": validation.model_dump(mode="json"),
-        "warnings": warnings,
-    }
-    try:
-        canonical = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise KustomizePlanError("plan inputs must be deterministically JSON-serializable") from exc
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"

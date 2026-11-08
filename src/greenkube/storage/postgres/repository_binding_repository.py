@@ -84,8 +84,3 @@ class PostgresRepositoryBindingRepository(RepositoryBindingRepository):
                 *([cluster] if cluster is not None else []),
             )
             return [_binding(row) for row in rows]
-
-    async def delete_binding(self, binding_id: int) -> bool:
-        async with self.db_manager.connection_scope() as conn:
-            result = await conn.execute("DELETE FROM repository_bindings WHERE id=$1", binding_id)
-            return result.endswith(" 1")

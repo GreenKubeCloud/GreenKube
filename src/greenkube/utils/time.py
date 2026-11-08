@@ -18,13 +18,17 @@ DEFAULT_QUERY_STEP_SECONDS = 300
 
 
 def ensure_utc(value: UTCDateTime | str) -> UTCDateTime:
-    """Return an aware UTC datetime, interpreting naive values as UTC."""
+    """Return an aware UTC datetime, interpreting naive values as UTC.
+
+    This is the single UTC normalizer: modules must not define their own
+    ``_as_utc`` helpers (roadmap M6).
+    """
     if isinstance(value, str):
         try:
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError(f"Invalid date string: {value}") from exc
-    if value.tzinfo is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 

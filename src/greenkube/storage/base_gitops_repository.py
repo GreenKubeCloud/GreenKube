@@ -23,6 +23,7 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     configured_binding_ttl,
 )
+from greenkube.utils.time import ensure_utc
 
 MAX_PULL_REQUEST_POLLING_LEASE_SECONDS = 86_400
 MAX_WORKLOAD_BINDING_PAGE_SIZE = 500
@@ -60,16 +61,12 @@ def _binding_status_at(
 ) -> tuple[BindingStatus, str | None]:
     if status not in {BindingStatus.RESOLVED, BindingStatus.AMBIGUOUS}:
         return status, None
-    current = _as_utc(now)
-    if expires_at is not None and _as_utc(expires_at) <= current:
+    current = ensure_utc(now)
+    if expires_at is not None and ensure_utc(expires_at) <= current:
         return BindingStatus.STALE, "source-expired"
-    if current - _as_utc(observed_at) >= configured_binding_ttl():
+    if current - ensure_utc(observed_at) >= configured_binding_ttl():
         return BindingStatus.STALE, "source-observation-expired"
     return status, None
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +178,7 @@ class WorkloadBindingCoverage:
         for binding in bindings:
             total += 1
             counts[binding.status] += 1
-            observed_at = _as_utc(binding.observed_at)
+            observed_at = ensure_utc(binding.observed_at)
             latest = observed_at if latest is None else max(latest, observed_at)
         return cls(
             total=total,
@@ -497,7 +494,7 @@ class WorkloadBindingRepository(ABC):
         selected_statuses = None if statuses is None else {BindingStatus(status) for status in statuses}
         if selected_statuses is not None and not selected_statuses:
             return WorkloadBindingPage((), None, False)
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         bindings = [
             freshen_workload_binding(binding, now=current_at)
             for binding in await self.list_workload_bindings(cluster=cluster)
@@ -549,7 +546,7 @@ class WorkloadBindingRepository(ABC):
         now: datetime | None = None,
     ) -> WorkloadBindingCoverage:
         """Return freshness-aware status counts; SQL adapters should aggregate in storage."""
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         bindings = [
             freshen_workload_binding(binding, now=current_at)
             for binding in await self.list_workload_bindings(cluster=cluster)
@@ -690,9 +687,6 @@ class AutomationPlanRepository(ABC):
     ) -> Plan | None: ...
 
     @abstractmethod
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]: ...
-
-    @abstractmethod
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]: ...
 
     @abstractmethod
@@ -708,9 +702,6 @@ class AutomationPlanRepository(ABC):
 
     @abstractmethod
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None: ...
-
-    @abstractmethod
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]: ...
 
 
 class WebhookDeliveryRepository(ABC):
@@ -758,13 +749,7 @@ class AutomationWorkerRepository(ABC):
     """Persistence port for worker heartbeats and leases."""
 
     @abstractmethod
-    async def upsert_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat: ...
-
-    @abstractmethod
     async def get_worker_heartbeat(self, worker_id: str) -> WorkerHeartbeat | None: ...
-
-    @abstractmethod
-    async def list_worker_heartbeats(self, *, status: str | None = None) -> list[WorkerHeartbeat]: ...
 
     @abstractmethod
     async def prune_worker_heartbeats(self, *, cutoff: datetime) -> int: ...

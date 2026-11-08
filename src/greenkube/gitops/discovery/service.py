@@ -29,6 +29,7 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBindingCoverage,
     WorkloadBindingRepository,
 )
+from greenkube.utils.time import ensure_utc
 
 DEFAULT_DISCOVERY_INTERVAL_SECONDS = 300.0
 MIN_DISCOVERY_INTERVAL_SECONDS = 1.0
@@ -163,7 +164,7 @@ class GitOpsDiscoveryService:
             namespace=self._namespace,
             resources=resources,
         )
-        refreshed_at = _as_utc(self._clock())
+        refreshed_at = ensure_utc(self._clock())
         current = group_workload_sources(discovery.candidates)
         if any(identity[0] != self._cluster for identity in current):
             raise ValueError("discovery returned a candidate for a different cluster")
@@ -308,7 +309,7 @@ def _merge_candidates(
                     )
                 )
                 continue
-            if _as_utc(expires_at) <= now or now - _as_utc(candidate.observed_at) >= binding_ttl:
+            if ensure_utc(expires_at) <= now or now - ensure_utc(candidate.observed_at) >= binding_ttl:
                 if candidate.id not in current_ids:
                     historical.append(_mark_manual_resolution_stale(candidate, "manual-resolution-expired"))
                 manual_events.append(
@@ -336,8 +337,8 @@ def _merge_candidates(
             if selected is not None:
                 is_current = (
                     selected.status in {BindingStatus.RESOLVED, BindingStatus.AMBIGUOUS}
-                    and (selected.expires_at is None or _as_utc(selected.expires_at) > now)
-                    and now - _as_utc(selected.observed_at) < binding_ttl
+                    and (selected.expires_at is None or ensure_utc(selected.expires_at) > now)
+                    and now - ensure_utc(selected.observed_at) < binding_ttl
                     and isinstance(selected_generation, str)
                     and binding_candidate_generation_token(selected) == selected_generation
                 )
@@ -515,10 +516,6 @@ def _validate_interval(interval_seconds: float) -> None:
             "interval_seconds must be finite and between "
             f"{MIN_DISCOVERY_INTERVAL_SECONDS:g} and {MAX_DISCOVERY_INTERVAL_SECONDS:g}"
         )
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _utc_now() -> datetime:

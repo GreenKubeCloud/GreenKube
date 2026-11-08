@@ -47,7 +47,7 @@ pytest tests/integration/test_real_database_repositories.py
 docker compose -f docker-compose.test.yml down -v
 ```
 
-The compose service uses the official `postgres:16-alpine` image, exposes port `5432`, and stores data on `tmpfs`, so the
+The compose service uses the official `postgres:18.0-alpine3.22` image, exposes port `5432`, and stores data on `tmpfs`, so the
 database is disposable and starts cleanly for local test sessions.
 
 ## CI/CD

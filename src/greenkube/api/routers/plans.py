@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from typing import Any, cast
-from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -24,7 +23,7 @@ from greenkube.api.schemas import (
     AutomationPlanValidationResponse,
 )
 from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
+from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
 
 router = APIRouter()
 
@@ -280,7 +279,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         rollback_of_plan_id=plan.rollback_of_plan_id,
         source=AutomationPlanSourceResponse(
             controller=f"{plan.source.controller_kind.value}/{plan.source.controller_name}",
-            repo=_safe_repository_url(plan.source.repo_url),
+            repo=public_repository_url(plan.source.repo_url),
             base_branch=plan.source.ref,
             base_revision=rendered.base_revision if rendered is not None else None,
             path=plan.source.path,
@@ -337,23 +336,6 @@ def _public_warnings(warnings: list[str]) -> list[str]:
         if text:
             public.append(text)
     return public
-
-
-def _safe_repository_url(value: str) -> str:
-    if value == "unresolved":
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() not in {"http", "https", "ssh", "git"} or not host:
-        return "redacted"
-    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
 
 
 def _domain_error_response(error: AutomationPlanError) -> JSONResponse:

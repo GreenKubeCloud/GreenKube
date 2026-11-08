@@ -3,11 +3,12 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, Callable, Coroutine, List
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
@@ -17,20 +18,51 @@ from greenkube.api.dependencies import (
     get_pull_request_repository,
     get_recommendation_repository,
 )
-from greenkube.api.routers.plans import _domain_error_response, _safe_repository_url
+from greenkube.api.routers.plans import _domain_error_response
 from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
 from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
+from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
 from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullRequestRecord, PullRequestStatus
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
 
 router = APIRouter()
 WORKER_STALE_AFTER = timedelta(seconds=120)
 
+# Compatibility routes superseded by /automation/plans (roadmap M4, F5). They keep working
+# this release and announce their removal (RFC 9745 Deprecation, RFC 8594 Sunset).
+LEGACY_ROUTE_HEADERS = {
+    "Deprecation": "@1796947200",  # 2026-12-11, v0.4.0
+    "Sunset": "Fri, 29 Jan 2027 00:00:00 GMT",  # v0.5.0
+    "Link": '</api/v1/automation/plans>; rel="successor-version"',
+}
 
-@router.post("/recommendations/{rec_id}/apply-pr", response_model=None)
+
+class _DeprecatedRoute(APIRoute):
+    """Adds the legacy-route deprecation headers to every response, errors included."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def deprecated_handler(request: Request) -> Response:
+            try:
+                response = await handler(request)
+            except HTTPException as error:
+                raise HTTPException(
+                    error.status_code, error.detail, headers={**(error.headers or {}), **LEGACY_ROUTE_HEADERS}
+                ) from error
+            response.headers.update(LEGACY_ROUTE_HEADERS)
+            return response
+
+        return deprecated_handler
+
+
+legacy_router = APIRouter(route_class=_DeprecatedRoute)
+
+
+@legacy_router.post("/recommendations/{rec_id}/apply-pr", response_model=None, deprecated=True)
 async def apply_recommendation_pr(
     rec_id: int,
     response: Response,
@@ -119,7 +151,7 @@ async def list_recommendation_pull_requests(
     return _externalize_pull_request_urls(await pr_repo.get_pull_requests_for_recommendation(rec_id))
 
 
-@router.get("/recommendations/{rec_id}/apply-pr/eligibility")
+@legacy_router.get("/recommendations/{rec_id}/apply-pr/eligibility", deprecated=True)
 async def recommendation_pr_eligibility(
     rec_id: int,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
@@ -142,7 +174,7 @@ async def recommendation_pr_eligibility(
     return {
         "eligible": True,
         "plan_id": plan.plan_id,
-        "repo": _safe_repository_url(plan.source.repo_url),
+        "repo": public_repository_url(plan.source.repo_url),
         "path": plan.source.path,
         "branch": plan.source.ref,
         "policy_result": plan.policy_result,
@@ -220,7 +252,7 @@ async def automation_status(
         worker_healthy = False
     discovery_age = None
     if coverage is not None and coverage.last_refresh is not None:
-        discovery_age = max(0.0, (now - _aware_utc(coverage.last_refresh)).total_seconds())
+        discovery_age = max(0.0, (now - ensure_utc(coverage.last_refresh)).total_seconds())
 
     renderer_url = os.getenv("GITOPS_RENDERER_URL", "").strip()
     queue = (
@@ -301,16 +333,10 @@ async def _provider_token_resolvable(provider: GitOpsProviderConfig) -> bool:
     return bool(value and value.strip())
 
 
-def _aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def _iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _aware_utc(value).isoformat().replace("+00:00", "Z")
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _safe_host(value: str | None) -> str | None:
@@ -400,7 +426,7 @@ def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[Pul
     return externalized
 
 
-@router.get("/automation/operations/{operation_id}")
+@legacy_router.get("/automation/operations/{operation_id}", deprecated=True)
 async def get_automation_operation(
     operation_id: str,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
@@ -419,6 +445,9 @@ async def get_automation_operation(
     return _operation_response(operation, plan, pull_request)
 
 
+router.include_router(legacy_router)
+
+
 def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
     if plan.file_plan is None:
         raise AutomationPlanError(
@@ -429,7 +458,7 @@ def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
         status="dry_run",
         policy_result=plan.policy_result,
         provider=plan.source.provider_id,
-        repo=_safe_repository_url(plan.source.repo_url),
+        repo=public_repository_url(plan.source.repo_url),
         base_branch=plan.source.ref,
         path=plan.source.path,
         patch=plan.action.model_dump(mode="json"),

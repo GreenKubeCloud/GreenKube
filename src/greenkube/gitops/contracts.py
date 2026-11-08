@@ -14,8 +14,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
+from greenkube.gitops.sha import SHA256_DIGEST
+
 _QUANTITY_PATTERN = re.compile(r"^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+|(?:n|u|m|k|K|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei))?$")
-_SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SCP_REPOSITORY_PATTERN = re.compile(r"^(?:[^/@:\s]+@)?(?P<host>[^:/\s]+):(?P<path>[^?#\s]+)$")
 DEFAULT_BINDING_TTL = timedelta(minutes=30)
 MAX_BINDING_TTL = timedelta(hours=24)
@@ -48,12 +49,16 @@ class RendererKind(StrEnum):
     HELM_RELEASE = "helm_release"
 
 
+#: Renderers the planners, snapshot resolver and rollback can handle (one definition, roadmap M6).
+PLANNABLE_RENDERERS: frozenset[RendererKind] = frozenset(
+    {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
+)
+
+
 class ControllerKind(StrEnum):
     ARGOCD = "argocd"
     FLUX_KUSTOMIZATION = "flux_kustomization"
     FLUX_HELM_RELEASE = "flux_helm_release"
-    EXPLICIT_REPOSITORY = "explicit_repository"
-    ANNOTATION = "annotation"
     MANUAL_RESOLUTION = "manual_resolution"
 
 
@@ -155,7 +160,7 @@ def _repository_path(value: str, *, allow_root: bool) -> str:
 
 
 def _validate_digest(value: str) -> str:
-    if not _SHA256_PATTERN.fullmatch(value):
+    if not SHA256_DIGEST.fullmatch(value):
         raise ValueError("digest must be a sha256 digest")
     return value
 
@@ -207,28 +212,12 @@ class WorkloadSource(ContractModel):
         return _repository_path(value, allow_root=True)
 
 
-def canonical_repository_identity(value: str) -> str:
-    """Normalize a Git URL for identity without retaining userinfo or query credentials."""
-    if value == "unresolved":
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() in {"http", "https", "ssh", "git", "oci"} and host:
-        normalized_host = f"[{host.lower()}]" if ":" in host else host.lower()
-        normalized_netloc = f"{normalized_host}:{port}" if port is not None else normalized_host
-        return f"{parts.scheme.lower()}://{normalized_netloc}{parts.path}"
-    match = _SCP_REPOSITORY_PATTERN.fullmatch(value)
-    if match is not None:
-        return f"{match.group('host').lower()}:{match.group('path')}"
-    return "redacted"
-
-
 def sanitize_repository_url(value: str) -> str:
-    """Remove repository URL userinfo and query credentials before persistence."""
+    """Normalize a Git URL without userinfo or query credentials.
+
+    The result is both the persisted form and the identity used to compare
+    repositories (``canonical_repository_identity``).
+    """
     if value == "unresolved":
         return value
     try:
@@ -245,6 +234,16 @@ def sanitize_repository_url(value: str) -> str:
     if match is not None:
         return f"{match.group('host').lower()}:{match.group('path')}"
     return "redacted"
+
+
+canonical_repository_identity = sanitize_repository_url
+
+
+def public_repository_url(value: str) -> str:
+    """Repository URL safe to return from the API: bounded, printable and credential-free."""
+    if len(value) > 512 or any(ord(character) < 32 for character in value):
+        return "redacted"
+    return sanitize_repository_url(value)
 
 
 def _safe_renderer_generation_config(value: Any) -> Any:

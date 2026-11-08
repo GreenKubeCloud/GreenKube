@@ -72,8 +72,7 @@ async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_m
         assert kwargs == {"connect_db": False}
         return service
 
-    async def run_worker(*, queue: str, plan_worker, heartbeat=None):
-        assert queue == "plans"
+    async def run_worker(*, plan_worker, heartbeat=None):
         assert plan_worker is worker
         assert callable(heartbeat)
         heartbeat()
