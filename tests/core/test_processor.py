@@ -869,27 +869,21 @@ async def test_run_range_uses_historical_node_data(
     }
 
     # Act
-    # Act
-    await data_processor.run_range(start, end)
+    rows = await data_processor.run_range(start, end)
 
     # Assert
     # Verify that get_latest_snapshots_before and get_snapshots were called
     mock_node_repository.get_latest_snapshots_before.assert_called_once()
     mock_node_repository.get_snapshots.assert_called_once()
 
-    # Verify that calculate_node_energy was called.
-    # We can check the 'node_profile' argument passed to it.
-    # Since we have one data point at 10:00, it should use the initial snapshot (t3.medium)
-
-    calls = data_processor.estimator.calculate_node_energy.call_args_list
-    assert len(calls) > 0
-
-    # Check the profile used in the call corresponding to the timestamp
-    # The first row describes [10:00, 10:05) (evaluated at 10:05)
-    # So it should use t3.medium profile
-    args, kwargs = calls[0]
-    assert kwargs["node_name"] == "node-1"
-    assert kwargs["node_profile"]["vcores"] == 2
+    # The first row describes [10:00, 10:05) (evaluated at 10:05), so the
+    # Impact Model allocates the t3.medium profile of that time (2 cores,
+    # 10-20 W): 1 core used -> 10 + 0.5 * 10 = 15 W, never the later t3.large
+    # (25 W). Pod rows plus the node's __idle__ row add up to the node power.
+    pod = next(row for row in rows if row.pod_name == "pod-A" and not row.container_name)
+    (idle,) = data_processor._range_processor.last_idle_metrics
+    assert idle.node == "node-1"
+    assert pod.joules + idle.joules == pytest.approx(15 * 300, rel=1e-6)
 
 
 @pytest.mark.asyncio

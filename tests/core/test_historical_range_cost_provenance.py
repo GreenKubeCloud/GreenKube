@@ -187,6 +187,10 @@ async def test_pod_and_container_rows_carry_provenance():
     assert container.emaps_zone == "FR"
     assert container.is_estimated == next(row for row in cache_rows if row.container_name is None).is_estimated
 
+    # Without an OpenCost cost, the Impact Model prices the pod's reservation at
+    # the node's list price (B2) and labels the tier; it never claims "opencost".
     queue_pod = next(row for row in rows if row.namespace == "queue" and row.container_name is None)
-    assert queue_pod.cost_source == "none"
-    assert not is_cost_trusted(queue_pod)
+    assert queue_pod.cost_source == "pricing_catalog"
+    assert queue_pod.total_cost > 0
+    assert queue_pod.total_cost == pytest.approx((queue_pod.cost_cpu or 0) + (queue_pod.cost_ram or 0))
+    assert any(reason.startswith("No observed cost for pod") for reason in queue_pod.estimation_reasons)

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 from .. import __version__
+from ..collectors import dcgm_collector
 from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import OpenCostCollector, opencost_step_share
@@ -23,14 +24,17 @@ from ..core.config import Config, get_config
 from ..core.metric_assembler import (
     MetricAssembler,
     cost_fields,
-    power_source_for_profile,
     provenance_estimation_reasons,
 )
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
-from ..models.metrics import CombinedMetric
+from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
+from ..impact.realization import refresh_realization_context
+from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
+from ..models.metrics import CombinedMetric, EnergyMetric
+from ..models.node import NodeInfo
 from ..models.provenance import UsageSource
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
@@ -39,9 +43,10 @@ logger = logging.getLogger(__name__)
 
 #: Bumped when the range pipeline changes how stored values are computed
 #: (A1: pod cgroup no longer double counted; A2: half-open per-step samples;
-#: A10: capacity-derived power profiles).  Rows written before carry the bare
-#: package version and over-state CPU, memory and energy.
-CALCULATION_VERSION = f"{__version__}+range.2"
+#: A10: capacity-derived power profiles; B2: energy, CO2e and modeled cost
+#: allocated by the Impact Model, see ``model_version``).  Rows written before
+#: carry the bare package version and over-state CPU, memory and energy.
+CALCULATION_VERSION = f"{__version__}+range.3"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -88,6 +93,10 @@ class HistoricalRangeProcessor:
         self._config = config if config is not None else get_config()
         self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
         self._promql = PromQLCatalog.from_config(self._config)
+        self._allocator = MetricRowAllocator(self._config)
+        self._gpu_model = GpuPowerModel()
+        #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
+        self.last_idle_metrics: List[NodeIdleMetric] = []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -199,6 +208,131 @@ class HistoricalRangeProcessor:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
+
+    async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
+        """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
+        step = self._promql.step
+        try:
+            power, utilization = await asyncio.gather(
+                self._query_range(chunk, dcgm_collector.power_query(step)),
+                self._query_range(chunk, dcgm_collector.utilization_query(step)),
+            )
+        except Exception as error:
+            logger.warning(
+                "DCGM GPU metrics unavailable for %s -> %s: %s; GPU power is not counted for this window.",
+                chunk.start.isoformat(),
+                chunk.end.isoformat(),
+                error,
+            )
+            return {}
+        return dcgm_collector.samples_by_step(
+            power, utilization, lambda series: self._iter_window_samples(series, chunk)
+        )
+
+    def _gpu_power_by_group(
+        self,
+        gpu_by_sample: dict[int, list[dcgm_collector.GpuSample]],
+        groups: dict[tuple[int, str], list[tuple[str, str]]],
+        pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]],
+        pod_node_latest: dict[tuple[str, str], str],
+        known_nodes: set[str],
+    ) -> dict[tuple[int, str], NodeGpuPower]:
+        """GPU power of every (sample, node) group, attributed to the group's pods.
+
+        A GPU is placed on its pod's node, else on the first label naming a
+        known node, else on the node of the exporter pod. Power attributed to a
+        pod without a row in the group is counted as unattributed (``__idle__``),
+        so no measured GPU energy is dropped.
+        """
+        if not gpu_by_sample:
+            return {}
+        exporter_nodes = {pod: node for (_ns, pod), node in pod_node_latest.items()}
+        result: dict[tuple[int, str], NodeGpuPower] = {}
+        for sample_start, gpu_samples in gpu_by_sample.items():
+            placement = pod_node_map_by_ts.get(sample_start, {})
+            devices: dict[str, list[GpuDevice]] = defaultdict(list)
+            for gpu in gpu_samples:
+                identity = gpu.identity
+                pod_key = (identity.namespace, identity.pod) if identity.namespace and identity.pod else None
+                node = (placement.get(pod_key) or pod_node_latest.get(pod_key)) if pod_key else None
+                if not node:
+                    node = next((hint for hint in identity.node_hints if hint in known_nodes), None)
+                if not node:
+                    for hint in (identity.exporter_pod, *identity.node_hints):
+                        if hint and hint in exporter_nodes:
+                            node = exporter_nodes[hint]
+                            break
+                if not node:
+                    continue
+                devices[node].append(
+                    GpuDevice(
+                        node=node,
+                        device=identity.device,
+                        model_name=identity.model_name,
+                        power_watts=gpu.power_watts,
+                        utilization_pct=gpu.utilization_pct,
+                        namespace=identity.namespace,
+                        pod=identity.pod,
+                    )
+                )
+            for node, node_devices in devices.items():
+                power = node_gpu_power(node_devices, self._gpu_model)
+                pods = set(groups.get((sample_start, node), ()))
+                orphaned = sum(watts for key, watts in power.by_pod.items() if key not in pods)
+                if orphaned:
+                    power = NodeGpuPower(
+                        by_pod={key: watts for key, watts in power.by_pod.items() if key in pods},
+                        usage_by_pod={key: usage for key, usage in power.usage_by_pod.items() if key in pods},
+                        unattributed_watts=power.unattributed_watts + orphaned,
+                        sources=power.sources,
+                    )
+                result[(sample_start, node)] = power
+        return result
+
+    @staticmethod
+    def _node_spec(
+        node_name: str,
+        info: NodeInfo | None,
+        power: NodePowerProfile,
+        boavizta_cache: dict,
+        *,
+        instance_type: str | None,
+        gpu_unattributed_watts: float,
+    ) -> NodeSpec:
+        """What the Impact Model needs to know about one node at one step."""
+        profile = power.profile or {}
+        embodied_profile = None
+        if info is not None and info.cloud_provider and info.instance_type:
+            embodied_profile = boavizta_cache.get((info.cloud_provider, info.instance_type))
+        return NodeSpec(
+            name=node_name,
+            instance_type=instance_type,
+            provider=info.cloud_provider if info else None,
+            region=info.region if info else None,
+            cpu_capacity_cores=info.cpu_capacity_cores if info else None,
+            memory_capacity_bytes=info.memory_capacity_bytes if info else None,
+            idle_watts=float(profile.get("minWatts", 0.0) or 0.0),
+            max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
+            vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
+            power_source=power.source,
+            embodied_g_per_hour=embodied_g_per_hour(embodied_profile),
+            gpu_unattributed_watts=gpu_unattributed_watts,
+            is_fallback=power.is_fallback,
+        )
+
+    async def _write_idle_metrics(self, idle_rows: List[NodeIdleMetric]) -> None:
+        """Persists the ``__idle__`` rows of a range (idempotent upsert per node and step).
+
+        A storage error fails the window like any Prometheus error, so the
+        watermark is not advanced over a window without its idle rows.
+        """
+        repository = self.combined_metrics_repository
+        if not idle_rows or not isinstance(repository, CombinedMetricsRepository):
+            return
+        try:
+            await repository.write_idle_metrics(idle_rows)
+        except Exception as error:
+            raise RangeCollectionError(f"Could not store {len(idle_rows)} node idle row(s)") from error
 
     # ------------------------------------------------------------------
     # Public API
@@ -369,8 +503,17 @@ class HistoricalRangeProcessor:
             logger.warning("Failed to collect pod storage metrics: %s", e)
             pod_storage_map = {}
 
+        # Realization inputs (autoscalers, consolidation policies, disruption
+        # blockers) are refreshed from the controller's collection cycle (B6).
+        try:
+            await refresh_realization_context(self._config)
+        except Exception as error:  # never fail a collection window for it
+            logger.warning("Could not refresh the realization context: %s", error)
+
         # --- Chunked processing ---
         combined: List[CombinedMetric] = []
+        idle_rows: List[NodeIdleMetric] = []
+        allocator = self._allocator
         skipped_carbon = 0
         unknown_power_nodes: set[str] = set()
         # (node, sample_start) -> PowerSource value; seam for per-row power provenance (A11).
@@ -459,45 +602,29 @@ class HistoricalRangeProcessor:
                 for sample_start, pod_map in samples.items()
             }
 
-            # Compute energy metrics for this chunk
-            chunk_energy_metrics = []
+            # Pods of every (sample, node): the allocation unit of the Impact Model (B2).
+            groups: dict[tuple[int, str], list[tuple[str, str]]] = defaultdict(list)
+            for sample_start, pod_map in sorted(samples.items()):
+                for pod_key in pod_map:
+                    node = pod_node_map_by_ts.get(sample_start, {}).get(pod_key) or ""
+                    groups[(sample_start, node)].append(pod_key)
             latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt
-            for sample_start, pod_map in sorted(samples.items()):
-                sample_dt = datetime.fromtimestamp(sample_start, tz=timezone.utc)
-
-                node_total_cpu = defaultdict(float)
-                node_pod_map = defaultdict(list)
-                for pod_key, cpu in pod_map.items():
-                    node = pod_node_map_by_ts.get(sample_start, {}).get(pod_key) or ""
-                    node_total_cpu[node] += cpu
-                    node_pod_map[node].append((pod_key, cpu))
-
-                for node_name, pods_on_node in node_pod_map.items():
-                    power = profile_for_node(node_name, sample_dt)
-                    node_power_sources[(node_name, sample_start)] = power.source
-                    if power.is_fallback:
-                        unknown_power_nodes.add(node_name)
-                    calculated_metrics = estimator.calculate_node_energy(
-                        node_name=node_name,
-                        node_profile=power.profile,
-                        node_total_cpu=node_total_cpu.get(node_name, 0.0),
-                        pods_on_node=pods_on_node,
-                        duration_seconds=chosen_step_sec,
-                        estimation_reasons=list(power.reasons),
-                    )
-                    for m in calculated_metrics:
-                        m.timestamp = sample_dt
-                        chunk_energy_metrics.append(m)
+            gpu_power_by_group = self._gpu_power_by_group(
+                await self._collect_gpu(chunk),
+                groups,
+                pod_node_map_by_ts,
+                pod_info_node_latest,
+                set(nodes_info) | {node for _start, node in groups if node},
+            )
 
             del samples, pod_node_map_by_ts
 
-            # Prefetch carbon intensities
-            for em in chunk_energy_metrics:
-                node_name: str = em.node or ""
+            # Prefetch carbon intensities, once per zone and sample.
+            for sample_start, node_name in groups:
                 context = node_contexts.get(node_name) if node_name else None
                 zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
-                ts = em.timestamp
+                ts = datetime.fromtimestamp(sample_start, tz=timezone.utc)
                 try:
                     intensity = await repository.get_for_zone_at_time(zone, ts.isoformat())
                 except Exception:
@@ -505,15 +632,14 @@ class HistoricalRangeProcessor:
                 if intensity is not None:
                     await calculator.prefetch_intensity(zone, ts.isoformat(), intensity)
 
-            # Build CombinedMetric objects for this chunk
-            for em in chunk_energy_metrics:
-                pod_name = em.pod_name
-                em_namespace = em.namespace
-                node_name: str = em.node or ""
-                joules = em.joules
-                ts = em.timestamp
-                # Per-sample resource usage: each row carries its own step, never a chunk aggregate.
-                sample_key = int(ts.timestamp())
+            # Build and allocate the pod rows of every (sample, node).
+            for (sample_start, node_name), pod_keys in sorted(groups.items()):
+                ts = datetime.fromtimestamp(sample_start, tz=timezone.utc)
+                sample_key = sample_start
+                power = profile_for_node(node_name, ts)
+                node_power_sources[(node_name, sample_start)] = power.source
+                if power.is_fallback:
+                    unknown_power_nodes.add(node_name)
                 range_cpu_usage_map = cpu_usage_by_sample.get(sample_key, {})
                 range_memory_map = memory_by_sample.get(sample_key, {})
                 range_net_rx_map = net_rx_by_sample.get(sample_key, {})
@@ -524,140 +650,173 @@ class HistoricalRangeProcessor:
                 range_ephemeral_usage_map = ephemeral_usage_by_sample.get(sample_key, {})
                 node_context = node_contexts.get(node_name) if node_name else None
                 zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
-                _ni_prov = nodes_info.get(node_name)
-                provider = _ni_prov.cloud_provider if _ni_prov else None
+                _ni = nodes_info.get(node_name)
+                provider = _ni.cloud_provider if _ni else None
                 pue = self._config.get_pue_for_provider(provider)
                 try:
-                    carbon_result = await calculator.calculate_emissions(
-                        joules=joules, zone=zone, timestamp=ts, pue=pue
-                    )
+                    # Energy comes from the allocation below; the calculator
+                    # resolves the intensity and its provenance (A8).
+                    carbon_result = await calculator.calculate_emissions(joules=0.0, zone=zone, timestamp=ts, pue=pue)
                 except Exception:
                     carbon_result = None
                 if carbon_result is None:
-                    skipped_carbon += 1
+                    skipped_carbon += len(pod_keys)
+                    continue
+                intensity_source = getattr(carbon_result, "intensity_source", None)
+                if not isinstance(intensity_source, str):
+                    intensity_source = None
+                fallback_reasons = provenance_estimation_reasons(intensity_source, power.source)
+                gpu_power = gpu_power_by_group.get((sample_start, node_name))
 
-                cost_metric = cost_map.get((em_namespace, pod_name))
-                costs = cost_fields(
-                    cost_metric,
-                    opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
-                    self._config.DEFAULT_COST,
-                )
-
-                # Reuse the shared estimation-flags builder
-                is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
-                    energy_metric=em,
-                    node_context=node_context,
-                    cost_metric=cost_metric,
-                    provider=provider,
-                    pue=pue,
-                    node_name=node_name,
-                    cpu_adjusted_nodes=set(),
-                )
-
-                cpu_req = pod_request_map.get((em_namespace, pod_name), 0)
-                mem_req = pod_mem_map.get((em_namespace, pod_name), 0)
-                pod_key = (em_namespace, pod_name)
-                node_info_at_ts = get_node_info_at(node_name, ts)
-                embodied_emissions_grams = self.assembler.embodied_service.calculate_pod_embodied(
-                    node_info=node_info_at_ts or nodes_info.get(node_name),
-                    boavizta_cache=boavizta_cache,
-                    pod_requests={"cpu": cpu_req, "memory": mem_req},
-                    cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
-                )
-                if carbon_result:
-                    _ni = nodes_info.get(node_name)
-                    power_source = getattr(em, "power_source", None)
-                    if not isinstance(power_source, str):
-                        power_source = power_source_for_profile(estimator, profile_for_node(node_name, ts))
-                    intensity_source = getattr(carbon_result, "intensity_source", None)
-                    if not isinstance(intensity_source, str):
-                        intensity_source = None
-                    fallback_reasons = provenance_estimation_reasons(intensity_source, power_source)
+                node_rows: List[CombinedMetric] = []
+                for em_namespace, pod_name in pod_keys:
+                    pod_key = (em_namespace, pod_name)
+                    energy_metric = EnergyMetric(
+                        pod_name=pod_name,
+                        namespace=em_namespace,
+                        joules=0.0,
+                        node=node_name or None,
+                        timestamp=ts,
+                        is_estimated=bool(power.reasons),
+                        estimation_reasons=list(power.reasons),
+                        power_source=power.source,
+                    )
+                    cost_metric = cost_map.get(pod_key)
+                    costs = cost_fields(
+                        cost_metric,
+                        opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
+                        self._config.DEFAULT_COST,
+                    )
+                    is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
+                        energy_metric=energy_metric,
+                        node_context=node_context,
+                        cost_metric=cost_metric,
+                        provider=provider,
+                        pue=pue,
+                        node_name=node_name,
+                        cpu_adjusted_nodes=set(),
+                    )
                     if fallback_reasons:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
-                    aggregate_metric = CombinedMetric(
-                        pod_name=pod_name,
-                        namespace=em_namespace,
-                        period=None,
-                        **costs,
-                        usage_source=UsageSource.PROMETHEUS.value,
-                        power_source=power_source,
-                        intensity_source=intensity_source,
-                        timestamp=ts,
-                        duration_seconds=chosen_step_sec,
-                        grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
-                        co2e_grams=carbon_result.co2e_grams,
-                        pue=pue,
-                        grid_intensity=carbon_result.grid_intensity,
-                        joules=joules,
-                        cpu_request=cpu_req,
-                        memory_request=mem_req,
-                        node=node_name or None,
-                        node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
-                        node_zone=(_ni.zone if _ni else None),
-                        emaps_zone=zone,
-                        is_estimated=is_estimated,
-                        estimation_reasons=estimation_reasons,
-                        embodied_co2e_grams=embodied_emissions_grams,
-                        cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
-                        memory_usage_bytes=(int(range_memory_map[pod_key]) if pod_key in range_memory_map else None),
-                        network_receive_bytes=range_net_rx_map.get(pod_key),
-                        network_transmit_bytes=range_net_tx_map.get(pod_key),
-                        disk_read_bytes=range_disk_read_map.get(pod_key),
-                        disk_write_bytes=range_disk_write_map.get(pod_key),
-                        storage_request_bytes=(
-                            int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
-                        ),
-                        storage_usage_bytes=(
-                            int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
-                        ),
-                        ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
-                        ephemeral_storage_usage_bytes=(
-                            int(range_ephemeral_usage_map[pod_key]) if pod_key in range_ephemeral_usage_map else None
-                        ),
-                        restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
-                        calculation_version=CALCULATION_VERSION,
-                    )
-                    combined.append(aggregate_metric)
-
-                    container_cpu_usage = {
-                        key: int(round(value * 1000))
-                        for key, value in normalized_container_samples.get(sample_key, {}).items()
-                    }
-                    container_memory_usage = {
-                        key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
-                    }
-                    container_sample_count_map = {}
-                    # Point-in-time metrics-server usage only fills gaps of the latest
-                    # sample of a current window, and only when it was measured during
-                    # or after that sample (A5, BUG-05).  The row keeps its own
-                    # timestamp and step duration.
-                    if current_chunk and sample_key == latest_sample_ts:
-                        freshness_cutoff = max(now - timedelta(seconds=max(chosen_step_sec * 2, 60)), ts)
-                        for usage in container_usages:
-                            if (
-                                usage.timestamp is None
-                                or usage.timestamp < freshness_cutoff
-                                or usage.timestamp > now + timedelta(seconds=chosen_step_sec)
-                            ):
-                                continue
-                            container_key = (usage.namespace, usage.pod_name, usage.container_name)
-                            usage_added = False
-                            if usage.cpu_usage_millicores is not None and container_key not in container_cpu_usage:
-                                container_cpu_usage[container_key] = usage.cpu_usage_millicores
-                                usage_added = True
-                            if usage.memory_usage_bytes is not None and container_key not in container_memory_usage:
-                                container_memory_usage[container_key] = usage.memory_usage_bytes
-                                usage_added = True
-                            if usage_added:
-                                container_sample_count_map[container_key] = 1
-                    if container_cpu_usage or container_memory_usage:
-                        container_maps = PodResourceMaps(
-                            container_cpu_usage_map=container_cpu_usage,
-                            container_memory_usage_map=container_memory_usage,
-                            container_sample_count_map=container_sample_count_map,
+                    node_rows.append(
+                        CombinedMetric(
+                            pod_name=pod_name,
+                            namespace=em_namespace,
+                            period=None,
+                            **costs,
+                            usage_source=UsageSource.PROMETHEUS.value,
+                            power_source=power.source,
+                            intensity_source=intensity_source,
+                            timestamp=ts,
+                            duration_seconds=chosen_step_sec,
+                            grid_intensity_timestamp=carbon_result.grid_intensity_timestamp,
+                            co2e_grams=0.0,
+                            pue=pue,
+                            grid_intensity=carbon_result.grid_intensity,
+                            joules=0.0,
+                            cpu_request=pod_request_map.get(pod_key, 0),
+                            memory_request=pod_mem_map.get(pod_key, 0),
+                            node=node_name or None,
+                            node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
+                            node_zone=(_ni.zone if _ni else None),
+                            emaps_zone=zone,
+                            is_estimated=is_estimated,
+                            estimation_reasons=estimation_reasons,
+                            embodied_co2e_grams=0.0,
+                            cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
+                            memory_usage_bytes=(
+                                int(range_memory_map[pod_key]) if pod_key in range_memory_map else None
+                            ),
+                            network_receive_bytes=range_net_rx_map.get(pod_key),
+                            network_transmit_bytes=range_net_tx_map.get(pod_key),
+                            disk_read_bytes=range_disk_read_map.get(pod_key),
+                            disk_write_bytes=range_disk_write_map.get(pod_key),
+                            storage_request_bytes=(
+                                int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
+                            ),
+                            storage_usage_bytes=(
+                                int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
+                            ),
+                            ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
+                            ephemeral_storage_usage_bytes=(
+                                int(range_ephemeral_usage_map[pod_key])
+                                if pod_key in range_ephemeral_usage_map
+                                else None
+                            ),
+                            gpu_power_watts=gpu_power.by_pod.get(pod_key) if gpu_power else None,
+                            gpu_usage_millicores=gpu_power.usage_by_pod.get(pod_key) if gpu_power else None,
+                            restart_count=(int(range_restart_map[pod_key]) if pod_key in range_restart_map else None),
+                            calculation_version=CALCULATION_VERSION,
                         )
+                    )
+
+                node_info_at_ts = get_node_info_at(node_name, ts) if node_name else None
+                info = node_info_at_ts or _ni
+                spec = self._node_spec(
+                    node_name,
+                    info,
+                    power,
+                    boavizta_cache,
+                    instance_type=(info.instance_type if info else None) or current_node_map.get(node_name),
+                    gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
+                )
+                node_profile = allocator.node_profile(
+                    spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0
+                )
+                allocated = allocator.allocate(
+                    node_rows,
+                    node_profile,
+                    chosen_step_sec / 3600.0,
+                    emit_idle=bool(node_name),
+                    idle_fields={"timestamp": ts, "emaps_zone": zone, "intensity_source": intensity_source},
+                )
+                if allocated.idle is not None:
+                    idle_rows.append(allocated.idle)
+
+                container_cpu_usage = {
+                    key: int(round(value * 1000))
+                    for key, value in normalized_container_samples.get(sample_key, {}).items()
+                }
+                container_memory_usage = {
+                    key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
+                }
+                container_sample_count_map = {}
+                # Point-in-time metrics-server usage only fills gaps of the latest
+                # sample of a current window, and only when it was measured during
+                # or after that sample (A5, BUG-05).  The row keeps its own
+                # timestamp and step duration.
+                if current_chunk and sample_key == latest_sample_ts:
+                    freshness_cutoff = max(now - timedelta(seconds=max(chosen_step_sec * 2, 60)), ts)
+                    for usage in container_usages:
+                        if (
+                            usage.timestamp is None
+                            or usage.timestamp < freshness_cutoff
+                            or usage.timestamp > now + timedelta(seconds=chosen_step_sec)
+                        ):
+                            continue
+                        container_key = (usage.namespace, usage.pod_name, usage.container_name)
+                        usage_added = False
+                        if usage.cpu_usage_millicores is not None and container_key not in container_cpu_usage:
+                            container_cpu_usage[container_key] = usage.cpu_usage_millicores
+                            usage_added = True
+                        if usage.memory_usage_bytes is not None and container_key not in container_memory_usage:
+                            container_memory_usage[container_key] = usage.memory_usage_bytes
+                            usage_added = True
+                        if usage_added:
+                            container_sample_count_map[container_key] = 1
+                container_maps = (
+                    PodResourceMaps(
+                        container_cpu_usage_map=container_cpu_usage,
+                        container_memory_usage_map=container_memory_usage,
+                        container_sample_count_map=container_sample_count_map,
+                    )
+                    if container_cpu_usage or container_memory_usage
+                    else None
+                )
+                for aggregate_metric in allocated.rows:
+                    combined.append(aggregate_metric)
+                    if container_maps is not None:
                         combined.extend(
                             self.assembler.assemble_container_metrics(
                                 [aggregate_metric],
@@ -666,7 +825,7 @@ class HistoricalRangeProcessor:
                             )
                         )
 
-            del chunk_energy_metrics, cpu_usage_by_sample, memory_by_sample
+            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
             del restart_by_sample, ephemeral_usage_by_sample
             del container_memory_samples, normalized_container_samples
@@ -678,7 +837,10 @@ class HistoricalRangeProcessor:
                 ", ".join(sorted(name or "<unresolved>" for name in unknown_power_nodes)),
             )
 
-        if namespace:
+        self.last_idle_metrics = idle_rows
+        if not namespace:
+            await self._write_idle_metrics(idle_rows)
+        else:
             combined = [c for c in combined if c.namespace == namespace]
 
         await self.calculator.clear_cache()

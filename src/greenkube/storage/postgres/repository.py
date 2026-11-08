@@ -36,6 +36,39 @@ def _provenance_values(metric: CombinedMetric) -> tuple[Any, ...]:
     return tuple(getattr(metric, column) for column in PROVENANCE_COLUMNS)
 
 
+#: Impact Model allocation columns of raw metric rows (B2, B5, migration 0050).
+ALLOCATION_COLUMNS: tuple[str, ...] = ("model_version", "gpu_power_watts")
+
+
+def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in ALLOCATION_COLUMNS)
+
+
+#: Columns of ``node_idle_metrics`` (``greenkube.impact.rows.NodeIdleMetric`` fields, migration 0050).
+IDLE_METRIC_COLUMNS: tuple[str, ...] = (
+    "node",
+    "timestamp",
+    "duration_seconds",
+    "scope",
+    "joules",
+    "co2e_grams",
+    "embodied_co2e_grams",
+    "total_cost",
+    "cost_cpu",
+    "cost_ram",
+    "cost_source",
+    "cpu_unreserved_cores",
+    "memory_unreserved_bytes",
+    "gpu_power_watts",
+    "pue",
+    "grid_intensity",
+    "emaps_zone",
+    "power_source",
+    "intensity_source",
+    "model_version",
+)
+
+
 def _container_metric_from_row(
     row: Mapping[str, Any],
     *,
@@ -217,7 +250,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         emaps_zone, estimation_reasons, is_estimated, embodied_co2e_grams,
                         calculation_version,
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                        cost_source, usage_source, power_source, intensity_source
+                        cost_source, usage_source, power_source, intensity_source,
+                        model_version, gpu_power_watts
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -234,7 +268,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $31, $32, $33, $34,
                         $35,
                         $36, $37, $38, $39, $40,
-                        $41, $42, $43, $44
+                        $41, $42, $43, $44,
+                        $45, $46
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -277,7 +312,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         cost_source = EXCLUDED.cost_source,
                         usage_source = EXCLUDED.usage_source,
                         power_source = EXCLUDED.power_source,
-                        intensity_source = EXCLUDED.intensity_source;
+                        intensity_source = EXCLUDED.intensity_source,
+                        model_version = EXCLUDED.model_version,
+                        gpu_power_watts = EXCLUDED.gpu_power_watts;
                 """
 
                 metrics_data = []
@@ -323,6 +360,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             metric.embodied_co2e_grams,
                             metric.calculation_version,
                             *_provenance_values(metric),
+                            *_allocation_values(metric),
                         )
                     )
 
@@ -431,13 +469,13 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
                 cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                 cost_source, usage_source, power_source, intensity_source,
-                emaps_zone, cpu_limit, memory_limit
+                emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                $32, $33, $34
+                $32, $33, $34, $35, $36
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
                 total_cost = EXCLUDED.total_cost,
@@ -469,7 +507,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 intensity_source = EXCLUDED.intensity_source,
                 emaps_zone = EXCLUDED.emaps_zone,
                 cpu_limit = EXCLUDED.cpu_limit,
-                memory_limit = EXCLUDED.memory_limit
+                memory_limit = EXCLUDED.memory_limit,
+                model_version = EXCLUDED.model_version,
+                gpu_power_watts = EXCLUDED.gpu_power_watts
         """
         rows = []
         for metric in metrics:
@@ -505,6 +545,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     metric.emaps_zone,
                     metric.cpu_limit,
                     metric.memory_limit,
+                    *_allocation_values(metric),
                 )
             )
         try:
@@ -515,6 +556,48 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         except Exception as e:
             logger.error("Error writing container metrics to Postgres: %s", e)
             raise QueryError(f"Error writing container metrics: {e}") from e
+
+    async def write_idle_metrics(self, metrics: List[Any]) -> int:
+        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
+        if not metrics:
+            return 0
+        columns = IDLE_METRIC_COLUMNS
+        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
+        updates = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in columns if column not in ("node", "timestamp")
+        )
+        query = (
+            f"INSERT INTO node_idle_metrics ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT (node, timestamp) DO UPDATE SET {updates}"
+        )
+        rows = [tuple(getattr(metric, column) for column in columns) for metric in metrics]
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                await conn.executemany(query, rows)
+            return len(rows)
+        except Exception as e:
+            logger.error("Error writing node idle metrics to Postgres: %s", e)
+            raise QueryError(f"Error writing node idle metrics: {e}") from e
+
+    async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
+        """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
+        from greenkube.impact.rows import NodeIdleMetric
+
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT {", ".join(IDLE_METRIC_COLUMNS)} FROM node_idle_metrics
+                    WHERE timestamp >= $1 AND timestamp < $2
+                    ORDER BY timestamp, node
+                    """,
+                    start_time,
+                    end_time,
+                )
+            return [NodeIdleMetric(**dict(row)) for row in rows]
+        except Exception as e:
+            logger.error("Error reading node idle metrics from Postgres: %s", e)
+            raise QueryError(f"Error reading node idle metrics: {e}") from e
 
     async def read_container_metrics(
         self,

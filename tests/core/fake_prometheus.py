@@ -56,6 +56,8 @@ class FakePrometheus:
         by_match = _BY_RE.search(query)
         by = [label.strip() for label in by_match.group(1).split(",")] if by_match else []
         use_max = query.lstrip().startswith("max")
+        # ``avg_over_time(metric[w])`` keeps every label of every series (DCGM GPU queries).
+        keep_labels = query.lstrip().startswith("avg_over_time(")
 
         timestamps = []
         t = start_ts
@@ -63,11 +65,18 @@ class FakePrometheus:
             timestamps.append(t)
             t += step_seconds
 
-        grouped: dict[tuple[str, ...], dict[float, float]] = defaultdict(dict)
+        grouped: dict[tuple, dict[float, float]] = defaultdict(dict)
+        group_labels: dict[tuple, dict[str, str]] = {}
         for raw in self.series:
             if raw.metric != metric_name or not _matches(raw.labels, matchers):
                 continue
-            key = tuple(raw.labels.get(label, "") for label in by)
+            if keep_labels:
+                key: tuple = tuple(sorted(raw.labels.items()))
+                group_labels[key] = dict(raw.labels)
+            else:
+                by_values: tuple[str, ...] = tuple(raw.labels.get(label, "") for label in by)
+                key = by_values
+                group_labels[key] = {label: value for label, value in zip(by, by_values) if value}
             for ts in timestamps:
                 value = raw.at(ts)
                 if value is None:
@@ -82,7 +91,7 @@ class FakePrometheus:
 
         results = []
         for key, samples in grouped.items():
-            labels = {label: value for label, value in zip(by, key) if value}
+            labels = group_labels[key]
             results.append(
                 {
                     "metric": labels,

@@ -27,8 +27,15 @@ BASE = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
 CPU_PER_CONTAINER = 0.2
 MEMORY_PER_CONTAINER = 100 * 1024**2
 # m5.large: 2 vCPU, AWS CCF coefficients 0.74 W / 3.5 W per vCPU.
-# util = 0.2 / 2 -> 1.48 + 0.1 * (7.0 - 1.48) = 2.032 W -> 609.6 J per 5-minute step.
-GOLDEN_JOULES = 609.6
+# util = 0.2 / 2 -> node CPU power 1.48 + 0.1 * (7.0 - 1.48) = 2.032 W -> 609.6 J per 5-minute step.
+NODE_CPU_JOULES = 609.6
+# Reservation-aware allocation (B2): the pod reserves 1 of 2 cores, so it gets
+# half the idle power (0.74 W) plus all the dynamic power (0.552 W), plus the
+# memory power of its 100 MiB working set (0.392 W/GiB, B5). The other half of
+# the idle power goes to the node's __idle__ row.
+MEMORY_WATTS = 100 / 1024 * 0.392
+GOLDEN_JOULES = (0.74 + 0.552 + MEMORY_WATTS) * STEP
+IDLE_JOULES = 0.74 * STEP
 
 
 def _cadvisor(prom: FakePrometheus, *, include_pod_cgroup: bool) -> None:
@@ -82,6 +89,10 @@ async def test_range_usage_counts_each_container_once(harness, include_pod_cgrou
     assert pods[0].cpu_usage_millicores == 200
     assert pods[0].memory_usage_bytes == MEMORY_PER_CONTAINER
     assert pods[0].joules == pytest.approx(GOLDEN_JOULES, rel=1e-6)
+    (idle,) = processor.last_idle_metrics
+    assert idle.joules == pytest.approx(IDLE_JOULES, rel=1e-6)
+    # Conservation: pod rows + __idle__ = node power (CPU profile + memory).
+    assert pods[0].joules + idle.joules == pytest.approx(NODE_CPU_JOULES + MEMORY_WATTS * STEP, rel=1e-6)
     assert [(c.container_name, c.cpu_usage_millicores) for c in containers] == [("app", 200)]
     cpu_queries = [q for q, *_ in prom.queries if "container_cpu_usage_seconds_total" in q]
     assert cpu_queries and all('container!=""' in q and 'container!="POD"' in q for q in cpu_queries)
