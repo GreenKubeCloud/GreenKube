@@ -13,7 +13,6 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from greenkube.automation.git.base import GitProvider
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
@@ -91,9 +90,6 @@ class AutomationPlanError(RuntimeError):
         super().__init__(message)
 
 
-PlanServiceError = AutomationPlanError
-
-
 @dataclass(frozen=True, slots=True)
 class GitBlobFile:
     """File contents paired with the Git object ID of the file blob."""
@@ -119,39 +115,6 @@ class PlanOperationEnqueuer(Protocol):
     """Enqueues approved plans; implementations must deduplicate by plan ID and digest."""
 
     async def enqueue(self, plan: Plan, *, idempotency_key: str) -> object: ...
-
-
-class ProviderGitBlobResolver:
-    """Resolve Git blob metadata where the existing provider adapter exposes a blob SHA."""
-
-    def __init__(self, providers: Mapping[str, GitProvider]) -> None:
-        self._providers = dict(providers)
-
-    async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
-        provider = self._providers.get(source.provider_id)
-        if provider is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"no Git provider is configured for {source.provider_id!r}",
-            )
-        if provider.name not in {"github", "gitea", "gitlab"}:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider {provider.name!r} has no verified Git blob SHA adapter",
-            )
-        repository = provider.repository(source.repo_url, base_branch=source.ref)
-        git_file = await provider.get_file(repository, path, revision)
-        if git_file is None:
-            return None
-        blob_sha = git_file.blob_sha
-        if blob_sha is None and provider.name in {"github", "gitea"}:
-            blob_sha = git_file.sha
-        if blob_sha is None:
-            raise AutomationPlanError(
-                AutomationErrorCode.PROVIDER_NOT_READY,
-                f"provider returned no Git blob SHA for {path!r} at {revision}",
-            )
-        return GitBlobFile(path=git_file.path, content=git_file.content, blob_sha=blob_sha)
 
 
 class AutomationPlanService:
@@ -808,46 +771,6 @@ class AutomationPlanService:
             )
         return await self._transition(plan, PlanStatus.SUPERSEDED, reason_code="replacement_plan")
 
-    async def create(
-        self,
-        action: ActionPlanV3,
-        source: WorkloadSource,
-        snapshot: ArchiveRepositorySnapshot,
-        *,
-        policy_result: dict[str, Any] | None = None,
-        change_set_id: str | None = None,
-        actor: str = "system",
-    ) -> Plan:
-        return await self.create_plan(
-            action,
-            source,
-            snapshot,
-            policy_result=policy_result,
-            change_set_id=change_set_id,
-            actor=actor,
-        )
-
-    async def read(self, plan_id: str) -> Plan | None:
-        return await self.read_plan(plan_id)
-
-    async def approve(self, plan_id: str, digest: str) -> Plan:
-        return await self.approve_plan(plan_id, digest)
-
-    async def stale(
-        self,
-        plan_id: str,
-        *,
-        actor: str = "system",
-        reason_code: str | None = None,
-    ) -> Plan | None:
-        return await self.mark_stale(plan_id, actor=actor, reason_code=reason_code)
-
-    async def expire(self, plan_id: str, *, now: datetime | None = None) -> Plan | None:
-        return await self.expire_plan(plan_id, now=now)
-
-    async def supersede(self, plan_id: str) -> Plan | None:
-        return await self.supersede_plan(plan_id)
-
     async def _get_git_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile:
         resolver = self.git_blob_resolver
         if resolver is None:
@@ -996,9 +919,6 @@ class AutomationPlanService:
             )
         if source.expires_at is not None and _as_utc(source.expires_at) <= now:
             raise AutomationPlanError(AutomationErrorCode.SOURCE_CHANGED, "workload source binding has expired")
-
-
-PlanService = AutomationPlanService
 
 
 def _archive_contents(

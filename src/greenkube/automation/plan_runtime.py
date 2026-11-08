@@ -394,7 +394,7 @@ class RuntimePlanService:
             clock=selected_policy_clock or (lambda: datetime.now(timezone.utc)),
         )
 
-    async def create_plan(
+    async def prepare_plan(
         self,
         recommendation_ids: Sequence[int],
         *,
@@ -454,32 +454,6 @@ class RuntimePlanService:
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "the repository snapshot is unavailable or exceeds configured planning limits",
             ) from exc
-
-    async def create_plan_for_recommendations(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        change_set_id: str | None = None,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """Explicit alias for the source-safe plan creation entry point."""
-        return await self.create_plan(
-            recommendation_ids,
-            change_set_id=change_set_id,
-            actor=actor,
-            values_mapping=values_mapping,
-        )
-
-    async def prepare_plan(
-        self,
-        recommendation_ids: Sequence[int],
-        *,
-        actor: str = "system",
-        values_mapping: Mapping[str, Any] | None = None,
-    ) -> Plan:
-        """API protocol alias for source-safe preparation from persisted recommendation IDs."""
-        return await self.create_plan(recommendation_ids, actor=actor, values_mapping=values_mapping)
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune expired rendered content and terminal outbox rows while retaining plan metadata."""
@@ -1708,15 +1682,9 @@ def kustomize_rollback_renderer(
     return KustomizeRollbackRenderer(renderer, snapshot_limits=snapshot_limits)
 
 
-async def get_plan_service(**runtime_options: Any) -> RuntimePlanService:
-    """Create the source-safe plan API service from the production repositories."""
-    runtime = await create_plan_runtime(**runtime_options)
-    return runtime.plan_service
-
-
 async def build_plan_api_service(**runtime_options: Any) -> RuntimePlanService:
-    """Build the API plan facade from persisted recommendations and bindings."""
-    return await get_plan_service(**runtime_options)
+    """Build the source-safe API plan facade from the production repositories."""
+    return (await create_plan_runtime(**runtime_options)).plan_service
 
 
 def _as_utc(value: datetime) -> datetime:
