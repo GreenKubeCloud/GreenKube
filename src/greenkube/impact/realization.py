@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -74,6 +74,10 @@ NODE_BLOCKING_ANNOTATIONS = {
 }
 #: Pool of nodes managed by the Cluster Autoscaler (or by nothing).
 CLUSTER_POOL = "__cluster__"
+
+#: ``RealizationInputs.unavailable`` names of the inputs that decide a pool's autoscaler.
+UNAVAILABLE_CLUSTER_AUTOSCALER = "Cluster Autoscaler status"
+UNAVAILABLE_KARPENTER_POOLS = "Karpenter NodePools"
 
 
 # --------------------------------------------------------------------------- #
@@ -252,8 +256,40 @@ def _karpenter_pool_of(node: NodeObservation, known: Iterable[str]) -> Optional[
     return None
 
 
-def resolve_realization(inputs: RealizationInputs, now: Optional[datetime] = None) -> RealizationContext:
-    """Computes the per-pool realization factors (pure)."""
+def _unread_pool(
+    name: str, members: Sequence[str], what: str, previous: Optional[RealizationContext]
+) -> PoolRealization:
+    """Pool whose autoscaler input could not be read: never mistaken for "no autoscaler".
+
+    The previous observation of the pool is kept when there is one; otherwise
+    the pool keeps the unobserved factor, as before the first observation.
+    """
+    nodes = tuple(sorted(members))
+    kept = previous.pools.get(name) if previous is not None else None
+    if kept is not None and kept.autoscaler != "unknown":
+        reason = f"{what} could not be read; the previous observation of this pool is kept"
+        return replace(kept, nodes=nodes, reasons=(*kept.reasons, reason))
+    return PoolRealization(
+        pool=name,
+        factor=UNOBSERVED_FACTOR,
+        autoscaler="unknown",
+        reasons=(f"{what} could not be read; the factor stays at the unobserved default {UNOBSERVED_FACTOR:g}",),
+        nodes=nodes,
+    )
+
+
+def resolve_realization(
+    inputs: RealizationInputs,
+    now: Optional[datetime] = None,
+    *,
+    previous: Optional[RealizationContext] = None,
+) -> RealizationContext:
+    """Computes the per-pool realization factors (pure).
+
+    An autoscaler input that could not be read (RBAC, timeout) does not count
+    as "no autoscaler": the affected pools keep their ``previous`` observation
+    or the unobserved factor.
+    """
     now = now or datetime.now(timezone.utc)
     karpenter = {pool.name: pool for pool in inputs.karpenter_pools or ()}
     node_pools: Dict[str, str] = {}
@@ -324,7 +360,20 @@ def resolve_realization(inputs: RealizationInputs, now: Optional[datetime] = Non
             blocked=blocked,
         )
 
+    # Nodes labeled with a Karpenter pool while the NodePools could not be read.
+    if UNAVAILABLE_KARPENTER_POOLS in inputs.unavailable:
+        for name, names in members.items():
+            if name != CLUSTER_POOL and name not in pools:
+                pools[name] = _unread_pool(name, names, UNAVAILABLE_KARPENTER_POOLS, previous)
+
     # Nodes outside Karpenter pools: Cluster Autoscaler, or fixed nodes.
+    if ca is None and UNAVAILABLE_CLUSTER_AUTOSCALER in inputs.unavailable:
+        pools[CLUSTER_POOL] = _unread_pool(
+            CLUSTER_POOL, members.get(CLUSTER_POOL, []), UNAVAILABLE_CLUSTER_AUTOSCALER, previous
+        )
+        return RealizationContext(
+            pools=pools, node_pools=node_pools, default_pool=CLUSTER_POOL, observed_at=now, notes=notes
+        )
     reasons = []
     blocked = False
     if ca is not None:
@@ -481,7 +530,7 @@ async def refresh_realization_context(
         inputs = None
     if inputs is None:
         return _STATE.context
-    context = resolve_realization(inputs, now)
+    context = resolve_realization(inputs, now, previous=_STATE.context)
     _STATE.context = context
     logger.info(
         "Realization context: %s",

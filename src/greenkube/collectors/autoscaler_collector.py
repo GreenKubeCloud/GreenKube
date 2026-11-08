@@ -23,6 +23,8 @@ from typing import Any, List, Optional, Tuple
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api, get_custom_objects_api, get_policy_v1_api
 from greenkube.impact.realization import (
+    UNAVAILABLE_CLUSTER_AUTOSCALER,
+    UNAVAILABLE_KARPENTER_POOLS,
     ClusterAutoscalerObservation,
     KarpenterPoolObservation,
     NodeObservation,
@@ -141,7 +143,7 @@ class AutoscalerCollector:
         except Exception as error:
             if getattr(error, "status", None) != 404:
                 logger.warning("Could not read %s/%s: %s", CA_STATUS_NAMESPACE, CA_STATUS_CONFIGMAP, error)
-                unavailable.append("Cluster Autoscaler status")
+                unavailable.append(UNAVAILABLE_CLUSTER_AUTOSCALER)
             return None
         data = _get(config_map, "data") or {}
         status = data.get("status") if isinstance(data, dict) else None
@@ -193,7 +195,7 @@ class AutoscalerCollector:
                 if getattr(error, "status", None) == 404:
                     continue
                 logger.warning("Could not list Karpenter NodePools (%s): %s", version, error)
-                unavailable.append("Karpenter NodePools")
+                unavailable.append(UNAVAILABLE_KARPENTER_POOLS)
                 return None
             items = (result or {}).get("items", []) if isinstance(result, dict) else []
             return [pool for pool in (karpenter_pool_from_item(item) for item in items) if pool]

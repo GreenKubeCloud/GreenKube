@@ -150,6 +150,36 @@ class TestHeuristic:
         )
         assert resolve_realization(drift_only, NOW).factor_for("k1") == pytest.approx(0.8)
 
+    def test_unreadable_cluster_autoscaler_status_is_not_no_autoscaler(self):
+        """An RBAC or timeout error on the CA status keeps the unobserved factor, never 0.0."""
+        unreadable = RealizationInputs(nodes=[NodeObservation("c1")], unavailable=("Cluster Autoscaler status",))
+        pool = resolve_realization(unreadable, NOW).pool_for("c1")
+        assert pool.factor == pytest.approx(1.0)
+        assert pool.autoscaler == "unknown"
+        assert any("could not be read" in reason for reason in pool.reasons)
+
+        observed = resolve_realization(
+            RealizationInputs(nodes=[NodeObservation("c1")], cluster_autoscaler=ClusterAutoscalerObservation(CA_TEXT)),
+            NOW,
+        )
+        kept = resolve_realization(unreadable, NOW, previous=observed).pool_for("c1")
+        assert kept.factor == pytest.approx(0.6)
+        assert kept.autoscaler == "cluster_autoscaler"
+        assert any("previous observation" in reason for reason in kept.reasons)
+
+    def test_unreadable_karpenter_nodepools_keep_labeled_pools_out_of_the_cluster_pool(self):
+        unreadable = RealizationInputs(
+            nodes=[_karpenter_node("k1")], karpenter_pools=None, unavailable=("Karpenter NodePools",)
+        )
+        context = resolve_realization(unreadable, NOW)
+        assert context.factor_for("k1") == pytest.approx(1.0)
+        assert context.pool_for("k1").pool == "default"
+
+        observed = resolve_realization(RealizationInputs(nodes=[_karpenter_node("k1")], karpenter_pools=[_pool()]), NOW)
+        assert resolve_realization(unreadable, NOW, previous=observed).factor_for("k1") == pytest.approx(0.8)
+        # The cluster pool itself was read fine: no autoscaler there.
+        assert context.factor_for("unknown-node") == 0.0
+
     def test_unknown_nodes_use_the_cluster_pool(self):
         inputs = RealizationInputs(nodes=[_karpenter_node("k1")], karpenter_pools=[_pool()])
         context = resolve_realization(inputs, NOW)
