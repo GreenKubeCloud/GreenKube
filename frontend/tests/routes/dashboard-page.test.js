@@ -78,4 +78,20 @@ describe('DashboardPage', () => {
 		expect(params.signal.aborted).toBe(true);
 		expect(savingsSignal.aborted).toBe(true);
 	});
+
+	it('shows the top recommendations in server order with their expected value (I1)', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{ id: 1, type: 'RIGHTSIZING_CPU', pod_name: 'best', reason: 'r1', value: { ev: 412, p_success: 0.82, currency: 'USD' } },
+			{ id: 2, type: 'RIGHTSIZING_CPU', pod_name: 'second', reason: 'r2', value: { ev: 35, p_success: 0.9, currency: 'USD' } }
+		]);
+
+		const { findAllByTestId, getByText } = render(DashboardPage);
+
+		const values = await findAllByTestId('dashboard-expected-value');
+		expect(values.map((node) => node.textContent.trim())).toEqual([
+			'≈ $412/yr expected · 82% success',
+			'≈ $35/yr expected · 90% success'
+		]);
+		expect(getByText('best').compareDocumentPosition(getByText('second')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
 });
