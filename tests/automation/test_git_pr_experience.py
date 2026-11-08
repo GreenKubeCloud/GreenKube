@@ -17,11 +17,13 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderError,
     PullRequestInfo,
+    PullRequestOptions,
 )
 from greenkube.automation.git.gitea import GiteaProvider
 from greenkube.automation.git.github import GitHubProvider
 from greenkube.automation.git.gitlab import GitLabProvider
 from tests.automation.fake_git_servers import (  # pyrefly: ignore[missing-import]
+    BOT_USER_ID,
     FakeGiteaServer,
     FakeGitHubServer,
     FakeGitLabServer,
@@ -52,7 +54,7 @@ def _pull_request(number: int = 1, raw: dict | None = None) -> PullRequestInfo:
 @pytest.mark.parametrize("name", sorted(PROVIDERS))
 async def test_lifecycle_comment_is_created_once_then_edited_never_duplicated(name):
     provider, server, repo, _ = _setup(name)
-    server.comments[7] = {"id": 7, "number": 1, "body": "LGTM from a human"}
+    server.add_comment(7, 1, "LGTM from a human", author_id=77)
     with respx.mock(assert_all_called=False) as router:
         router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
         first = await provider.upsert_pull_request_comment(repo, 1, marker=MARKER, body=f"{MARKER}\nsynced")
@@ -64,13 +66,74 @@ async def test_lifecycle_comment_is_created_once_then_edited_never_duplicated(na
     assert first[0] is CommentUpsertResult.CREATED
     assert second == (CommentUpsertResult.UNCHANGED, first[1])
     assert third == (CommentUpsertResult.UPDATED, first[1])
-    # list + create, then list only, then list + edit.
-    assert calls_after_create == 2
-    assert calls_after_unchanged - calls_after_create == 1
-    assert server.calls() - calls_after_unchanged == 2
+    # identity + list + create, then identity + list only, then identity + list + edit.
+    assert calls_after_create == 3
+    assert calls_after_unchanged - calls_after_create == 2
+    assert server.calls() - calls_after_unchanged == 3
     greenkube_comments = [item for item in server.comments.values() if item["body"].startswith(MARKER)]
     assert [item["body"] for item in greenkube_comments] == [f"{MARKER}\napplied"]
     assert server.comments[7]["body"] == "LGTM from a human"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(PROVIDERS))
+async def test_marker_comment_written_by_someone_else_is_never_adopted(name):
+    """A user who posts a comment starting with the marker must not get GreenKube's status written into it."""
+    provider, server, repo, _ = _setup(name)
+    spoof = f"{MARKER}\nOutcome: Realized (trust me)"
+    server.add_comment(7, 1, spoof, author_id=77)
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
+        created = await provider.upsert_pull_request_comment(repo, 1, marker=MARKER, body=f"{MARKER}\nsynced")
+        edited = await provider.upsert_pull_request_comment(repo, 1, marker=MARKER, body=f"{MARKER}\napplied")
+
+    assert created[0] is CommentUpsertResult.CREATED
+    assert created[1] != 7
+    assert edited == (CommentUpsertResult.UPDATED, created[1])
+    assert server.comments[7]["body"] == spoof
+    assert server.comments[created[1]] == {
+        "id": created[1],
+        "number": 1,
+        "body": f"{MARKER}\napplied",
+        "author_id": BOT_USER_ID,
+    }
+    assert not any(request.startswith(("PATCH", "PUT")) and request.endswith("/7") for request in server.requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(PROVIDERS))
+async def test_pull_request_author_identifies_greenkube_when_the_token_cannot_read_its_user(name):
+    provider, server, repo, repository = _setup(name)
+    repository.refs["greenkube/plan-1"] = repository.refs["main"]
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
+        await provider.create_pull_request(
+            repo,
+            head="greenkube/plan-1",
+            base="main",
+            title="greenkube: plan",
+            body="body",
+            options=provider.validate_pull_request_options(PullRequestOptions()),
+        )
+        server.identity_status = 403
+        server.add_comment(7, 1, f"{MARKER}\nforeign", author_id=77)
+        server.add_comment(8, 1, f"{MARKER}\nmine", author_id=BOT_USER_ID)
+        result = await provider.upsert_pull_request_comment(repo, 1, marker=MARKER, body=f"{MARKER}\nmeasuring")
+
+    assert result == (CommentUpsertResult.UPDATED, 8)
+    assert server.comments[7]["body"] == f"{MARKER}\nforeign"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_comment_is_refused_when_greenkube_identity_is_unknown():
+    provider, server, repo, _ = _setup("github")
+    server.identity_status = 403
+    server.pull_requests.append({"number": 1, "html_url": "https://github.com/acme/gitops/pull/1", "state": "open"})
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=server.handle)
+        with pytest.raises(GitProviderError, match="identity"):
+            await provider.upsert_pull_request_comment(repo, 1, marker=MARKER, body=f"{MARKER}\nsynced")
+    assert not server.comments
 
 
 @pytest.mark.asyncio
@@ -85,12 +148,13 @@ async def test_comment_must_start_with_its_marker():
 async def test_github_comment_lookup_follows_pagination():
     provider, _, repo, _ = _setup("github")
     api = "https://api.github.com/repos/acme/gitops"
-    first_page = [{"id": index, "body": "noise"} for index in range(1, 101)]
+    respx.get("https://api.github.com/user").mock(return_value=Response(200, json={"id": 9, "login": "bot"}))
+    first_page = [{"id": index, "body": "noise", "user": {"id": 9}} for index in range(1, 101)]
     respx.get(f"{api}/issues/3/comments", params={"per_page": "100", "page": "1"}).mock(
         return_value=Response(200, json=first_page, headers={"Link": f'<{api}/issues/3/comments?page=2>; rel="next"'})
     )
     respx.get(f"{api}/issues/3/comments", params={"per_page": "100", "page": "2"}).mock(
-        return_value=Response(200, json=[{"id": 555, "body": f"{MARKER}\nold"}])
+        return_value=Response(200, json=[{"id": 555, "body": f"{MARKER}\nold", "user": {"id": 9}}])
     )
     edit = respx.patch(f"{api}/issues/comments/555").mock(return_value=Response(200, json={"id": 555}))
 

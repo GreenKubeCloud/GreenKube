@@ -70,10 +70,16 @@ MAX_CODEOWNER_REVIEWERS = 10
 
 @dataclass(frozen=True, slots=True)
 class PullRequestComment:
-    """One provider comment on a pull request."""
+    """One provider comment on a pull request.
+
+    ``author_id`` is the provider's numeric user ID of the comment's author
+    (``user.id`` on GitHub and Gitea, ``author.id`` on GitLab), ``None`` when
+    the provider did not report one.
+    """
 
     id: int
     body: str
+    author_id: Optional[int] = None
 
 
 class CommentUpsertResult(StrEnum):
@@ -1096,7 +1102,8 @@ class GitProvider(ABC):
             raise GitProviderError("A managed pull-request comment must start with its marker.")
         if len(body) > MAX_COMMENT_CHARS or "\x00" in body:
             raise GitProviderError("Pull-request comment is too long or contains a NUL character.")
-        existing = await self._find_marked_comment(repo, number, marker)
+        author_id = await self._managed_comment_author_id(repo, number)
+        existing = await self._find_marked_comment(repo, number, marker, author_id=author_id)
         if existing is None:
             created = await self._create_pull_request_comment(repo, number, body)
             return CommentUpsertResult.CREATED, created
@@ -1105,11 +1112,45 @@ class GitProvider(ABC):
         await self._update_pull_request_comment(repo, number, existing.id, body)
         return CommentUpsertResult.UPDATED, existing.id
 
-    async def _find_marked_comment(self, repo: GitRepository, number: int, marker: str) -> Optional[PullRequestComment]:
+    async def _managed_comment_author_id(self, repo: GitRepository, number: int) -> int:
+        """Return the user ID whose marker comments GreenKube may adopt and edit.
+
+        A marker is plain text that anyone with comment access can post, and
+        GreenKube's token can edit other users' comments. Adopting a foreign
+        marker comment would publish GreenKube's status under (and editable by)
+        someone else, or overwrite a human's text. Only comments written by
+        GreenKube's own identity are adopted: the token's user (``GET /user``)
+        or, when the token cannot read its own profile, the author of the pull
+        request, which GreenKube opened.
+        """
+        user_id = await self._authenticated_user_id()
+        if user_id is None:
+            pull_request = await self.get_pull_request(repo, number)
+            user_id = pull_request_author_id(pull_request.raw)
+        if user_id is None:
+            raise GitProviderError(
+                f"{self.name} did not report GreenKube's identity; the lifecycle comment is not published."
+            )
+        return user_id
+
+    async def _authenticated_user_id(self) -> Optional[int]:
+        """The numeric ID of the token's user, or ``None`` when the token may not read it."""
+        response = await self._request("GET", "/user", ok_statuses=(200, 401, 403))
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        return _positive_user_id(data.get("id") if isinstance(data, dict) else None)
+
+    async def _find_marked_comment(
+        self, repo: GitRepository, number: int, marker: str, *, author_id: int
+    ) -> Optional[PullRequestComment]:
         for page in range(1, MAX_COMMENT_PAGES + 1):
             comments, has_next = await self._list_pull_request_comments(repo, number, page)
             for comment in comments:
-                if comment.body.lstrip().startswith(marker):
+                if comment.author_id == author_id and comment.body.lstrip().startswith(marker):
                     return comment
             if not has_next:
                 return None
@@ -1342,8 +1383,29 @@ def parse_comment_list(response: httpx.Response, *, provider: str) -> list[PullR
         body = item.get("body") if isinstance(item, dict) else None
         if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
             raise GitProviderError(f"{provider} returned a comment without a valid ID.")
-        comments.append(PullRequestComment(id=comment_id, body=body if isinstance(body, str) else ""))
+        author = item.get("user") or item.get("author")
+        comments.append(
+            PullRequestComment(
+                id=comment_id,
+                body=body if isinstance(body, str) else "",
+                author_id=_positive_user_id(author.get("id") if isinstance(author, dict) else None),
+            )
+        )
     return comments
+
+
+def pull_request_author_id(raw: object) -> Optional[int]:
+    """The author's user ID from a raw PR payload (``user`` on GitHub/Gitea, ``author`` on GitLab)."""
+    if not isinstance(raw, dict):
+        return None
+    author = raw.get("user") or raw.get("author")
+    return _positive_user_id(author.get("id") if isinstance(author, dict) else None)
+
+
+def _positive_user_id(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def parse_comment_id(response: httpx.Response, *, provider: str) -> int:
