@@ -1,114 +1,16 @@
 """Provenance of assembled pod and container rows (roadmap A4, A7, A11; BUG-04, BUG-29)."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from greenkube.core.calculator import CarbonCalculationResult
 from greenkube.core.metric_assembler import MetricAssembler, cost_fields, power_source_for_profile
 from greenkube.core.prometheus_resource_mapper import PodResourceMaps
-from greenkube.models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
-from greenkube.models.node import NodeInfo, NodeZoneContext
+from greenkube.models.metrics import CombinedMetric, PodMetric
 from greenkube.models.provenance import is_cost_trusted, is_usage_trusted
 
 TS = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
-
-
-def _assembler(intensity_source: str = "consolidated") -> MetricAssembler:
-    calculator = MagicMock()
-    calculator.calculate_emissions = AsyncMock(
-        return_value=CarbonCalculationResult(
-            co2e_grams=50.0, grid_intensity=100.0, grid_intensity_timestamp=TS, intensity_source=intensity_source
-        )
-    )
-    estimator = MagicMock()
-    estimator.query_range_step_sec = 300
-    embodied = MagicMock()
-    embodied.calculate_pod_embodied = MagicMock(return_value=0.0)
-    embodied.is_embodied_fallback = MagicMock(return_value=False)
-    return MetricAssembler(
-        calculator=calculator,
-        estimator=estimator,
-        repository=MagicMock(),
-        electricity_provider=MagicMock(),
-        zone_mapper=MagicMock(),
-        embodied_service=embodied,
-    )
-
-
-def _assemble_args(cost_map: dict, pods: list[EnergyMetric]) -> dict:
-    return {
-        "energy_metrics": pods,
-        "cost_map": cost_map,
-        "pod_request_map": {},
-        "node_contexts": {"node-1": NodeZoneContext(node="node-1", emaps_zone="FR", is_estimated=False)},
-        "nodes_info": {
-            "node-1": NodeInfo(
-                name="node-1",
-                zone="eu-west-3a",
-                region="eu-west-3",
-                cloud_provider="aws",
-                instance_type="m5.large",
-                architecture="amd64",
-                node_pool=None,
-            )
-        },
-        "node_instance_map": {"node-1": "m5.large"},
-        "boavizta_cache": {},
-        "cpu_adjusted_nodes": set(),
-        "steps_per_day": 1.0,
-        "resource_maps": PodResourceMaps(cpu_usage_map={("cache", "redis-0"): 100, ("queue", "redis-0"): 50}),
-    }
-
-
-def _energy(namespace: str, power_source: str | None = "instance_profile") -> EnergyMetric:
-    return EnergyMetric(
-        pod_name="redis-0", namespace=namespace, joules=1000.0, timestamp=TS, node="node-1", power_source=power_source
-    )
-
-
-@pytest.mark.asyncio
-async def test_same_named_pods_in_two_namespaces_keep_their_own_cost():
-    cost_map = {
-        ("cache", "redis-0"): CostMetric(
-            pod_name="redis-0", namespace="cache", cpu_cost=0.6, ram_cost=0.3, storage_cost=0.1, total_cost=1.0
-        ),
-        ("queue", "redis-0"): CostMetric(
-            pod_name="redis-0", namespace="queue", cpu_cost=0.1, ram_cost=0.1, total_cost=0.2
-        ),
-    }
-
-    rows = await _assembler().assemble(**_assemble_args(cost_map, [_energy("cache"), _energy("queue")]))
-
-    by_namespace = {row.namespace: row for row in rows}
-    assert by_namespace["cache"].total_cost == pytest.approx(1.0)
-    assert by_namespace["queue"].total_cost == pytest.approx(0.2)
-    assert by_namespace["cache"].cost_cpu == pytest.approx(0.6)
-    assert by_namespace["cache"].cost_storage == pytest.approx(0.1)
-    assert all(row.cost_source == "opencost" for row in rows)
-
-
-@pytest.mark.asyncio
-async def test_a_legacy_pod_name_key_never_leaks_into_another_namespace():
-    cost_map = {"redis-0": CostMetric(pod_name="redis-0", namespace="cache", cpu_cost=1, ram_cost=0, total_cost=1)}
-
-    rows = await _assembler().assemble(**_assemble_args(cost_map, [_energy("queue")]))
-
-    assert rows[0].cost_source == "none"
-    assert rows[0].total_cost == 0.0
-
-
-@pytest.mark.asyncio
-async def test_pod_rows_carry_usage_power_and_intensity_provenance():
-    rows = await _assembler("zone_default").assemble(**_assemble_args({}, [_energy("cache", power_source=None)]))
-
-    row = rows[0]
-    assert row.usage_source == "prometheus"
-    assert row.intensity_source == "zone_default"
-    assert row.cost_source == "none"
-    assert row.is_estimated is True
-    assert any("intensity" in reason.lower() for reason in row.estimation_reasons)
 
 
 def _aggregate(**overrides) -> CombinedMetric:

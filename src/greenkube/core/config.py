@@ -177,7 +177,6 @@ class Config(BaseSettings):
     # --- Prometheus variables ---
     PROMETHEUS_URL: str = ""
     PROMETHEUS_QUERY_RANGE_STEP: str = "5m"
-    PROMETHEUS_QUERY_RANGE_MAX_SAMPLES: int = 10000
     # Prometheus scrape interval of cAdvisor; rate windows span max(step, 4 x scrape interval).
     PROMETHEUS_SCRAPE_INTERVAL: str = "30s"
     # Collection catch-up: windows end at now - COLLECTION_SAFETY_LAG; after downtime the
@@ -198,9 +197,6 @@ class Config(BaseSettings):
     DEFAULT_INSTANCE_VCORES: int = 1
     DEFAULT_INSTANCE_MIN_WATTS: float = 1.0
     DEFAULT_INSTANCE_MAX_WATTS: float = 10.0
-
-    # Threshold in cores below which Prometheus totals are considered too small
-    LOW_NODE_CPU_THRESHOLD: float = 0.05
 
     # Normalization granularity for carbon intensity lookups and cache keys.
     # Allowed values: 'hour', 'day', 'none'
