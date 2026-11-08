@@ -2,15 +2,21 @@
 # Install (or upgrade) GreenKube from ./helm-chart with the quickstart values
 # and the image built by build-image.sh. Creates the Git token Secret the
 # quickstart provider references. Idempotent (helm upgrade --install).
+#
+# Refuses to install into a namespace that the harness did not create (label
+# greenkube.io/e2e=true), so it never upgrades a real GreenKube installation
+# with the demo values.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 need_cmd kubectl helm jq
+require_e2e_context
 
-kubectl create namespace "${GK_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+ensure_harness_namespace "${GK_NAMESPACE}"
 
-# The quickstart provider reads key "token" of Secret "greenkube-git".
-kubectl -n "${GK_NAMESPACE}" create secret generic greenkube-git \
-  --from-literal=token="$(gitea_token)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# The quickstart provider reads key "token" of Secret "greenkube-git". The token
+# reaches kubectl on stdin, not on its command line.
+gitea_token | kubectl -n "${GK_NAMESPACE}" create secret generic greenkube-git \
+  --from-file=token=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # Cluster-specific overrides: backend URLs and the Gitea repository of this run.
 # Helm replaces lists wholesale, so the provider entry is written out in full.

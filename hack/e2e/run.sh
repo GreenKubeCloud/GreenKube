@@ -12,11 +12,17 @@
 # and the harness's Argo CD/Flux objects), so the run starts from oversized
 # workloads and an empty database. E2E_FRESH=0 reuses them.
 #
+# Safety: nothing runs unless kubectl points at E2E_KUBE_CONTEXT (default
+# minikube), and cleanup deletes only objects that carry the harness's
+# ownership marker (see cleanup.sh).
+#
 # The environment is left running for inspection; `make e2e-clean` removes it.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 : "${E2E_FRESH:=1}"
-need_cmd kubectl helm curl jq minikube docker
+need_cmd kubectl jq
+require_e2e_context
+need_cmd helm curl minikube docker
 
 trap stop_port_forwards EXIT
 

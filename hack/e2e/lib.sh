@@ -23,8 +23,31 @@ QUICKSTART_DIR="${REPO_ROOT}/docs/examples/quickstart"
 # Extra Helm values file merged after the quickstart and cluster values.
 : "${GK_EXTRA_VALUES:=}"
 
+# --- Safety ----------------------------------------------------------------------
+# Every script that changes the cluster first checks that kubectl points at this
+# context, so a shell left on a real cluster is never touched.
+: "${E2E_KUBE_CONTEXT:=minikube}"
+# Ownership marker: the harness labels the namespaces, the Argo CD Application
+# and the Flux objects it creates, and only deletes or reuses labelled objects.
+# The sample repository carries GITEA_REPO_MARKER in its description instead.
+E2E_OWNER_LABEL_KEY="greenkube.io/e2e"
+E2E_OWNER_LABEL="${E2E_OWNER_LABEL_KEY}=true"
+GITEA_REPO_MARKER="managed by hack/e2e"
+# Set to 1 to take over objects that have the harness's names but no ownership
+# marker (for example an environment created before the marker existed). They
+# are labelled and reused and, with E2E_FRESH=1, deleted.
+: "${E2E_ADOPT:=0}"
+
 # --- Sample application ---------------------------------------------------------
-: "${APPS_NAMESPACE:=greenkube-e2e-apps}"
+# Fixed: the sample manifests, the Argo CD destination and the Flux overlay all
+# declare this namespace.
+APPS_NAMESPACE_FIXED="greenkube-e2e-apps"
+: "${APPS_NAMESPACE:=${APPS_NAMESPACE_FIXED}}"
+if [[ "${APPS_NAMESPACE}" != "${APPS_NAMESPACE_FIXED}" ]]; then
+  printf '[e2e] ERROR: APPS_NAMESPACE cannot be changed: the sample repository deploys into %s.\n' \
+    "${APPS_NAMESPACE_FIXED}" >&2
+  exit 1
+fi
 : "${ARGO_WORKLOAD:=oversized-web}"
 : "${FLUX_WORKLOAD:=oversized-worker}"
 
@@ -39,9 +62,12 @@ QUICKSTART_DIR="${REPO_ROOT}/docs/examples/quickstart"
 : "${GITEA_OWNER:=greenkube}"
 : "${GITEA_REPO:=greenkube-e2e-quickstart}"
 : "${GITEA_BRANCH:=main}"
-# Token of GITEA_OWNER with read/write repository scope. GITEA_TOKEN wins over the file.
-: "${GITEA_TOKEN_FILE:=${HOME}/Documents/Entreprise/GreenKube/local-k8s/.bootstrap-state/gitea-token}"
-# Set to 1 to delete and recreate the sample repository (it is owned by the harness).
+# Token with read/write repository scope: GITEA_TOKEN, or a file that holds it
+# in GITEA_TOKEN_FILE (GITEA_TOKEN wins). The token's user must be GITEA_OWNER,
+# a member of the GITEA_OWNER organization, or a Gitea administrator.
+: "${GITEA_TOKEN_FILE:=}"
+# Set to 1 to delete and recreate the sample repository (only when its
+# description carries the harness marker, see GITEA_REPO_MARKER).
 : "${GITEA_RESET_REPO:=0}"
 
 # --- GitOps controllers -----------------------------------------------------------
@@ -121,8 +147,71 @@ gitea_token() {
     printf '%s' "${GITEA_TOKEN}"
     return
   fi
-  [[ -s "${GITEA_TOKEN_FILE}" ]] || die "Set GITEA_TOKEN or GITEA_TOKEN_FILE (missing: ${GITEA_TOKEN_FILE})."
+  [[ -n "${GITEA_TOKEN_FILE}" ]] || die "Set GITEA_TOKEN, or GITEA_TOKEN_FILE to a file that holds the Gitea token."
+  [[ -s "${GITEA_TOKEN_FILE}" ]] || die "GITEA_TOKEN_FILE is empty or missing: ${GITEA_TOKEN_FILE}"
   tr -d '[:space:]' <"${GITEA_TOKEN_FILE}"
+}
+
+# --- Safety checks -----------------------------------------------------------------
+# Refuse to run against any kubectl context other than E2E_KUBE_CONTEXT.
+require_e2e_context() {
+  local current
+  current="$(kubectl config current-context 2>/dev/null || true)"
+  [[ "${current}" == "${E2E_KUBE_CONTEXT}" ]] ||
+    die "kubectl points at context '${current:-<none>}', not '${E2E_KUBE_CONTEXT}'. The harness installs, upgrades and deletes objects: switch context (kubectl config use-context ${E2E_KUBE_CONTEXT}) or set E2E_KUBE_CONTEXT to the context of a disposable cluster."
+}
+
+# owner_label <kind> <name> [namespace]: prints the value of the harness label
+# of an object ("" when unlabelled); fails when the object does not exist.
+owner_label() {
+  local kind="$1" name="$2" namespace="${3:-}" object
+  if [[ -n "${namespace}" ]]; then
+    object="$(kubectl -n "${namespace}" get "${kind}" "${name}" -o json 2>/dev/null)" || return 1
+  else
+    object="$(kubectl get "${kind}" "${name}" -o json 2>/dev/null)" || return 1
+  fi
+  jq -r --arg key "${E2E_OWNER_LABEL_KEY}" '.metadata.labels[$key] // ""' <<<"${object}"
+}
+
+# harness_owns <kind> <name> [namespace]: true when the object exists and
+# belongs to the harness (labelled, or E2E_ADOPT=1); false when it is missing.
+harness_owns() {
+  local value
+  value="$(owner_label "$@")" || return 1
+  [[ "${value}" == "true" || "${E2E_ADOPT}" == "1" ]]
+}
+
+# claim_object <kind> <name> [namespace]: called before the harness creates or
+# updates an object. Passes when the object is missing or belongs to the
+# harness; dies on an object that someone else created.
+claim_object() {
+  local kind="$1" name="$2" namespace="${3:-}" value
+  value="$(owner_label "$@")" || return 0
+  [[ "${value}" == "true" ]] && return 0
+  if [[ "${E2E_ADOPT}" == "1" ]]; then
+    warn "Adopting ${kind} ${namespace:+${namespace}/}${name} (E2E_ADOPT=1)."
+    return 0
+  fi
+  die "${kind} ${namespace:+${namespace}/}${name} exists but was not created by the harness (no label ${E2E_OWNER_LABEL}). Choose another name, or set E2E_ADOPT=1 if it is disposable."
+}
+
+# ensure_harness_namespace <name>: create the namespace with the ownership
+# label, or check that the existing namespace belongs to the harness.
+ensure_harness_namespace() {
+  local namespace="$1"
+  claim_object namespace "${namespace}"
+  kubectl create namespace "${namespace}" --dry-run=client -o yaml |
+    kubectl label --local -f - "${E2E_OWNER_LABEL}" app.kubernetes.io/part-of=greenkube-quickstart -o yaml |
+    kubectl apply -f - >/dev/null
+}
+
+# label_owned <file>: add the ownership label to every object of a manifest
+# (read from the file) and print them as one List. `kubectl label --local -o
+# yaml` would print several objects without "---" separators, so the objects
+# are collected as JSON instead.
+label_owned() {
+  kubectl label --local -f "$1" "${E2E_OWNER_LABEL}" -o json |
+    jq -s '{apiVersion: "v1", kind: "List", items: .}'
 }
 
 # --- Port-forwards ------------------------------------------------------------------
@@ -178,13 +267,42 @@ greenkube_port_forward() {
 
 # --- HTTP helpers --------------------------------------------------------------------
 # gitea_api <method> <path> [json-body]; prints the response body, fails on HTTP errors.
+# Credentials reach curl on stdin (-H @-), never on its command line.
 gitea_api() {
   local method="$1" path="$2" body="${3:-}"
-  local args=(-sS -X "${method}" -H "Authorization: token $(gitea_token)" -H "Accept: application/json")
+  local args=(-sS -X "${method}" -H @- -H "Accept: application/json")
   if [[ -n "${body}" ]]; then
     args+=(-H "Content-Type: application/json" --data "${body}")
   fi
-  curl --fail-with-body "${args[@]}" "${GITEA_LOCAL_URL}/api/v1${path}"
+  printf 'Authorization: token %s\n' "$(gitea_token)" |
+    curl --fail-with-body "${args[@]}" "${GITEA_LOCAL_URL}/api/v1${path}"
+}
+
+# gitea_call <method> <path> [json-body]: like gitea_api, but never fails on an
+# HTTP error. Prints the HTTP status code (000 when Gitea is unreachable); the
+# response body goes to ${E2E_STATE_DIR}/gitea-last.json.
+gitea_call() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sS -X "${method}" -H @- -H "Accept: application/json"
+    -o "${E2E_STATE_DIR}/gitea-last.json" -w '%{http_code}')
+  if [[ -n "${body}" ]]; then
+    args+=(-H "Content-Type: application/json" --data "${body}")
+  fi
+  printf 'Authorization: token %s\n' "$(gitea_token)" |
+    curl "${args[@]}" "${GITEA_LOCAL_URL}/api/v1${path}" 2>/dev/null || printf '000'
+}
+
+# gitea_repo_state: prints "missing", "owned" (the description carries the
+# harness marker, or E2E_ADOPT=1) or "foreign".
+gitea_repo_state() {
+  local repo
+  if ! repo="$(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}" 2>/dev/null)"; then
+    printf 'missing'
+  elif [[ "$(jq -r '.description // ""' <<<"${repo}")" == *"${GITEA_REPO_MARKER}"* || "${E2E_ADOPT}" == "1" ]]; then
+    printf 'owned'
+  else
+    printf 'foreign'
+  fi
 }
 
 greenkube_api_key() {
@@ -199,12 +317,13 @@ greenkube_api_key() {
 # fails on HTTP errors; the body of a failed call is kept in ${E2E_STATE_DIR}/last-error.json.
 gk_api() {
   local method="$1" path="$2" body="${3:-}"
-  local args=(-sS -X "${method}" -H "Authorization: Bearer ${GK_API_KEY:?GK_API_KEY is not set}" -H "Accept: application/json")
+  local args=(-sS -X "${method}" -H @- -H "Accept: application/json")
   if [[ -n "${body}" ]]; then
     args+=(-H "Content-Type: application/json" --data "${body}")
   fi
   local output status
-  output="$(curl "${args[@]}" -w '\n%{http_code}' "${GK_LOCAL_URL}/api/v1${path}")" || return 1
+  output="$(printf 'Authorization: Bearer %s\n' "${GK_API_KEY:?GK_API_KEY is not set}" |
+    curl "${args[@]}" -w '\n%{http_code}' "${GK_LOCAL_URL}/api/v1${path}")" || return 1
   status="${output##*$'\n'}"
   output="${output%$'\n'*}"
   if [[ "${status}" -ge 400 ]]; then

@@ -2,26 +2,33 @@
 # Register the sample repository with the GitOps controllers: one Argo CD
 # Application (raw YAML, apps/oversized-web) and, when E2E_FLUX=1, one Flux
 # GitRepository + Kustomization (Kustomize, flux/oversized-worker). Creates
-# only these objects and the sample namespace. Idempotent (kubectl apply).
+# only these objects and the sample namespace, each labelled
+# greenkube.io/e2e=true, and refuses to update an existing object without that
+# label. Idempotent (kubectl apply).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 need_cmd kubectl jq sed
+require_e2e_context
 
 default_repo_url="http://gitea-http.gitea.svc.cluster.local:3000/greenkube/greenkube-e2e-quickstart.git"
+rendered="${E2E_STATE_DIR}/gitops-objects.yaml"
 
+# render <file> <name> <namespace>: point the manifest at this run's repository,
+# branch and object names, and add the ownership label.
 render() {
   sed -e "s|${default_repo_url}|${GITEA_REPO_URL}|g" \
     -e "s|targetRevision: main|targetRevision: ${GITEA_BRANCH}|" \
-    -e "s|branch: main|branch: ${GITEA_BRANCH}|" "$1"
+    -e "s|branch: main|branch: ${GITEA_BRANCH}|" \
+    -e "s|name: greenkube-e2e-quickstart|name: $2|" \
+    -e "s|namespace: argocd$|namespace: $3|" -e "s|namespace: flux-system$|namespace: $3|" "$1" >"${rendered}"
+  label_owned "${rendered}"
 }
 
-kubectl create namespace "${APPS_NAMESPACE}" --dry-run=client -o yaml |
-  kubectl label --local -f - app.kubernetes.io/part-of=greenkube-quickstart -o yaml |
-  kubectl apply -f - >/dev/null
+ensure_harness_namespace "${APPS_NAMESPACE}"
 
+claim_object application "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}"
 log "Applying Argo CD Application ${ARGOCD_NAMESPACE}/${ARGOCD_APP}..."
-render "${QUICKSTART_DIR}/argocd-application.yaml" |
-  sed -e "s|name: greenkube-e2e-quickstart|name: ${ARGOCD_APP}|" -e "s|namespace: argocd|namespace: ${ARGOCD_NAMESPACE}|" |
+render "${QUICKSTART_DIR}/argocd-application.yaml" "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}" |
   kubectl apply -f - >/dev/null
 kubectl -n "${ARGOCD_NAMESPACE}" annotate application "${ARGOCD_APP}" argocd.argoproj.io/refresh=normal --overwrite >/dev/null
 
@@ -42,10 +49,10 @@ if [[ "${E2E_FLUX}" == "1" ]]; then
     evidence flux_kustomization skipped "Flux is not installed"
     exit 0
   fi
+  claim_object gitrepository "${FLUX_NAME}" "${FLUX_NAMESPACE}"
+  claim_object kustomization "${FLUX_NAME}" "${FLUX_NAMESPACE}"
   log "Applying Flux GitRepository + Kustomization ${FLUX_NAMESPACE}/${FLUX_NAME}..."
-  render "${QUICKSTART_DIR}/flux-kustomization.yaml" |
-    sed -e "s|name: greenkube-e2e-quickstart|name: ${FLUX_NAME}|" -e "s|namespace: flux-system|namespace: ${FLUX_NAMESPACE}|" \
-      -e "s|targetNamespace: greenkube-e2e-apps|targetNamespace: ${APPS_NAMESPACE}|" |
+  render "${QUICKSTART_DIR}/flux-kustomization.yaml" "${FLUX_NAME}" "${FLUX_NAMESPACE}" |
     kubectl apply -f - >/dev/null
   kubectl -n "${FLUX_NAMESPACE}" annotate gitrepository "${FLUX_NAME}" \
     reconcile.fluxcd.io/requestedAt="$(date +%s)" --overwrite >/dev/null
