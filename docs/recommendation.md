@@ -8,13 +8,13 @@ This page describes how GreenKube recommendations are generated, stored, shown, 
 
 Recommendations are derived from stored `CombinedMetric` records. These records already combine Kubernetes workload identity, resource requests, observed CPU and memory usage, energy, CO2e, cost, timestamps, grid intensity, and node metadata collected elsewhere in GreenKube.
 
-Scheduled scans use `RECOMMENDATION_LOOKBACK_DAYS` to read the recent metrics window from the combined metrics repository. The default is 7 days. When the recommender receives the analysis window length, projected savings are annualized from the observed window.
+Scheduled scans use `RECOMMENDATION_LOOKBACK_DAYS` (default 14 days, two weekly cycles) of history. On SQLite and PostgreSQL they do not load the metric rows of that window: they read one **usage summary** per workload container, computed in SQL from the `workload_usage_hourly` rollup (see [Usage summaries](#usage-summaries-memory-bounded-scans)). Projected savings are annualized over the span actually observed (from the first rolled hour in the lookback to the scan), so a cluster with three days of history is not extrapolated as if it had fourteen.
 
 The optimization context can also include these optional Kubernetes and cost inputs:
 
 | Input | Purpose |
 |---|---|
-| Latest node snapshots | Enables node-level recommendations such as overprovisioned or underutilized nodes. |
+| Latest node snapshots | Enables node-level recommendations (overprovisioned nodes). |
 | HPA targets | Prevents autoscaling recommendations for workloads that already have a HorizontalPodAutoscaler. |
 | Orphaned PersistentVolumes | Enables delete-orphaned-PV recommendations. The `PVCollector` lists all PVs and PVCs from the Kubernetes API and reports volumes whose claim is gone or released. Requires read access to `persistentvolumes` and `persistentvolumeclaims` at cluster scope; the Helm chart's `ClusterRole` includes these resources by default. When OpenCost is reachable, real per-volume storage costs are fetched via `OpenCostCollector.collect_pv_costs()` and used for the projected savings; otherwise the capacity-based estimate applies. |
 | Orphaned LoadBalancers | Enables delete-orphaned-LoadBalancer recommendations. The `LoadBalancerCollector` lists all Services and Endpoints from the Kubernetes API and reports Services of type `LoadBalancer` that have no ready backing endpoints. Requires read access to `services` and `endpoints` at cluster scope; the Helm chart's `ClusterRole` includes these resources by default. When OpenCost is reachable, real per-service LoadBalancer costs are fetched via `OpenCostCollector.collect_lb_costs()` (allocations aggregated by `service`, using the `loadBalancerCosts` field) and used for the projected savings; otherwise the flat `LOAD_BALANCER_COST_PER_MONTH` estimate applies. |
@@ -22,6 +22,25 @@ The optimization context can also include these optional Kubernetes and cost inp
 VPA and Karpenter are separate optional recommendation sources. VPA reads recommendation-mode objects when its CRD is available; Karpenter reads NodePools/NodeClaims when compatible CRDs are available. Both connectors are enabled by default and skip cleanly when their APIs are absent.
 
 During scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever.
+
+## Usage Summaries (Memory-Bounded Scans)
+
+A scan's memory grows with the number of workload targets, not with pods × lookback × samples (roadmap E3, BUG-12). Before, a scan materialized up to `RECOMMENDATION_MAX_METRIC_ROWS` (750,000) metric objects, about 2.6 GB.
+
+**Rollup.** The `workload_usage_hourly` table (migration `0052`) holds one row per hour, workload target, container and node. The target is the stable recommendation target (owner kind and name, an inferred Deployment, or the bare pod with kind `Pod`); container `""` is the pod-level aggregate, which exists for every pod (rebuilt from the containers when a pod row is missing). Each row stores:
+
+- sample, step and distinct-pod counts and the replica-seconds observed (`sample_count / step_count` is the average replica count);
+- CPU and memory per replica: average, p50, p90, p95, p99 and maximum, plus the mean of squared CPU values (for the coefficient of variation);
+- the latest requests and limits of the hour, and the sum of per-sample requests (requested capacity per node);
+- allocated cost (with its components and `cost_source`), CO2e, energy, PUE, grid intensity and zone, restarts.
+
+The compression job (every hour) re-rolls the last 24 hours, because late collection windows and the carbon-intensity recompute still change them, and backfills up to the lookback on its first run. An hour is rolled from its raw rows, or from the compressed hourly tables once raw rows are pruned (`source = hourly`). Each scan first rolls the hours collected since the last run, so it sees the newest data. The rollup is pruned with `METRICS_AGGREGATED_RETENTION_DAYS`.
+
+**Percentiles.** Hourly percentiles are exact nearest-rank percentiles over the hour's per-step values: the per-step maximum when the collector stored one, otherwise the step value (a rate over the step for CPU, a sample for memory), never the average of averages. Over the lookback, a percentile is the nearest-rank percentile of the hourly percentiles (the `ceil(p × hours / 100)`-th smallest), and the maximum is the largest hourly maximum. Across the nodes of one hour, the larger percentile is kept. The approximation is close for p95/p99 and conservative for a single burst hour; hours rolled from compressed hourly tables use each pod's hourly maximum and are conservative too.
+
+**What a scan reads.** Three bounded SQL aggregations build the usage snapshot: the summaries (one per target container), the pod-level CPU profile per UTC hour of day (off-peak analysis) and the per-node average usage and requests (node and Karpenter analyses). A fourth returns **baseline rows** for the Impact Model and the evidence: pod-level rows per target, node, hour of day and requests; container rows per target, container, node and requests. Their `timestamp` is the last hour they cover, so the newest rows carry the current requests, and they carry the summary percentiles so evidence statistics match the analyzer's. On SQLite these queries run with a 2 MiB page cache, no memory map and on-disk sorts, then restore the connection settings.
+
+A scan of 500 pods over 14 days (336,000 rollup rows) peaks below 200 MB RSS and finishes in under 10 seconds on SQLite and PostgreSQL (`tests/integration/test_bounded_scan_performance.py`; the acceptance bound is 300 MB and 60 s). Backends without the rollup (custom repositories) keep the row-loading path bounded by `RECOMMENDATION_MAX_METRIC_ROWS`.
 
 ## Lifecycle States
 
@@ -109,16 +128,35 @@ GreenKube currently has eleven recommendation types.
 | Type | Scope | Current trigger |
 |---|---|---|
 | `ZOMBIE_POD` | pod or workload | Target has cost above `ZOMBIE_COST_THRESHOLD` and energy below `ZOMBIE_ENERGY_THRESHOLD`. Projected as a workload deletion: the observed allocated cost and the allocated CO2e share (idle and embodied by reservation, dynamic by usage), annualized from the observed window. |
-| `RIGHTSIZING_CPU` | pod or workload | Average CPU usage divided by latest CPU request is below `RIGHTSIZING_CPU_THRESHOLD`. The target request is based on P95 usage, observed max, average usage, and `RIGHTSIZING_HEADROOM`, then floored by `RECOMMENDATION_MIN_CPU_MILLICORES`. Savings price only the released CPU reservation, at the container's observed OpenCost cost per reserved core when available, otherwise at the node's CPU rate; CO2e is the idle and embodied share released ([Impact Model](methodology/impact-model.md#container-requests-rightsizing-native-analyzers-and-vpa)). |
-| `RIGHTSIZING_MEMORY` | pod or workload | Average memory usage divided by latest memory request is below `RIGHTSIZING_MEMORY_THRESHOLD`. The target request uses the same balanced sizing formula and is floored by `RECOMMENDATION_MIN_MEMORY_BYTES`. Savings price only the released memory reservation, at the container's observed cost per reserved GiB when available, otherwise at the node's RAM rate; projected CO2e is zero until memory power is modeled. CPU and memory savings on one container never add up to more than its observed cost. |
+| `RIGHTSIZING_CPU` | pod or workload | Two-way (see [Two-way rightsizing](#two-way-rightsizing-and-limits)). **Decrease:** average CPU usage divided by the latest CPU request is below `RIGHTSIZING_CPU_THRESHOLD` and at least `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` (7) days are observed. The target request is based on P95 usage, observed max, average usage, and `RIGHTSIZING_HEADROOM`, then floored by `RECOMMENDATION_MIN_CPU_MILLICORES`. **Increase:** p99 usage is above `RIGHTSIZING_INCREASE_THRESHOLD` (0.9) of the request; the target is p99 × headroom. Savings price only the released CPU reservation, at the container's observed OpenCost cost per reserved core when available, otherwise at the node's CPU rate; CO2e is the idle and embodied share released ([Impact Model](methodology/impact-model.md#container-requests-rightsizing-native-analyzers-and-vpa)). |
+| `RIGHTSIZING_MEMORY` | pod or workload | Two-way. **Decrease:** average memory usage divided by the latest memory request is below `RIGHTSIZING_MEMORY_THRESHOLD`, with the same coverage rule; the target uses the same balanced sizing formula and is floored by `RECOMMENDATION_MIN_MEMORY_BYTES`. **Increase:** p99 above 90% of the request, OOM kills, or a working set above 90% of the memory limit; the target is the larger of p99 × headroom and max × 1.1, rounded up to a MiB. Savings price only the released memory reservation, at the container's observed cost per reserved GiB when available, otherwise at the node's RAM rate; projected CO2e is zero until memory power is modeled. CPU and memory savings on one container never add up to more than its observed cost. |
 | `AUTOSCALING_CANDIDATE` | pod or workload | CPU usage has enough samples, coefficient of variation is above `AUTOSCALING_CV_THRESHOLD`, max/mean spike ratio is above `AUTOSCALING_SPIKE_RATIO`, and no matching HPA was found for a non-pod owner target. |
 | `OFF_PEAK_SCALING` | pod or workload | Timestamped CPU usage shows at least `OFF_PEAK_MIN_IDLE_HOURS` consecutive hours below `OFF_PEAK_IDLE_THRESHOLD` of the daily peak. The recommendation includes a suggested UTC scale-to-zero window. Savings are the replica-hours removed in that window, priced at the workload's allocated rate and multiplied by the realization factor. |
 | `IDLE_NAMESPACE` | namespace | Namespace total energy is below `IDLE_NAMESPACE_ENERGY_THRESHOLD` while cost is positive. Common system namespaces are excluded unless `RECOMMEND_SYSTEM_NAMESPACES` is enabled. Projected as deleting every workload of the namespace. |
 | `CARBON_AWARE_SCHEDULING` | pod or workload | Target average grid intensity is more than `CARBON_AWARE_THRESHOLD` times the average for its electricity zone. Projected CO2e savings are estimated from the high-carbon share. |
 | `OVERPROVISIONED_NODE` | node | Node average CPU utilization, and memory utilization when capacity is available, are below `NODE_UTILIZATION_THRESHOLD`. |
-| `UNDERUTILIZED_NODE` | node | Node has fewer than three pods and average CPU utilization below 15%. |
+| `UNDERUTILIZED_NODE` | node | No longer emitted (E9): it duplicated `OVERPROVISIONED_NODE` with weaker logic. The value stays for stored recommendations. |
 | `ORPHANED_PERSISTENT_VOLUME` | cluster | A PersistentVolume is in `Released` phase (its PVC was deleted but the volume was not reclaimed) or its `claimRef` references a PVC that no longer exists. The PV name is stored in the `pod_name` field because PVs are cluster-scoped. Deleting the volume releases the provisioned storage. Projected cost savings prefer the real storage cost reported by OpenCost for the volume (annualized from the observation window); when OpenCost has no cost data (e.g. on-premises or local storage), the estimate falls back to the provisioned capacity and `STORAGE_COST_PER_GIB_MONTH` (default `$0.10`/GiB-month). Projected as an asset deletion (realization factor 1). CO2e savings are not projected because the energy model does not cover storage. |
 | `ORPHANED_LOAD_BALANCER` | cluster | A Service of type `LoadBalancer` has no ready backing endpoints, so its selector matches no pods and the provisioned cloud LoadBalancer routes traffic to nothing while continuing to bill hourly. The Service name is stored in the `pod_name` field and its namespace in the `namespace` field. Deleting the Service removes the cloud LoadBalancer. Projected cost savings prefer the real LoadBalancer cost reported by OpenCost for the Service (`OpenCostCollector.collect_lb_costs()` aggregates allocations by `service` and annualizes the window cost); when OpenCost has no cost data, the estimate falls back to `LOAD_BALANCER_COST_PER_MONTH` (default `$18.00`/month). Projected as an asset deletion (realization factor 1). CO2e savings are not projected because the energy model does not cover load balancers. |
+
+### Two-Way Rightsizing And Limits
+
+Native rightsizing proposes **decreases** (efficiency) and **increases** (reliability) from the per-container usage summary:
+
+- A decrease needs `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` (default 7) of observed coverage, so a weekly cycle is seen; a workload with less history (or unknown coverage) gets no decrease.
+- An increase needs no minimum coverage. Triggers: p99 usage above `RIGHTSIZING_INCREASE_THRESHOLD` × request (CPU and memory), any OOM kill, or a memory working set above 90% of the memory limit. Memory increases, and CPU increases whose p99 is above the request, have priority `high`; their reason starts with "Reliability".
+- An increase is projected by the Impact Model like any request change: it is a **negative** cost delta, kept as such in `potential_savings_cost` and `impact`. Ranking counts it as zero cost value. GitOps actions are generated for decreases only, so increases are advisory until container resources v2 (roadmap H1).
+- Percentiles come from per-step values (see [Usage summaries](#usage-summaries-memory-bounded-scans)), so a short burst raises p95/p99 even when hourly averages hide it.
+
+`RECOMMENDATION_LIMITS_POLICY` sets how limits are treated; the advice is appended to the description:
+
+| Policy | CPU limit | Memory limit |
+|---|---|---|
+| `keep` (default) | Left alone, unless it is below the new request ("remove it or raise it to at least max(request, p99 × 1.5)") or the workload is throttled in more than 5% of CFS periods. | Left alone, unless it is below max(new request, max × 1.1). |
+| `remove_cpu` | Remove it. | As `keep`. |
+| `memory_equals_request` | As `keep`. | Set equal to the request; memory decreases then never go below max × 1.1. |
+
+OOM kills and CPU throttling are used when a summary carries them (`oom_kill_count`, `throttling_ratio`); the rollup does not collect them yet. JVM detection is not implemented: container images and environment variables are not collected.
 
 Projected savings come from the [Impact Model](methodology/impact-model.md): each projected recommendation carries an `impact` object (model version, cost and CO2e breakdown, capacity released, realization factor, unit prices and their source). `potential_savings_cost` and `potential_savings_co2e_grams` are its expected annual values. Karpenter NodePool recommendations project the removable nodes' price and their idle and embodied emissions; the nodes kept must fit both the CPU and the memory requests. Autoscaling, carbon-aware and node-level native recommendations do not use the model yet.
 
@@ -286,10 +324,14 @@ Recommendation behavior is configured through environment variables in `src/gree
 
 | Environment variable | Helm value | Default |
 |---|---|---|
-| `RECOMMENDATION_LOOKBACK_DAYS` | `config.recommendations.lookbackDays` | `7` |
+| `RECOMMENDATION_LOOKBACK_DAYS` | `config.recommendations.lookbackDays` | `14` |
+| `RECOMMENDATION_MAX_METRIC_ROWS` | `config.recommendations.maxMetricRows` | `750000` (row-loading path only) |
 | `RIGHTSIZING_CPU_THRESHOLD` | `config.recommendations.rightsizingCpuThreshold` | `0.3` |
 | `RIGHTSIZING_MEMORY_THRESHOLD` | `config.recommendations.rightsizingMemoryThreshold` | `0.3` |
 | `RIGHTSIZING_HEADROOM` | `config.recommendations.rightsizingHeadroom` | `1.2` |
+| `RIGHTSIZING_INCREASE_THRESHOLD` | `config.recommendations.rightsizingIncreaseThreshold` | `0.9` |
+| `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` | `config.recommendations.minDecreaseCoverageDays` | `7` |
+| `RECOMMENDATION_LIMITS_POLICY` | `config.recommendations.limitsPolicy` | `keep` |
 | `ZOMBIE_COST_THRESHOLD` | `config.recommendations.zombieCostThreshold` | `0.01` |
 | `ZOMBIE_ENERGY_THRESHOLD` | `config.recommendations.zombieEnergyThreshold` | `1000` |
 | `AUTOSCALING_CV_THRESHOLD` | `config.recommendations.autoscalingCvThreshold` | `0.7` |
