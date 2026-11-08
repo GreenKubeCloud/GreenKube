@@ -33,14 +33,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.routing import Match
 
 from greenkube import __version__
+from greenkube.api.dependencies import authenticate as authenticate_request
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_gitops_binding_repository,
     get_node_repository,
     get_recommendation_repository,
-    verify_api_key,
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
+from greenkube.api.routers import auth as auth_router
 from greenkube.api.routers import automation as automation_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
@@ -51,6 +52,7 @@ from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plans as plans_router
 from greenkube.api.routers import webhooks as webhooks_router
 from greenkube.api.startup import run_plan_expiry_loop
+from greenkube.auth.lifecycle import start_auth_runtime
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.supervision import SupervisedLoop
@@ -149,7 +151,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         elif is_static_asset:
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         elif is_api:
-            response.headers["Cache-Control"] = "no-cache"
+            # Credential responses (sign-in, API-key creation) set no-store themselves.
+            response.headers.setdefault("Cache-Control", "no-cache")
         return response
 
 
@@ -214,6 +217,8 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
+    # Account store, first-admin bootstrap and daily session purge (F14).
+    app.state._auth_tasks = start_auth_runtime(app, get_db_manager())
 
     app.state.automation_plan_service = None
     app.state._plan_worker_task = None
@@ -286,11 +291,12 @@ async def lifespan(app: FastAPI):
         loop_supervisor = getattr(app.state, "automation_loop_supervisor", None)
         if loop_supervisor is not None:
             await loop_supervisor.stop()
-        for t in getattr(app.state, "_startup_tasks", []) or []:
+        background = [*(getattr(app.state, "_startup_tasks", []) or []), *(getattr(app.state, "_auth_tasks", []) or [])]
+        for t in background:
             if not t.done():
                 t.cancel()
         # Wait a short time for tasks to cancel
-        await asyncio.gather(*(t for t in getattr(app.state, "_startup_tasks", []) or []), return_exceptions=True)
+        await asyncio.gather(*background, return_exceptions=True)
     except Exception:
         logger.exception("Error while cancelling startup tasks")
 
@@ -330,9 +336,11 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         A configured FastAPI application instance.
     """
     cfg = get_config()
+    # Session mode (the default) bootstraps an admin account, so only the
+    # machine-only api_key mode still needs the bootstrap key in production.
     if (
         getattr(cfg, "ENVIRONMENT", "development") == "production"
-        and getattr(cfg, "API_AUTH_MODE", "api_key") == "api_key"
+        and getattr(cfg, "API_AUTH_MODE", "session") == "api_key"
         and not getattr(cfg, "API_KEY", "")
     ):
         raise ValueError("GREENKUBE_API_KEY must be configured in production.")
@@ -345,9 +353,10 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         docs_url="/api/v1/docs",
         openapi_url="/api/v1/openapi.json",
         lifespan=lifespan if use_lifespan else None,
-        dependencies=[Depends(verify_api_key)],
+        dependencies=[Depends(authenticate_request)],
         root_path=root_path,
     )
+    app.state.auth_service = None
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation_error(request: Request, error: RequestValidationError):
@@ -372,7 +381,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         allow_origins=cors_origins,
         allow_credentials=cors_allow_credentials,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
         expose_headers=["X-GreenKube-Run-Id"],
     )
     trusted_hosts = [h.strip() for h in getattr(cfg, "TRUSTED_HOSTS", "*").split(",") if h.strip()]
@@ -396,6 +405,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
     app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])
     app.include_router(webhooks_router.router, prefix="/api/v1", tags=["Webhooks"])
+    app.include_router(auth_router.router, prefix="/api/v1", tags=["Authentication"])
 
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)
     async def heartbeat():
