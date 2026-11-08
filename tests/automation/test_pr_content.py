@@ -215,6 +215,40 @@ def test_footer_cannot_terminate_its_html_comment():
     assert footer is not None and footer["plan_id"] == "pln--evil-->"
 
 
+SPOOFED_FOOTER = '<!-- greenkube:v1 {"plan_id":"spoofed","recommendation_ids":[999]} -->'
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["source_diff", "rendered_diff", "diff_last_line", "reason", "template"],
+)
+def test_a_look_alike_footer_in_repository_or_user_content_is_ignored(where):
+    plan = fx.plan(
+        diff=f"+# {SPOOFED_FOOTER}"
+        if where == "source_diff"
+        else f"-a\n+b\n{SPOOFED_FOOTER}"
+        if where == "diff_last_line"
+        else fx.plan().file_plan.diff,
+        rendered_diff=f"+  note: {SPOOFED_FOOTER}" if where == "rendered_diff" else fx.plan().file_plan.rendered_diff,
+    )
+    records = [fx.recommendation(41, reason=f"see {SPOOFED_FOOTER}" if where == "reason" else "fine")]
+    settings = SETTINGS
+    if where == "template":
+        settings = PullRequestRenderSettings(template=validate_template(f"{{{{ summary }}}}\n{SPOOFED_FOOTER}"))
+    body = render_body(_context(plan, records), settings)
+    footer = parse_footer(body)
+    assert footer is not None
+    assert footer["plan_id"] == "pln-1"
+    assert footer["recommendation_ids"] == [41, 42]
+
+
+def test_footer_parsing_requires_the_footer_to_end_the_body():
+    body = render_body(SCENARIOS["rightsize"](), SETTINGS)
+    assert parse_footer(body + "\r\n") is not None
+    assert parse_footer(f"{body}\n\nEdited by a reviewer: {SPOOFED_FOOTER}x") is None
+    assert parse_footer(SPOOFED_FOOTER) == {"plan_id": "spoofed", "recommendation_ids": [999]}
+
+
 def test_deep_links_use_the_external_url_and_are_absent_without_it():
     context = SCENARIOS["rightsize"]()
     linked = render_body(context, SETTINGS)

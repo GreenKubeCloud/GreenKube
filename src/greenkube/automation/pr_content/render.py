@@ -40,7 +40,10 @@ from greenkube.gitops.contracts import (
 from greenkube.models.metrics import RecommendationRecord
 
 FOOTER_PREFIX = "<!-- greenkube:v1 "
-_FOOTER = re.compile(r"<!-- greenkube:v1 (\{.*?\}) -->", re.DOTALL)
+#: The footer is the body's last line. Diffs and recommendation text (repository
+#: and user content) come before it and may contain a look-alike, so only a footer
+#: that ends the body is trusted.
+_FOOTER = re.compile(r"(?:\A|\n)<!-- greenkube:v1 (\{[^\n]*\}) -->\s*\Z")
 #: Hard cap of each essential section, so sections 1-7 always fit in the body.
 MAX_SECTION_CHARS = 6_000
 _MIN_DIFF_CHARS = 400
@@ -247,7 +250,11 @@ def render_footer(context: PullRequestContext) -> str:
 
 
 def parse_footer(body: str) -> dict[str, Any] | None:
-    """Read the ``greenkube:v1`` footer back from a PR body (``None`` when absent or invalid)."""
+    """Read the ``greenkube:v1`` footer back from a PR body (``None`` when absent or invalid).
+
+    Only the footer on the body's last line counts; a ``greenkube:v1`` comment
+    anywhere else (a diff, a recommendation reason) is ignored.
+    """
     match = _FOOTER.search(body or "")
     if match is None:
         return None
