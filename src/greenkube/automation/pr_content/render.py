@@ -1,0 +1,749 @@
+"""Pull-request title, body and commit message for a GitOps plan (roadmap J1).
+
+The body answers, in this order: what changes and what it saves (summary and
+changes), why (consensus and evidence), what could go wrong (risk), which
+numbers the projection rests on (assumptions), how to undo it (rollback) and
+how GreenKube will prove the result (verification plan). Provenance and the
+diffs follow in collapsible blocks, and a machine-readable ``greenkube:v1``
+footer closes the body.
+
+Every saving shown here is a projection; measured outcomes are posted later by
+the lifecycle comment and are never added to these numbers (principle 3).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from greenkube.automation.pr_content import formatting as fmt
+from greenkube.automation.pr_content.model import (
+    PullRequestContext,
+    PullRequestRenderSettings,
+    ResourceChange,
+    highest_risk,
+    plan_verb,
+    resource_changes,
+    savings_totals,
+)
+from greenkube.automation.pr_content.template import ESSENTIAL_SECTIONS, render_template
+from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
+    AddHorizontalPodAutoscaler,
+    ControllerKind,
+    DeleteResource,
+    SetContainerResources,
+)
+from greenkube.models.metrics import RecommendationRecord
+
+FOOTER_PREFIX = "<!-- greenkube:v1 "
+_FOOTER = re.compile(r"<!-- greenkube:v1 (\{.*?\}) -->", re.DOTALL)
+#: Hard cap of each essential section, so sections 1-7 always fit in the body.
+MAX_SECTION_CHARS = 6_000
+_MIN_DIFF_CHARS = 400
+_CONTROLLER_NAMES = {
+    ControllerKind.ARGOCD: "Argo CD Application",
+    ControllerKind.FLUX_KUSTOMIZATION: "Flux Kustomization",
+    ControllerKind.FLUX_HELM_RELEASE: "Flux HelmRelease",
+    ControllerKind.MANUAL_RESOLUTION: "manually resolved source",
+}
+_DEFAULT_WATCH = (
+    "container restarts and `OOMKilled` events",
+    "CPU throttling of the changed containers",
+    "readiness, error rate and latency of the service",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestContent:
+    title: str
+    body: str
+    commit_message: str
+
+
+def render_pull_request(
+    context: PullRequestContext,
+    settings: PullRequestRenderSettings | None = None,
+) -> PullRequestContent:
+    selected = settings or PullRequestRenderSettings()
+    title = render_title(context, selected)
+    return PullRequestContent(
+        title=title,
+        body=render_body(context, selected, title=title),
+        commit_message=render_commit_message(context, selected, title=title),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Title                                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def render_title(context: PullRequestContext, settings: PullRequestRenderSettings | None = None) -> str:
+    """``greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr``.
+
+    Parts are dropped from the right of the details when the title exceeds the
+    limit (72 characters by default); the full summary is always in the body.
+    """
+    selected = settings or PullRequestRenderSettings()
+    prefix = f"{selected.title_prefix}: " if selected.title_prefix else ""
+    head = f"{prefix}{plan_verb(context)} {context.workload}"
+    details = _title_details(context)
+    savings = [] if context.is_rollback else _title_savings(context)
+    limit = max(selected.max_title_chars, 20)
+    candidates = []
+    if details:
+        candidates.append(_join_title(f"{head} ({details})", savings))
+    candidates.append(_join_title(head, savings))
+    candidates.append(_join_title(head, savings[:1]))
+    candidates.append(head)
+    for candidate in candidates:
+        if len(candidate) <= limit:
+            return candidate
+    return candidates[-1][: limit - 1].rstrip() + "…"
+
+
+def _join_title(head: str, savings: Sequence[str]) -> str:
+    return " · ".join([head, *savings])
+
+
+def _title_details(context: PullRequestContext) -> str:
+    operations = context.plan.action.operations
+    if context.is_rollback:
+        return f"plan {context.plan.rollback_of_plan_id}"
+    changes = [change for change in resource_changes(context) if change.field.startswith("requests.")]
+    if changes:
+        multiple = len({change.container for change in changes}) > 1
+        parts = []
+        for change in changes:
+            label = "cpu" if change.is_cpu else "mem" if change.resource == "memory" else change.resource
+            if multiple:
+                label = f"{change.container} {label}"
+            parts.append(f"{label} {_current_text(change)}→{_proposed_text(change)}")
+        return ", ".join(parts)
+    for operation in operations:
+        if isinstance(operation, AddHorizontalPodAutoscaler):
+            target = f" @{operation.target_cpu_utilization}% cpu" if operation.target_cpu_utilization else ""
+            return f"{operation.min_replicas}-{operation.max_replicas} replicas{target}"
+        if isinstance(operation, DeleteResource):
+            return context.plan.action.target.kind
+    return ""
+
+
+def _title_savings(context: PullRequestContext) -> list[str]:
+    totals = savings_totals(context.recommendations)
+    parts: list[str] = []
+    if totals.has_cost and totals.cost_annual > 0:
+        parts.append(f"−{fmt.money_compact(totals.cost_annual, totals.currency)}/yr")
+    if totals.has_co2e and totals.co2e_annual_g > 0:
+        parts.append(f"−{fmt.co2e_compact(totals.co2e_annual_g)}/yr")
+    return parts
+
+
+def _current_text(change: ResourceChange) -> str:
+    if change.current is None:
+        return "?"
+    return fmt.cpu(change.current) if change.is_cpu else fmt.memory(change.current)
+
+
+def _proposed_text(change: ResourceChange) -> str:
+    if change.proposed is None:
+        return change.proposed_text
+    return fmt.cpu(change.proposed) if change.is_cpu else fmt.memory(change.proposed)
+
+
+# --------------------------------------------------------------------------- #
+# Commit message                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def render_commit_message(
+    context: PullRequestContext,
+    settings: PullRequestRenderSettings | None = None,
+    *,
+    title: str | None = None,
+) -> str:
+    """Commit message of the commit GreenKube creates in the GitOps repository.
+
+    The ``GreenKube-Plan`` and ``GreenKube-Recommendations`` trailers let
+    ``git log`` and audits find the plan behind any commit of the target repo.
+    """
+    plan = context.plan
+    subject = title or render_title(context, settings)
+    digest = (plan.digest or "")[:19]
+    if context.is_rollback:
+        description = f"Rollback of GreenKube plan {plan.rollback_of_plan_id} ({digest})."
+    else:
+        description = f"Apply GreenKube plan {plan.plan_id} ({digest})."
+    recommendation_ids = ", ".join(str(item) for item in plan.recommendation_ids)
+    trailers = [f"GreenKube-Plan: {plan.plan_id}", f"GreenKube-Recommendations: {recommendation_ids}"]
+    if context.is_rollback:
+        trailers.append(f"GreenKube-Rollback-Of: {plan.rollback_of_plan_id}")
+    return f"{subject}\n\n{description}\n\n" + "\n".join(trailers) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# Body                                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def render_body(
+    context: PullRequestContext,
+    settings: PullRequestRenderSettings | None = None,
+    *,
+    title: str | None = None,
+) -> str:
+    """Render the body through the configured template, at most ``max_body_chars`` long.
+
+    Sections 1-7 are each capped and always kept; the diffs get the remaining
+    space and are truncated first. The footer is always last.
+    """
+    selected = settings or PullRequestRenderSettings()
+    footer = render_footer(context)
+    sections = {
+        "summary": _summary(context, selected),
+        "changes": _changes(context),
+        "why": _why(context, selected),
+        "risk": _risk(context),
+        "assumptions": _assumptions(context),
+        "rollback": _rollback(context, selected),
+        "verification": _verification(context, selected),
+        "provenance": _provenance(context),
+    }
+    for name in ESSENTIAL_SECTIONS:
+        sections[name] = _cap(sections[name], MAX_SECTION_CHARS)
+    scalars = _scalars(context, selected, title or render_title(context, selected))
+    values = {**scalars, **sections, "diffs": ""}
+    without_diffs = render_template(selected.template, values)
+    budget = selected.max_body_chars - len(without_diffs) - len(footer) - 2
+    values["diffs"] = _diffs(context, budget)
+    body = render_template(selected.template, values)
+    limit = selected.max_body_chars - len(footer) - 1
+    if len(body) > limit:
+        note = "\n\n_The description was truncated to the provider limit._\n"
+        body = body[: max(limit - len(note), 0)].rstrip() + note
+    return f"{body}\n{footer}"
+
+
+def render_footer(context: PullRequestContext) -> str:
+    """``<!-- greenkube:v1 {...} -->`` with the plan identity, safe inside an HTML comment."""
+    plan = context.plan
+    payload = {
+        "plan_id": plan.plan_id,
+        "recommendation_ids": list(plan.recommendation_ids),
+        "revision": context.base_revision or None,
+        "change_set_id": plan.change_set_id,
+        "digest": plan.digest,
+    }
+    if plan.rollback_of_plan_id is not None:
+        payload["rollback_of_plan_id"] = plan.rollback_of_plan_id
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    # ``--`` cannot appear inside an HTML comment; JSON accepts the escaped form.
+    encoded = encoded.replace("--", "-\\u002d").replace(">", "\\u003e")
+    return f"{FOOTER_PREFIX}{encoded} -->"
+
+
+def parse_footer(body: str) -> dict[str, Any] | None:
+    """Read the ``greenkube:v1`` footer back from a PR body (``None`` when absent or invalid)."""
+    match = _FOOTER.search(body or "")
+    if match is None:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _scalars(context: PullRequestContext, settings: PullRequestRenderSettings, title: str) -> dict[str, str]:
+    plan = context.plan
+    return {
+        "title": title,
+        "plan_id": plan.plan_id,
+        "digest": plan.digest or "",
+        "workload": context.workload,
+        "namespace": plan.action.target.namespace,
+        "repository": context.repository,
+        "branch": context.branch,
+        "recommendation_ids": ", ".join(f"#{item}" for item in plan.recommendation_ids),
+        "risk_level": highest_risk(context.recommendations) or "unknown",
+        "plan_url": settings.link(f"changes/{plan.plan_id}") or "",
+    }
+
+
+def _cap(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 60].rstrip() + "\n\n_… section truncated to fit the provider limit._"
+
+
+def _summary(context: PullRequestContext, settings: PullRequestRenderSettings) -> str:
+    plan = context.plan
+    target = plan.action.target
+    ids = ", ".join(_recommendation_ref(item, settings) for item in plan.recommendation_ids)
+    if context.is_rollback:
+        sentence = (
+            f"GreenKube proposes to **revert plan `{plan.rollback_of_plan_id}`** on "
+            f"`{target.namespace}/{target.kind}/{target.name}` after its recommendations entered rollback review "
+            f"({ids})."
+        )
+    else:
+        details = _title_details(context)
+        sentence = (
+            f"GreenKube proposes to **{plan_verb(context)}** `{target.namespace}/{target.kind}/{target.name}`"
+            + (f" ({details})" if details else "")
+            + f", from recommendation{'s' if len(plan.recommendation_ids) > 1 else ''} {ids}."
+        )
+    lines = ["## Summary", "", sentence]
+    if not context.is_rollback:
+        lines.extend(("", *_totals_table(context)))
+    if context.missing_recommendation_ids:
+        missing = ", ".join(f"#{item}" for item in context.missing_recommendation_ids)
+        lines.extend(
+            ("", f"> Recommendation evidence is unavailable for {missing}; review those records before merging.")
+        )
+    return "\n".join(lines)
+
+
+def _recommendation_ref(recommendation_id: int, settings: PullRequestRenderSettings) -> str:
+    link = settings.link(f"recommendations/{recommendation_id}")
+    return f"[#{recommendation_id}]({link})" if link else f"#{recommendation_id}"
+
+
+def _totals_table(context: PullRequestContext) -> list[str]:
+    totals = savings_totals(context.recommendations)
+    if not totals.has_cost and not totals.has_co2e:
+        return ["_No projected savings are recorded for these recommendations._"]
+    factors = totals.realization_factors
+    if len(factors) == 1:
+        realization = f" (realization factor {factors[0]:.2f})"
+    elif factors:
+        realization = f" (realization factor {min(factors):.2f}–{max(factors):.2f})"
+    else:
+        realization = ""
+    lines = [
+        f"| Projected saving{realization} | per month | per year |",
+        "| --- | ---: | ---: |",
+    ]
+    if totals.has_cost:
+        lines.append(
+            f"| Cost ({totals.currency}) | {fmt.money(totals.cost_annual / 12, totals.currency)} "
+            f"| {fmt.money(totals.cost_annual, totals.currency)} |"
+        )
+    if totals.has_co2e:
+        lines.append(f"| CO₂e | {fmt.co2e(totals.co2e_annual_g / 12)} | {fmt.co2e(totals.co2e_annual_g)} |")
+    projector = (
+        "the Impact Model"
+        if any(isinstance(record.impact, dict) for record in context.recommendations)
+        else "the recommendation sources"
+    )
+    notes = [f"Projected by {projector}; measured savings are reported on this pull request after the rollout."]
+    if len(totals.currencies) > 1:
+        notes.append(
+            f"Only {totals.currency} amounts are totalled; other currencies: {', '.join(totals.currencies[1:])}."
+        )
+    return [*lines, "", *(f"_{note}_" for note in notes)]
+
+
+def _changes(context: PullRequestContext) -> str:
+    plan = context.plan
+    target = plan.action.target
+    lines = ["## Changes", ""]
+    if context.is_rollback:
+        lines.append(
+            f"Restores the resources recorded on `{target.namespace}/{target.kind}/{target.name}` before plan "
+            f"`{plan.rollback_of_plan_id}` was applied:"
+        )
+        for operation in plan.action.operations:
+            if isinstance(operation, SetContainerResources):
+                applied = ", ".join(
+                    f"{kind}.{name} {value}"
+                    for kind, values in (
+                        ("requests", operation.resources.requests),
+                        ("limits", operation.resources.limits),
+                    )
+                    for name, value in sorted(values.items())
+                )
+                lines.append(f"- container `{operation.container}`: reverts {applied or 'the planned values'}")
+        return "\n".join(lines)
+    changes = resource_changes(context)
+    if changes:
+        lines.extend(("| Container | Resource | Current | Proposed | Change |", "| --- | --- | ---: | ---: | ---: |"))
+        for change in changes:
+            lines.append(
+                f"| `{fmt.table_cell(change.container)}` | {change.field} | {_current_text(change)} "
+                f"| {_proposed_text(change)} | {_delta(change)} |"
+            )
+    for operation in plan.action.operations:
+        if isinstance(operation, DeleteResource):
+            lines.append(f"- Delete `{target.kind}` `{target.namespace}/{target.name}` from the repository.")
+        elif isinstance(operation, AddHorizontalPodAutoscaler):
+            utilization = (
+                f", target CPU utilization {operation.target_cpu_utilization}%"
+                if operation.target_cpu_utilization
+                else ""
+            )
+            lines.append(
+                f"- Add a HorizontalPodAutoscaler for `{target.kind}/{target.name}`: "
+                f"{operation.min_replicas}–{operation.max_replicas} replicas{utilization}."
+            )
+    if len(lines) == 2:
+        lines.append("_No resource values change; see the diffs._")
+    return "\n".join(lines)
+
+
+def _delta(change: ResourceChange) -> str:
+    if change.current is None or change.proposed is None:
+        return "n/a"
+    difference = change.proposed - change.current
+    amount = fmt.cpu(abs(difference)) if change.is_cpu else fmt.memory(abs(difference))
+    sign = "+" if difference > 0 else "−"
+    ratio = f" ({difference / change.current:+.0%})" if change.current else ""
+    return f"{sign}{amount}{ratio}"
+
+
+def _why(context: PullRequestContext, settings: PullRequestRenderSettings) -> str:
+    lines = ["## Why", ""]
+    if not context.recommendations:
+        lines.append("_The recommendation records behind this plan could not be loaded._")
+        return "\n".join(lines)
+    for record in context.recommendations:
+        lines.extend(_why_record(record, settings))
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _why_record(record: RecommendationRecord, settings: PullRequestRenderSettings) -> list[str]:
+    capability = getattr(record.capability, "value", record.capability) or record.type.value
+    target = (
+        f"`{fmt.inline(record.namespace or 'cluster', max_chars=80)}/"
+        f"{fmt.inline(record.owner_kind or 'resource', max_chars=60)}/"
+        f"{fmt.inline(record.owner_name or record.pod_name or 'unknown', max_chars=120)}`"
+    ) + (f" · container `{fmt.inline(record.container_name, max_chars=80)}`" if record.container_name else "")
+    reference = _recommendation_ref(record.id, settings) if record.id is not None else "recommendation"
+    lines = [f"**{reference} · {capability}** — {target}"]
+    finding = fmt.inline(record.reason or record.description)
+    if finding:
+        lines.append(f"- Finding: {finding}")
+    sources = [source for source in record.sources if source] or [getattr(record.source, "value", str(record.source))]
+    consensus = f"- Consensus: {len(sources)} source{'s' if len(sources) > 1 else ''} ({', '.join(sources)})"
+    if record.superseded_by:
+        consensus += f"; `{fmt.inline(record.superseded_by, max_chars=80)}` won arbitration"
+    proposal = _proposal_text(record)
+    if proposal:
+        consensus += f"; proposed {proposal}"
+    lines.append(consensus)
+    evidence = record.evidence
+    if evidence is None:
+        lines.append("- Evidence: not stored with this recommendation.")
+    else:
+        window = ""
+        if evidence.observation_window_start and evidence.observation_window_end:
+            hours = (evidence.observation_window_end - evidence.observation_window_start).total_seconds() / 3600
+            window = (
+                f"{fmt.duration_hours(round(hours))} ({fmt.timestamp(evidence.observation_window_start)} → "
+                f"{fmt.timestamp(evidence.observation_window_end)}), "
+            )
+        lines.append(
+            f"- Evidence: {window}{evidence.sample_count} samples, {fmt.percent(evidence.coverage_ratio)} coverage"
+        )
+        if evidence.cpu_usage is not None:
+            usage = evidence.cpu_usage
+            lines.append(f"- CPU usage: p95 {fmt.cpu(usage.p95)} · p99 {fmt.cpu(usage.p99)} · max {fmt.cpu(usage.max)}")
+        if evidence.memory_usage is not None:
+            usage = evidence.memory_usage
+            lines.append(
+                f"- Memory usage: p95 {fmt.memory(usage.p95)} · p99 {fmt.memory(usage.p99)} · "
+                f"max {fmt.memory(usage.max)}"
+            )
+        stability = []
+        if evidence.restart_count is not None:
+            stability.append(f"{evidence.restart_count} restarts")
+        if evidence.oom_events is not None:
+            stability.append(f"{evidence.oom_events} OOM events")
+        if stability:
+            lines.append(f"- Stability: {', '.join(stability)} in the window")
+    if record.confidence is not None:
+        lines.append(f"- Confidence: {fmt.percent(record.confidence)}")
+    link = settings.link(f"recommendations/{record.id}") if record.id is not None else None
+    if link:
+        lines.append(f"- Chart and full evidence: [GreenKube]({link})")
+    return lines
+
+
+def _proposal_text(record: RecommendationRecord) -> str:
+    evidence = record.evidence
+    parts = []
+    cpu_value = record.recommended_cpu_request_millicores
+    memory_value = record.recommended_memory_request_bytes
+    if evidence is not None:
+        cpu_value = cpu_value if cpu_value is not None else evidence.proposed.cpu_request_millicores
+        memory_value = memory_value if memory_value is not None else evidence.proposed.memory_request_bytes
+    if cpu_value is not None:
+        parts.append(f"cpu {fmt.cpu(cpu_value)}")
+    if memory_value is not None:
+        parts.append(f"memory {fmt.memory(memory_value)}")
+    return ", ".join(parts)
+
+
+def _risk(context: PullRequestContext) -> str:
+    risk = highest_risk(context.recommendations) or "unknown"
+    lines = ["## Risk & what to watch", "", f"Risk: **{risk}**."]
+    factors: list[str] = []
+    for record in context.recommendations:
+        for factor in record.risk_factors:
+            text = fmt.inline(factor, max_chars=300)
+            if text and text not in factors:
+                factors.append(text)
+    if factors:
+        lines.extend(("", "Risk factors:", *(f"- {factor}" for factor in factors[:20])))
+    headroom = _headroom_lines(context)
+    if headroom:
+        lines.extend(("", "Headroom over observed usage:", *headroom))
+    watch: list[str] = []
+    for record in context.recommendations:
+        if record.evidence is None:
+            continue
+        for condition in record.evidence.rollback_conditions:
+            text = condition.description or f"{condition.metric} {condition.comparator} {condition.threshold:g}"
+            text = fmt.inline(text, max_chars=300)
+            if text not in watch:
+                watch.append(text)
+    watch.extend(item for item in _DEFAULT_WATCH if item not in watch)
+    lines.extend(("", "Watch these for 24h after the rollout:", *(f"- {item}" for item in watch[:12])))
+    return "\n".join(lines)
+
+
+def _headroom_lines(context: PullRequestContext) -> list[str]:
+    lines: list[str] = []
+    if context.is_rollback:
+        return lines
+    for change in resource_changes(context):
+        if not change.field.startswith("requests.") or change.proposed is None:
+            continue
+        for record in context.recommendations:
+            if record.evidence is None or record.container_name not in (None, change.container):
+                continue
+            usage = record.evidence.cpu_usage if change.is_cpu else record.evidence.memory_usage
+            if usage is None or usage.p95 <= 0:
+                continue
+            observed = fmt.cpu(usage.p95) if change.is_cpu else fmt.memory(usage.p95)
+            line = (
+                f"- `{change.container}` {change.resource}: proposed {_proposed_text(change)} is "
+                f"{change.proposed / usage.p95:.2f}× the p95 ({observed})"
+            )
+            if usage.max > 0:
+                line += f" and {change.proposed / usage.max:.2f}× the max"
+            if line not in lines:
+                lines.append(line)
+            break
+    return lines
+
+
+def _assumptions(context: PullRequestContext) -> str:
+    lines = ["## Assumptions", ""]
+    impacts = [record.impact for record in context.recommendations if isinstance(record.impact, dict)]
+    if not impacts:
+        methods = sorted(
+            {record.evidence.savings_method for record in context.recommendations if record.evidence is not None}
+        )
+        lines.append(
+            "No Impact Model projection is stored with these recommendations; the savings are the sources' own "
+            f"estimates (method: {', '.join(methods) or 'unknown'})."
+        )
+        return "\n".join(lines)
+    impact = impacts[0]
+    assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+    prices = assumptions.get("unit_prices") if isinstance(assumptions.get("unit_prices"), list) else []
+    if prices:
+        lines.append("- Unit prices:")
+        for price in prices[:3]:
+            if not isinstance(price, dict):
+                continue
+            currency = price.get("currency") or impact.get("currency") or "USD"
+            detail = f" ({fmt.inline(price.get('detail'), max_chars=80)})" if price.get("detail") else ""
+            lines.append(
+                f"  - {fmt.unit_price(_number(price.get('cpu_core_hour')), currency)}/core-hour, "
+                f"{fmt.unit_price(_number(price.get('ram_gib_hour')), currency)}/GiB-hour, "
+                f"source `{fmt.inline(price.get('source') or 'unknown', max_chars=40)}`{detail}"
+            )
+    cost_sources = assumptions.get("observed_cost_sources")
+    if isinstance(cost_sources, dict) and cost_sources:
+        lines.append(f"- Observed cost sources: {', '.join(f'`{key}`' for key in sorted(cost_sources))}")
+    elif assumptions.get("cost_source"):
+        lines.append(f"- Cost source: `{fmt.inline(assumptions['cost_source'], max_chars=40)}`")
+    intensity = _number(assumptions.get("grid_intensity_g_per_kwh"))
+    if intensity is not None:
+        power = assumptions.get("power_sources")
+        power_text = f"; power model {', '.join(str(item) for item in power)}" if isinstance(power, list) else ""
+        lines.append(f"- Carbon intensity: {intensity:,.0f} gCO₂e/kWh{power_text}")
+    pue = _number(assumptions.get("pue"))
+    if pue is not None:
+        lines.append(f"- PUE: {pue:.2f}")
+    factor = _number(impact.get("realization_factor"))
+    if factor is not None:
+        source = assumptions.get("realization_factor_source") or "config"
+        lines.append(f"- Realization factor: {factor:.2f} (`{fmt.inline(source, max_chars=60)}`)")
+        reasons = assumptions.get("realization_reasons")
+        if isinstance(reasons, list):
+            lines.extend(f"  - {fmt.inline(reason, max_chars=200)}" for reason in reasons[:5])
+    carbon_price = _number(impact.get("carbon_price_per_tonne"))
+    if carbon_price is not None:
+        lines.append(f"- Carbon price: {fmt.money(carbon_price, impact.get('currency'))}/tCO₂e (ranking only)")
+    if assumptions.get("unknown_node_profile"):
+        lines.append("- At least one node has no power profile; a default profile was used.")
+    versions = sorted({str(item.get("model_version")) for item in impacts if item.get("model_version")})
+    lines.append(f"- Impact Model version: {', '.join(versions) or 'unknown'}")
+    return "\n".join(lines)
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _rollback(context: PullRequestContext, settings: PullRequestRenderSettings) -> str:
+    plan = context.plan
+    lines = ["## Rollback", ""]
+    if context.is_rollback:
+        lines.append(f"This pull request is itself the rollback of plan `{plan.rollback_of_plan_id}`.")
+        lines.append("To undo it, revert this pull request.")
+        return "\n".join(lines)
+    lines.append("- Revert this pull request; the GitOps controller syncs the previous values.")
+    automated = plan.source.renderer in PLANNABLE_RENDERERS and all(
+        isinstance(operation, SetContainerResources) for operation in plan.action.operations
+    )
+    if automated:
+        link = settings.link(f"changes/{plan.plan_id}")
+        where = f" from [the change page]({link})" if link else ""
+        lines.append(
+            "- Or let GreenKube open the rollback pull request"
+            f"{where}: when a health gate fails after the rollout, the recommendation enters rollback review and "
+            "the inverse plan restores the recorded pre-apply values."
+        )
+    else:
+        lines.append(
+            "- GreenKube cannot build an automated rollback for this layout or action kind; revert this pull "
+            "request manually."
+        )
+    return "\n".join(lines)
+
+
+def _verification(context: PullRequestContext, settings: PullRequestRenderSettings) -> str:
+    plan = context.plan
+    source = plan.source
+    controller = _CONTROLLER_NAMES.get(source.controller_kind, source.controller_kind.value)
+    lines = [
+        "## Verification plan",
+        "",
+        f"1. After the merge, GreenKube waits for the {controller} `{source.controller_namespace}/"
+        f"{source.controller_name}` to sync the merge commit, then for the rollout to complete.",
+    ]
+    if context.is_rollback:
+        lines.append("2. The rollback is confirmed when the workload runs the restored values again.")
+    elif settings.change_measurement_enabled:
+        lines.append(
+            f"2. Measurement starts after a {fmt.duration_hours(settings.measurement_warmup_hours)} warm-up and "
+            f"lasts {fmt.duration_hours(settings.measurement_post_window_days * 24)}; it is compared with a "
+            f"baseline of {fmt.duration_hours(settings.measurement_pre_window_days * 24)} that ends at the merge, "
+            "matched hour of the week and normalized for load, with a 90% confidence interval."
+        )
+        lines.append(
+            "3. The outcome is `realized`, `not_realized`, `inconclusive` or `contaminated`; health gates "
+            "(restarts, OOM kills, throttling, readiness) can send the change to rollback review."
+        )
+    else:
+        lines.append(
+            f"2. The verifier compares {fmt.duration_hours(settings.verification_window_hours)} after the rollout "
+            "with the same length before the merge, and checks restarts, readiness and throttling."
+        )
+    where = []
+    if settings.lifecycle_comments:
+        where.append("a GreenKube status comment on this pull request (updated at each step)")
+    ledger = settings.link(f"ledger?change={plan.plan_id}")
+    if ledger:
+        where.append(f"[the savings ledger]({ledger})")
+    lines.append(f"\nResults are posted to {' and '.join(where) if where else 'the GreenKube savings ledger'}.")
+    return "\n".join(lines)
+
+
+def _provenance(context: PullRequestContext) -> str:
+    plan = context.plan
+    source = plan.source
+    file_plan = plan.file_plan
+    base_revision = context.base_revision
+    lines = [
+        "<details><summary>Plan provenance</summary>",
+        "",
+        f"- Plan: `{plan.plan_id}`",
+        f"- Digest: `{plan.digest}`",
+        f"- Provider: `{source.provider_id}`",
+        f"- Repository: `{context.repository}`",
+        f"- Controller: `{source.controller_kind.value}/{source.controller_namespace}/{source.controller_name}`",
+        f"- Renderer: `{source.renderer.value}`",
+        f"- Source path: `{source.path}`",
+        f"- Base branch/revision: `{source.ref}` / `{base_revision}`",
+    ]
+    committed = plan.committed_on_revision
+    if committed is not None and base_revision and committed.lower() != base_revision.lower():
+        lines.append(
+            f"- Committed on moved head: `{committed}` (every file this plan touches is unchanged since the "
+            "planned base revision)"
+        )
+    lines.append(f"- Plan branch: `{context.branch}`")
+    if file_plan is not None:
+        lines.append(f"- Render validation: `{'passed' if file_plan.validation.passed else 'failed'}`")
+        for warning in file_plan.validation.warnings[:5]:
+            lines.append(f"  - warning: {fmt.inline(warning, max_chars=200)}")
+        files = ", ".join(f"`{edit.path}` ({edit.operation})" for edit in file_plan.files[:20])
+        lines.append(f"- Files: {files}")
+    if source.source_revision:
+        lines.append(f"- Observed controller revision: `{source.source_revision}`")
+        if base_revision and _revision_identity(source.source_revision) != _revision_identity(base_revision):
+            lines.append(
+                f"- Revision drift: this plan targets branch head `{base_revision}`, while the controller reports "
+                f"`{source.source_revision}`; refresh discovery or sync before approval if the live revision is "
+                "required."
+            )
+    policy = plan.policy_result if isinstance(plan.policy_result, dict) else {}
+    if "allowed" in policy:
+        warnings = policy.get("warnings") if isinstance(policy.get("warnings"), list) else []
+        lines.append(f"- Policy: `{'allowed' if policy.get('allowed') else 'rejected'}`, {len(warnings)} warning(s)")
+    lines.extend(("", "</details>"))
+    return "\n".join(lines)
+
+
+def _revision_identity(value: str) -> str:
+    normalized = value.strip().casefold()
+    match = re.search(r"(?:^|@sha(?:1|256):)([0-9a-f]{40}|[0-9a-f]{64})$", normalized)
+    return match.group(1) if match is not None else normalized
+
+
+def _diffs(context: PullRequestContext, budget: int) -> str:
+    file_plan = context.plan.file_plan
+    if file_plan is None:
+        return ""
+    if budget < _MIN_DIFF_CHARS:
+        return "_The diffs are omitted to fit the provider limit; review the plan branch._"
+    blocks = (("Source diff", file_plan.diff), ("Rendered diff", file_plan.rendered_diff))
+    overhead = sum(len(_diff_block(name, "")) for name, _ in blocks) + 2
+    per_diff = max((budget - overhead) // len(blocks), 0)
+    rendered = [_diff_block(name, _truncate(diff, per_diff)) for name, diff in blocks]
+    return "\n\n".join(rendered)
+
+
+def _diff_block(name: str, diff: str) -> str:
+    return f"<details><summary>{name}</summary>\n\n```diff\n{diff}\n```\n\n</details>"
+
+
+def _truncate(value: str, limit: int) -> str:
+    # Never let a diff close the fence early.
+    value = value.replace("```", "`​``")
+    if len(value) <= limit:
+        return value
+    note = f"\n... truncated after {max(limit - 80, 0)} characters; see the plan branch"
+    return value[: max(limit - len(note), 0)].rstrip() + note
