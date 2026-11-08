@@ -1,0 +1,46 @@
+suite: install notes
+templates:
+  - templates/NOTES.txt
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: prints the exact command that reads the generated API key
+    asserts:
+      - matchRegexRaw:
+          pattern: "kubectl -n greenkube get secret gk-greenkube -o jsonpath='\\{\\.data\\.GREENKUBE_API_KEY\\}' \\| base64 -d; echo"
+      - matchRegexRaw:
+          pattern: generated once by the gk-greenkube-credentials-bootstrap hook
+
+  - it: prints the dashboard and setup URLs
+    asserts:
+      - matchRegexRaw:
+          pattern: kubectl -n greenkube port-forward svc/gk-greenkube-api 8000:8000
+      - matchRegexRaw:
+          pattern: "Setup & service health: http://localhost:8000/settings"
+
+  - it: reads a values-supplied API key from the values Secret
+    set:
+      secrets.apiKey: supplied
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gk-greenkube-values -o jsonpath
+      - matchRegexRaw:
+          pattern: The key is the value of secrets.apiKey.
+
+  - it: reads the API key from secrets.existingSecret
+    set:
+      secrets.existingSecret: gitops-credentials
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gitops-credentials -o jsonpath
+      - notMatchRegexRaw:
+          pattern: credentials-bootstrap
+
+  - it: omits the dashboard URLs when the API is disabled
+    set:
+      config.api.enabled: false
+    asserts:
+      - notMatchRegexRaw:
+          pattern: port-forward

@@ -52,7 +52,7 @@ image:
 | `config.api.port` | `8000` | API/UI container and Service port. |
 | `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health`). |
 | `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`). |
-| `config.corsOrigins` | `*` | Allowed CORS origins. Prefer same-origin UI/API deployments. |
+| `config.corsOrigins` | `""` | Comma-separated allowed CORS origins (`CORS_ORIGINS`). Empty (default) keeps the API same-origin. Credentials are allowed only for explicitly listed origins; `*` allows any origin without credentials. |
 | `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
 | `config.metricsListMaxRangeDays` | `30` | Maximum raw `/metrics` listing window; wider ranges use report endpoints. |
@@ -83,7 +83,7 @@ image:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `config.boavizta.url` | `https://api.boavizta.org` | Boavizta API endpoint for embodied emissions |
+| `config.boavizta.url` | `""` | Boavizta API endpoint for embodied emissions. Empty uses the public API `https://api.boavizta.org`, or the URL saved on the Settings page. A URL set here always takes precedence. |
 | `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
@@ -298,14 +298,16 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 
 | Key | Description |
 |-----|-------------|
-| `secrets.apiKey` | API bearer token. A random key is generated for the chart-managed Secret when omitted and is preserved across upgrades. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
+| `secrets.apiKey` | API bearer token, rendered into the Secret `<release>-values`. When omitted, the `<release>-credentials-bootstrap` hook generates one once into the Secret `<release>`; upgrades and GitOps syncs never rotate it. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
 | `secrets.electricityMapsToken` | Electricity Maps API token when `config.electricityProvider` is `electricity_maps`. Without it, GreenKube uses bundled zone-specific fallback data when available, then the configured global intensity. Get a token at [electricitymaps.com](https://www.electricitymaps.com/). |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
 | `secrets.boaviztaToken` | Optional Boavizta API token. |
-| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of creating one from `values.yaml`. This skips chart Secret creation, so include every credential the installation needs (for the bundled database: `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`). |
+| `secrets.existingSecret` | Name of an existing Kubernetes Secret to use instead of chart-rendered and generated credentials; the GitOps path. The chart renders no Secret and runs no credentials bootstrap hook, so include every credential the installation needs (for the bundled database: `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`). |
 | `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`) with the chart-managed Secret. When `secrets.existingSecret` is set, put `DB_CONNECTION_STRING` in that Secret instead. |
 | `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
+
+Rendering never uses `lookup` or random functions, so `helm template` output is stable under Argo CD and Flux. Values set above go to the Secret `<release>-values`; generated credentials (`GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database) are created once by the credentials bootstrap hook in the Secret `<release>`, which is not part of the release and survives `helm uninstall`. See [Credentials and GitOps](installation.md#credentials-and-gitops-argo-cd-flux).
 
 ### Monitoring (`monitoring`)
 
@@ -430,8 +432,16 @@ config:
 
 ### API authentication and runtime service settings
 
-The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and creates a random API key in its managed Secret when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
+The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
 
 The Settings page sends integration changes to `POST /api/v1/config/services`. The API accepts only the current configured service hosts or exact hosts listed in `config.serviceUrlAllowlist`, and does not log the submitted URLs. It updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.
+
+With the chart, Pods read each service URL and token from the first of these that holds it:
+
+1. The Secret `<release>-values`, when you set the key in values (`config.prometheus.url`, `config.opencost.url`, `config.boavizta.url`, `secrets.*`).
+2. The Secret `<release>`, where the Settings page stores its changes.
+3. The built-in default or in-cluster discovery.
+
+A Settings-page change to a key that is also set in values therefore lasts only until the next Pod restart, even though `X-Configuration-Persisted` is `true`. To manage a key from the Settings page, leave it empty in values; all three service URLs are empty by default. With `secrets.existingSecret`, every key is read from that Secret; the chart grants GreenKube no write access to it, so Settings-page changes stay in memory.
 
 The API expires unapproved GitOps plans once per minute. A daily retention sweep removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, pull-request records, and recommendation audit events. Worker heartbeat rows older than seven days are pruned when the worker starts.

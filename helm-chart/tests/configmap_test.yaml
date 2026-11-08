@@ -131,11 +131,52 @@ tests:
           path: data.API_PORT
           value: "8000"
 
-  - it: should set CORS_ORIGINS
+  - it: should keep CORS same-origin by default (BUG-59)
     asserts:
       - equal:
           path: data.CORS_ORIGINS
-          value: "*"
+          value: ""
+
+  - it: should render explicit CORS origins
+    set:
+      config.corsOrigins: "https://greenkube.example.com"
+    asserts:
+      - equal:
+          path: data.CORS_ORIGINS
+          value: "https://greenkube.example.com"
+
+  # Service URLs come from a Secret: the values Secret when set in values,
+  # otherwise a Settings-page override in the release Secret.
+  - it: should not carry service URLs that live in a Secret
+    set:
+      config.prometheus.url: "http://prometheus:9090"
+      config.opencost.url: "http://opencost:9003"
+      config.boavizta.url: "https://custom-boavizta.example.com"
+    asserts:
+      - notExists:
+          path: data.PROMETHEUS_URL
+      - notExists:
+          path: data.OPENCOST_API_URL
+      - notExists:
+          path: data.BOAVIZTA_API_URL
+
+  # secrets.existingSecret replaces the values Secret, so the ConfigMap carries
+  # the Boavizta URL (as in 0.3.x); a key in that Secret still wins.
+  - it: should carry BOAVIZTA_API_URL set in values when secrets.existingSecret is used
+    set:
+      secrets.existingSecret: gitops-credentials
+      config.boavizta.url: "https://custom-boavizta.example.com"
+    asserts:
+      - equal:
+          path: data.BOAVIZTA_API_URL
+          value: "https://custom-boavizta.example.com"
+
+  - it: should leave BOAVIZTA_API_URL to the app default with secrets.existingSecret
+    set:
+      secrets.existingSecret: gitops-credentials
+    asserts:
+      - notExists:
+          path: data.BOAVIZTA_API_URL
 
   - it: should set API_RATE_LIMIT
     asserts:

@@ -79,6 +79,9 @@ if needle not in text:
 path.write_text(text.replace(needle, f"{needle}\n\n## [{sys.argv[1]}] — {sys.argv[2]}", 1))
 PY
 
+# Regenerate the Artifact Hub changes list from the new CHANGELOG section.
+uv run --locked python scripts/artifacthub_changes.py "$VERSION"
+
 # 4. Commit
 git add pyproject.toml CHANGELOG.md
 while IFS= read -r changed_file; do

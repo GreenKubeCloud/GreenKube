@@ -273,7 +273,9 @@ config:
 
   # Boavizta configuration
   boavizta:
-    url: https://api.boavizta.org
+    # If empty, GreenKube uses the public API (https://api.boavizta.org) unless
+    # the URL is changed from the Settings page. A URL set here always wins.
+    url: ''
     # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
     # recognize a cloud provider or instance type. Boavizta returns per-instance
     # allocated values (typically 50–170 kg for common cloud VMs). 100 kg is a
@@ -328,9 +330,12 @@ config:
   # Threshold in cores below which Prometheus totals are considered too small
   lowNodeCpuThreshold: 0.05
 
-  # Comma-separated list of allowed CORS origins.
-  # Use "*" to allow all origins (default).
-  corsOrigins: '*'
+  # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
+  # same-origin: the bundled UI needs no CORS. List exact origins (for example
+  # "https://greenkube.example.com") only for a UI served from another origin;
+  # credentials are allowed for listed origins only. "*" allows any origin but
+  # disables credentialed CORS.
+  corsOrigins: ''
 
   # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
   apiRateLimit: 60/minute
@@ -449,13 +454,19 @@ config:
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
-# Option A (default): leave existingSecret empty and fill in the values below.
-# The chart creates a Secret named "<release>". Not recommended when
-# values.yaml is committed to Git (credentials would be stored in plain text).
+# Option A (default): leave existingSecret empty. Values set below are rendered
+# into the Secret "<release>-values". Credentials left empty (the API key and
+# the bundled PostgreSQL password) are generated once at install time by the
+# "<release>-credentials-bootstrap" hook into the Secret "<release>", which is
+# not part of the Helm release: upgrades and Argo CD/Flux syncs never rotate
+# it, and `helm uninstall` keeps it alongside the PostgreSQL volume. Rendering
+# never uses lookup or random functions, so `helm template` output is stable.
+# Do not commit plain-text credentials to Git.
 #
-# Option B (recommended for production): create the Secret manually, then
-# set secrets.existingSecret to its name. The chart will skip Secret
-# creation and all other secrets.* values are ignored.
+# Option B (recommended for production and GitOps): create the Secret manually
+# (or with External Secrets / Sealed Secrets), then set secrets.existingSecret
+# to its name. The chart renders no Secret, runs no bootstrap hook, and all
+# other secrets.* values are ignored.
 #
 #   kubectl create secret generic greenkube-secrets -n greenkube \
 #     --from-literal=GREENKUBE_API_KEY="..." \
@@ -588,9 +599,10 @@ postgres:
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
-    # Set a fixed password here to ensure stability across upgrades.
-    # If left empty, a random password is generated on first install and
-    # preserved automatically on subsequent upgrades via secret lookup.
+    # If left empty, a random password is generated once by the credentials
+    # bootstrap hook and kept in the Secret "<release>" across upgrades and
+    # GitOps syncs. Set it here (or use secrets.existingSecret) to manage it
+    # yourself.
     password: ''
     database: greenkube
   persistence:

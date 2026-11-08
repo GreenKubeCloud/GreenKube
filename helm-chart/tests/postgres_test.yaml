@@ -113,3 +113,36 @@ tests:
       - equal:
           path: spec.volumeClaimTemplates[0].spec.storageClassName
           value: fast
+
+  - it: should load a values-supplied POSTGRES_PASSWORD from the values Secret
+    set:
+      postgres.auth.password: supplied
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: RELEASE-NAME-greenkube-values
+                key: POSTGRES_PASSWORD
+
+  - it: should load POSTGRES_PASSWORD from secrets.existingSecret
+    set:
+      secrets.existingSecret: gitops-credentials
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: gitops-credentials
+                key: POSTGRES_PASSWORD
+
+  - it: should render without a cluster lookup on install (Argo CD renders offline)
+    release:
+      upgrade: false
+    asserts:
+      - isKind:
+          of: StatefulSet

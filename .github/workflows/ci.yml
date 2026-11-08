@@ -9,13 +9,14 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     name: Lint, Gitleaks & Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -71,36 +72,8 @@ jobs:
       - name: Type-check with Pyrefly
         run: uv run pyrefly check
 
-      - name: Run tests with pytest
-        run: uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=json --tb=short --no-header --color=no 2>&1 | tee pytest_output.txt; exit ${PIPESTATUS[0]}
-
-      - name: Update README badges
-        if: github.event_name == 'push' && matrix.python-version == '3.14' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
-        run: |
-          # Extract total coverage percentage from coverage.json
-          COV=$(python -c "import json; d=json.load(open('coverage.json')); print(int(d['totals']['percent_covered_display'].rstrip('%')))")
-
-          # Extract total test count from saved pytest output
-          TEST_COUNT=$(python -c "import re; txt=open('pytest_output.txt').read(); m=re.search(r'(\d+) passed', txt); print(m.group(1) if m else '0')")
-
-          # Determine badge colour by coverage level
-          if   [ "$COV" -ge 90 ]; then COLOR="brightgreen"
-          elif [ "$COV" -ge 80 ]; then COLOR="green"
-          elif [ "$COV" -ge 70 ]; then COLOR="yellowgreen"
-          elif [ "$COV" -ge 60 ]; then COLOR="yellow"
-          else                         COLOR="red"
-          fi
-
-          # Rewrite the two badge lines in README.md in-place
-          sed -i "s|!\[Python Coverage\]([^)]*)|![Python Coverage](https://img.shields.io/badge/coverage%20python-${COV}%25-${COLOR})|g" README.md
-          sed -i "s|!\[Tests\]([^)]*)|![Tests](https://img.shields.io/badge/tests-${TEST_COUNT}%20passed-brightgreen)|g" README.md
-
-      - name: Commit updated README badges
-        if: github.event_name == 'push' && matrix.python-version == '3.14' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "ci: update coverage and test-count badges [skip ci]"
-          file_pattern: README.md
+      - name: Run tests with pytest (coverage gate from pyproject.toml)
+        run: uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no
 
   frontend-test:
     name: Frontend Tests
@@ -146,3 +119,17 @@ jobs:
 
       - name: Run Helm unit tests
         run: helm unittest helm-chart
+
+      - name: Check that helm template renders are stable (Argo CD)
+        run: |
+          set -euo pipefail
+          check() {
+            helm template greenkube ./helm-chart --namespace greenkube "$@" > /tmp/render-1.yaml
+            helm template greenkube ./helm-chart --namespace greenkube "$@" > /tmp/render-2.yaml
+            diff -u /tmp/render-1.yaml /tmp/render-2.yaml
+          }
+          check
+          check --set automation.enabled=true
+          check --set profile=production
+          check -f helm-chart/values-production.yaml
+          check --set secrets.apiKey=ci-api-key --set postgres.auth.password=ci-password

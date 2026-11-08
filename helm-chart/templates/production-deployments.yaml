@@ -121,7 +121,7 @@ spec:
             - name: GREENKUBE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.secretName" $root }}
+                  name: {{ include "greenkube.secretNameFor" (dict "context" $root "key" "GREENKUBE_API_KEY") }}
                   key: GREENKUBE_API_KEY
                   optional: true
             {{- end }}
@@ -131,7 +131,7 @@ spec:
             - name: DB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "greenkube.secretName" $root }}
+                  name: {{ include "greenkube.secretNameFor" (dict "context" $root "key" "DB_CONNECTION_STRING") }}
                   key: DB_CONNECTION_STRING
             {{- end }}
             - name: K8S_NODE_NAME
