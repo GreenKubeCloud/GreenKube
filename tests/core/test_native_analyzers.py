@@ -184,7 +184,8 @@ class TestZombiePod:
         assert len(zombie_recs) == 0
 
     def test_zombie_includes_savings(self, recommender):
-        """Zombie recommendation should estimate savings."""
+        """Deleting a zombie releases its observed allocated cost and its allocated CO2e share."""
+        window = 7 * 24 * 3600
         metrics = [
             _make_metric(
                 pod_name="zombie-pod",
@@ -193,11 +194,20 @@ class TestZombiePod:
                 co2e_grams=0.5,
             )
         ]
-        recs = recommender.generate_recommendations(metrics)
+        recs = recommender.generate_recommendations(metrics, analysis_window_seconds=window)
         zombie_recs = [r for r in recs if r.type == RecommendationType.ZOMBIE_POD]
         assert len(zombie_recs) == 1
-        assert zombie_recs[0].potential_savings_cost == pytest.approx(1.50, abs=0.01)
-        assert zombie_recs[0].potential_savings_co2e_grams == pytest.approx(0.5, abs=0.01)
+        rec = zombie_recs[0]
+        assert rec.potential_savings_cost == pytest.approx(1.50 * 365 / 7)
+        assert rec.impact is not None
+        assert rec.impact["kind"] == "workload_deletion"
+        assert rec.impact["realization_factor"] == 1.0
+        # CO2e is the reservation-allocated idle and embodied share plus the
+        # (small) dynamic share, not the usage-based row value.
+        breakdown = rec.impact["co2e_breakdown_annual_g"]
+        assert breakdown["idle_operational"] > 0
+        assert breakdown["embodied"] > 0
+        assert rec.potential_savings_co2e_grams == pytest.approx(breakdown["total"])
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +376,16 @@ class TestRightsizingCPU:
         cpu_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU)
 
         assert cpu_rec.recommended_cpu_request_millicores == recommender.min_cpu_millicores
-        assert cpu_rec.potential_savings_cost == pytest.approx(90.0)
-        assert cpu_rec.potential_savings_co2e_grams == pytest.approx(90.0)
+        # The released reservation is current - floored target, observed for one
+        # 5-minute sample and annualized over that span. It is priced from the
+        # row's observed total (100 per 5 minutes), apportioned to CPU and RAM
+        # (0.1 core, 0.5 GiB reserved) with the OpenCost default rate weights.
+        released_core_hours = (100 - recommender.min_cpu_millicores) / 1000 * 8760
+        assert cpu_rec.impact["capacity_released"]["cpu_core_hours"] == pytest.approx(released_core_hours)
+        cpu_share = 0.1 * 0.031611 / (0.1 * 0.031611 + 0.5 * 0.004237)
+        released_ratio = (100 - recommender.min_cpu_millicores) / 100
+        assert cpu_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * cpu_share * released_ratio)
+        assert cpu_rec.impact["cost_breakdown_annual"]["ram"] == 0.0
 
     def test_deployment_pods_are_grouped_as_one_workload(self, recommender):
         """Pod restarts for the same Deployment should produce one stable workload recommendation."""
@@ -543,8 +561,15 @@ class TestRightsizingMemory:
         mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
 
         assert mem_rec.recommended_memory_request_bytes == recommender.min_memory_bytes
-        assert mem_rec.potential_savings_cost == pytest.approx(50.0)
-        assert mem_rec.potential_savings_co2e_grams == pytest.approx(50.0)
+        released_gib_hours = (32 * mib - recommender.min_memory_bytes) / 1024**3 * 8760
+        assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(released_gib_hours)
+        # RAM share of the observed total (1 core and 32 MiB reserved).
+        ram_share = (32 / 1024 * 0.004237) / (1.0 * 0.031611 + 32 / 1024 * 0.004237)
+        released_ratio = (32 * mib - recommender.min_memory_bytes) / (32 * mib)
+        assert mem_rec.potential_savings_cost == pytest.approx(100.0 * 12 * 8760 * ram_share * released_ratio)
+        assert mem_rec.impact["cost_breakdown_annual"]["cpu"] == 0.0
+        # Memory power is not modeled yet (roadmap B5): a memory cut releases no CO2e.
+        assert mem_rec.potential_savings_co2e_grams == 0.0
 
     def test_memory_savings_are_annualized_from_analysis_window(self, recommender):
         """Potential memory savings should be annual projections, not only lookback-window totals."""
@@ -579,11 +604,20 @@ class TestRightsizingMemory:
 
         recs = recommender.generate_recommendations(metrics, analysis_window_seconds=analysis_window_seconds)
         mem_rec = next(r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY)
-        savings_ratio = 1 - (mem_rec.recommended_memory_request_bytes / mem_rec.current_memory_request_bytes)
+        released_gib = (mem_rec.current_memory_request_bytes - mem_rec.recommended_memory_request_bytes) / 1024**3
         annualization_factor = (365 * 24 * 60 * 60) / analysis_window_seconds
+        observed_hours = 2 * 300 / 3600
 
-        assert mem_rec.potential_savings_cost == pytest.approx(0.002 * annualization_factor * savings_ratio)
-        assert mem_rec.potential_savings_co2e_grams == pytest.approx(2.0 * annualization_factor * savings_ratio)
+        expected_gib_hours = released_gib * observed_hours * annualization_factor
+        assert mem_rec.impact["capacity_released"]["mem_gib_hours"] == pytest.approx(expected_gib_hours)
+        # The RAM share of the observed total (1 core and 0.25 GiB reserved),
+        # times the released fraction of the request, annualized.
+        ram_share = (0.25 * 0.004237) / (1.0 * 0.031611 + 0.25 * 0.004237)
+        released_ratio = released_gib / 0.25
+        assert mem_rec.potential_savings_cost == pytest.approx(
+            2 * 0.001 * ram_share * released_ratio * annualization_factor
+        )
+        assert mem_rec.potential_savings_co2e_grams == 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@
 from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.statistics import annualized_window_total
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
@@ -20,17 +20,18 @@ class ZombieAnalyzer(Analyzer):
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
+        projector = ImpactProjector.for_context(context)
 
         for (ns, target_kind, target_name), series in context.target_series().items():
             agg = {
                 "total_cost": sum(metric.total_cost for metric in series),
                 "joules": sum(metric.joules for metric in series),
-                "co2e_grams": sum(metric.co2e_grams for metric in series),
             }
             if agg["total_cost"] > cfg.ZOMBIE_COST_THRESHOLD and agg["joules"] < cfg.ZOMBIE_ENERGY_THRESHOLD:
                 label = target_label(target_kind, target_name)
-                annual_cost = annualized_window_total(agg["total_cost"], context.analysis_window_seconds)
-                annual_co2e = annualized_window_total(agg["co2e_grams"], context.analysis_window_seconds)
+                # Deleting the workload releases its whole allocation: observed cost,
+                # plus the idle, dynamic and embodied CO2e share it holds.
+                delta = projector.workload_deletion(projector.workload_ref(ns, target_kind, target_name), series)
                 recs.append(
                     Recommendation(
                         pod_name=target_name,
@@ -48,8 +49,7 @@ class ZombieAnalyzer(Analyzer):
                             f"This may be an idle or 'zombie' pod."
                         ),
                         priority="high",
-                        potential_savings_cost=annual_cost,
-                        potential_savings_co2e_grams=annual_co2e,
+                        **impact_fields(delta),
                     )
                 )
         return recs

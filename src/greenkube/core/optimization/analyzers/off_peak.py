@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Dict, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
+from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
@@ -74,6 +75,14 @@ class OffPeakAnalyzer(Analyzer):
                 end_h = (consecutive[-1] + 1) % 24
                 cron_schedule = f"Scale to 0: {start_h:02d}:00-{end_h:02d}:00 UTC"
                 label = target_label(target_kind, target_name)
+                # Replica-hours removed during the idle hours, priced at the
+                # workload's allocated rate (Impact Model replica/schedule rule).
+                projector = ImpactProjector.for_context(context)
+                delta = projector.replica_schedule(
+                    projector.workload_ref(ns, target_kind, target_name),
+                    series,
+                    consecutive,
+                )
 
                 recs.append(
                     Recommendation(
@@ -93,6 +102,7 @@ class OffPeakAnalyzer(Analyzer):
                         ),
                         priority="medium",
                         cron_schedule=cron_schedule,
+                        **impact_fields(delta),
                     )
                 )
         return recs

@@ -388,3 +388,68 @@ tests:
       - equal:
           path: data.RECOMMENDATION_MAX_METRIC_ROWS
           value: "1234"
+
+  # --------------------------------------------------------------------------
+  # Impact Model
+  # --------------------------------------------------------------------------
+  - it: should use OpenCost default rates unless impact pricing is set
+    asserts:
+      - notExists:
+          path: data.IMPACT_PRICING_CPU_CORE_HOUR
+      - notExists:
+          path: data.IMPACT_PRICING_RAM_GIB_HOUR
+      - equal:
+          path: data.IMPACT_PRICING_CURRENCY
+          value: USD
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "1"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "100"
+
+  - it: should render custom impact rates and carbon price
+    set:
+      impact.pricing.cpuCoreHour: 0.05
+      impact.pricing.ramGiBHour: 0.006
+      impact.pricing.currency: EUR
+      impact.realizationFactor: 0.6
+      impact.carbonPricePerTonne: 85
+    asserts:
+      - equal:
+          path: data.IMPACT_PRICING_CPU_CORE_HOUR
+          value: "0.05"
+      - equal:
+          path: data.IMPACT_PRICING_RAM_GIB_HOUR
+          value: "0.006"
+      - equal:
+          path: data.IMPACT_PRICING_CURRENCY
+          value: EUR
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "0.6"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "85"
+
+  - it: should omit unset impact settings so the application defaults apply
+    set:
+      impact.realizationFactor: null
+      impact.carbonPricePerTonne: null
+    asserts:
+      - notExists:
+          path: data.IMPACT_REALIZATION_FACTOR
+      - notExists:
+          path: data.CARBON_PRICE_PER_TONNE
+
+  - it: should keep a zero realization factor and carbon price
+    set:
+      impact.realizationFactor: 0
+      impact.carbonPricePerTonne: 0
+    asserts:
+      - equal:
+          path: data.IMPACT_REALIZATION_FACTOR
+          value: "0"
+      - equal:
+          path: data.CARBON_PRICE_PER_TONNE
+          value: "0"

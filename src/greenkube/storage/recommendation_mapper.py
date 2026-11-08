@@ -177,6 +177,7 @@ RECORD_COLUMNS: tuple = (
     "expires_at",
     "reversible",
     "requires_restart",
+    "impact",
     "applied_at",
     "actual_cpu_request_millicores",
     "actual_memory_request_bytes",
@@ -232,6 +233,7 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "expires_at",
     "reversible",
     "requires_restart",
+    "impact",
 )
 
 
@@ -289,6 +291,7 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "expires_at": _dt(record.expires_at),
         "reversible": record.reversible,
         "requires_restart": record.requires_restart,
+        "impact": to_json(record.impact),
         "applied_at": _dt(record.applied_at),
         "actual_cpu_request_millicores": record.actual_cpu_request_millicores,
         "actual_memory_request_bytes": record.actual_memory_request_bytes,
@@ -355,6 +358,7 @@ def row_to_record(row: Any) -> RecommendationRecord:
         expires_at=_as_datetime(_get(row, "expires_at")),
         reversible=_as_bool(_get(row, "reversible")),
         requires_restart=_as_bool(_get(row, "requires_restart")),
+        impact=from_json(_get(row, "impact")),
         applied_at=_as_datetime(_get(row, "applied_at")),
         actual_cpu_request_millicores=_get(row, "actual_cpu_request_millicores"),
         actual_memory_request_bytes=_get(row, "actual_memory_request_bytes"),

@@ -476,6 +476,30 @@ config:
       maxThrottleRatio: 0.05
       # Interval between lifecycle jobs (apply detection, verification, expiry).
       lifecycleInterval: 5m
+
+# ---------------------------------------------------------------------------
+# Impact Model (docs/methodology/impact-model.md)
+# ---------------------------------------------------------------------------
+impact:
+  # CustomRates: last tier of the cost fallback chain (observed OpenCost costs,
+  # then bundled list prices per instance type, then these rates). Leave null
+  # to use the OpenCost default custom pricing (0.031611 per core-hour and
+  # 0.004237 per GiB-hour, USD). Set both for on-premises or negotiated rates.
+  pricing:
+    cpuCoreHour: null
+    ramGiBHour: null
+    # Currency of every projected cost (custom rates and observed OpenCost
+    # costs). Only bundled catalogs in this currency are used: set EUR for the
+    # OVHcloud and Scaleway catalogs. GreenKube never converts currencies.
+    currency: USD
+  # Share of released capacity expected to become removed billable node-hours.
+  # Used until per-pool realization (RealizationContext) lands; 1.0 projects
+  # expected billable savings equal to allocated savings.
+  realizationFactor: 1.0
+  # Carbon price (currency per tonne CO2e) used to value projected CO2e:
+  # value = cost + carbonPricePerTonne x tCO2e.
+  carbonPricePerTonne: 100
+
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------

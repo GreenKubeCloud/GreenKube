@@ -4,6 +4,8 @@
 from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
+from greenkube.impact.projector import ImpactProjector, impact_fields
+from greenkube.impact.types import CostSource
 from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
@@ -48,19 +50,34 @@ class OrphanedPVAnalyzer(Analyzer):
                     f"so the volume can never be bound or used."
                 )
 
-            # CO2e savings are intentionally not projected: energy estimation
-            # currently only covers CPU usage, not disk usage.
+            # Deletion releases the asset's current allocated rate (realization 1).
+            # CO2e is not projected: the energy model does not cover storage.
             annual_cost = getattr(pv, "annual_cost", None)
             if not isinstance(annual_cost, (int, float)) or annual_cost <= 0:
                 annual_cost = None
             description_savings = ""
+            cost_source = CostSource.OPENCOST
+            cost_detail = "opencost_pv_cost"
             if annual_cost is not None and capacity_bytes > 0:
                 description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
             elif capacity_bytes > 0:
                 annual_cost = capacity_gib * cfg.STORAGE_COST_PER_GIB_MONTH * 12
+                cost_source = CostSource.CUSTOM_RATE
+                cost_detail = "STORAGE_COST_PER_GIB_MONTH"
                 description_savings = (
                     f" Estimated cost savings: ${annual_cost:.2f}/year "
                     f"(at ${cfg.STORAGE_COST_PER_GIB_MONTH:.2f}/GiB-month)."
+                )
+            savings_fields: dict = {"potential_savings_cost": None}
+            if annual_cost is not None:
+                savings_fields = impact_fields(
+                    ImpactProjector.for_context(context).asset_deletion(
+                        asset_kind="persistent_volume",
+                        allocated_cost_annual=annual_cost,
+                        component="storage",
+                        cost_source=cost_source,
+                        detail=cost_detail,
+                    )
                 )
 
             recs.append(
@@ -76,7 +93,7 @@ class OrphanedPVAnalyzer(Analyzer):
                     ),
                     reason=reason,
                     priority="medium",
-                    potential_savings_cost=annual_cost,
+                    **savings_fields,
                 )
             )
         return recs

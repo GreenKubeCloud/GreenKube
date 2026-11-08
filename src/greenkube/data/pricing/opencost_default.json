@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "OpenCost default custom pricing, used by GreenKube when neither observed costs nor a catalog price are available. OpenCost describes these values as 'Default prices based on GCP us-central1'.",
+  "source": "https://github.com/opencost/opencost/blob/cee1642a5f8d7fcd280cd12f39f350cda2d99c82/configs/default.json",
+  "retrieved_at": "2026-11-07",
+  "currency": "USD",
+  "units": {
+    "CPU": "per vCPU-hour",
+    "spotCPU": "per vCPU-hour",
+    "RAM": "per GiB-hour",
+    "spotRAM": "per GiB-hour",
+    "GPU": "per GPU-hour",
+    "storage": "per GiB-hour",
+    "zoneNetworkEgress": "per GiB",
+    "regionNetworkEgress": "per GiB",
+    "internetNetworkEgress": "per GiB",
+    "natGatewayEgress": "per GiB",
+    "natGatewayIngress": "per GiB"
+  },
+  "prices": {
+    "CPU": 0.031611,
+    "spotCPU": 0.006655,
+    "RAM": 0.004237,
+    "spotRAM": 0.000892,
+    "GPU": 0.95,
+    "storage": 0.00005479452,
+    "zoneNetworkEgress": 0.01,
+    "regionNetworkEgress": 0.01,
+    "internetNetworkEgress": 0.12,
+    "natGatewayEgress": 0.045,
+    "natGatewayIngress": 0.045
+  }
+}

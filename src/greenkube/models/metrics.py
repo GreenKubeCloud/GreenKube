@@ -368,6 +368,10 @@ class Recommendation(BaseModel):
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
+    impact: Optional[dict] = Field(
+        None,
+        description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
 
     @model_validator(mode="after")
     def _derive_capability(self) -> "Recommendation":
@@ -434,6 +438,10 @@ class RecommendationRecord(BaseModel):
     expires_at: Optional[datetime] = Field(None, description="Recommendation expiry (TTL).")
     reversible: Optional[bool] = Field(None, description="Whether the change has a clean reverse.")
     requires_restart: Optional[bool] = Field(None, description="Whether applying the change restarts workloads.")
+    impact: Optional[dict] = Field(
+        None,
+        description="Projected Impact Model delta (ImpactDelta); a projection, never a measured value.",
+    )
     # Applied lifecycle fields
     applied_at: Optional[datetime] = Field(None, description="When the recommendation was applied.")
     actual_cpu_request_millicores: Optional[int] = Field(
@@ -546,6 +554,7 @@ class RecommendationRecord(BaseModel):
             expires_at=rec.expires_at,
             reversible=rec.reversible,
             requires_restart=rec.requires_restart,
+            impact=dict(rec.impact) if rec.impact is not None else None,
             created_at=created_at or datetime.now(timezone.utc),
         )
 

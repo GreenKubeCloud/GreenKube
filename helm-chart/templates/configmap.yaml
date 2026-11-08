@@ -196,3 +196,22 @@ data:
   RECOMMENDATION_LIFECYCLE_INTERVAL: {{ .lifecycleInterval | default "5m" | quote }}
   {{- end }}
   {{- end }}
+
+  # --- Impact Model ---
+  {{- with .Values.impact }}
+  {{- with .pricing }}
+  {{- if not (kindIs "invalid" .cpuCoreHour) }}
+  IMPACT_PRICING_CPU_CORE_HOUR: {{ .cpuCoreHour | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .ramGiBHour) }}
+  IMPACT_PRICING_RAM_GIB_HOUR: {{ .ramGiBHour | toString | quote }}
+  {{- end }}
+  IMPACT_PRICING_CURRENCY: {{ .currency | default "USD" | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .realizationFactor) }}
+  IMPACT_REALIZATION_FACTOR: {{ .realizationFactor | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .carbonPricePerTonne) }}
+  CARBON_PRICE_PER_TONNE: {{ .carbonPricePerTonne | toString | quote }}
+  {{- end }}
+  {{- end }}
