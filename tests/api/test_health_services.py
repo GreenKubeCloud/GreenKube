@@ -157,179 +157,35 @@ class TestGetSingleServiceHealth:
         assert response.status_code == 404
 
 
-class TestUpdateServiceConfig:
-    """Tests for POST /api/v1/config/services."""
-
-    def test_update_prometheus_url(self, client, monkeypatch):
-        """Should update PROMETHEUS_URL and return fresh health check."""
-        _allow_service_hosts(monkeypatch, "new-prometheus")
-
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={"prometheus_url": "http://new-prometheus:9090"},
-            )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert "services" in data
-
-    def test_update_opencost_url(self, client, monkeypatch):
-        """Should update OPENCOST_API_URL and return fresh health check."""
-        _allow_service_hosts(monkeypatch, "opencost")
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={"opencost_url": "http://opencost:9003"},
-            )
-
-        assert response.status_code == 200
-
-    def test_update_electricity_maps_token(self, client, monkeypatch):
-        """Should update ELECTRICITY_MAPS_TOKEN and return fresh health check."""
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={"electricity_maps_token": "new-token-abc123"},
-            )
-
-        assert response.status_code == 200
-
-    def test_update_wattnet_credentials(self, client, monkeypatch):
-        """Should update WATTNET_EMAIL/WATTNET_PASSWORD and persist to the K8s secret."""
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock) as patch_secret,
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={"wattnet_email": "user@example.com", "wattnet_password": "watt-secret"},
-            )
-
-        assert response.status_code == 200
-        patch_secret.assert_awaited_once()
-        assert patch_secret.await_args is not None
-        k8s_updates = patch_secret.await_args.args[0]
-        assert k8s_updates["WATTNET_EMAIL"] == "user@example.com"
-        assert k8s_updates["WATTNET_PASSWORD"] == "watt-secret"
-
-    def test_update_multiple_fields(self, client, monkeypatch):
-        """Should accept multiple fields in a single request."""
-        _allow_service_hosts(monkeypatch, "prom", "oc", "custom-boavizta.example.com")
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={
-                    "prometheus_url": "http://prom:9090",
-                    "opencost_url": "http://oc:9003",
-                    "boavizta_url": "https://custom-boavizta.example.com",
-                },
-            )
-
-        assert response.status_code == 200
-
-    def test_empty_update_returns_cached(self, client):
-        """An empty body should still return health without errors."""
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post("/api/v1/config/services", json={})
-
-        assert response.status_code == 200
-
-    def test_k8s_patch_failure_does_not_break_response(self, client):
-        """A K8s secret patch failure must not affect the API response."""
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=False),
-        ):
-            response = client.post(
-                "/api/v1/config/services",
-                json={"electricity_maps_token": "tok"},
-            )
-
-        assert response.status_code == 200
-
-
-class TestServiceConfigUrlValidation:
-    """SSRF and input-validation tests for POST /api/v1/config/services."""
+class TestServiceConfigIsConfigurationAsCode:
+    """A13, BUG-11, BUG-60: the API no longer edits data sources at runtime."""
 
     @pytest.mark.parametrize(
-        "bad_url",
+        "body",
         [
-            "ftp://prometheus:9090",
-            "http://user:password@prometheus:9090",
-            "http://169.254.169.254/latest/meta-data",
-            "http://metadata.google.internal/computeMetadata/v1/",
-            "http://127.0.0.1:9090",
-            "http://[::1]:9090",
-            "http://0.0.0.0:9090",
-            "not-a-url",
+            {"prometheus_url": "http://new-prometheus:9090"},
+            {"electricity_maps_token": "new-token"},
+            {"wattnet_email": "user@example.com", "wattnet_password": "secret"},
+            {},
         ],
     )
-    def test_rejects_unsafe_service_urls(self, client, bad_url):
-        response = client.post("/api/v1/config/services", json={"prometheus_url": bad_url})
-        assert response.status_code == 400
+    def test_runtime_service_updates_are_gone(self, client, monkeypatch, body):
+        monkeypatch.setenv("PROMETHEUS_URL", "http://original-prometheus:9090")
+        from greenkube.core.config import get_config
 
-    @pytest.mark.parametrize(
-        "good_url",
-        [
-            "http://prometheus-k8s.monitoring.svc.cluster.local:9090",
-            "http://10.0.0.5:9090",
-            "https://api.boavizta.org",
-        ],
-    )
-    def test_accepts_in_cluster_and_public_urls(self, client, good_url, monkeypatch):
-        host = good_url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
-        _allow_service_hosts(monkeypatch, host)
-        with (
-            patch(
-                "greenkube.api.routers.health.run_health_checks",
-                new_callable=AsyncMock,
-                return_value=_mock_health_response(),
-            ),
-            patch("greenkube.api.routers.health.patch_k8s_secret", new_callable=AsyncMock, return_value=True),
-        ):
-            response = client.post("/api/v1/config/services", json={"boavizta_url": good_url})
-        assert response.status_code == 200
+        get_config().reload()
+
+        response = client.post("/api/v1/config/services", json=body)
+
+        assert response.status_code == 410
+        assert response.json()["detail"]["code"] == "CONFIGURATION_AS_CODE"
+        assert get_config().PROMETHEUS_URL == "http://original-prometheus:9090"
+
+    def test_api_has_no_secret_writer(self):
+        import greenkube.core.k8s_secret_store as store
+
+        assert not hasattr(store, "patch_k8s_secret")
+
+    def test_endpoint_is_not_documented(self, client):
+        schema = client.get("/api/v1/openapi.json").json()
+        assert "/api/v1/config/services" not in schema["paths"]

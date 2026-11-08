@@ -1,7 +1,12 @@
 <script>
+	/**
+	 * Connectivity issues found at load. Data sources are configuration as code
+	 * (A13): the popup explains which Helm values fix each issue instead of
+	 * editing them at runtime.
+	 */
 	import { createEventDispatcher } from 'svelte';
-	import { updateServiceConfig } from '$lib/api.js';
 	import HealthBadge from './HealthBadge.svelte';
+	import { helmSnippetFor } from '$lib/configSnippets.js';
 
 	/** @type {Object|null} */
 	export let services = null;
@@ -10,47 +15,14 @@
 
 	const dispatch = createEventDispatcher();
 
-	let prometheusUrl = '';
-	let opencostUrl = '';
-	let electricityMapsToken = '';
-	let wattnetEmail = '';
-	let wattnetPassword = '';
-	let saving = false;
-	let saveError = '';
-	let acknowledgement = null;
-
 	$: issues = services ? Object.values(services).filter(
 		s => (s.status === 'unreachable' || s.status === 'unconfigured') && !s.inactive
 	) : [];
 
 	$: hasIssues = issues.length > 0;
-
-	async function saveConfig() {
-		saving = true;
-		saveError = '';
-		acknowledgement = null;
-		try {
-			const update = {};
-			if (prometheusUrl) update.prometheus_url = prometheusUrl;
-			if (opencostUrl) update.opencost_url = opencostUrl;
-			if (electricityMapsToken) update.electricity_maps_token = electricityMapsToken;
-			if (wattnetEmail) update.wattnet_email = wattnetEmail;
-			if (wattnetPassword) update.wattnet_password = wattnetPassword;
-
-			if (Object.keys(update).length === 0) {
-				dispatch('dismiss');
-				return;
-			}
-
-			const result = await updateServiceConfig(update);
-			acknowledgement = result.configurationAcknowledgement;
-			dispatch('updated', result);
-		} catch (e) {
-			saveError = e.message;
-		} finally {
-			saving = false;
-		}
-	}
+	$: fixes = issues
+		.map((svc) => ({ svc, snippet: helmSnippetFor(svc.name) }))
+		.filter((item) => item.snippet);
 
 	function dismiss() {
 		dispatch('dismiss');
@@ -92,119 +64,26 @@
 				{/each}
 			</div>
 
-			<!-- Config Form -->
-			<div class="px-6 py-4 border-t border-dark-700/50 space-y-3">
-				<p class="text-xs text-dark-400">
-					You can configure service URLs below.
-				</p>
-
-				{#if services?.prometheus?.status === 'unconfigured' || services?.prometheus?.status === 'unreachable'}
-					<div>
-						<label for="prom-url" class="block text-xs font-medium text-dark-400 mb-1">Prometheus URL</label>
-						<input
-							id="prom-url"
-							type="url"
-							bind:value={prometheusUrl}
-							placeholder="http://prometheus-server:9090"
-							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
-						/>
-					</div>
-				{/if}
-
-				{#if services?.opencost?.status === 'unconfigured' || services?.opencost?.status === 'unreachable'}
-					<div>
-						<label for="oc-url" class="block text-xs font-medium text-dark-400 mb-1">OpenCost URL</label>
-						<input
-							id="oc-url"
-							type="url"
-							bind:value={opencostUrl}
-							placeholder="http://opencost:9003"
-							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
-						/>
-					</div>
-				{/if}
-
-				{#if services?.electricity_maps?.status === 'unconfigured' && !services?.electricity_maps?.inactive}
-					<div>
-						<label for="emaps-token" class="block text-xs font-medium text-dark-400 mb-1">
-							Electricity Maps Token
-							<a href="https://www.electricitymaps.com/" target="_blank" class="text-green-400 hover:text-green-300 ml-1">
-								(Get free token ↗)
-							</a>
-						</label>
-						<input
-							id="emaps-token"
-							type="text"
-							bind:value={electricityMapsToken}
-							placeholder="Your API token"
-							class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-							       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
-						/>
-					</div>
-				{/if}
-
-				{#if services?.wattnet?.status === 'unconfigured' && !services?.wattnet?.inactive}
-					<div class="grid grid-cols-1 gap-3">
-						<div>
-							<label for="wattnet-email" class="block text-xs font-medium text-dark-400 mb-1">
-								Wattnet Email
-								<a href="https://wattnet.eu" target="_blank" class="text-green-400 hover:text-green-300 ml-1">
-									(Learn more ↗)
-								</a>
-							</label>
-							<input
-								id="wattnet-email"
-								type="email"
-								bind:value={wattnetEmail}
-								placeholder="you@example.com"
-								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-								       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
-							/>
-						</div>
-						<div>
-							<label for="wattnet-password" class="block text-xs font-medium text-dark-400 mb-1">Wattnet Password</label>
-							<input
-								id="wattnet-password"
-								type="password"
-								bind:value={wattnetPassword}
-								placeholder="Wattnet account password"
-								class="w-full px-3 py-2 bg-dark-800 border border-dark-600/50 rounded-lg text-sm text-dark-200
-								       placeholder-dark-600 focus:outline-hidden focus:ring-2 focus:ring-green-500/50 focus:border-green-500/50"
-							/>
-						</div>
-					</div>
-				{/if}
-
-				{#if saveError}
-					<p class="text-xs text-red-400">{saveError}</p>
-				{/if}
-				{#if acknowledgement}
-					<p class="text-xs text-green-400" role="status">
-						Configuration acknowledged
-						{#if acknowledgement.version} (version {acknowledgement.version}){/if}.
-						Health checks were retried
-						{acknowledgement.persisted ? ' and persisted.' : '; save Helm values to persist it across restarts.'}
+			<!-- How to fix: Helm values (configuration as code) -->
+			{#if fixes.length > 0}
+				<div class="px-6 py-4 border-t border-dark-700/50 space-y-3 max-h-64 overflow-y-auto">
+					<p class="text-xs text-dark-400">
+						Data sources are set in your Helm values (or Secrets), then applied with
+						<code>helm upgrade</code> or your GitOps tool:
 					</p>
-				{/if}
-			</div>
+					{#each fixes as fix (fix.svc.name)}
+						<div>
+							<p class="text-xs font-medium text-dark-300 mb-1">{fix.snippet.label}</p>
+							<pre class="text-[11px] leading-relaxed bg-dark-950 border border-dark-700/50 rounded-lg p-2 overflow-x-auto text-dark-200"><code>{fix.snippet.helm}</code></pre>
+						</div>
+					{/each}
+				</div>
+			{/if}
 
 			<!-- Actions -->
 			<div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-dark-700/50">
-				<button
-					on:click={dismiss}
-					class="btn-secondary text-sm"
-				>
-					{acknowledgement ? 'Close' : 'Dismiss'}
-				</button>
-				<button
-					on:click={saveConfig}
-					disabled={saving}
-					class="btn-primary text-sm"
-				>
-					{saving ? 'Saving…' : 'Save & Retry'}
-				</button>
+				<a href="/settings" class="btn-secondary text-sm" on:click={dismiss}>Open settings</a>
+				<button type="button" on:click={dismiss} class="btn-primary text-sm">Dismiss</button>
 			</div>
 		</div>
 	</div>

@@ -79,9 +79,6 @@ data:
   GITOPS_WEBHOOK_SECRET_FILE: {{ include "greenkube.webhookSecretFilePath" . | quote }}
   {{- end }}
   GITOPS_PROVIDERS_JSON: {{ $gitProviderConfig | quote }}
-  # Name of the Helm-managed Secret — used by the API to persist runtime
-  # configuration overrides (UI-set tokens/URLs) back into the Secret.
-  GREENKUBE_SECRET_NAME: {{ include "greenkube.secretName" . | quote }}
   CLOUD_PROVIDER: {{ .Values.config.cloudProvider | quote }}
   CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
   DEFAULT_INTENSITY: {{ .Values.config.defaultIntensity | quote }}
@@ -113,8 +110,9 @@ data:
   
   # --- Boavizta Config ---
   # Service URLs (BOAVIZTA_API_URL, PROMETHEUS_URL, OPENCOST_API_URL) are read
-  # from mounted Secrets, not from here: a URL set in values wins, then a
-  # Settings-page override stored in Secret {{ include "greenkube.secretName" . }}, then the
+  # from mounted Secrets, not from here: a URL set in values wins, then a key
+  # in Secret {{ include "greenkube.secretName" . }} (such as an override saved by the
+  # Settings page of GreenKube 0.3.x, which no longer edits them), then the
   # built-in default or discovery.
   {{- if and .Values.secrets.existingSecret .Values.config.boavizta.url }}
   # secrets.existingSecret replaces the values Secret, so the Boavizta URL set in
@@ -144,7 +142,24 @@ data:
   API_RATE_LIMIT: {{ .Values.config.apiRateLimit | quote }}
   ROOT_PATH: {{ .Values.config.rootPath | default "" | quote }}
   METRICS_LIST_MAX_RANGE_DAYS: {{ .Values.config.metricsListMaxRangeDays | default 30 | int | quote }}
+  TRUSTED_PROXY_IPS: {{ .Values.config.trustedProxyIps | default "" | quote }}
   {{- end }}
+
+  # --- Authentication (F14, F15) ---
+  {{- $auth := .Values.auth | default dict }}
+  {{- $session := $auth.session | default dict }}
+  {{- $admin := $auth.admin | default dict }}
+  {{- $secureCookie := $session.secureCookie | default "auto" | toString }}
+  {{- if not (has $secureCookie (list "auto" "always" "never")) }}
+  {{- fail "auth.session.secureCookie must be auto, always or never" }}
+  {{- end }}
+  SESSION_COOKIE_SECURE: {{ $secureCookie | quote }}
+  AUTH_SESSION_IDLE_TIMEOUT: {{ $session.idleTimeout | default "12h" | quote }}
+  AUTH_SESSION_ABSOLUTE_LIFETIME: {{ $session.absoluteLifetime | default "7d" | quote }}
+  AUTH_SESSION_REMEMBER_LIFETIME: {{ $session.rememberLifetime | default "30d" | quote }}
+  AUTH_LOGIN_RATE_LIMIT: {{ ($auth.login | default dict).rateLimit | default "5/minute" | quote }}
+  AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
+  AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
 
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}

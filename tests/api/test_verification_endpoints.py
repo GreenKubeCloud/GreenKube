@@ -219,7 +219,8 @@ class TestIgnoreGuard:
         assert restored.status_code == 200 and restored.json()["status"] == "active"
         events = await reco_repo.get_events(rec_id)
         assert [event.event_type for event in events] == ["ignored", "unignored"]
-        assert events[0].actor == "user"
+        # The audit actor is the authenticated principal (anonymous on an open development instance).
+        assert events[0].actor == "anonymous"
 
     async def test_unknown_recommendation_is_404(self, client):
         assert client.patch("/api/v1/recommendations/9999/ignore", json={"reason": "x"}).status_code == 404

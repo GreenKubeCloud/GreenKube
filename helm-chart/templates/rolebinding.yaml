@@ -1,14 +1,14 @@
-{{- if and .Values.rbac.create (not .Values.secrets.existingSecret) }}
+{{- if include "greenkube.initialAdminSecretName" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "greenkube.fullname" . }}-secret-writer
+  name: {{ include "greenkube.fullname" . }}-initial-admin
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "greenkube.fullname" . }}-secret-writer
+  name: {{ include "greenkube.fullname" . }}-initial-admin
 subjects:
   - kind: ServiceAccount
     name: {{ if eq .Values.profile "production" }}{{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}{{ else }}{{ include "greenkube.serviceAccountName" . }}{{ end }}

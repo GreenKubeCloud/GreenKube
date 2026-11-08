@@ -112,18 +112,18 @@ helm install greenkube greenkube/greenkube \
   --create-namespace
 ```
 
-By default the chart uses the `standalone` profile, enables production authentication, generates an API key, and leaves GitOps automation disabled. To retrieve the API key:
+By default the chart uses the `standalone` profile, enables production authentication, and leaves GitOps automation disabled. You sign in as `admin`; read the initial password (you choose a new one at the first sign-in):
 
 ```bash
-kubectl -n greenkube get secret greenkube \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
+kubectl -n greenkube get secret greenkube-initial-admin \
+  -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
 Then open the dashboard:
 
 ```bash
 kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
-# Open http://localhost:8000 and paste the API key when prompted
+# Open http://localhost:8000 and sign in as admin
 ```
 
 GreenKube discovers Prometheus, OpenCost, VPA, Karpenter, Argo CD and Flux automatically. The [Installation guide](docs/installation.md) covers production secrets, external databases, ingress and on-premises clusters.

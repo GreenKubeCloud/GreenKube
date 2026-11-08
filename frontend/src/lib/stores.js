@@ -18,6 +18,19 @@ export const timeRanges = [
 /** Sidebar state */
 export const sidebarCollapsed = writable(false);
 
+/**
+ * The signed-in principal from GET /auth/me (F14): {kind, name, role, scopes,
+ * must_change_password, ...}, or null while signed out. The session itself
+ * lives in an HttpOnly cookie that scripts cannot read.
+ */
+export const currentUser = writable(null);
+
+/** Whether the principal holds a scope (the admin scope implies every other). */
+export function hasScope(user, scope) {
+	const scopes = user?.scopes || [];
+	return scopes.includes('admin') || scopes.includes(scope);
+}
+
 /** Services health state — populated on first load and refreshable */
 export const servicesHealth = writable(null);
 

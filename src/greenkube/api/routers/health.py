@@ -1,25 +1,19 @@
 # src/greenkube/api/routers/health.py
 """
-API routes for service health checks and runtime configuration updates.
+API routes for data-source health checks.
 
 Provides endpoints to check the health of all data sources (Prometheus,
-OpenCost, Electricity Maps, Boavizta, Kubernetes) and to update service
-URLs at runtime from the frontend.
+OpenCost, Electricity Maps, Boavizta, Kubernetes). Data-source endpoints and
+tokens are configuration as code (Helm values and Secrets, roadmap A13): the
+API reports them read-only and never writes them.
 """
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException
 
-from greenkube.api.dependencies import validate_service_url
-from greenkube.core.config import get_config_service
-from greenkube.core.health import invalidate_health_cache, run_health_checks
-from greenkube.core.k8s_secret_store import patch_k8s_secret
-from greenkube.models.health import (
-    HealthCheckResponse,
-    ServiceConfigUpdate,
-    ServiceHealth,
-)
+from greenkube.core.health import run_health_checks
+from greenkube.models.health import HealthCheckResponse, ServiceHealth
 
 logger = logging.getLogger(__name__)
 
@@ -49,58 +43,21 @@ async def get_service_health(service_name: str, force: bool = False):
     return service
 
 
-@router.post("/config/services", response_model=HealthCheckResponse)
-async def update_service_config(update: ServiceConfigUpdate, response: Response):
-    """Update service URLs or tokens at runtime from the frontend.
+@router.post("/config/services", include_in_schema=False, status_code=410)
+async def update_service_config_removed():
+    """Removed (roadmap A13, BUG-11, BUG-60): data sources are configuration as code.
 
-    Changes are applied to the running process via environment variables
-    and the Config singleton is reloaded. They do NOT persist across
-    pod restarts — for permanent changes, update the Helm values or
-    environment variables.
-
-    After applying changes the health cache is invalidated and a fresh
-    health check is executed and returned.
+    Runtime edits reached only the API process while the controller kept its
+    collectors, and persisting them into the release Secret drifted from Git.
+    Set the URLs and tokens in Helm values or Secrets instead.
     """
-    service = get_config_service()
-    updates: dict[str, str] = {}
-
-    if update.prometheus_url is not None:
-        validate_service_url(update.prometheus_url)
-        updates["PROMETHEUS_URL"] = update.prometheus_url
-        logger.info("Prometheus service URL updated.")
-
-    if update.opencost_url is not None:
-        validate_service_url(update.opencost_url)
-        updates["OPENCOST_API_URL"] = update.opencost_url
-        logger.info("OpenCost service URL updated.")
-
-    if update.electricity_maps_token is not None:
-        updates["ELECTRICITY_MAPS_TOKEN"] = update.electricity_maps_token
-        logger.info("Electricity Maps token updated.")
-
-    if update.boavizta_url is not None:
-        validate_service_url(update.boavizta_url)
-        updates["BOAVIZTA_API_URL"] = update.boavizta_url
-        logger.info("Boavizta service URL updated.")
-
-    if update.wattnet_email is not None:
-        updates["WATTNET_EMAIL"] = update.wattnet_email
-        logger.info("Wattnet email updated.")
-
-    if update.wattnet_password is not None:
-        updates["WATTNET_PASSWORD"] = update.wattnet_password
-        logger.info("Wattnet password updated.")
-
-    if updates:
-        version = service.apply(updates)
-        invalidate_health_cache()
-        logger.info("Configuration reloaded after service config update.")
-
-        # Mounted external secrets remain read-only. The K8s API patch is a
-        # separate, best-effort persistence channel for runtime overrides.
-        persisted = await patch_k8s_secret(updates)
-        response.headers["X-Configuration-Version"] = str(version)
-        response.headers["X-Configuration-Persisted"] = str(persisted).lower()
-        if not persisted:
-            logger.warning("Runtime configuration version %s was applied in memory only.", version)
-    return await run_health_checks(force=True)
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "CONFIGURATION_AS_CODE",
+            "message": (
+                "Data-source URLs and tokens are configured with Helm values and Secrets; "
+                "see the Settings page for the matching Helm snippets."
+            ),
+        },
+    )

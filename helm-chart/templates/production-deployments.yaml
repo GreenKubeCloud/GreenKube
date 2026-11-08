@@ -117,7 +117,7 @@ spec:
             - name: AUTOMATION_MODE
               value: {{ ternary "inline" "disabled" (and $root.Values.automation.enabled (eq $automationMode "inline")) | quote }}
             {{- end }}
-            {{- if and (eq $component "api") (eq $root.Values.config.apiAuthMode "api_key") }}
+            {{- if and (eq $component "api") (has $root.Values.config.apiAuthMode (list "api_key" "session")) }}
             - name: GREENKUBE_API_KEY
               valueFrom:
                 secretKeyRef:

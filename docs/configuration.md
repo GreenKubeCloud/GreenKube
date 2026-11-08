@@ -1,6 +1,6 @@
 # Configuration Reference
 
-The Helm chart maps `values.yaml` settings to GreenKube's environment-based configuration. The chart's [`values.yaml`](../helm-chart/values.yaml) is the authoritative list of deployment options; this page summarizes the commonly used settings. For a step-by-step installation, see the [Installation guide](installation.md). Selected integration URLs and tokens can also be changed at runtime from the Settings page. Runtime updates affect the running process and are persisted to the Kubernetes Secret on a best-effort basis; use Helm values for durable configuration.
+The Helm chart maps `values.yaml` settings to GreenKube's environment-based configuration. The chart's [`values.yaml`](../helm-chart/values.yaml) is the authoritative list of deployment options; this page summarizes the commonly used settings. For a step-by-step installation, see the [Installation guide](installation.md). Data-source URLs and tokens are configuration as code: the Settings page shows them read-only, with the matching Helm snippets.
 
 ## Helm values
 
@@ -9,7 +9,7 @@ The chart supports two deployment profiles:
 - `profile: standalone` (default) deploys the collector and API together. When automation is enabled, the worker runs inline in the API process.
 - `profile: production` renders separate API, controller, and (when automation is enabled) automation worker deployments. The controller uses a Kubernetes Lease for leader election and the migration Job runs before the API is considered ready. The standalone profile does not run a separate worker.
 
-The default values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: api_key`, and a generated API key. The default profile is not a substitute for production authentication or network controls.
+The default values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: session` (account sign-in, see [Authentication](authentication.md)), and a generated bootstrap API key. The default profile is not a substitute for production authentication or network controls.
 
 ### Image
 
@@ -29,9 +29,10 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `config.environment` | `production` | Runtime environment. Production configuration fails closed when API-key authentication is not configured. |
-| `config.apiAuthMode` | `api_key` | API authentication contract. API-key authentication is the currently supported request middleware mode. |
-| `config.serviceUrlAllowlist` | `[]` | Exact hostnames permitted for runtime service URL overrides. Configured Prometheus/OpenCost/Boavizta hosts are also allowed. |
+| `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
+| `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `oidc`: reserved (`503`). See [Authentication](authentication.md). |
+| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
+| `config.serviceUrlAllowlist` | `[]` | Exact service hostnames accepted in addition to the configured Prometheus/OpenCost/Boavizta hosts. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
 | `config.defaultZone` | `""` | Fallback Electricity Maps zone code for nodes whose zone or region cannot be mapped (e.g. `FR`, `DE`, `US-CAL-CISO`) |
@@ -502,18 +503,33 @@ config:
   cloudProvider: aws
 ```
 
-### API authentication and runtime service settings
+### Authentication (`auth`)
 
-The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. Existing Secrets must include `GREENKUBE_API_KEY`; otherwise production requests fail closed with `503`. For local development, explicitly set `config.environment: development` and do not expose the service publicly. See the [API authentication notes](api.md#authentication).
+| Key | Default | Setting | Description |
+|-----|---------|---------|-------------|
+| `auth.admin.username` | `admin` | `AUTH_ADMIN_USERNAME` | Name of the first account, created when no account exists. |
+| `auth.admin.existingSecret` | `""` | `AUTH_ADMIN_PASSWORD` | Secret holding the first admin password (key `auth.admin.existingSecretKey`, default `password`), mounted into the API. Empty: the credentials bootstrap hook generates it once into `<release>-initial-admin` (`AUTH_INITIAL_ADMIN_SECRET`) and the UI forces a change at first sign-in. |
+| `auth.session.secureCookie` | `auto` | `SESSION_COOKIE_SECURE` | `auto` (HTTPS directly or via `config.trustedProxyIps`), `always`, `never`. `true`/`false` are accepted as `always`/`never`. |
+| `auth.session.idleTimeout` | `12h` | `AUTH_SESSION_IDLE_TIMEOUT` | Sliding inactivity timeout (`<n>s\|m\|h\|d`, `m` = minutes). |
+| `auth.session.absoluteLifetime` | `7d` | `AUTH_SESSION_ABSOLUTE_LIFETIME` | Maximum session lifetime. |
+| `auth.session.rememberLifetime` | `30d` | `AUTH_SESSION_REMEMBER_LIFETIME` | Lifetime with **Keep me signed in**. |
+| `auth.login.rateLimit` | `5/minute` | `AUTH_LOGIN_RATE_LIMIT` | Failed sign-ins per username (four times as many per client IP) before an exponential lockout. |
+| `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the Prometheus scrape. Empty uses the deprecated bootstrap key. |
 
-The Settings page sends integration changes to `POST /api/v1/config/services`. The API accepts only the current configured service hosts or exact hosts listed in `config.serviceUrlAllowlist`, and does not log the submitted URLs. It updates the running process and attempts to patch the mounted Secret. Check the response's `X-Configuration-Persisted` header; if persistence fails, the change is in memory only and will not survive a restart. Helm remains the recommended source of truth for durable values.
+`SESSION_COOKIE_NAME` (default `greenkube_session`) is not exposed in values.
+
+The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random bootstrap API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. That key is deprecated: people sign in with accounts and machines use scoped API keys. For local development, `config.environment: development` leaves an instance without any account and without a bootstrap key open; do not expose it publicly. See [Authentication](authentication.md).
+
+### Data sources are configuration as code
+
+Data-source endpoints and tokens (Prometheus, OpenCost, Boavizta, Electricity Maps, Wattnet) are set in Helm values or Secrets only (roadmap A13). The Settings page and the connectivity popup show them read-only with copy-paste Helm snippets; `POST /api/v1/config/services` answers `410 Gone`. Runtime edits reached only the API process while the controller kept its collectors (BUG-11), and writing them into the release Secret drifted from Git (BUG-60); the API no longer has any RBAC to write that Secret.
 
 With the chart, Pods read each service URL and token from the first of these that holds it:
 
 1. The Secret `<release>-values`, when you set the key in values (`config.prometheus.url`, `config.opencost.url`, `config.boavizta.url`, `secrets.*`).
-2. The Secret `<release>`, where the Settings page stores its changes.
+2. The Secret `<release>`, which may still hold overrides saved by the Settings page of an earlier release.
 3. The built-in default or in-cluster discovery.
 
-A Settings-page change to a key that is also set in values therefore lasts only until the next Pod restart, even though `X-Configuration-Persisted` is `true`. To manage a key from the Settings page, leave it empty in values; all three service URLs are empty by default. With `secrets.existingSecret`, every key is read from that Secret; the chart grants GreenKube no write access to it, so Settings-page changes stay in memory.
+To change a data source, set it in values (or in your `secrets.existingSecret`) and upgrade. To drop an old Settings-page override from the Secret `<release>`, remove its key, for example `kubectl -n greenkube patch secret greenkube --type=json -p='[{"op":"remove","path":"/data/PROMETHEUS_URL"}]'`.
 
 The API expires unapproved GitOps plans once per minute. A daily retention sweep removes rendered file contents and terminal operation/webhook rows older than 90 days while retaining plan metadata, pull-request records, and recommendation audit events. Worker heartbeat rows older than seven days are pruned when the worker starts.

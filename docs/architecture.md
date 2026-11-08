@@ -431,7 +431,8 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `GET /api/v1/health` — Health check and version
 - `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Wattnet, Boavizta, Kubernetes)
 - `GET /api/v1/health/services/{name}` — Health status for a single data source
-- `POST /api/v1/config/services` — Update service URLs or tokens at runtime
+- `POST /api/v1/auth/login`, `/auth/logout`, `GET /api/v1/auth/me` — Account sign-in with server-side sessions (see [Authentication](authentication.md))
+- `GET|POST|DELETE /api/v1/auth/api-keys` — Scoped API keys for machines
 - `GET /api/v1/config` — Current configuration (sanitized secrets)
 - `GET /api/v1/metrics` — Per-pod metrics with filtering
 - `GET /api/v1/metrics/summary` — Aggregated totals (on-demand, full scan)
@@ -485,8 +486,9 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - Data fetched on page load/navigation — no polling or live push updates
 - Export functionality (CSV, JSON) — from the Report page
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
-- **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and allows inline configuration of service URLs and tokens
-- **Runtime service configuration:** Service URLs (Prometheus, OpenCost, Boavizta) and tokens (Electricity Maps/Wattnet) can be updated from the Settings page without restarting the pod
+- **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and shows the Helm values that fix each issue
+- **Configuration as code:** Data-source URLs and tokens come from Helm values and Secrets only; the Settings page shows them read-only with copy-paste Helm snippets
+- **Sign in once:** Account sign-in (password-manager friendly), forced change of the initial password, account menu with active sessions, API keys page, warning on remote plain-HTTP access
 - **Recommendation review:** Source/risk/confidence badges, ranking profiles, evidence details, plan preview, pull-request tracking, rollback preview, and measured vs projected savings
 - **Automation console:** GitOps capability status, discovery coverage, blocked/ambiguous bindings, and audited manual resolution
 

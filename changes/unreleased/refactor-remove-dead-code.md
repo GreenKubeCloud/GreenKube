@@ -10,7 +10,7 @@
 ### Removed
 - **Instant collection path (M4):** `DataProcessor.run()`, `CollectionOrchestrator`, `CostNormalizer`, `PrometheusResourceMapper` (the `PodResourceMaps` dataclass stays), `PrometheusCollector.collect()` and its instant-query parsers, `MetricAssembler.assemble()`/`prefetch_intensities()`, and the unused `container_restarts`/`node_instance_labels` PromQL helpers. `run_range()` is the only collection path.
 - **Unused settings:** `LOW_NODE_CPU_THRESHOLD` (Helm `config.lowNodeCpuThreshold`) and `PROMETHEUS_QUERY_RANGE_MAX_SAMPLES` (Helm `config.prometheus.queryRangeMaxSamples`).
-- **Runtime configuration persistence:** `ConfigService.load()`/`clear_persisted()`/`snapshot()`, the configuration repositories (SQLite and PostgreSQL) and `models/configuration.py`. Migration `0059` drops the never-used `configuration_overrides` table from migration 0020. Settings-page changes still apply in memory and to the release Secret as before.
+- **Runtime configuration persistence:** `ConfigService.load()`/`clear_persisted()`/`snapshot()`, the configuration repositories (SQLite and PostgreSQL) and `models/configuration.py`. Migration `0059` drops the never-used `configuration_overrides` table from migration 0020. The remaining in-memory `ConfigService` went with the runtime data-source endpoint it served, since `POST /api/v1/config/services` now answers `410 Gone` (A13).
 - `RecommendationStatus.PLAN_CREATED`, `PLAN_STATUS_CHANGED` and `PLAN_ACTION_STATUS_CHANGED`: event names, not statuses (BUG-24).
 - `automation/rollout/` (`RolloutReconciler`), `models/rollout.py` and `docs/rollouts.md`, which nothing used.
 - `ControllerKind.EXPLICIT_REPOSITORY` and `ControllerKind.ANNOTATION`, which no discovery source produced.

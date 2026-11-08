@@ -29,7 +29,7 @@ The chart has two profiles:
 | `standalone` (default) | Collector and API in one Deployment. Automation runs inline when enabled. | Evaluations, small clusters, local installations. |
 | `production` | Separate API, controller, and (when automation is enabled) automation worker Deployments. The controller uses a Kubernetes Lease for leader election; database migrations run as a Helm hook Job. | Production clusters and any installation that needs component isolation or horizontal API scaling. |
 
-The default chart values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: api_key`, and a generated API key. GitOps automation is disabled until you explicitly enable it.
+The default chart values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: session` (sign in with an account; an initial admin password is generated), and a generated bootstrap API key for machines. GitOps automation is disabled until you explicitly enable it.
 
 ### Development vs production at a glance
 
@@ -94,30 +94,45 @@ Open <http://localhost:8000>.
 
 Service names follow the Helm fullname convention. With the release name `greenkube` above, the Service is `greenkube-api`, generated credentials are in the Secret `greenkube`, and credentials you set in values are in `greenkube-values`. For a release named `greenkube-prod`, they are `greenkube-prod-api`, `greenkube-prod` and `greenkube-prod-values`, unless you set `secrets.existingSecret`.
 
-### 5. Retrieve the API key
+### 5. Sign in
 
-In `production` authentication mode the dashboard asks for an API key. `helm install` prints the exact command for your release in its notes; for the default release it reads the generated value from the Secret `greenkube`:
+Open the dashboard and sign in as `admin`. On the first start GreenKube creates that account with an initial
+password, stored once in the Secret `<release>-initial-admin`. `helm install` prints the exact command for your
+release; for the default release:
+
+```bash
+kubectl -n greenkube get secret greenkube-initial-admin \
+  -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+The sign-in page is a regular form, so your browser or password manager can save and autofill the credentials.
+GreenKube asks you to choose a new password at the first sign-in and then erases the initial one from the Secret.
+You then stay signed in across reloads and new tabs (**Keep me signed in** also survives a browser restart), until
+you select **Sign out** or the session expires (12 hours of inactivity, 7 days at most). To provide the first
+password yourself (GitOps), set `auth.admin.existingSecret`. See [Authentication](authentication.md).
+
+For remote access, serve GreenKube over HTTPS (see [Reach the frontend](#reach-the-frontend)): the dashboard warns
+when it is opened over plain HTTP from another machine.
+
+### 6. API access for scripts and Prometheus
+
+Machines use scoped API keys: create one in **Settings > API keys**, choose its scopes (`read`, `write`, `approve`,
+`signals:write`, `metrics:read`, `admin`) and copy it: it is shown once.
+
+```bash
+curl -H "Authorization: Bearer gk_..." http://localhost:8000/api/v1/metrics/summary
+```
+
+The generated bootstrap key `GREENKUBE_API_KEY` still works as an admin key for one more minor release
+(deprecated):
 
 ```bash
 kubectl -n greenkube get secret greenkube \
   -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
 ```
 
-If you set `secrets.apiKey`, read it from `greenkube-values` instead; with `secrets.existingSecret`, from your own Secret.
-
-Paste the value into the **API key** field of the dashboard's **API authentication required** dialog and select **Connect**. The dialog is a regular sign-in form (account `api-key`), so your browser or password manager can save and autofill the key. The dashboard keeps the key in `sessionStorage` for the current tab: reloading the tab keeps you signed in, while closing the tab, selecting **Sign out**, or a `401` response forgets it. The key is never written to `localStorage` or cookies.
-
-For API clients:
-
-```bash
-export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d)"
-
-curl -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
-  http://localhost:8000/api/v1/metrics/summary
-```
-
-Never put the key in a URL, a values file committed to Git, or shell history on a shared machine.
+If you set `secrets.apiKey`, read it from `greenkube-values` instead; with `secrets.existingSecret`, from your own
+Secret. Never put a key in a URL, a values file committed to Git, or shell history on a shared machine.
 
 ## Configure your installation
 
@@ -193,7 +208,14 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | Value | Default | Purpose |
 |---|---|---|
 | `config.environment` | `production` | `production`, `development`, or `test`. Production fails closed if authentication is not configured. |
-| `config.apiAuthMode` | `api_key` | The only request-authentication implementation currently supported. `oidc`/`session` are configuration contracts and return `503` at request time. |
+| `config.apiAuthMode` | `session` | `session`: dashboard sign-in with accounts and server-side sessions, scoped API keys for machines. `api_key`: Bearer API keys only. `oidc` is reserved and returns `503`. See [Authentication](authentication.md). |
+| `config.trustedProxyIps` | `""` | IPs or CIDRs of reverse proxies whose `X-Forwarded-For`/`X-Forwarded-Proto` are trusted (rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
+| `auth.admin.username` | `admin` | Name of the first account. |
+| `auth.admin.existingSecret` | `""` | Secret holding the first admin password (key `auth.admin.existingSecretKey`, default `password`). Empty: a password is generated once into `<release>-initial-admin` and must be changed at first sign-in. |
+| `auth.session.secureCookie` | `auto` | `auto` (HTTPS, directly or via a trusted proxy), `always`, or `never`. |
+| `auth.session.idleTimeout` | `12h` | Sign out after this much inactivity. |
+| `auth.session.absoluteLifetime` / `rememberLifetime` | `7d` / `30d` | Maximum session lifetime, without and with **Keep me signed in**. |
+| `auth.login.rateLimit` | `5/minute` | Failed sign-ins per username (four times as many per IP) before an exponential lockout. |
 | `config.clusterName` | `""` | Label used in Prometheus metrics. Empty enables auto-detection from the node/cloud provider. |
 | `config.cloudProvider` | `unknown` | `aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, or `unknown`. |
 | `config.defaultZone` | `""` | Fallback grid zone (for example `FR`, `DE`, `US-CAL-CISO`). |
@@ -211,7 +233,7 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `config.collection.maxBackfill` | `24h` | How far back the controller backfills missing windows after downtime. |
 | `config.opencost.url` | `""` | Empty attempts in-cluster discovery. |
 | `config.kubernetesMetricsApiEnabled` | `true` | Read per-container usage from `metrics.k8s.io` when available. |
-| `config.serviceUrlAllowlist` | `[]` | Exact hosts allowed for runtime service-URL overrides from the Settings page. |
+| `config.serviceUrlAllowlist` | `[]` | Exact service hosts accepted in addition to the configured Prometheus, OpenCost and Boavizta hosts. |
 
 #### Database and retention
 
@@ -309,7 +331,7 @@ profile: production
 
 config:
   environment: production
-  apiAuthMode: api_key
+  apiAuthMode: session
   clusterName: prod-eu-west
   cloudProvider: aws
 
@@ -346,7 +368,7 @@ Production mode differences:
 - The API can be scaled horizontally; the controller uses the `<release>-leader` Lease so only one controller runs collection, discovery, and sync observation.
 - Migrations run as a post-install/post-upgrade Job before the API is considered ready.
 - The automation worker is a single replica. It claims queued operations through database leases, so do not scale it manually.
-- Production keeps the API key mandatory. A missing key or unavailable authentication configuration returns `503` rather than opening the API.
+- Production never serves anonymous requests: without a session or a valid API key the API answers `401`, and `503` when no authentication can be configured (for example the account store is unavailable and no bootstrap key is set).
 
 ### Production API-key handling
 
@@ -399,7 +421,7 @@ Key-handling rules:
 
   kubectl -n greenkube rollout restart deploy/greenkube-api
   ```
-- The dashboard keeps the entered key in `sessionStorage` for the current browser tab only. It survives reloads of that tab and is forgotten when the tab closes, on **Sign out**, and on any `401` (for example after a rotation). It is never written to `localStorage` or cookies; password managers can store it because the dialog is a standard sign-in form.
+- People do not use this key: they sign in with their account ([Authentication](authentication.md)). Give machines scoped keys from **Settings > API keys** and retire this deprecated bootstrap key.
 - Run the UI and API on the same origin. If they must differ, set `config.corsOrigins` explicitly and make sure the proxy forwards `Authorization` and `OPTIONS`.
 
 ### Credentials and GitOps (Argo CD, Flux)
@@ -423,9 +445,11 @@ a value. That Secret carries no Helm or Argo CD tracking metadata: Argo CD does 
 `helm uninstall` keeps it, like the PostgreSQL volume whose password it holds. The hook needs `rbac.create=true`;
 with `rbac.create=false`, supply the credentials or use `secrets.existingSecret`.
 
-The hook creates the Secret `<release>` even when you supply every credential in values. It then stays empty
-until the Settings page stores a runtime override in it (see
-[runtime service settings](configuration.md#api-authentication-and-runtime-service-settings)). The hook's Role
+The hook creates the Secret `<release>` even when you supply every credential in values; it then stays empty.
+It also creates the Secret `<release>-initial-admin` once, with the first admin password, unless you set
+`auth.admin.existingSecret`; with `secrets.existingSecret` it creates only that Secret and never touches yours. The
+API erases the password from it after the first sign-in and keeps it as an empty tombstone, so later runs of the hook
+never issue a new one. The hook's Role
 lets it create Secrets anywhere in the release namespace, because Kubernetes cannot restrict `create` to one
 Secret name; `get` and `patch` are limited to `<release>`. The ServiceAccount, Role and RoleBinding are hook
 resources that are deleted once the hook succeeds.
@@ -438,8 +462,8 @@ PostgreSQL does not answer within about 40 seconds (first install, first Argo CD
 during the upgrade). In that case the Pods themselves report `password authentication failed`, as described in
 [Troubleshooting](#troubleshooting).
 
-For a fully declarative setup, set `secrets.existingSecret`: the chart then renders no Secret and runs no
-bootstrap hook. See [Production API-key handling](#production-api-key-handling) for the keys it must contain.
+For a fully declarative setup, set `secrets.existingSecret` and `auth.admin.existingSecret`: the chart then
+renders no Secret and runs no bootstrap hook. See [Production API-key handling](#production-api-key-handling) for the keys it must contain.
 
 Upgrading from 0.3.x keeps the Secret `<release>` created by the earlier chart as-is: the hook finds the existing
 API key and PostgreSQL password and adds nothing.
@@ -458,8 +482,9 @@ helm upgrade greenkube greenkube/greenkube \
 Alternatively, set `secrets.apiKey` and `postgres.auth.password` to the values stored in that Secret.
 
 `config.boavizta.url` is now empty by default, like the Prometheus and OpenCost URLs, and GreenKube then uses the
-public Boavizta API. A Boavizta URL saved on the Settings page now survives Pod restarts. A URL you set in values
-still takes precedence.
+public Boavizta API. A URL you set in values takes precedence over a URL saved by the Settings page of an earlier
+release, which stays in the Secret `<release>` until you remove it. The Settings page no longer edits data sources
+(see [Data sources are configuration as code](configuration.md#data-sources-are-configuration-as-code)).
 
 ### Reach the frontend
 
@@ -469,7 +494,7 @@ still takes precedence.
 kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
 ```
 
-Open <http://localhost:8000>. The API and UI share the origin, so no CORS or frontend build configuration is required. The login dialog appears on the first protected request. Paste the API key from the Secret named after the release (`greenkube` here), or from `secrets.existingSecret` when you set one; the install notes print the exact `kubectl` command.
+Open <http://localhost:8000>. The API and UI share the origin, so no CORS or frontend build configuration is required. Sign in as `admin` (see [Sign in](#5-sign-in)). Over `localhost` the session cookie works without HTTPS.
 
 **Ingress or Gateway API**
 
@@ -480,7 +505,9 @@ https://greenkube.example.com/            -> greenkube-api:8000
 https://greenkube.example.com/api/v1/...  -> greenkube-api:8000
 ```
 
-The proxy must preserve the `/api` prefix, forward the `Authorization` header, and allow `GET`, `POST`, `PATCH`, and `DELETE`. Because the UI and API are same-origin, no CORS configuration is required. If you terminate TLS at the proxy, do not expose the API key in query strings or logs.
+The proxy must preserve the `/api` prefix, forward the `Authorization`, `Cookie`, `Origin` and `X-CSRF-Token` headers, and allow `GET`, `POST`, `PATCH`, and `DELETE`. Because the UI and API are same-origin, no CORS configuration is required.
+
+Serve remote access over HTTPS: the session cookie and the password travel with every sign-in. When TLS terminates at the Ingress controller, set `config.trustedProxyIps` to its addresses (for example the Pod CIDR, `10.0.0.0/8`) so that GreenKube trusts its `X-Forwarded-Proto: https` and marks the cookie `Secure`, or set `auth.session.secureCookie: always`. Never expose an API key in query strings or logs.
 
 If the installation is served under a sub-path, set `config.rootPath` (for example `/greenkube`) and configure the proxy to forward that prefix.
 
@@ -619,7 +646,9 @@ kubectl -n greenkube rollout status deployment/greenkube-controller --timeout=10
 kubectl -n greenkube rollout status deployment/greenkube-automation --timeout=10m
 ```
 
-Upgrades never rotate generated API keys or PostgreSQL passwords: the credentials bootstrap hook only adds missing keys to the Secret `<release>`, which also keeps runtime service overrides written from the Settings page. Values you set in Helm take precedence over those overrides.
+Upgrades never rotate generated API keys or PostgreSQL passwords: the credentials bootstrap hook only adds missing keys to the Secret `<release>`. That Secret also keeps service overrides written by the Settings page of earlier releases; they still apply, values you set in Helm take precedence, and GreenKube no longer writes them.
+
+Upgrading to session sign-in: the first upgrade creates `<release>-initial-admin`; sign in as `admin` with its password and choose a new one. Existing API clients keep working with the bootstrap key `GREENKUBE_API_KEY` (deprecated). The API no longer has RBAC to patch the Secret `<release>` (the former `<release>-secret-writer` Role is removed). If your values set `config.apiAuthMode: api_key` explicitly (or you upgrade with `--reuse-values` from such a release), browser sign-in stays disabled and the UI no longer offers the former API-key dialog: set `config.apiAuthMode: session` to use the UI. API keys that call `POST /api/v1/recommendations/{id}/apply-pr` need the `approve` scope.
 
 Changes to Helm-managed runtime configuration roll the standalone or production component Pods through a ConfigMap checksum. If you update an existing provider Secret or an API key outside Helm, restart the affected API/worker Pods so they reload the changed Secret values.
 
@@ -673,9 +702,10 @@ The credentials bootstrap hook rejects an install when a retained PostgreSQL PVC
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Dashboard shows **API authentication required** | The API is protected. | Paste the value of `GREENKUBE_API_KEY` from the release Secret. |
-| API returns `401` | Missing or wrong bearer token. | Send `Authorization: Bearer <key>`; re-enter the key in the UI. |
-| API returns `503` with "API authentication is not configured" | `config.environment=production` but the Secret has no key. | Create/reference a Secret containing `GREENKUBE_API_KEY`. |
+| Dashboard shows **Sign in to GreenKube** and the initial password is rejected | The initial password was already changed (and erased from `<release>-initial-admin`), or `auth.admin.existingSecret` provides it. | Sign in with the chosen password; see [Authentication](authentication.md#recovery) to reset it. |
+| API returns `401` | No session, or a missing, wrong, revoked or expired API key. | Sign in again in the UI; for scripts send `Authorization: Bearer gk_...` with a valid key. |
+| API returns `403` `CSRF_REJECTED` | A proxy strips `Origin` or `X-CSRF-Token`, or the page is served from another origin. | Forward those headers; list a separate UI origin in `config.corsOrigins`. |
+| API returns `503` with "API authentication is not configured" | `config.environment=production`, the account store is unavailable and no bootstrap key is set. | Check the API logs and database connectivity, or set `GREENKUBE_API_KEY`. |
 | Dashboard shows no data | Prometheus is unreachable or not discovered. | Open **Settings**, check service health, and set `config.prometheus.url` explicitly. |
 | Pod stays in `InvalidImageName` or events show `couldn't parse image name "...:sha256:..."` | A digest was passed through `image.tag`. | Use `--set image.digest=sha256:<64 hex>` instead. `image.repository` must stay a repository name. |
 | Collector/API crash-loop with `password authentication failed for user "greenkube"` | A PostgreSQL PVC from an earlier installation was reused with a different password. | Delete `data-greenkube-postgres-0` for a clean install, or put the password used by the existing database in the Secret `greenkube`, `postgres.auth.password`, or `secrets.existingSecret`. |

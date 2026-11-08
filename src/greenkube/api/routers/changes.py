@@ -22,9 +22,8 @@ import logging
 from datetime import datetime
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
-from greenkube.api import dependencies as auth
 from greenkube.api.dependencies import validate_namespace
 from greenkube.storage.change_repository import ChangeRepository, get_change_repository
 from greenkube.storage.measurement_repository import (
@@ -37,26 +36,10 @@ from greenkube.verify.model import BaselineSnapshot, ChangeEvent, ChangeStatus, 
 logger = logging.getLogger(__name__)
 
 
-def require_api_authentication(request: Request) -> None:
-    """Apply the API authentication to this ``/api/v2`` router.
-
-    The app-wide ``verify_api_key`` dependency only guards ``/api/v1/*`` paths;
-    this router runs the same check, unchanged, as if the request targeted a
-    protected ``/api/v1`` route.
-    """
-    if getattr(request.state, "authenticated_actor", None):
-        return
-    scope = dict(request.scope)
-    scope["path"] = "/api/v1/changes"
-    scope["root_path"] = ""
-    proxy = Request(scope, request.receive)
-    auth.verify_api_key(proxy)
-    actor = getattr(proxy.state, "authenticated_actor", None)
-    if actor:
-        request.state.authenticated_actor = actor
-
-
-router = APIRouter(dependencies=[Depends(require_api_authentication)])
+# The app-wide ``authenticate`` dependency resolves the principal of ``/api/v2``
+# routes like ``/api/v1`` ones: sessions, scoped API keys (``read``) and the
+# bootstrap key.
+router = APIRouter()
 
 MAX_LIMIT = 200
 _CHANGE_ID = Path(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")

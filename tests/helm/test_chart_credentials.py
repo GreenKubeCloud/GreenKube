@@ -232,7 +232,20 @@ def test_existing_secret_is_the_gitops_path():
     docs = _documents(_render("--set", "secrets.existingSecret=greenkube-credentials"))
 
     assert not [doc for doc in docs if doc.get("kind") == "Secret"]
-    assert _find(docs, "Job", "greenkube-credentials-bootstrap") is None
+    # The hook only creates the initial-admin Secret (F14): it never reads or
+    # writes the user's Secret.
+    job = _get(docs, "Job", "greenkube-credentials-bootstrap")
+    env = {item["name"]: item.get("value") for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["GREENKUBE_SECRET_NAME"] == ""
+    assert env["GREENKUBE_GENERATE_API_KEY"] == "false"
+    assert env["GREENKUBE_GENERATE_POSTGRES_PASSWORD"] == "false"
+    assert env["GREENKUBE_INITIAL_ADMIN_SECRET"] == "greenkube-initial-admin"
+    role = _get(docs, "Role", "greenkube-credentials-bootstrap")
+    assert all("greenkube-credentials" not in rule.get("resourceNames", []) for rule in role["rules"])
+    declarative = _documents(
+        _render("--set", "secrets.existingSecret=greenkube-credentials", "--set", "auth.admin.existingSecret=admin")
+    )
+    assert _find(declarative, "Job", "greenkube-credentials-bootstrap") is None
     statefulset = _get(docs, "StatefulSet", "greenkube-postgres")
     password = next(
         e for e in statefulset["spec"]["template"]["spec"]["containers"][0]["env"] if e["name"] == "POSTGRES_PASSWORD"

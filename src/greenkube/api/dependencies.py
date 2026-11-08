@@ -19,6 +19,12 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Query, Request
 
+from greenkube.auth.http import CSRF_HEADER, is_same_origin
+from greenkube.auth.metrics import record_auth_failure
+from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, required_scope
+from greenkube.auth.service import AuthService, api_key_principal, user_principal
+from greenkube.auth.settings import AuthSettings
+from greenkube.auth.tokens import constant_time_equals, sha256_hex
 from greenkube.gitops.contracts import Operation, Plan
 from greenkube.gitops.discovery.kubernetes import KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime, create_gitops_discovery_runtime
@@ -47,6 +53,8 @@ _PUBLIC_API_PATHS = (
     "/api/v1/openapi.json",
 )
 _WEBHOOK_API_PREFIX = "/api/v1/webhooks/"
+# API versions resolved by :func:`authenticate` (``/api/v2`` serves changes and measurements).
+_PROTECTED_API_PREFIXES = ("/api/v1/", "/api/v2/")
 
 
 def _is_webhook_ingress_path(path: str) -> bool:
@@ -100,10 +108,10 @@ def verify_api_key(request: Request) -> None:
     if path in _PUBLIC_API_PATHS or (request.method == "POST" and _is_webhook_ingress_path(path)):
         return
 
-    if getattr(cfg, "API_AUTH_MODE", "api_key") != "api_key":
+    if getattr(cfg, "API_AUTH_MODE", "api_key") not in ("api_key", "session"):
         raise HTTPException(
             status_code=503,
-            detail="The configured session/OIDC authentication contract is not available in this deployment.",
+            detail="The configured OIDC authentication contract is not available in this deployment.",
         )
     if not api_key:
         if getattr(cfg, "ENVIRONMENT", "development") == "production":
@@ -127,6 +135,167 @@ def verify_api_key(request: Request) -> None:
         )
     actor_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
     request.state.authenticated_actor = f"api-key:{actor_digest}"
+
+
+# Auth endpoints reachable without credentials: they resolve a principal when
+# one is presented but never require it.
+_AUTH_PUBLIC_PATHS = ("/api/v1/auth/login", "/api/v1/auth/logout")
+# What a user who must still change the initial password may call.
+_PASSWORD_CHANGE_ALLOWED = ("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout", "/api/v1/version")
+_UNAUTHORIZED = "Authentication required."
+_INVALID_KEY = "Invalid or missing API key."
+
+
+def get_auth_service(request: Request) -> AuthService | None:
+    """The account and session service, available once the API lifespan connected the database."""
+    service = getattr(request.app.state, "auth_service", None)
+    return service if isinstance(service, AuthService) else None
+
+
+def _forbidden(code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=403, detail={"code": code, "message": message})
+
+
+def _bearer_unauthorized() -> HTTPException:
+    return HTTPException(status_code=401, detail=_INVALID_KEY, headers={"WWW-Authenticate": "Bearer"})
+
+
+def _legacy_principal(token: str) -> Principal:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    return Principal(
+        kind="apikey",
+        name="legacy",
+        role=Role.ADMIN.value,
+        scopes=ALL_SCOPES,
+        legacy=True,
+        actor_override=f"api-key:{digest}",
+    )
+
+
+async def _bearer_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal:
+    """Resolve ``Authorization: Bearer``: the deprecated bootstrap key, then a scoped key."""
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    token = token.strip()
+    if scheme.lower() == "bearer" and token:
+        # Compare digests so that neither the content nor the length of the key leaks through timing.
+        if settings.legacy_api_key and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key)):
+            return _legacy_principal(token)
+        if service is not None and token.startswith("gk_"):
+            key = await service.resolve_api_key(token)
+            if key is not None:
+                return api_key_principal(key)
+    if await _open_access(settings, service):
+        # Nothing to check a key against on an open development instance.
+        return ANONYMOUS
+    record_auth_failure("invalid_api_key")
+    raise _bearer_unauthorized()
+
+
+async def _session_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal | None:
+    if not settings.sessions_enabled or service is None:
+        return None
+    token = request.cookies.get(settings.cookie_name)
+    if not token:
+        return None
+    resolved = await service.resolve_session(token)
+    if resolved is None:
+        record_auth_failure("invalid_session")
+        return None
+    session, user = resolved
+    request.state.auth_session = session
+    return user_principal(user, session, token)
+
+
+async def _open_access(settings: AuthSettings, service: AuthService | None) -> bool:
+    """Whether an unauthenticated request is served anonymously.
+
+    Only a development instance with no bootstrap API key and no account is
+    open, as before sessions existed. Production never is.
+    """
+    if settings.legacy_api_key or settings.environment == "production":
+        return False
+    if settings.mode == "api_key" or service is None:
+        return True
+    try:
+        return not await service.users_exist()
+    except Exception:
+        logger.warning("Could not check whether accounts exist; refusing anonymous access.")
+        return False
+
+
+def _remember(request: Request, principal: Principal) -> None:
+    request.state.principal = principal
+    request.state.authenticated_actor = principal.actor
+
+
+async def authenticate(request: Request) -> None:
+    """Resolve the request's :class:`Principal` and enforce scopes and CSRF (F14, F15).
+
+    Order: a Bearer API key (the deprecated ``GREENKUBE_API_KEY`` bootstrap key,
+    then scoped ``gk_`` keys), then the session cookie. Protected routes are
+    ``/api/v1/*``, ``/api/v2/*`` and ``/prometheus/metrics``; the SPA, liveness, docs, OpenAPI
+    schema and the provider webhook ingress route are public. Unsafe methods
+    authenticated by a session cookie need a same-origin ``Origin``/``Referer``
+    and an ``X-CSRF-Token`` header matching the session.
+    """
+    from greenkube.core.config import get_config
+
+    path = _route_path(request)
+    if not path.startswith(_PROTECTED_API_PREFIXES) and path != "/prometheus/metrics":
+        return
+    if path in _PUBLIC_API_PATHS or (request.method == "POST" and _is_webhook_ingress_path(path)):
+        return
+
+    settings = AuthSettings.from_config(get_config())
+    if settings.mode not in ("api_key", "session"):
+        raise HTTPException(
+            status_code=503,
+            detail="The configured OIDC authentication contract is not available in this deployment.",
+        )
+    service = get_auth_service(request)
+    auth_public = path in _AUTH_PUBLIC_PATHS
+
+    if request.headers.get("Authorization"):
+        principal: Principal | None = await _bearer_principal(request, settings, service)
+    else:
+        principal = await _session_principal(request, settings, service)
+
+    if principal is None:
+        if auth_public:
+            return
+        if await _open_access(settings, service):
+            principal = ANONYMOUS
+        elif settings.environment == "production" and not settings.legacy_api_key and service is None:
+            raise HTTPException(status_code=503, detail="API authentication is not configured.")
+        else:
+            raise HTTPException(status_code=401, detail=_UNAUTHORIZED, headers={"WWW-Authenticate": "Bearer"})
+
+    _remember(request, principal)
+    if auth_public:
+        return
+
+    if principal.must_change_password and path not in _PASSWORD_CHANGE_ALLOWED:
+        raise _forbidden("PASSWORD_CHANGE_REQUIRED", "Change the initial password before using GreenKube.")
+
+    scope = required_scope(request.method, path)
+    if scope is not None and not principal.has_scope(scope):
+        record_auth_failure("forbidden_scope")
+        raise _forbidden("INSUFFICIENT_SCOPE", f"This credential lacks the '{scope}' scope.")
+
+    if principal.is_session and request.method.upper() not in SAFE_METHODS:
+        if not is_same_origin(request, settings, require=True) or not constant_time_equals(
+            request.headers.get(CSRF_HEADER), principal.csrf_token
+        ):
+            record_auth_failure("csrf")
+            raise _forbidden("CSRF_REJECTED", "Cross-site request rejected: reload the page and try again.")
+
+
+def get_principal(request: Request) -> Principal:
+    """The principal resolved by :func:`authenticate` (401 when there is none)."""
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(principal, Principal):
+        raise HTTPException(status_code=401, detail=_UNAUTHORIZED)
+    return principal
 
 
 def get_authenticated_actor(request: Request) -> str:

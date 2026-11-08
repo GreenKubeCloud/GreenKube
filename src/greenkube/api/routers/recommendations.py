@@ -380,6 +380,7 @@ async def apply_recommendation(
     rec_id: int,
     request: ApplyRecommendationRequest,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Mark a recommendation as applied.
 
@@ -406,7 +407,7 @@ async def apply_recommendation(
             carbon_saved_co2e_grams=None,
             cost_saved=None,
             application_method=request.application_method or "manual",
-            actor="user",
+            actor=actor,
         )
     except RecommendationTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -453,6 +454,7 @@ async def remeasure_recommendation(
     rec_id: int,
     request: Optional[RemeasureRequest] = None,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Start a new fixed-horizon measurement of an applied recommendation.
 
@@ -470,7 +472,7 @@ async def remeasure_recommendation(
         return await RecommendationLifecycle(reco_repo).request_remeasure(
             rec_id,
             reason=request.reason if request is not None else None,
-            actor="user",
+            actor=actor,
         )
     except RecommendationNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -483,6 +485,7 @@ async def dismiss_rollback_review(
     rec_id: int,
     request: DismissRollbackReviewRequest,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Dismiss a false-positive rollback review; the change is measured again from now.
 
@@ -497,7 +500,7 @@ async def dismiss_rollback_review(
 
     try:
         return await RecommendationLifecycle(reco_repo).dismiss_rollback_review(
-            rec_id, reason=request.reason, actor="user"
+            rec_id, reason=request.reason, actor=actor
         )
     except RecommendationNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -529,6 +532,7 @@ async def ignore_recommendation(
     rec_id: int,
     request: IgnoreRecommendationRequest,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Permanently ignore a recommendation.
 
@@ -542,7 +546,7 @@ async def ignore_recommendation(
 
     try:
         # Compare-and-swap with its event; an open PR or an applied change is refused (409).
-        return await RecommendationLifecycle(reco_repo).ignore(rec_id, reason=request.reason, actor="user")
+        return await RecommendationLifecycle(reco_repo).ignore(rec_id, reason=request.reason, actor=actor)
     except RecommendationTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
@@ -553,6 +557,7 @@ async def ignore_recommendation(
 async def unignore_recommendation(
     rec_id: int,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+    actor: str = Depends(get_authenticated_actor),
 ):
     """Restore an ignored recommendation back to active status.
 
@@ -563,7 +568,7 @@ async def unignore_recommendation(
 
     try:
         # Only an ignored recommendation is restored; any other status is a 409.
-        return await RecommendationLifecycle(reco_repo).unignore(rec_id, actor="user")
+        return await RecommendationLifecycle(reco_repo).unignore(rec_id, actor=actor)
     except RecommendationTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:

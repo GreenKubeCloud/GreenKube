@@ -4,16 +4,39 @@ The GreenKube REST API is available under `/api/v1`. Interactive documentation a
 
 ## Authentication
 
-When an API key is configured, send it as `Authorization: Bearer <API_KEY>`. The chart defaults to `config.environment: production` and generates a random `GREENKUBE_API_KEY` once, with its credentials bootstrap hook, in the Secret `<release>`. In production, a missing key makes protected routes fail closed with `503`; in development, an installation whose Secret has no key leaves protected routes open. The current API middleware supports API-key authentication; selecting another mode does not enable an OIDC or session implementation.
+See [Authentication](authentication.md) for the full model. In short:
 
-The browser dashboard sends the key only after you enter it in the authentication dialog. It keeps the key in `sessionStorage` for the current tab (it survives reloads, and is forgotten when the tab closes, on **Sign out**, or on any `401`) and never writes it to `localStorage` or cookies. The dialog is a standard sign-in form (account `api-key`), so password managers can save and autofill the key. Retrieve the key with:
+- **Machines** send a scoped API key as `Authorization: Bearer gk_<id>_<secret>`. Administrators create keys in
+  **Settings > API keys** or with `POST /api/v1/auth/api-keys`; the key is shown once. Scopes: `read`, `write`,
+  `approve`, `signals:write`, `metrics:read`, `admin`. A request outside its key's scopes answers `403` with code
+  `INSUFFICIENT_SCOPE`.
+- **The dashboard** signs in with `POST /api/v1/auth/login` and then uses an `HttpOnly` session cookie. Mutations
+  authenticated by that cookie need a same-origin `Origin` and the `X-CSRF-Token` header returned by
+  `GET /api/v1/auth/me`.
+- **The bootstrap key** `GREENKUBE_API_KEY` (generated once by the chart in the Secret `<release>`) is still accepted
+  as an admin Bearer key for one more minor release (deprecated):
 
-```bash
-kubectl -n <namespace> get secret <release-secret> \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
-```
+  ```bash
+  kubectl -n <namespace> get secret <release-secret> \
+    -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
+  ```
 
-The exact Secret name is `<release>` for a generated key, `<release>-values` for a key set with `secrets.apiKey`, or the value of `secrets.existingSecret`; `helm install` prints the exact command. See the [Installation guide](installation.md#production-api-key-handling).
+Unauthenticated requests answer `401`. A production instance that cannot authenticate anybody answers `503`; a
+development instance without any account and without a bootstrap key stays open.
+
+### Authentication endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/auth/login` | Sign in with `{username, password, remember}`; sets the session cookie. Rate-limited (`429` with `Retry-After`). |
+| `POST` | `/auth/logout` | Revoke the current session (`204`). |
+| `GET` | `/auth/me` | Current principal, scopes, `must_change_password` and, for sessions, the CSRF token. |
+| `POST` | `/auth/password` | Change the password; revokes every session and sets a new cookie. |
+| `GET` | `/auth/sessions` | Active sessions of the signed-in user. |
+| `DELETE` | `/auth/sessions/{id}` | Sign out one session. |
+| `GET` | `/auth/api-keys` | List API keys (`admin`); secrets are never returned. |
+| `POST` | `/auth/api-keys` | Create a key `{name, scopes, expires_in_days?}` (`admin`); the response holds the key once. |
+| `DELETE` | `/auth/api-keys/{id}` | Revoke a key (`admin`). |
 
 ## Endpoints
 
@@ -28,7 +51,7 @@ All paths below are relative to `/api/v1`.
 | `GET` | `/config` | Current runtime configuration. |
 | `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). |
 | `GET` | `/health/services/{service_name}` | Health check for one data source. |
-| `POST` | `/config/services` | Apply selected integration URLs or tokens at runtime; see [Configuration](configuration.md). |
+| `POST` | `/config/services` | Removed: answers `410 Gone`. Data sources are configuration as code; see [Configuration](configuration.md#data-sources-are-configuration-as-code). |
 
 The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from the OpenAPI schema.
 
@@ -109,11 +132,11 @@ Resource recommendations for multiple containers in one workload are composed in
 
 Rollback preview takes only the original plan ID. GreenKube snapshots the current immutable ref, retrieves updated files at the original plan's base revision through the authorized provider resolver, and rejects changed paths or any rendered effect outside the exact target. Approval uses the same exact-digest endpoint and worker queue as other plans. Recommendations remain in `rollback_review` through merge and controller sync; they become `reverted` (and their actions `reverted`) only after the rollback plan is `synced`, a post-baseline workload generation is observed, and live per-container requests match the original pre-apply baseline. RAW rollback is built in; Kustomize requires an explicitly configured exact-target rollback adapter; Argo CD `HELM_VALUES` rollback supports only the explicitly mapped local-chart subset. Flux `HELM_RELEASE` rollback restores the original Git-owned HelmRelease file and uses the same local same-revision chart, snapshot-resolvable `valuesFiles`/`valuesFrom`, and GreenKube-managed post-renderer subset as forward planning. It fails closed on stale refs, changed forward files or render output, missing baselines, unrelated rendered changes, remote/cross-revision charts, chart dependencies, runtime-only or cross-repository `valuesFrom`, unsupported `targetPath` merging, unmanaged post-renderers, or unsupported operations.
 
-The three compatibility routes above (`apply-pr`, `apply-pr/eligibility` and `/automation/operations/{operation_id}`) still work in this release but are deprecated. Their responses carry `Deprecation: @1796947200` (2026-12-11, v0.4.0), `Sunset: Fri, 29 Jan 2027 00:00:00 GMT` (planned removal in v0.5.0) and `Link: </api/v1/automation/plans>; rel="successor-version"`, and OpenAPI marks them `deprecated`. `POST /recommendations/{rec_id}/apply-pr` uses the same server-resolved, render-validated plan path as `/automation/plans`; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest, returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. When automation is enabled, the standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].secretName` / `secretKey` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
+The three compatibility routes above (`apply-pr`, `apply-pr/eligibility` and `/automation/operations/{operation_id}`) still work in this release but are deprecated. Their responses carry `Deprecation: @1796947200` (2026-12-11, v0.4.0), `Sunset: Fri, 29 Jan 2027 00:00:00 GMT` (planned removal in v0.5.0) and `Link: </api/v1/automation/plans>; rel="successor-version"`, and OpenAPI marks them `deprecated`. `POST /recommendations/{rec_id}/apply-pr` uses the same server-resolved, render-validated plan path as `/automation/plans`; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest (an API key therefore needs the `approve` scope, even for a dry run), returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. When automation is enabled, the standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].secretName` / `secretKey` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
 
 ### Changes and measurements (`/api/v2`)
 
-These routes live under `/api/v2` (not `/api/v1`) and use the same authentication. A change is one workload revision applied by apply detection; see [Savings measurement](methodology/savings-measurement.md).
+These routes live under `/api/v2` (not `/api/v1`) and use the same authentication: a session, the bootstrap key, or an API key with the `read` scope ([Authentication](authentication.md)). A change is one workload revision applied by apply detection; see [Savings measurement](methodology/savings-measurement.md).
 
 | Method | Path | Description |
 |---|---|---|
@@ -150,7 +173,7 @@ With `aggregate=true`, report rows can be grouped using `granularity=hourly`, `d
 
 ### Repository bindings
 
-GitOps bindings are discovered from Argo CD and Flux controller state. Discovery is read-only except for the operator-approved, expiring resolution of an ambiguous or unresolved binding. All GitOps endpoints use the existing API-key middleware. See [GitOps automation](automation.md) for supported source layouts and safety rules.
+GitOps bindings are discovered from Argo CD and Flux controller state. Discovery is read-only except for the operator-approved, expiring resolution of an ambiguous or unresolved binding. All GitOps endpoints use the standard API authentication (a session cookie or a scoped API key, see [Authentication](authentication.md)). See [GitOps automation](automation.md) for supported source layouts and safety rules.
 
 | Method | Path | Description |
 |---|---|---|
