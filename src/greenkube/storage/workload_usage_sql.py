@@ -535,6 +535,10 @@ def baseline_from_row(
         "pue": float(row["pue_sum"] or 0.0) / pue_n if pue_n else 1.0,
         "grid_intensity": float(row["intensity_sum"] or 0.0) / intensity_n if intensity_n else 0.0,
         "emaps_zone": row["emaps_zone"],
+        # Given explicitly: ``model_construct`` otherwise inspects the default
+        # factory's signature for every row (a ``sys.modules`` copy each time
+        # on Python 3.14), which inflates the scan's peak memory.
+        "estimation_reasons": [],
     }
     if summary is not None:
         for resource, stats in (("cpu", summary.cpu), ("memory", summary.memory)):

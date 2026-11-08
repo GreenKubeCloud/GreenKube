@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -264,4 +265,5 @@ def test_since_accepts_durations_and_timestamps():
 def test_command_is_registered():
     result = CliRunner().invoke(app, ["recompute", "--help"])
     assert result.exit_code == 0
-    assert "--since" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--since" in plain
