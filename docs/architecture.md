@@ -655,7 +655,7 @@ Used for reporting over time ranges with historical accuracy.
 
 4. **Sync and verification:**
    ```
-   Webhook/polling update → controller observes exact source revision
+   Webhook/polling update → controller observes the landed commit, or a descendant that still carries the planned values (provider ancestry + planned-file checks)
    └─ actions sync_pending; plan merged → synced (or sync_failed after timeout)
    └─ Apply detection compares per-container requests
    └─ Normal post-apply health and savings verification

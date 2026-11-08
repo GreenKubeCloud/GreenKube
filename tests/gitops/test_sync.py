@@ -638,3 +638,187 @@ async def test_oversized_controller_response_fails_closed():
 
     assert result.status is GitOpsSyncStatus.UNAVAILABLE
     assert result.reason is GitOpsSyncReason.RESPONSE_TOO_LARGE
+
+
+class _Ancestry:
+    """Fake commit graph answering ``is_ancestor(ancestor, descendant)``.
+
+    ``answer`` is returned for the merge -> observed question and ``reverse``
+    for observed -> merge (is the controller still behind the merge?).
+    """
+
+    def __init__(
+        self,
+        answer: bool | None = True,
+        error: Exception | None = None,
+        *,
+        reverse: bool | None = False,
+    ) -> None:
+        self.answer = answer
+        self.reverse = reverse
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        self.calls.append((ancestor_sha, descendant_sha))
+        if self.error is not None:
+            raise self.error
+        return self.answer if ancestor_sha == MERGE_SHA else self.reverse
+
+
+class _PlannedChanges:
+    """Fake answer to "does the observed revision still carry the plan's edits?"."""
+
+    def __init__(self, answer: bool | None = True, error: Exception | None = None) -> None:
+        self.answer = answer
+        self.error = error
+        self.calls: list[str] = []
+
+    async def __call__(self, observed_sha: str) -> bool | None:
+        self.calls.append(observed_sha)
+        if self.error is not None:
+            raise self.error
+        return self.answer
+
+
+@pytest.mark.asyncio
+async def test_bug_43_controller_on_a_later_descendant_commit_confirms_sync():
+    """BUG-43: a commit landing after the merge must not turn a real sync into a mismatch."""
+    ancestry = _Ancestry(True)
+    planned_changes = _PlannedChanges(True)
+
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=ancestry,
+        planned_changes=planned_changes,
+    )
+
+    assert result.status is GitOpsSyncStatus.SYNCED
+    assert result.reason is GitOpsSyncReason.SYNC_CONFIRMED_DESCENDANT
+    assert result.observed_revision == OTHER_SHA
+    assert ancestry.calls == [(MERGE_SHA, OTHER_SHA)]
+    assert planned_changes.calls == [OTHER_SHA]
+
+
+@pytest.mark.asyncio
+async def test_descendant_that_no_longer_carries_the_planned_changes_is_mismatched():
+    """D1: a later commit that reverted or overwrote the plan must not confirm its sync."""
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=_Ancestry(True),
+        planned_changes=_PlannedChanges(False),
+    )
+
+    assert result.status is GitOpsSyncStatus.MISMATCHED
+    assert result.reason is GitOpsSyncReason.PLANNED_CHANGE_NOT_PRESENT
+    assert result.observed_revision == OTHER_SHA
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "planned_changes",
+    [None, _PlannedChanges(None), _PlannedChanges(error=RuntimeError("provider down"))],
+)
+async def test_descendant_without_planned_change_proof_never_confirms_sync(planned_changes):
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=_Ancestry(True),
+        planned_changes=planned_changes,
+    )
+
+    assert result.status is GitOpsSyncStatus.MISMATCHED
+    assert result.reason is GitOpsSyncReason.PLANNED_CHANGE_UNVERIFIED
+
+
+@pytest.mark.asyncio
+async def test_non_descendant_controller_revision_is_mismatched_with_a_clear_reason():
+    planned_changes = _PlannedChanges(True)
+
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=_Ancestry(False),
+        planned_changes=planned_changes,
+    )
+
+    assert result.status is GitOpsSyncStatus.MISMATCHED
+    assert result.reason is GitOpsSyncReason.REVISION_NOT_DESCENDANT
+    assert result.observed_revision == OTHER_SHA
+    assert planned_changes.calls == []
+
+
+@pytest.mark.asyncio
+async def test_controller_still_on_an_older_revision_reports_that_it_is_behind():
+    ancestry = _Ancestry(False, reverse=True)
+
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=ancestry,
+        planned_changes=_PlannedChanges(True),
+    )
+
+    assert result.status is GitOpsSyncStatus.MISMATCHED
+    assert result.reason is GitOpsSyncReason.REVISION_BEHIND_MERGE
+    assert ancestry.calls == [(MERGE_SHA, OTHER_SHA), (OTHER_SHA, MERGE_SHA)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ancestry", [_Ancestry(None), _Ancestry(error=RuntimeError("provider down"))])
+async def test_unknown_ancestry_never_confirms_sync(ancestry):
+    planned_changes = _PlannedChanges(True)
+
+    result = await observe_gitops_sync(
+        _source(),
+        MERGE_SHA,
+        _api(_argo_application(OTHER_SHA)),
+        ancestry=ancestry,
+        planned_changes=planned_changes,
+    )
+
+    assert result.status is GitOpsSyncStatus.MISMATCHED
+    assert result.reason is GitOpsSyncReason.ANCESTRY_UNAVAILABLE
+    assert planned_changes.calls == []
+
+
+@pytest.mark.asyncio
+async def test_exact_revision_and_unhealthy_controllers_never_query_ancestry():
+    ancestry = _Ancestry(True)
+    planned_changes = _PlannedChanges(True)
+    exact = await observe_gitops_sync(
+        _source(), MERGE_SHA, _api(_argo_application()), ancestry=ancestry, planned_changes=planned_changes
+    )
+    degraded_application = _argo_application(OTHER_SHA)
+    degraded_application["status"]["health"]["status"] = "Degraded"
+    degraded = await observe_gitops_sync(
+        _source(), MERGE_SHA, _api(degraded_application), ancestry=ancestry, planned_changes=planned_changes
+    )
+
+    assert (exact.status, exact.reason) == (GitOpsSyncStatus.SYNCED, GitOpsSyncReason.SYNC_CONFIRMED)
+    assert exact.observed_revision == MERGE_SHA
+    assert degraded.status is GitOpsSyncStatus.FAILED
+    assert ancestry.calls == []
+    assert planned_changes.calls == []
+
+
+@pytest.mark.asyncio
+async def test_flux_kustomization_descendant_artifact_revision_confirms_sync():
+    source = _source(controller_kind=ControllerKind.FLUX_KUSTOMIZATION, controller_namespace="flux-system")
+    controller = _flux_controller("Kustomization", f"main@sha1:{OTHER_SHA}")
+    ancestry = _Ancestry(True)
+
+    result = await observe_gitops_sync(
+        source, MERGE_SHA, _api(controller), ancestry=ancestry, planned_changes=_PlannedChanges(True)
+    )
+
+    assert result.status is GitOpsSyncStatus.SYNCED
+    assert result.reason is GitOpsSyncReason.SYNC_CONFIRMED_DESCENDANT
+    assert ancestry.calls == [(MERGE_SHA, OTHER_SHA)]

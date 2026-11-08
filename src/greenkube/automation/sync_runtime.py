@@ -7,11 +7,24 @@ import logging
 import math
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from functools import partial
+from typing import TYPE_CHECKING, Any, Protocol
 
+from greenkube.automation.git.base import (
+    GitProviderCapability,
+    GitProviderError,
+    git_blob_id,
+    is_full_commit_sha,
+)
+from greenkube.automation.git.budget import (
+    DEFAULT_SYNC_ANCESTRY_PROVIDER_CALL_BUDGET,
+    DEFAULT_SYNC_PLANNED_CHANGE_PROVIDER_CALL_BUDGET,
+    provider_call_budget,
+)
 from greenkube.core.leader_election import DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS
 from greenkube.core.observability import (
     record_automation_failure,
@@ -19,10 +32,14 @@ from greenkube.core.observability import (
     record_sync_outcome,
     record_sync_timeout,
 )
-from greenkube.gitops.contracts import ActionStatus, Plan, PlanStatus
+from greenkube.gitops.contracts import ActionStatus, FileEdit, FilePlan, Plan, PlanStatus, WorkloadSource
+from greenkube.gitops.planned_values import planned_values_present
 from greenkube.gitops.sync import GitOpsSyncReason, GitOpsSyncStatus, observe_gitops_sync
 from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
+
+if TYPE_CHECKING:
+    from greenkube.automation.plan_worker import PlanProviderResolver
 
 DEFAULT_GITOPS_SYNC_POLL_INTERVAL_SECONDS = 30
 MIN_GITOPS_SYNC_POLL_INTERVAL_SECONDS = 10
@@ -33,9 +50,190 @@ MAX_GITOPS_SYNC_TIMEOUT_SECONDS = 86_400
 DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS = 30
 GITOPS_SYNC_POLL_INTERVAL_ENV = "GITOPS_SYNC_POLL_INTERVAL"
 GITOPS_SYNC_TIMEOUT_ENV = "GITOPS_SYNC_TIMEOUT"
+DEFAULT_ANCESTRY_CACHE_SIZE = 1024
 _COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 
 logger = logging.getLogger(__name__)
+
+
+class GitAncestryChecker(Protocol):
+    """Answer the two Git questions that confirm a sync on a descendant revision (D1)."""
+
+    async def is_ancestor(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        """Return whether ``descendant_sha`` contains ``ancestor_sha`` (``None``: unknown)."""
+        ...
+
+    async def planned_changes_present(
+        self,
+        source: WorkloadSource,
+        file_plan: FilePlan,
+        observed_revision: str,
+    ) -> bool | None:
+        """Return whether ``observed_revision`` still carries the plan's file changes (``None``: unknown)."""
+        ...
+
+
+class ProviderAncestryChecker:
+    """Ask the workload's authorized Git provider about descendant revisions (D1).
+
+    Ancestry between two immutable commits, and the content of planned files
+    at an immutable commit, never change, so definitive answers (positive and
+    negative) are cached; ``None`` (unknown commit, provider error, exhausted
+    budget, unsupported adapter) is never cached and is retried next poll.
+    """
+
+    def __init__(
+        self,
+        provider_resolver: PlanProviderResolver,
+        *,
+        cache_size: int = DEFAULT_ANCESTRY_CACHE_SIZE,
+        call_budget: int = DEFAULT_SYNC_ANCESTRY_PROVIDER_CALL_BUDGET,
+        planned_change_call_budget: int = DEFAULT_SYNC_PLANNED_CHANGE_PROVIDER_CALL_BUDGET,
+    ) -> None:
+        if type(cache_size) is not int or cache_size <= 0:
+            raise ValueError("cache_size must be a positive integer.")
+        self.provider_resolver = provider_resolver
+        self.cache_size = cache_size
+        self.call_budget = call_budget
+        self.planned_change_call_budget = planned_change_call_budget
+        self._cache: OrderedDict[Hashable, bool] = OrderedDict()
+
+    async def is_ancestor(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        if _COMMIT_SHA.fullmatch(ancestor_sha) is None or _COMMIT_SHA.fullmatch(descendant_sha) is None:
+            return None
+        ancestor, descendant = ancestor_sha.lower(), descendant_sha.lower()
+        key = ("ancestry", source.provider_id, source.repo_url, ancestor, descendant)
+        return await self._cached(
+            key,
+            "sync_ancestry",
+            self.call_budget,
+            partial(self._ask_provider, source, ancestor, descendant),
+        )
+
+    async def planned_changes_present(
+        self,
+        source: WorkloadSource,
+        file_plan: FilePlan,
+        observed_revision: str,
+    ) -> bool | None:
+        """Check the planned paths at ``observed_revision`` against the plan's edits.
+
+        A path whose blob equals the planned content is present. A deleted path
+        must stay absent. When a later commit edited a planned file, that file
+        is read at the observed and base revisions and compared structurally
+        (:func:`planned_values_present`), so unrelated edits in the same file
+        are accepted while reverts and overwrites are not. Costs one tree read
+        plus two file reads per planned file that a later commit edited.
+        """
+        if not isinstance(file_plan, FilePlan) or not file_plan.files:
+            return None
+        if not is_full_commit_sha(observed_revision) or not is_full_commit_sha(file_plan.base_revision):
+            return None
+        observed = observed_revision.lower()
+        key = ("planned", source.provider_id, source.repo_url, file_plan.plan_id, file_plan.digest, observed)
+        return await self._cached(
+            key,
+            "sync_planned_change",
+            self.planned_change_call_budget,
+            partial(self._check_planned_changes, source, file_plan, observed),
+        )
+
+    async def _cached(
+        self,
+        key: Hashable,
+        operation: str,
+        call_budget: int,
+        ask: Callable[[], Any],
+    ) -> bool | None:
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
+        try:
+            with provider_call_budget(operation, limit=call_budget):
+                answer = await ask()
+        except (GitProviderError, RuntimeError) as error:
+            logger.warning("Git %s lookup failed for a merged plan (%s).", operation, type(error).__name__)
+            return None
+        if not isinstance(answer, bool):
+            return None
+        self._cache[key] = answer
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+        return answer
+
+    async def _ask_provider(self, source: WorkloadSource, ancestor_sha: str, descendant_sha: str) -> bool | None:
+        target = await self.provider_resolver.resolve(source)
+        provider: Any = target.provider
+        try:
+            if not provider.supports(GitProviderCapability.COMMIT_ANCESTRY):
+                return None
+            answer = await provider.is_ancestor(target.repository, ancestor_sha, descendant_sha)
+            return answer if isinstance(answer, bool) else None
+        finally:
+            await _close_quietly(provider)
+
+    async def _check_planned_changes(self, source: WorkloadSource, file_plan: FilePlan, observed: str) -> bool | None:
+        target = await self.provider_resolver.resolve(source)
+        provider: Any = target.provider
+        repository = target.repository
+        try:
+            blob_ids = await provider.get_blob_ids(repository, observed, [edit.path for edit in file_plan.files])
+            if not isinstance(blob_ids, Mapping):
+                return None
+            object_format = "sha256" if len(observed) == 64 else "sha1"
+            for edit in file_plan.files:
+                blob = blob_ids.get(edit.path)
+                if blob is not None and not isinstance(blob, str):
+                    return None
+                if edit.operation == "delete":
+                    if blob is not None:
+                        return False
+                    continue
+                if blob is None:
+                    return False
+                assert edit.content is not None
+                if blob.lower() == git_blob_id(edit.content, object_format=object_format):
+                    continue
+                present = await _planned_file_present(provider, repository, file_plan.base_revision, edit, observed)
+                if present is not True:
+                    return present
+            return True
+        finally:
+            await _close_quietly(provider)
+
+
+async def _planned_file_present(
+    provider: Any,
+    repository: Any,
+    base_revision: str,
+    edit: FileEdit,
+    observed: str,
+) -> bool | None:
+    """Compare one planned file that a later commit edited, structurally."""
+    observed_file = await provider.get_file(repository, edit.path, observed)
+    if observed_file is None or not isinstance(observed_file.content, str):
+        return None
+    original: str | None = None
+    if edit.operation == "update":
+        base_file = await provider.get_file(repository, edit.path, base_revision)
+        if base_file is None or not isinstance(base_file.content, str):
+            return None
+        object_format = "sha256" if len(base_revision) == 64 else "sha1"
+        base_blob = base_file.blob_sha or git_blob_id(base_file.content, object_format=object_format)
+        if edit.original_sha is None or base_blob.lower() != edit.original_sha.lower():
+            # Not the content the plan was computed from: the diff cannot be trusted.
+            return False
+        original = base_file.content
+    assert edit.content is not None
+    return planned_values_present(original, edit.content, observed_file.content)
+
+
+async def _close_quietly(provider: Any) -> None:
+    try:
+        await provider.close()
+    except Exception:
+        pass
 
 
 class SyncPullRequestRepository(Protocol):
@@ -121,6 +319,7 @@ class GitOpsSyncRuntime:
         sync_timeout_seconds: int = DEFAULT_GITOPS_SYNC_TIMEOUT_SECONDS,
         sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
         clock: Callable[[], datetime] | None = None,
+        ancestry_checker: GitAncestryChecker | None = None,
     ) -> None:
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_PULL_REQUEST_POLL_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_PULL_REQUEST_POLL_BATCH_SIZE}.")
@@ -141,6 +340,7 @@ class GitOpsSyncRuntime:
         self.sync_timeout_seconds = sync_timeout_seconds
         self.sync_retry_backoff_seconds = sync_retry_backoff_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.ancestry_checker = ancestry_checker
         self._after_id: int | None = None
         self._poll_lock = asyncio.Lock()
 
@@ -274,11 +474,37 @@ class GitOpsSyncRuntime:
             await self._mark_failed(record, plan, recommendation_ids, merge_sha, now, "sync_timeout")
             return "timeout"
 
-        result = await observe_gitops_sync(plan.source, merge_sha, self.custom_objects_api)
+        ancestry = planned_changes = None
+        if self.ancestry_checker is not None:
+            ancestry = partial(self.ancestry_checker.is_ancestor, plan.source)
+            # A descendant revision only confirms sync while it still carries
+            # the planned edits; without the file plan that cannot be proven.
+            file_plan = getattr(plan, "file_plan", None)
+            if isinstance(file_plan, FilePlan):
+                planned_changes = partial(self.ancestry_checker.planned_changes_present, plan.source, file_plan)
+        result = await observe_gitops_sync(
+            plan.source,
+            merge_sha,
+            self.custom_objects_api,
+            ancestry=ancestry,
+            planned_changes=planned_changes,
+        )
         if result.status is GitOpsSyncStatus.SYNCED:
-            await self._mark_synced(record, plan, recommendation_ids, merge_sha, now)
+            await self._mark_synced(
+                record,
+                plan,
+                recommendation_ids,
+                result.observed_revision or merge_sha,
+                now,
+                reason=result.reason,
+            )
             return "synced"
         if retry_after_timeout:
+            if result.reason is GitOpsSyncReason.PLANNED_CHANGE_NOT_PRESENT:
+                # A later commit reverted or overwrote the plan: that is final,
+                # so stop re-observing the record like a plain ``sync_timeout``.
+                await self._mark_failed(record, plan, recommendation_ids, merge_sha, now, result.reason.value)
+                return "failed"
             await self._defer_timeout_retry(record, recommendation_ids, now)
             return "pending"
         if _sync_timeout_elapsed(record, now, self.sync_timeout_seconds):
@@ -309,8 +535,10 @@ class GitOpsSyncRuntime:
         record: PullRequestRecord,
         plan: Plan,
         recommendation_ids: list[int],
-        merge_sha: str,
+        synced_revision: str,
         observed_at: datetime,
+        *,
+        reason: GitOpsSyncReason = GitOpsSyncReason.SYNC_CONFIRMED,
     ) -> None:
         action_updates: list[int] = []
         recovering_timeout = plan.status is PlanStatus.SYNC_FAILED and record.sync_error_code == "sync_timeout"
@@ -331,6 +559,7 @@ class GitOpsSyncRuntime:
                 expected_statuses=(plan.status,),
                 expected_digest=plan.digest,
                 actor="gitops-sync-observer",
+                reason_code=reason.value,
             )
             if updated_plan is None or updated_plan.status is not PlanStatus.SYNCED:
                 raise RuntimeError("merged plan did not transition to synced")
@@ -352,7 +581,7 @@ class GitOpsSyncRuntime:
             linked_records,
             {
                 "sync_status": "synced",
-                "sync_revision": merge_sha,
+                "sync_revision": synced_revision,
                 "sync_observed_at": observed_at,
                 "sync_error_code": None,
             },
@@ -518,8 +747,20 @@ def create_gitops_sync_runtime(
     interval_seconds: int | float | None = None,
     sync_timeout_seconds: int | None = None,
     sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
+    ancestry_checker: GitAncestryChecker | None = None,
+    provider_resolver: PlanProviderResolver | None = None,
 ) -> GitOpsSyncRuntime:
-    """Compose periodic sync observation using a lazy, shared Kubernetes API client."""
+    """Compose periodic sync observation using a lazy, shared Kubernetes API client.
+
+    Ancestry checks use ``ancestry_checker``, else ``provider_resolver``, else
+    an authorized provider registry built from ``plan_repository`` when it
+    stores provider configurations (the production GitOps repository).
+    """
+    if ancestry_checker is None:
+        if provider_resolver is None:
+            provider_resolver = _default_provider_resolver(plan_repository)
+        if provider_resolver is not None:
+            ancestry_checker = ProviderAncestryChecker(provider_resolver)
     return GitOpsSyncRuntime(
         pull_request_repository,
         plan_repository,
@@ -530,7 +771,21 @@ def create_gitops_sync_runtime(
             parse_gitops_sync_timeout_seconds() if sync_timeout_seconds is None else sync_timeout_seconds
         ),
         sync_retry_backoff_seconds=sync_retry_backoff_seconds,
+        ancestry_checker=ancestry_checker,
     )
+
+
+def _default_provider_resolver(plan_repository: object) -> PlanProviderResolver | None:
+    """Mirror the plan runtime's authorized provider resolution (mounted Secret tokens)."""
+    from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
+    from greenkube.automation.git.registry import GitProviderRegistry
+    from greenkube.automation.plan_worker import RegistryPlanProviderResolver
+    from greenkube.storage.base_gitops_repository import GitOpsProviderRepository
+
+    if not isinstance(plan_repository, GitOpsProviderRepository):
+        return None
+    registry = GitProviderRegistry(plan_repository, MountedSecretFileResolver())
+    return RegistryPlanProviderResolver(plan_repository, registry)
 
 
 class _LazyCustomObjectsApi:

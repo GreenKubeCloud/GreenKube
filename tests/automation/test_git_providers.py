@@ -13,7 +13,9 @@ from greenkube.automation.git.base import (
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
+    GitFile,
     GitFileEdit,
+    GitProvider,
     GitProviderArchiveLimitError,
     GitProviderCapability,
     GitProviderCapabilityError,
@@ -22,6 +24,7 @@ from greenkube.automation.git.base import (
     GitRepository,
     PullRequestInfo,
     PullRequestOptions,
+    git_blob_id,
     parse_repo_url,
     validate_git_ref,
 )
@@ -974,6 +977,17 @@ def _commit_request(repo, files):
     )
 
 
+def _github_tree(tree_sha, blobs, *, modes=None):
+    modes = modes or {}
+    return {
+        "sha": tree_sha,
+        "truncated": False,
+        "tree": [
+            {"path": path, "mode": modes.get(path, "100644"), "type": "blob", "sha": sha} for path, sha in blobs.items()
+        ],
+    }
+
+
 def test_git_commit_contract_validates_file_actions_and_paths():
     with pytest.raises(GitProviderError):
         GitFileEdit(path="../secret.yaml", action="create", content="x")
@@ -996,20 +1010,16 @@ async def test_github_create_commit_uses_one_git_data_commit_for_file_edits():
     respx.get(f"{api}/git/ref/heads/feature/atomic").mock(
         return_value=Response(200, json={"object": {"sha": "base-sha"}})
     )
-    respx.get(f"{api}/git/commits/base-sha").mock(return_value=Response(200, json={"tree": {"sha": "base-tree"}}))
-    respx.get(f"{api}/contents/new.yaml").mock(return_value=Response(404, json={"message": "Not Found"}))
-    respx.get(f"{api}/contents/apps/update.yaml").mock(
+    base_tree_route = respx.get(f"{api}/git/trees/base-sha", params={"recursive": "1"}).mock(
         return_value=Response(
             200,
-            json={"content": base64.b64encode(b"old").decode(), "sha": "update-blob"},
+            json=_github_tree(
+                "base-tree",
+                {"apps/update.yaml": "update-blob", "apps/delete.yaml": "delete-blob", "README.md": "readme-blob"},
+            ),
         )
     )
-    respx.get(f"{api}/contents/apps/delete.yaml").mock(
-        return_value=Response(
-            200,
-            json={"content": base64.b64encode(b"old").decode(), "sha": "delete-blob"},
-        )
-    )
+    contents_route = respx.get(url__startswith=f"{api}/contents/").mock(return_value=Response(500))
 
     def create_tree(request):
         seen["tree"] = json.loads(request.content)
@@ -1047,6 +1057,8 @@ async def test_github_create_commit_uses_one_git_data_commit_for_file_edits():
     assert tree_route.call_count == 1
     assert commit_route.call_count == 1
     assert ref_route.call_count == 1
+    assert base_tree_route.call_count == 1
+    assert contents_route.call_count == 0
     assert seen["tree"]["base_tree"] == "base-tree"
     assert seen["tree"]["tree"] == [
         {"path": "new.yaml", "mode": "100644", "type": "blob", "content": "new"},
@@ -1090,9 +1102,8 @@ async def test_github_create_commit_maps_non_fast_forward_ref_update_to_conflict
     respx.get(f"{api}/git/ref/heads/feature/atomic").mock(
         return_value=Response(200, json={"object": {"sha": "base-sha"}})
     )
-    respx.get(f"{api}/git/commits/base-sha").mock(return_value=Response(200, json={"tree": {"sha": "base-tree"}}))
-    respx.get(f"{api}/contents/apps/api.yaml").mock(
-        return_value=Response(200, json={"content": base64.b64encode(b"old").decode(), "sha": "old-blob"})
+    respx.get(f"{api}/git/trees/base-sha").mock(
+        return_value=Response(200, json=_github_tree("base-tree", {"apps/api.yaml": "old-blob"}))
     )
     respx.post(f"{api}/git/trees").mock(return_value=Response(201, json={"sha": "new-tree"}))
     respx.post(f"{api}/git/commits").mock(return_value=Response(201, json={"sha": "new-commit"}))
@@ -1237,18 +1248,9 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
     api = "http://gitea.local/api/v1/repos/acme/manifests"
     seen = {}
     respx.get(f"{api}/branches/feature/atomic").mock(return_value=Response(200, json={"commit": {"id": "base-sha"}}))
-
-    def create_staging_branch(request):
-        seen["staging_create"] = json.loads(request.content)
-        seen["staging_branch"] = seen["staging_create"]["new_branch_name"]
-        return Response(201, json={"name": seen["staging_branch"]})
-
-    def get_staging_branch(request):
-        return Response(200, json={"commit": {"id": "base-sha"}})
-
-    staging_create_route = respx.post(f"{api}/branches").mock(side_effect=create_staging_branch)
+    staging_create_route = respx.post(f"{api}/branches").mock(return_value=Response(201, json={}))
     staging_get_route = respx.get(url__startswith=f"{api}/branches/greenkube-commit-").mock(
-        side_effect=get_staging_branch
+        return_value=Response(200, json={"commit": {"id": "base-sha"}})
     )
     respx.get(f"{api}/contents/new.yaml").mock(return_value=Response(404, json={"message": "Not Found"}))
     respx.get(f"{api}/contents/apps%2Fupdate.yaml").mock(
@@ -1266,6 +1268,7 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
 
     def create_commit(request):
         seen["commit"] = json.loads(request.content)
+        seen["staging_branch"] = seen["commit"]["new_branch"]
         return Response(
             201,
             json={"commit": {"sha": "new-commit", "parents": [{"sha": "base-sha"}]}},
@@ -1306,16 +1309,17 @@ async def test_gitea_create_commit_uses_one_native_atomic_multi_file_commit():
     assert result.commit_sha == "new-commit"
     assert result.branch == "feature/atomic"
     assert result.files_changed == ["new.yaml", "apps/update.yaml", "apps/delete.yaml"]
-    assert staging_create_route.call_count == 1
-    assert staging_get_route.call_count == 1
+    # The staging branch is cut from the plan branch by the commit call itself.
+    assert staging_create_route.call_count == 0
+    assert staging_get_route.call_count == 0
     assert commit_route.call_count == 1
     assert single_file_route.call_count == 0
     assert branch_update_route.call_count == 1
     assert staging_delete_route.call_count == 1
-    assert seen["staging_create"]["old_branch_name"] == "feature/atomic"
-    assert seen["staging_create"]["new_branch_name"].startswith("greenkube-commit-")
+    assert seen["staging_branch"].startswith("greenkube-commit-")
     assert seen["commit"] == {
-        "branch": seen["staging_branch"],
+        "branch": "feature/atomic",
+        "new_branch": seen["staging_branch"],
         "message": "apply plan",
         "author": {"name": "GreenKube Bot", "email": "bot@greenkube.cloud"},
         "committer": {"name": "GreenKube Bot", "email": "bot@greenkube.cloud"},
@@ -1366,15 +1370,6 @@ async def test_gitea_create_commit_rejects_a_stale_base_without_staging():
 async def test_gitea_create_commit_maps_compare_and_swap_failure_to_conflict():
     api = "http://gitea.local/api/v1/repos/acme/manifests"
     respx.get(f"{api}/branches/feature/atomic").mock(return_value=Response(200, json={"commit": {"id": "base-sha"}}))
-
-    def create_staging_branch(request):
-        body = json.loads(request.content)
-        return Response(201, json={"name": body["new_branch_name"]})
-
-    respx.post(f"{api}/branches").mock(side_effect=create_staging_branch)
-    respx.get(url__startswith=f"{api}/branches/greenkube-commit-").mock(
-        return_value=Response(200, json={"commit": {"id": "base-sha"}})
-    )
     respx.get(f"{api}/contents/apps%2Fapi.yaml").mock(
         return_value=Response(200, json={"content": base64.b64encode(b"old").decode(), "sha": "old-blob"})
     )
@@ -1565,4 +1560,343 @@ async def test_get_ref_revision_rejects_invalid_ref_before_request(provider_name
         await provider.get_ref_revision(repo, "../release-1")
 
     assert not respx.calls
+    await provider.close()
+
+
+ANCESTOR = "a" * 40
+DESCENDANT = "d" * 40
+
+
+def _ancestry_case(provider_name, outcome):
+    """Return (provider, repo, mocked route) answering ``outcome`` for ANCESTOR -> DESCENDANT."""
+    provider, repo, _ = _ref_revision_provider_case(provider_name)
+    if provider_name == "github":
+        url = f"https://api.github.com/repos/acme/manifests/compare/{ANCESTOR}...{DESCENDANT}"
+        payload = {True: {"status": "ahead", "behind_by": 0}, False: {"status": "diverged", "behind_by": 3}}
+    elif provider_name == "gitlab":
+        url = "https://gitlab.com/api/v4/projects/acme%2Fmanifests/repository/merge_base"
+        payload = {True: {"id": ANCESTOR}, False: {"id": "c" * 40}}
+    else:
+        url = f"http://gitea.local/api/v1/repos/acme/manifests/compare/{DESCENDANT}...{ANCESTOR}"
+        payload = {True: {"total_commits": 0, "commits": []}, False: {"total_commits": 2, "commits": []}}
+    response = Response(404, json={"message": "Not Found"}) if outcome is None else Response(200, json=payload[outcome])
+    return provider, repo, respx.get(url).mock(return_value=response)
+
+
+@pytest.mark.parametrize("provider_name", ["github", "gitlab", "gitea"])
+@pytest.mark.parametrize("outcome", [True, False, None])
+@pytest.mark.asyncio
+@respx.mock
+async def test_is_ancestor_uses_one_provider_comparison(provider_name, outcome):
+    provider, repo, route = _ancestry_case(provider_name, outcome)
+
+    assert provider.supports(GitProviderCapability.COMMIT_ANCESTRY)
+    assert await provider.is_ancestor(repo, ANCESTOR, DESCENDANT) is outcome
+    assert route.call_count == 1
+    if provider_name == "gitlab":
+        assert route.calls[0].request.url.params.get_list("refs[]") == [ANCESTOR, DESCENDANT]
+    await provider.close()
+
+
+@pytest.mark.parametrize("provider_name", ["github", "gitlab", "gitea"])
+@pytest.mark.asyncio
+@respx.mock
+async def test_is_ancestor_short_circuits_identical_commits_and_rejects_refs(provider_name):
+    provider, repo, _ = _ref_revision_provider_case(provider_name)
+
+    assert await provider.is_ancestor(repo, ANCESTOR, ANCESTOR.upper()) is True
+    with pytest.raises(GitProviderError):
+        await provider.is_ancestor(repo, "main", DESCENDANT)
+    assert not respx.calls
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_tree_reads_are_cached_per_immutable_commit_and_fail_closed_when_truncated():
+    api = "https://api.github.com/repos/acme/manifests"
+    tree_route = respx.get(f"{api}/git/trees/{ANCESTOR}").mock(
+        return_value=Response(
+            200,
+            json=_github_tree(
+                "root", {"apps/a.yaml": "blob-a", "apps/b.yaml": "blob-b"}, modes={"apps/b.yaml": "100755"}
+            ),
+        )
+    )
+    truncated_route = respx.get(f"{api}/git/trees/main").mock(
+        return_value=Response(200, json={**_github_tree("root", {}), "truncated": True})
+    )
+    provider = GitHubProvider("token")
+    repo = GitRepository(provider="github", owner="acme", name="manifests")
+
+    assert await provider.get_blob_ids(repo, ANCESTOR, ["apps/a.yaml", "missing.yaml"]) == {
+        "apps/a.yaml": "blob-a",
+        "missing.yaml": None,
+    }
+    comparison = await provider.compare_trees(repo, ANCESTOR, ANCESTOR)
+    assert comparison.changes == ()
+    assert tree_route.call_count == 1
+    with pytest.raises(GitProviderError, match="truncated"):
+        await provider.get_tree(repo, "main")
+    assert truncated_route.call_count == 1
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_compare_trees_reports_changed_blobs_and_modes_only():
+    api = "https://api.github.com/repos/acme/manifests"
+    respx.get(f"{api}/git/trees/{ANCESTOR}").mock(
+        return_value=Response(
+            200, json=_github_tree("base", {"keep.yaml": "k", "edit.yaml": "e1", "drop.yaml": "d", "mode.sh": "m"})
+        )
+    )
+    respx.get(f"{api}/git/trees/greenkube/plan/branch").mock(
+        return_value=Response(
+            200,
+            json=_github_tree(
+                "head",
+                {"keep.yaml": "k", "edit.yaml": "e2", "new.yaml": "n", "mode.sh": "m"},
+                modes={"mode.sh": "100755"},
+            ),
+        )
+    )
+    provider = GitHubProvider("token")
+    repo = GitRepository(provider="github", owner="acme", name="manifests")
+
+    comparison = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+
+    assert [(change.path, change.status, change.blob_sha) for change in comparison.changes] == [
+        ("drop.yaml", "deleted", None),
+        ("edit.yaml", "modified", "e2"),
+        ("mode.sh", "modified", "m"),
+        ("new.yaml", "added", "n"),
+    ]
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gitlab_compare_trees_maps_direct_diffs_and_falls_back_on_timeouts():
+    api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests/repository"
+    compare_route = respx.get(f"{api}/compare").mock(
+        side_effect=[
+            Response(
+                200,
+                json={
+                    "commit": {"id": DESCENDANT},
+                    "compare_timeout": False,
+                    "diffs": [
+                        {"old_path": "a.yaml", "new_path": "a.yaml", "new_file": False, "deleted_file": False},
+                        {"old_path": "b.yaml", "new_path": "b.yaml", "new_file": True, "deleted_file": False},
+                        {"old_path": "c.yaml", "new_path": "c.yaml", "new_file": False, "deleted_file": True},
+                        {"old_path": "old.yaml", "new_path": "moved.yaml", "renamed_file": True},
+                    ],
+                },
+            ),
+            Response(200, json={"commit": None, "compare_timeout": True, "diffs": []}),
+        ]
+    )
+    tree_route = respx.get(f"{api}/tree").mock(
+        side_effect=[
+            Response(200, json=[{"path": "a.yaml", "id": "blob-a", "type": "blob", "mode": "100644"}]),
+            Response(200, json=[{"path": "a.yaml", "id": "blob-b", "type": "blob", "mode": "100644"}]),
+        ]
+    )
+    provider = GitLabProvider("token")
+    repo = GitRepository(provider="gitlab", owner="acme", name="manifests")
+
+    comparison = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+    fallback = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+
+    assert comparison.head_revision == DESCENDANT
+    assert [(change.path, change.status, change.blob_sha) for change in comparison.changes] == [
+        ("a.yaml", "modified", None),
+        ("b.yaml", "added", None),
+        ("c.yaml", "deleted", None),
+        ("moved.yaml", "added", None),
+        ("old.yaml", "deleted", None),
+    ]
+    assert compare_route.calls[0].request.url.params["straight"] == "true"
+    assert [(change.path, change.status, change.blob_sha) for change in fallback.changes] == [
+        ("a.yaml", "modified", "blob-b")
+    ]
+    assert tree_route.call_count == 2
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gitea_compare_trees_reads_one_commit_and_falls_back_for_other_shapes():
+    api = "http://gitea.local/api/v1/repos/acme/manifests"
+    single = {
+        "sha": DESCENDANT,
+        "parents": [{"sha": ANCESTOR}],
+        "files": [{"filename": "a.yaml", "status": "modified"}, {"filename": "b.yaml", "status": "removed"}],
+    }
+    merge = {"sha": DESCENDANT, "parents": [{"sha": ANCESTOR}, {"sha": "c" * 40}], "files": []}
+    commits_route = respx.get(f"{api}/commits").mock(
+        side_effect=[
+            Response(200, json=[{"sha": ANCESTOR, "parents": [], "files": []}]),
+            Response(200, json=[single]),
+            Response(200, json=[merge]),
+        ]
+    )
+    trees = {
+        ANCESTOR: [{"path": "a.yaml", "sha": "blob-a", "type": "blob", "mode": "100644"}],
+        DESCENDANT: [{"path": "a.yaml", "sha": "blob-a2", "type": "blob", "mode": "100644"}],
+    }
+    respx.get(url__startswith=f"{api}/git/trees/").mock(
+        side_effect=lambda request: Response(
+            200, json={"sha": "tree", "truncated": False, "tree": trees[request.url.path.rsplit("/", 1)[-1]]}
+        )
+    )
+    provider = GiteaProvider("token", api_base_url="http://gitea.local")
+    repo = GitRepository(provider="gitea", owner="acme", name="manifests")
+
+    unchanged = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+    one_commit = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+    merged = await provider.compare_trees(repo, ANCESTOR, "greenkube/plan/branch")
+
+    assert unchanged.changes == () and unchanged.head_revision == ANCESTOR
+    assert [(change.path, change.status) for change in one_commit.changes] == [
+        ("a.yaml", "modified"),
+        ("b.yaml", "deleted"),
+    ]
+    assert one_commit.head_revision == DESCENDANT
+    assert [(change.path, change.status, change.blob_sha) for change in merged.changes] == [
+        ("a.yaml", "modified", "blob-a2")
+    ]
+    assert commits_route.calls[0].request.url.params["sha"] == "greenkube/plan/branch"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_provider_call_budget_refuses_requests_once_exhausted():
+    from greenkube.automation.git.base import ProviderCallBudgetExceededError
+    from greenkube.automation.git.budget import provider_call_budget
+
+    route = respx.get("https://api.github.com/repos/acme/manifests").mock(
+        return_value=Response(200, json={"default_branch": "main"})
+    )
+    provider = GitHubProvider("token")
+    repo = GitRepository(provider="github", owner="acme", name="manifests")
+
+    with provider_call_budget("plan_apply", limit=2) as budget:
+        assert await provider.get_default_branch(repo) == "main"
+        assert await provider.get_default_branch(repo) == "main"
+        with pytest.raises(ProviderCallBudgetExceededError, match="budget of 2 calls"):
+            await provider.get_default_branch(repo)
+
+    assert budget.calls == 2 and budget.exhausted
+    assert route.call_count == 2
+    assert await provider.get_default_branch(repo) == "main"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_portable_tree_fallback_compares_listed_files_by_blob_identity():
+    class ListingProvider(GitProvider):
+        name = "github"
+
+        def __init__(self) -> None:
+            super().__init__("token")
+            self.trees = {ANCESTOR: {"a.yaml": "one"}, "branch": {"a.yaml": "two", "b.yaml": "new"}}
+            self.reads = 0
+
+        async def get_default_branch(self, repo):
+            return "main"
+
+        async def get_file(self, repo, path, ref):
+            self.reads += 1
+            content = self.trees[ref].get(path)
+            return None if content is None else GitFile(path, content)
+
+        async def list_files(self, repo, ref):
+            return sorted(self.trees[ref])
+
+        async def create_branch(self, repo, branch, from_ref):
+            return None
+
+        async def update_file(self, repo, path, content, message, branch, sha=None):
+            return None
+
+        async def create_pull_request(self, repo, *, head, base, title, body, options=None):
+            raise AssertionError
+
+        async def get_pull_request(self, repo, number):
+            raise AssertionError
+
+    provider = ListingProvider()
+    repo = GitRepository(provider="github", owner="acme", name="manifests")
+
+    comparison = await provider.compare_trees(repo, ANCESTOR, "branch")
+    assert await provider.get_blob_ids(repo, ANCESTOR, ["a.yaml"]) == {"a.yaml": git_blob_id("one")}
+
+    assert [(change.path, change.status, change.blob_sha) for change in comparison.changes] == [
+        ("a.yaml", "modified", git_blob_id("two")),
+        ("b.yaml", "added", git_blob_id("new")),
+    ]
+    assert provider.reads == 3
+    with pytest.raises(GitProviderCapabilityError):
+        await provider.is_ancestor(repo, ANCESTOR, DESCENDANT)
+
+
+HEAD_SHA = "e" * 40
+SQUASH_SHA = "5" * 40
+MERGE_COMMIT_SHA = "f" * 40
+
+
+def _gitlab_merged_request(**overrides):
+    payload = {
+        "iid": 7,
+        "web_url": "https://gitlab.com/acme/manifests/-/merge_requests/7",
+        "state": "merged",
+        "merged_at": "2026-10-21T12:30:00Z",
+        "source_branch": "greenkube/plan/branch",
+        "target_branch": "main",
+        "sha": HEAD_SHA,
+        "merge_commit_sha": None,
+        "squash_commit_sha": None,
+        "squash": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("overrides", "merge_method", "expected_sha", "expected_source", "project_reads"),
+    [
+        (
+            {"merge_commit_sha": MERGE_COMMIT_SHA, "squash_commit_sha": SQUASH_SHA},
+            None,
+            MERGE_COMMIT_SHA,
+            "merge_commit",
+            0,
+        ),
+        ({"squash_commit_sha": SQUASH_SHA, "squash": True}, None, SQUASH_SHA, "squash_commit", 0),
+        ({}, "ff", HEAD_SHA, "fast_forward_head", 1),
+        ({}, "merge", None, None, 1),
+        ({"squash": True}, "ff", None, None, 0),
+        ({"state": "closed", "merged_at": None, "merge_commit_sha": MERGE_COMMIT_SHA}, None, None, None, 0),
+    ],
+    ids=["merge-commit", "squash", "fast-forward", "missing-merge-commit", "squash-without-sha", "closed"],
+)
+@pytest.mark.asyncio
+@respx.mock
+async def test_bug_46_gitlab_resolves_the_landed_commit_of_squash_and_fast_forward_merges(
+    overrides, merge_method, expected_sha, expected_source, project_reads
+):
+    api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests"
+    respx.get(f"{api}/merge_requests/7").mock(return_value=Response(200, json=_gitlab_merged_request(**overrides)))
+    project_route = respx.get(api).mock(return_value=Response(200, json={"merge_method": merge_method}))
+    provider = GitLabProvider("token")
+    repo = GitRepository(provider="gitlab", owner="acme", name="manifests")
+
+    pull_request = await provider.get_pull_request(repo, 7)
+
+    assert pull_request.merge_commit_sha == expected_sha
+    assert pull_request.merge_commit_source == expected_source
+    assert project_route.call_count == project_reads
     await provider.close()

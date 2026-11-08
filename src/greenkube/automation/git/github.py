@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Sequence
 from typing import List, Optional
 from urllib.parse import quote, urlsplit
 
@@ -17,10 +18,13 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderError,
     GitRepository,
+    GitTree,
+    GitTreeEntry,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_object,
     _validate_full_commit_sha,
+    _validate_git_path,
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
@@ -29,6 +33,8 @@ from greenkube.automation.git.base import (
     quote_git_path,
     validate_git_ref,
 )
+
+_TREE_ENTRY_TYPES = frozenset({"blob", "commit"})
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,7 @@ class GitHubProvider(GitProvider):
             GitProviderCapability.TEAM_REVIEWERS,
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
+            GitProviderCapability.COMMIT_ANCESTRY,
         }
     )
 
@@ -99,6 +106,76 @@ class GitHubProvider(GitProvider):
             raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")
         return [item["path"] for item in tree if item.get("type") == "blob"]
 
+    async def get_tree(self, repo: GitRepository, ref: str) -> GitTree:
+        """Read the whole recursive tree in one call, independent of repository size."""
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/git/trees/{quote(ref, safe='/')}",
+            params={"recursive": "1"},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was not found.", status_code=404)
+        data = _git_response_object(response, provider=self.name, ref=ref)
+        if data.get("truncated"):
+            raise GitProviderError(f"GitHub tree for {repo.full_name}@{ref} was truncated; refusing partial results.")
+        items = data.get("tree")
+        tree_sha = data.get("sha")
+        if not isinstance(items, list) or not isinstance(tree_sha, str) or not tree_sha:
+            raise GitProviderError(f"GitHub returned an invalid tree for {repo.full_name}@{ref}.")
+        entries: dict[str, GitTreeEntry] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise GitProviderError(f"GitHub returned an invalid tree entry for {repo.full_name}@{ref}.")
+            item_type = item.get("type")
+            if item_type == "tree":
+                continue
+            path, sha, mode = item.get("path"), item.get("sha"), item.get("mode")
+            if (
+                not isinstance(item_type, str)
+                or item_type not in _TREE_ENTRY_TYPES
+                or not isinstance(path, str)
+                or not isinstance(sha, str)
+                or not sha
+                or not isinstance(mode, str)
+                or path in entries
+            ):
+                raise GitProviderError(f"GitHub returned an invalid tree entry for {repo.full_name}@{ref}.")
+            entries[path] = GitTreeEntry(path=path, sha=sha, mode=mode, type=item_type)
+        return GitTree(entries=entries, sha=tree_sha)
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, Optional[str]]:
+        """Resolve blob IDs from one (cached) recursive tree instead of per-file reads."""
+        for path in paths:
+            _validate_git_path(path)
+        if not paths:
+            return {}
+        tree = await self._get_tree_cached(repo, ref)
+        blob_ids: dict[str, Optional[str]] = {}
+        for path in paths:
+            entry = tree.entries.get(path)
+            blob_ids[path] = entry.sha if entry is not None and entry.type == "blob" else None
+        return blob_ids
+
+    async def is_ancestor(self, repo: GitRepository, ancestor_sha: str, descendant_sha: str) -> Optional[bool]:
+        ancestor, descendant = self._validate_ancestry_request(repo, ancestor_sha, descendant_sha)
+        if ancestor == descendant:
+            return True
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/compare/{ancestor}...{descendant}",
+            params={"per_page": "1"},
+        )
+        if response.status_code == 404:
+            return None
+        data = _git_response_object(response, provider=self.name, ref=f"{ancestor}...{descendant}")
+        status = data.get("status")
+        behind_by = data.get("behind_by")
+        if status in ("identical", "ahead"):
+            return behind_by in (None, 0)
+        if status in ("behind", "diverged"):
+            return False
+        return None
+
     async def get_archive(self, repo: GitRepository, revision: str, *, max_bytes: int) -> bytes:
         revision = self._validate_archive_request(repo, revision, max_bytes)
         parsed_base = urlsplit(self.api_base_url)
@@ -127,16 +204,20 @@ class GitHubProvider(GitProvider):
             raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.")
         sha = ref_response.json()["object"]["sha"]
 
+        # Create first: an existing ref answers 422, so the common case costs one write.
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/git/refs",
+            json_body={"ref": f"refs/heads/{branch}", "sha": sha},
+            ok_statuses=(200, 201, 422),
+        )
+        if response.status_code != 422:
+            return
         exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(branch, safe='/')}")
         if exists.status_code == 200:
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
             return
-
-        await self._request(
-            "POST",
-            f"/repos/{repo.owner}/{repo.name}/git/refs",
-            json_body={"ref": f"refs/heads/{branch}", "sha": sha},
-        )
+        raise GitProviderError(f"GitHub could not create branch '{branch}' in {repo.full_name}.", status_code=422)
 
     async def update_file(
         self,
@@ -228,20 +309,25 @@ class GitHubProvider(GitProvider):
         if current_head != base_revision:
             raise GitConflictError(f"Branch '{branch}' moved from base revision {base_revision} to {current_head}.")
 
-        base_commit = await self._request(
-            "GET",
-            f"/repos/{repo.owner}/{repo.name}/git/commits/{quote(base_revision, safe='')}",
-            conflict_statuses=(404,),
-        )
-        commit_data = base_commit.json()
-        base_tree_sha = commit_data.get("tree", {}).get("sha") if isinstance(commit_data, dict) else None
+        # One recursive tree read (shared with branch-state checks through the
+        # immutable cache) yields the base tree SHA and every precondition, so
+        # the commit costs O(1) reads instead of one Contents call per file.
+        base_tree = await self._get_tree_cached(repo, base_revision)
+        base_tree_sha = base_tree.sha
         if not isinstance(base_tree_sha, str) or not base_tree_sha:
             raise GitProviderError(f"GitHub returned an invalid base tree for {repo.full_name}@{base_revision}.")
-
-        await self._validate_commit_edits(request)
+        for edit in request.files:
+            existing = base_tree.entries.get(edit.path)
+            exists = existing is not None and existing.type == "blob"
+            if edit.action == "create" and existing is not None:
+                raise GitConflictError(f"Cannot create '{edit.path}': the file already exists at the base revision.")
+            if edit.action != "create" and not exists:
+                raise GitConflictError(f"Cannot {edit.action} '{edit.path}': the file is missing at the base revision.")
         tree_entries = []
         for edit in request.files:
-            entry: dict[str, str | None] = {"path": edit.path, "mode": "100644", "type": "blob"}
+            base_entry = base_tree.entries.get(edit.path)
+            mode = base_entry.mode if base_entry is not None and base_entry.mode in ("100644", "100755") else "100644"
+            entry: dict[str, str | None] = {"path": edit.path, "mode": mode, "type": "blob"}
             if edit.action == "delete":
                 entry["sha"] = None
             else:

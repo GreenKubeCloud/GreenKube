@@ -20,10 +20,14 @@ from greenkube.automation.git.base import (
     GitProviderError,
     GitProviderTransientError,
     GitRepository,
+    GitTreeChange,
+    GitTreeComparison,
     PullRequestInfo,
     PullRequestOptions,
+    git_blob_id,
     parse_repo_url,
 )
+from greenkube.automation.git.budget import DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET, provider_call_budget
 from greenkube.automation.plans import PlanRevisionResolver
 from greenkube.automation.rollback import (
     inverse_plan_id,
@@ -105,6 +109,10 @@ class PlanGitProvider(Protocol):
     async def list_files(self, repo: GitRepository, ref: str) -> list[str]: ...
 
     async def get_file(self, repo: GitRepository, path: str, ref: str) -> GitFile | None: ...
+
+    async def compare_trees(self, repo: GitRepository, base_revision: str, head_ref: str) -> GitTreeComparison: ...
+
+    async def get_blob_ids(self, repo: GitRepository, ref: str, paths: Sequence[str]) -> dict[str, str | None]: ...
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None: ...
 
@@ -280,12 +288,6 @@ class RegistryPlanProviderResolver:
         return GitProviderTarget(provider=provider, repository=repository)
 
 
-@dataclass(frozen=True, slots=True)
-class _TreeFile:
-    content: str
-    blob_sha: str | None
-
-
 @dataclass(slots=True)
 class _Execution:
     lease: PlanOperationLease
@@ -301,6 +303,9 @@ class _PlanResult:
 
 class PlanWorker:
     """Claim and execute one plan operation with fenced queue mutations."""
+
+    #: Upper bound on Git provider HTTP calls for one plan operation (D5).
+    provider_call_budget_limit: int = DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET
 
     def __init__(
         self,
@@ -352,7 +357,8 @@ class PlanWorker:
                     raise PlanWorkerError(f"Plan {lease.operation.plan_id!r} was not found.")
                 operation_type = _plan_operation_type(plan)
 
-                result = await self._execute(execution, plan)
+                with provider_call_budget(f"plan_{operation_type}", limit=self.provider_call_budget_limit):
+                    result = await self._execute(execution, plan)
             except PlanOperationLeaseError:
                 raise
             except Exception as exc:
@@ -894,30 +900,9 @@ class PlanWorker:
         elif branch_state != "applied":
             raise _replan_error("Deterministic plan branch contains unverified changes; re-plan before applying.")
 
-        existing_pr = await self._git_call(
-            execution,
-            provider.find_pull_request,
-            target.repository,
-            branch,
-            plan.source.ref,
-        )
-        if existing_pr is not None:
-            self._validate_pull_request(existing_pr, branch, plan.source.ref)
-            branch_state = await self._branch_state(execution, target, branch, plan)
-            if branch_state != "applied":
-                raise _replan_error("Existing pull request branch does not match the approved file plan.")
-            commit_sha = _pull_request_head_sha(existing_pr) or commit_sha
-            await self._git_call(
-                execution,
-                provider.ensure_pull_request_options,
-                target.repository,
-                existing_pr,
-                self.pull_request_options,
-            )
-            await self._validate_rollback_review(plan)
-            await self._record_open_pull_request(plan, target, branch, existing_pr, commit_sha=commit_sha)
-            return _PlanResult(target, branch, commit_sha, existing_pr)
-
+        # No second pull-request lookup here: the lookup above ran under this
+        # lease, and a request opened meanwhile makes creation fail, which falls
+        # back to adopting the matching open request below (D5).
         await self._heartbeat(execution, force=True)
         await self._validate_rollback_review(plan)
         recommendations, missing_recommendation_ids = await self._recommendation_records_for_pr(plan)
@@ -960,10 +945,14 @@ class PlanWorker:
                 self.pull_request_options,
             )
         self._validate_pull_request(pull_request, branch, plan.source.ref)
-        branch_state = await self._branch_state(execution, target, branch, plan)
-        if branch_state != "applied":
-            raise _replan_error("Pull-request branch changed while it was being opened; re-plan before applying.")
-        commit_sha = _pull_request_head_sha(pull_request) or commit_sha
+        pull_request_head = _pull_request_head_sha(pull_request)
+        if commit_sha is None or pull_request_head is None or pull_request_head.lower() != commit_sha.lower():
+            # Only re-read the branch when the request head is not the commit
+            # this operation created and already verified.
+            branch_state = await self._branch_state(execution, target, branch, plan)
+            if branch_state != "applied":
+                raise _replan_error("Pull-request branch changed while it was being opened; re-plan before applying.")
+        commit_sha = pull_request_head or commit_sha
         await self._record_open_pull_request(plan, target, branch, pull_request, commit_sha=commit_sha)
         return _PlanResult(target, branch, commit_sha, pull_request)
 
@@ -1060,7 +1049,15 @@ class PlanWorker:
                 action_status=ActionStatus.FAILED,
             )
 
-    def _commit_request(self, plan: Plan, target: GitProviderTarget, branch: str) -> GitCommitRequest:
+    def _commit_request(
+        self,
+        plan: Plan,
+        target: GitProviderTarget,
+        branch: str,
+        *,
+        start_revision: str | None = None,
+    ) -> GitCommitRequest:
+        """Build the atomic commit; ``start_revision`` defaults to the plan's base revision."""
         file_plan = plan.file_plan
         assert file_plan is not None
         if plan.digest is None:
@@ -1074,51 +1071,85 @@ class PlanWorker:
         return GitCommitRequest(
             repo=target.repository,
             branch=branch,
-            base_revision=file_plan.base_revision,
+            base_revision=start_revision or file_plan.base_revision,
             message=message,
             files=files,
             author_name=target.provider.author_name,
             author_email=target.provider.author_email,
         )
 
-    async def _branch_state(self, execution: _Execution, target: GitProviderTarget, branch: str, plan: Plan) -> str:
-        file_plan = plan.file_plan
-        assert file_plan is not None
-        base_tree = await self._tree_snapshot(execution, target, file_plan.base_revision)
-        branch_tree = await self._tree_snapshot(execution, target, branch)
-        expected_tree = _expected_tree(base_tree, file_plan.files)
-        if _trees_match(base_tree, branch_tree):
-            return "base"
-        if _trees_match(expected_tree, branch_tree, changed_paths={edit.path for edit in file_plan.files}):
-            return "applied"
-        return "mismatch"
-
-    async def _tree_snapshot(
+    async def _branch_state(
         self,
         execution: _Execution,
         target: GitProviderTarget,
-        ref: str,
-    ) -> dict[str, _TreeFile]:
-        paths = await self._git_call(execution, target.provider.list_files, target.repository, ref)
-        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
-            raise _replan_error(f"Provider returned an incomplete file listing for ref {ref!r}.")
-        if len(paths) != len(set(paths)):
-            raise _replan_error(f"Provider returned duplicate paths for ref {ref!r}.")
+        branch: str,
+        plan: Plan,
+        *,
+        start_revision: str | None = None,
+    ) -> str:
+        """Classify the plan branch as ``base``, ``applied`` or ``mismatch``.
 
-        snapshot: dict[str, _TreeFile] = {}
-        for path in sorted(paths):
-            try:
-                GitFileEdit(path=path, action="delete")
-            except GitProviderError as exc:
-                raise _replan_error(f"Provider returned an unsafe repository path: {path!r}.") from exc
-            git_file = await self._git_call(execution, target.provider.get_file, target.repository, path, ref)
-            if git_file is None or git_file.path != path:
-                raise _replan_error(f"Provider could not prove file state for {path!r} at ref {ref!r}.")
-            if not isinstance(git_file.content, str):
-                raise _replan_error(f"Provider returned invalid content for {path!r} at ref {ref!r}.")
-            blob_sha = git_file.blob_sha or git_file.sha
-            snapshot[path] = _TreeFile(content=git_file.content, blob_sha=blob_sha)
-        return snapshot
+        The branch is compared with the immutable start revision (the plan's
+        base revision unless a caller commits on a newer one) through one tree
+        comparison plus reads of the planned paths only, so the cost does not
+        grow with repository size (D5, BUG-47).
+        """
+        file_plan = plan.file_plan
+        assert file_plan is not None
+        start = start_revision or file_plan.base_revision
+        provider = target.provider
+        repository = target.repository
+        planned_paths = [edit.path for edit in file_plan.files]
+
+        start_blobs = await self._git_call(execution, provider.get_blob_ids, repository, start, planned_paths)
+        if not isinstance(start_blobs, Mapping) or not set(start_blobs) <= set(planned_paths):
+            raise _replan_error(f"Provider returned invalid blob IDs for revision {start!r}.")
+        expected = _expected_changes(start_blobs, file_plan.files, start)
+
+        try:
+            comparison = await self._git_call(execution, provider.compare_trees, repository, start, branch)
+        except GitProviderError as exc:
+            if isinstance(exc, GitProviderTransientError) or exc.status_code != 404:
+                raise
+            # The start revision was just read, so the plan branch is missing
+            # (deleted, or never created): it does not hold the planned state.
+            return "mismatch"
+        changes = _validated_tree_changes(comparison, start, branch)
+        if not changes:
+            return "base"
+        if changes.keys() != expected.keys():
+            return "mismatch"
+
+        unresolved: list[str] = []
+        for path, expected_blob in expected.items():
+            change = changes[path]
+            if expected_blob is None:
+                if change.status != "deleted":
+                    return "mismatch"
+            elif change.status == "deleted":
+                return "mismatch"
+            elif change.blob_sha is None or change.blob_sha.lower() != expected_blob:
+                unresolved.append(path)
+        if not unresolved:
+            return "applied"
+
+        # The comparison listed paths without (matching) blob IDs: read only
+        # the planned paths at the compared head, then fall back to content.
+        head = comparison.head_revision or branch
+        head_blobs = await self._git_call(execution, provider.get_blob_ids, repository, head, unresolved)
+        if not isinstance(head_blobs, Mapping):
+            raise _replan_error(f"Provider returned invalid blob IDs for ref {head!r}.")
+        planned_content = {edit.path: edit.content for edit in file_plan.files}
+        for path in unresolved:
+            blob = head_blobs.get(path)
+            if blob is None:
+                return "mismatch"
+            if isinstance(blob, str) and blob.lower() == expected[path]:
+                continue
+            git_file = await self._git_call(execution, provider.get_file, repository, path, head)
+            if git_file is None or git_file.path != path or git_file.content != planned_content[path]:
+                return "mismatch"
+        return "applied"
 
     async def _ensure_pending_pull_request_records(
         self,
@@ -1442,47 +1473,59 @@ def _same_plan_content(left: Plan, right: Plan) -> bool:
     )
 
 
-def _expected_tree(base: dict[str, _TreeFile], edits: Sequence[FileEdit]) -> dict[str, _TreeFile]:
-    expected = dict(base)
+def _expected_changes(
+    start_blobs: Mapping[str, str | None],
+    edits: Sequence[FileEdit],
+    start_revision: str,
+) -> dict[str, str | None]:
+    """Validate the start revision against the plan and return the expected tree delta.
+
+    Maps every path the plan really changes to its expected blob ID (``None``
+    for deletions). Updates that rewrite identical bytes change nothing.
+    """
+    object_format = "sha256" if len(start_revision) == 64 else "sha1"
+    expected: dict[str, str | None] = {}
     for edit in edits:
-        original = base.get(edit.path)
+        original = start_blobs.get(edit.path)
+        if original is not None and not isinstance(original, str):
+            raise _replan_error(f"Provider returned an invalid blob ID for {edit.path!r}.")
         if edit.operation == "create":
             if original is not None:
                 raise _replan_error(f"Plan expected to create existing file {edit.path!r}; re-plan.")
         elif original is None:
             raise _replan_error(f"Plan expected existing file {edit.path!r}; re-plan.")
-        elif (
-            original.blob_sha is None
-            or edit.original_sha is None
-            or original.blob_sha.lower() != edit.original_sha.lower()
-        ):
+        elif edit.original_sha is None or original.lower() != edit.original_sha.lower():
             raise _replan_error(f"Base blob for {edit.path!r} no longer matches the approved plan.")
 
         if edit.operation == "delete":
-            expected.pop(edit.path, None)
-        else:
-            assert edit.content is not None
-            expected[edit.path] = _TreeFile(content=edit.content, blob_sha=None)
+            expected[edit.path] = None
+            continue
+        assert edit.content is not None
+        blob = git_blob_id(edit.content, object_format=object_format)
+        if original is None or original.lower() != blob:
+            expected[edit.path] = blob
     return expected
 
 
-def _trees_match(
-    expected: dict[str, _TreeFile],
-    actual: dict[str, _TreeFile],
-    *,
-    changed_paths: set[str] | None = None,
-) -> bool:
-    if expected.keys() != actual.keys():
-        return False
-    changed_paths = changed_paths or set()
-    for path, expected_file in expected.items():
-        actual_file = actual[path]
-        if expected_file.content != actual_file.content:
-            return False
-        if path not in changed_paths and expected_file.blob_sha and actual_file.blob_sha:
-            if expected_file.blob_sha.lower() != actual_file.blob_sha.lower():
-                return False
-    return True
+def _validated_tree_changes(comparison: object, start_revision: str, head_ref: str) -> dict[str, GitTreeChange]:
+    if (
+        not isinstance(comparison, GitTreeComparison)
+        or comparison.base_revision.lower() != start_revision.lower()
+        or not isinstance(comparison.changes, tuple)
+    ):
+        raise _replan_error(f"Provider returned an invalid tree comparison for ref {head_ref!r}.")
+    changes: dict[str, GitTreeChange] = {}
+    for change in comparison.changes:
+        if not isinstance(change, GitTreeChange) or change.status not in ("added", "modified", "deleted"):
+            raise _replan_error(f"Provider returned an invalid tree comparison for ref {head_ref!r}.")
+        try:
+            GitFileEdit(path=change.path, action="delete")
+        except GitProviderError as exc:
+            raise _replan_error(f"Provider returned an unsafe repository path: {change.path!r}.") from exc
+        if change.path in changes:
+            raise _replan_error(f"Provider returned duplicate paths for ref {head_ref!r}.")
+        changes[change.path] = change
+    return changes
 
 
 def _pull_request_title(plan: Plan) -> str:
@@ -1686,7 +1729,8 @@ def _pr_truncate(value: str, *, max_chars: int = 12_000) -> str:
 def _pull_request_head_sha(pull_request: PullRequestInfo) -> str | None:
     raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
     head = raw.get("head")
-    sha = head.get("sha") if isinstance(head, dict) else None
+    # GitHub and Gitea nest the head commit; GitLab merge requests expose ``sha``.
+    sha = head.get("sha") if isinstance(head, dict) else raw.get("sha")
     return sha if isinstance(sha, str) and _COMMIT_SHA_PATTERN.fullmatch(sha) else None
 
 
