@@ -1998,7 +1998,7 @@ def _managed_postrenderer_patches(
             patch_target = _patch_target(patch, error_type)
             expected_selector = _target_selector(patch_target)
             selector_values = dict(selector)
-            if selector_values != expected_selector and selector_values != _legacy_target_selector(patch_target):
+            if selector_values != expected_selector:
                 raise error_type("managed post-renderer target selector does not match its patch identity")
             identity = _target_identity(patch_target)
             if identity in seen:
@@ -2105,19 +2105,6 @@ def _target_selector(target: ResourceTarget) -> dict[str, str]:
         "kind": re.escape(target.kind),
         "name": re.escape(target.name),
         "namespace": re.escape(target.namespace),
-    }
-
-
-def _legacy_target_selector(target: ResourceTarget) -> dict[str, str]:
-    group, separator, version = target.api_version.partition("/")
-    if not separator:
-        group, version = "", group
-    return {
-        "group": group,
-        "version": version,
-        "kind": target.kind,
-        "name": target.name,
-        "namespace": target.namespace,
     }
 
 

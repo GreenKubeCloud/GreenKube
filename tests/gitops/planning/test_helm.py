@@ -35,7 +35,6 @@ from greenkube.gitops.planning.helm import (
     HelmValuesPlanner,
     HelmValuesUnsupportedError,
     _dump_patch,
-    _legacy_target_selector,
     _managed_postrenderer_patches,
     _new_managed_patch,
     _target_selector,
@@ -1463,11 +1462,10 @@ def test_flux_helmrelease_planner_updates_its_managed_patch_without_duplicates()
     try:
         first = planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
         assert first.files[0].content is not None
-        legacy_release = first.files[0].content.replace(r"payments\-api", "payments-api")
         second_snapshot = _snapshot(
             {
                 **_CHART,
-                "clusters/prod/helmrelease.yaml": legacy_release,
+                "clusters/prod/helmrelease.yaml": first.files[0].content,
             }
         )
         try:
@@ -1506,7 +1504,7 @@ def test_flux_helmrelease_planner_updates_its_managed_patch_without_duplicates()
         snapshot.close()
 
 
-def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy_selectors():
+def test_flux_postrenderer_selectors_escape_regex_metacharacters():
     target = ResourceTarget(
         api_version="apps/v1",
         kind="Deployment",
@@ -1522,7 +1520,7 @@ def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy
                 "kustomize": {
                     "patches": [
                         {
-                            "target": _legacy_target_selector(target),
+                            "target": _target_selector(target),
                             "patch": _dump_patch(patch),
                         }
                     ]
@@ -1539,6 +1537,12 @@ def test_flux_postrenderer_selectors_escape_regex_metacharacters_and_read_legacy
         "namespace": r"prod\.blue",
     }
     assert _managed_postrenderer_patches(spec, FluxHelmReleasePlanError)[0].target == target
+
+    # An unescaped selector would also match "paymentsXapi": it is not a GreenKube-managed patch.
+    unescaped = {**_target_selector(target), "name": "payments.api", "namespace": "prod.blue"}
+    spec["postRenderers"][0]["kustomize"]["patches"][0]["target"] = unescaped
+    with pytest.raises(FluxHelmReleasePlanError, match="does not match its patch identity"):
+        _managed_postrenderer_patches(spec, FluxHelmReleasePlanError)
 
 
 def test_flux_helmrelease_planner_refuses_unmanaged_postrenderers():
