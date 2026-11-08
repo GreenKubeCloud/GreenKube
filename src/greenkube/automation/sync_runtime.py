@@ -51,6 +51,7 @@ DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS = 30
 GITOPS_SYNC_POLL_INTERVAL_ENV = "GITOPS_SYNC_POLL_INTERVAL"
 GITOPS_SYNC_TIMEOUT_ENV = "GITOPS_SYNC_TIMEOUT"
 DEFAULT_ANCESTRY_CACHE_SIZE = 1024
+DEFAULT_FEEDBACK_INTERVAL_SECONDS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,14 @@ class SyncPlanRepository(Protocol):
     ) -> int: ...
 
 
+class PullRequestFeedback(Protocol):
+    """Lifecycle-comment publisher notified on sync transitions (J5, ``automation.pr_feedback``)."""
+
+    async def notify(self, plan_id: str) -> None: ...
+
+    async def reconcile_once(self) -> Any: ...
+
+
 @dataclass(frozen=True, slots=True)
 class GitOpsSyncCycleSummary:
     """Secret-free result counts for one bounded sync-observation cycle."""
@@ -319,6 +328,8 @@ class GitOpsSyncRuntime:
         sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
         clock: Callable[[], datetime] | None = None,
         ancestry_checker: GitAncestryChecker | None = None,
+        feedback: PullRequestFeedback | None = None,
+        feedback_interval_seconds: int = DEFAULT_FEEDBACK_INTERVAL_SECONDS,
     ) -> None:
         if type(batch_size) is not int or not 1 <= batch_size <= MAX_PULL_REQUEST_POLL_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_PULL_REQUEST_POLL_BATCH_SIZE}.")
@@ -340,6 +351,9 @@ class GitOpsSyncRuntime:
         self.sync_retry_backoff_seconds = sync_retry_backoff_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
         self.ancestry_checker = ancestry_checker
+        self.feedback = feedback
+        self.feedback_interval_seconds = feedback_interval_seconds
+        self._last_feedback_reconcile: datetime | None = None
         self._after_id: int | None = None
         self._poll_lock = asyncio.Lock()
 
@@ -387,6 +401,9 @@ class GitOpsSyncRuntime:
                 else:
                     skipped += 1
                     record_sync_outcome("skipped")
+                if result in {"synced", "failed", "timeout"} and self.feedback is not None:
+                    # Post the sync step on the PR right away (J5); the publisher never raises.
+                    await self.feedback.notify(reference[3])
 
             return GitOpsSyncCycleSummary(
                 selected=selected,
@@ -418,6 +435,7 @@ class GitOpsSyncRuntime:
                             summary.skipped,
                             summary.errors,
                         )
+                await self.reconcile_feedback()
             else:
                 logger.debug("Skipping GitOps sync observation while this controller is not the Lease holder.")
 
@@ -428,6 +446,20 @@ class GitOpsSyncRuntime:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
             except TimeoutError:
                 continue
+
+    async def reconcile_feedback(self) -> None:
+        """Refresh PR status comments (applied, measuring, outcome) every feedback interval (J5)."""
+        if self.feedback is None:
+            return
+        now = _utc_now(self.clock())
+        last = self._last_feedback_reconcile
+        if last is not None and (now - last).total_seconds() < self.feedback_interval_seconds:
+            return
+        self._last_feedback_reconcile = now
+        try:
+            await self.feedback.reconcile_once()
+        except Exception as error:
+            logger.warning("PR status comment refresh failed (%s).", type(error).__name__)
 
     async def _observe_record(
         self,
@@ -748,6 +780,7 @@ def create_gitops_sync_runtime(
     sync_retry_backoff_seconds: int = DEFAULT_GITOPS_SYNC_RETRY_BACKOFF_SECONDS,
     ancestry_checker: GitAncestryChecker | None = None,
     provider_resolver: PlanProviderResolver | None = None,
+    feedback: PullRequestFeedback | None = None,
 ) -> GitOpsSyncRuntime:
     """Compose periodic sync observation using a lazy, shared Kubernetes API client.
 
@@ -771,6 +804,7 @@ def create_gitops_sync_runtime(
         ),
         sync_retry_backoff_seconds=sync_retry_backoff_seconds,
         ancestry_checker=ancestry_checker,
+        feedback=feedback,
     )
 
 

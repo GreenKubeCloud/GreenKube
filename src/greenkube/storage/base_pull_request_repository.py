@@ -123,6 +123,17 @@ class PullRequestRepository(ABC):
         safely and are marked as orphaned rather than treated as open PRs.
         """
 
+    async def list_feedback_pull_requests(
+        self,
+        *,
+        merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> List[PullRequestRecord]:
+        """Returns plan PRs merged since ``merged_since`` whose status comment may change (J5)."""
+        self.validate_poll_page(limit, after_id)
+        raise NotImplementedError("lifecycle feedback listing is not supported by this repository")
+
     async def list_branch_cleanup_candidates(
         self,
         *,

@@ -15,7 +15,14 @@ async def test_start_composes_and_cancels_gitops_sync_observer(monkeypatch):
     manager = object()
     pull_requests = object()
     gitops_repository = object()
-    plan_runtime = SimpleNamespace(pull_requests=pull_requests, gitops_repository=gitops_repository)
+    provider_resolver = object()
+    recommendations = object()
+    plan_runtime = SimpleNamespace(
+        pull_requests=pull_requests,
+        gitops_repository=gitops_repository,
+        provider_resolver=provider_resolver,
+        recommendations=recommendations,
+    )
     runtime_started = asyncio.Event()
     runtime_stopped = asyncio.Event()
 
@@ -31,9 +38,15 @@ async def test_start_composes_and_cancels_gitops_sync_observer(monkeypatch):
             finally:
                 runtime_stopped.set()
 
-    def create_gitops_sync_runtime(selected_pr_repository, selected_plan_repository):
+    def create_gitops_sync_runtime(selected_pr_repository, selected_plan_repository, *, feedback=None):
         assert selected_pr_repository is pull_requests
         assert selected_plan_repository is gitops_repository
+        # The PR status-comment publisher reuses the plan runtime's repositories and providers (J5).
+        assert feedback is not None
+        assert feedback.pull_request_repository is pull_requests
+        assert feedback.plan_repository is gitops_repository
+        assert feedback.provider_resolver is provider_resolver
+        assert feedback.recommendation_repository is recommendations
         return SyncRuntime()
 
     monkeypatch.setattr(plan_runtime_module, "create_plan_runtime", create_plan_runtime)
@@ -74,7 +87,7 @@ async def test_sync_observer_uses_controller_leader_gate(monkeypatch):
                 runtime_stopped.set()
 
     monkeypatch.setattr(plan_runtime_module, "create_plan_runtime", create_plan_runtime)
-    monkeypatch.setattr(sync_runtime_module, "create_gitops_sync_runtime", lambda *_: SyncRuntime())
+    monkeypatch.setattr(sync_runtime_module, "create_gitops_sync_runtime", lambda *_, **__: SyncRuntime())
 
     task = await start_module._start_gitops_sync_observer(object(), should_run=gate)
     assert task is not None

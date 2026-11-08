@@ -543,9 +543,24 @@ async def _start_gitops_sync_observer(
         logger.warning("GitOps sync observation is unavailable (%s).", type(error).__name__)
         return None
 
+    try:
+        from ..automation.pr_feedback import create_pull_request_feedback_publisher
+
+        # One status comment per merged PR: synced, applied, measuring, outcome (J5).
+        feedback = create_pull_request_feedback_publisher(
+            pull_request_repository=plan_runtime.pull_requests,
+            plan_repository=plan_runtime.gitops_repository,
+            provider_resolver=plan_runtime.provider_resolver,
+            recommendation_repository=plan_runtime.recommendations,
+            db_manager=db_manager,
+        )
+    except Exception as error:
+        logger.warning("PR status comments are unavailable (%s).", type(error).__name__)
+        feedback = None
     runtime = create_gitops_sync_runtime(
         plan_runtime.pull_requests,
         plan_runtime.gitops_repository,
+        feedback=feedback,
     )
     observer_stop_event = stop_event if stop_event is not None else asyncio.Event()
     if should_run is None:

@@ -258,6 +258,34 @@ class SQLitePullRequestRepository(PullRequestRepository):
             rows = await cursor.fetchall()
             return [row_to_pull_request(row) for row in rows]
 
+    async def list_feedback_pull_requests(
+        self,
+        *,
+        merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> List[PullRequestRecord]:
+        self.validate_poll_page(limit, after_id)
+        query = (
+            "SELECT * FROM recommendation_pull_requests "
+            "WHERE status = 'merged' "
+            "AND plan_id IS NOT NULL AND plan_id <> '' "
+            "AND provider_id IS NOT NULL AND provider_id <> '' "
+            "AND repo <> '' AND pr_number IS NOT NULL AND pr_number > 0 "
+            "AND merged_at IS NOT NULL AND merged_at >= ?"
+        )
+        params: list = [to_iso_z(merged_since)]
+        if after_id is not None:
+            query += " AND id > ?"
+            params.append(after_id)
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(query, params)
+            return [row_to_pull_request(row) for row in await cursor.fetchall()]
+
     async def list_branch_cleanup_candidates(
         self,
         *,
