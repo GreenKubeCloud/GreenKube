@@ -49,6 +49,12 @@ class RendererKind(StrEnum):
     HELM_RELEASE = "helm_release"
 
 
+#: Renderers the planners, snapshot resolver and rollback can handle (one definition, roadmap M6).
+PLANNABLE_RENDERERS: frozenset[RendererKind] = frozenset(
+    {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
+)
+
+
 class ControllerKind(StrEnum):
     ARGOCD = "argocd"
     FLUX_KUSTOMIZATION = "flux_kustomization"
@@ -206,28 +212,12 @@ class WorkloadSource(ContractModel):
         return _repository_path(value, allow_root=True)
 
 
-def canonical_repository_identity(value: str) -> str:
-    """Normalize a Git URL for identity without retaining userinfo or query credentials."""
-    if value == "unresolved":
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() in {"http", "https", "ssh", "git", "oci"} and host:
-        normalized_host = f"[{host.lower()}]" if ":" in host else host.lower()
-        normalized_netloc = f"{normalized_host}:{port}" if port is not None else normalized_host
-        return f"{parts.scheme.lower()}://{normalized_netloc}{parts.path}"
-    match = _SCP_REPOSITORY_PATTERN.fullmatch(value)
-    if match is not None:
-        return f"{match.group('host').lower()}:{match.group('path')}"
-    return "redacted"
-
-
 def sanitize_repository_url(value: str) -> str:
-    """Remove repository URL userinfo and query credentials before persistence."""
+    """Normalize a Git URL without userinfo or query credentials.
+
+    The result is both the persisted form and the identity used to compare
+    repositories (``canonical_repository_identity``).
+    """
     if value == "unresolved":
         return value
     try:
@@ -244,6 +234,16 @@ def sanitize_repository_url(value: str) -> str:
     if match is not None:
         return f"{match.group('host').lower()}:{match.group('path')}"
     return "redacted"
+
+
+canonical_repository_identity = sanitize_repository_url
+
+
+def public_repository_url(value: str) -> str:
+    """Repository URL safe to return from the API: bounded, printable and credential-free."""
+    if len(value) > 512 or any(ord(character) < 32 for character in value):
+        return "redacted"
+    return sanitize_repository_url(value)
 
 
 def _safe_renderer_generation_config(value: Any) -> Any:

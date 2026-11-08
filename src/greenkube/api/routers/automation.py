@@ -18,10 +18,10 @@ from greenkube.api.dependencies import (
     get_pull_request_repository,
     get_recommendation_repository,
 )
-from greenkube.api.routers.plans import _domain_error_response, _safe_repository_url
+from greenkube.api.routers.plans import _domain_error_response
 from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
 from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus
+from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
 from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullRequestRecord, PullRequestStatus
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
@@ -174,7 +174,7 @@ async def recommendation_pr_eligibility(
     return {
         "eligible": True,
         "plan_id": plan.plan_id,
-        "repo": _safe_repository_url(plan.source.repo_url),
+        "repo": public_repository_url(plan.source.repo_url),
         "path": plan.source.path,
         "branch": plan.source.ref,
         "policy_result": plan.policy_result,
@@ -458,7 +458,7 @@ def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
         status="dry_run",
         policy_result=plan.policy_result,
         provider=plan.source.provider_id,
-        repo=_safe_repository_url(plan.source.repo_url),
+        repo=public_repository_url(plan.source.repo_url),
         base_branch=plan.source.ref,
         path=plan.source.path,
         patch=plan.action.model_dump(mode="json"),

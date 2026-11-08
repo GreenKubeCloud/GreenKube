@@ -802,22 +802,6 @@ class PlanWorker:
                 records.append(record)
         return records, missing_ids
 
-    async def _recommendation_records_for_pr(
-        self,
-        plan: Plan,
-    ) -> tuple[list[RecommendationRecord], list[int]]:
-        if self.recommendation_repository is None:
-            return [], list(plan.recommendation_ids)
-        records: list[RecommendationRecord] = []
-        missing_ids: list[int] = []
-        for recommendation_id in plan.recommendation_ids:
-            record = await self.recommendation_repository.get_recommendation_by_id(recommendation_id)
-            if record is None or record.id != recommendation_id:
-                missing_ids.append(recommendation_id)
-            else:
-                records.append(record)
-        return records, missing_ids
-
     async def _validate_rollback_review(self, plan: Plan) -> None:
         rollback_of_plan_id = plan.rollback_of_plan_id
         if rollback_of_plan_id is None:

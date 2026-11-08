@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     ActionPlanV3,
     ActionStatus,
     AutomationErrorCode,
@@ -906,12 +907,7 @@ class AutomationPlanService:
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"workload source binding is not resolved ({source.status.value})",
             )
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the automation plan service",

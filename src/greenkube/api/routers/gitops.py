@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -40,6 +39,7 @@ from greenkube.gitops.contracts import (
     BindingStatus,
     WorkloadSource,
     binding_candidate_generation_token,
+    public_repository_url,
 )
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime
@@ -61,7 +61,6 @@ _MAX_BINDING_LIST_LIMIT = 100
 _MAX_BINDING_LIST_CANDIDATES = 20
 _MAX_BINDING_DETAIL_CANDIDATES = 50
 _REVISION_PATTERN = re.compile(rf"{GIT_OBJECT_SHA.pattern}|sha1:[0-9a-fA-F]{{40}}|sha256:[0-9a-fA-F]{{64}}")
-_SCP_REPOSITORY_PATTERN = re.compile(r"^[^/@:\s]+@(?P<host>[^:/\s]+):(?P<path>[^?\s#]+)$")
 # Expose only reason codes emitted by the GitOps adapters and reconciler.
 _SAFE_REASON_CODES = frozenset(
     {
@@ -392,7 +391,7 @@ def _source_response(source: WorkloadSource, *, now: datetime | None = None) -> 
         controller_name=_bounded_text(source.controller_name, 128),
         controller_namespace=_bounded_text(source.controller_namespace, 128),
         provider_id=_bounded_text(source.provider_id, 128),
-        repo_url=_safe_repository_url(source.repo_url),
+        repo_url=public_repository_url(source.repo_url),
         path=_bounded_text(source.path, 512),
         renderer=source.renderer,
         confidence=source.confidence,
@@ -423,7 +422,7 @@ def _provenance_response(source: WorkloadSource) -> GitOpsBindingProvenanceRespo
         controller_name=_bounded_text(source.controller_name, 128),
         controller_namespace=_bounded_text(source.controller_namespace, 128),
         provider_id=_bounded_text(source.provider_id, 128),
-        repo_url=_safe_repository_url(source.repo_url),
+        repo_url=public_repository_url(source.repo_url),
         path=_bounded_text(source.path, 512),
         renderer=source.renderer,
         revision=_public_revision(source.revision),
@@ -460,28 +459,6 @@ def _source_sort_key(source: WorkloadSource) -> tuple[str, str, str, str, str, s
         source.path,
         source.id,
     )
-
-
-def _safe_repository_url(value: str) -> str:
-    if value == "unresolved":
-        return value
-    if len(value) > 512 or any(ord(character) < 32 for character in value):
-        return "redacted"
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return "redacted"
-    if parts.scheme.lower() in {"http", "https", "ssh", "git"} and host:
-        netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
-        if port is not None:
-            netloc = f"{netloc}:{port}"
-        return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
-    scp_match = _SCP_REPOSITORY_PATTERN.fullmatch(value)
-    if scp_match is not None:
-        return f"{scp_match.group('host')}:{scp_match.group('path')}"
-    return "redacted"
 
 
 def _bounded_text(value: str, limit: int) -> str:

@@ -73,6 +73,7 @@ from greenkube.automation.rollback import (
 from greenkube.core.config import get_config
 from greenkube.core.optimization.applied_detector import K8sWorkloadReader
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     UNRESOLVED_PROVIDER_ID,
     ActionPlanV3,
     ActionStatus,
@@ -246,12 +247,7 @@ class ProviderSourceSnapshotResolver:
         self._limits = limits or SnapshotLimits()
 
     async def create_snapshot(self, source: WorkloadSource) -> RepositorySnapshot:
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} does not have a configured snapshot planner",
@@ -411,12 +407,7 @@ class RuntimePlanService:
             exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
         )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
@@ -469,12 +460,7 @@ class RuntimePlanService:
             exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
         )
         self._ensure_policy_allowed(policy_result)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the configured plan service",
@@ -732,12 +718,7 @@ class RuntimePlanService:
         await self._validate_rollback_source_plan(original_plan)
         await self._rollback_review_records(original_plan)
         source = await self._resolve_current_rollback_source(original_plan)
-        if source.renderer not in {
-            RendererKind.RAW,
-            RendererKind.KUSTOMIZE,
-            RendererKind.HELM_VALUES,
-            RendererKind.HELM_RELEASE,
-        }:
+        if source.renderer not in PLANNABLE_RENDERERS:
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_UNSUPPORTED,
                 f"renderer {source.renderer.value!r} does not support exact-target rollback",

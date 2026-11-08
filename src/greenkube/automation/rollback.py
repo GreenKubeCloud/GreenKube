@@ -16,6 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import ValidationError
 
 from greenkube.gitops.contracts import (
+    PLANNABLE_RENDERERS,
     ActionPlanV3,
     BindingStatus,
     ContainerRequestBaseline,
@@ -48,9 +49,6 @@ from greenkube.gitops.snapshots.models import RepositorySnapshot, SnapshotFile
 from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
-_SUPPORTED_RENDERERS = frozenset(
-    {RendererKind.RAW, RendererKind.KUSTOMIZE, RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}
-)
 ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY = "_greenkube_plan_one_time_values_mapping"
 
 _ResourceIdentity = tuple[str, str, str, str]
@@ -512,7 +510,7 @@ def _validate_original_plan(plan: Plan) -> FilePlan:
         raise RollbackConflictError("original action target does not match its resolved workload source")
     if not all(isinstance(operation, SetContainerResources) for operation in plan.action.operations):
         raise UnsupportedRollbackError("only per-container resource operations have a supported inverse")
-    if file_plan.renderer not in _SUPPORTED_RENDERERS:
+    if file_plan.renderer not in PLANNABLE_RENDERERS:
         raise UnsupportedRollbackError(f"renderer {file_plan.renderer.value!r} does not support exact-target rollback")
     if file_plan.renderer is RendererKind.HELM_VALUES:
         mapping = plan.source.renderer_config.get("values_mapping")
@@ -677,7 +675,7 @@ def _validate_revision(value: str) -> str:
 
 
 def _select_renderer(kind: RendererKind, renderer: RollbackRenderer | None) -> RollbackRenderer:
-    if kind not in _SUPPORTED_RENDERERS:
+    if kind not in PLANNABLE_RENDERERS:
         raise UnsupportedRollbackError(f"renderer {kind.value!r} does not support exact-target rollback")
     selected = renderer
     if selected is None:
