@@ -33,7 +33,7 @@ Changes applied before this release, recommendations marked applied by hand (`PA
 
 ## 1. Recording the change (C1)
 
-Apply detection reads every Deployment, StatefulSet and DaemonSet on each lifecycle pass. For each workload it records a **spec observation** whenever its UID, generation, pod-template digest or HPA digest differs from the previous one. The pod-template digest is the SHA-256 of the canonical JSON of the pod template, with empty fields removed and the `pod-template-hash` label ignored.
+Apply detection reads every Deployment, StatefulSet and DaemonSet on each lifecycle pass. For each workload it records a **spec observation** whenever its UID, generation, pod-template digest or HPA digest differs from the previous one. The pod-template digest is the SHA-256 of the canonical JSON of the pod template, with empty fields removed and the `pod-template-hash` label ignored. When HPAs cannot be listed in a pass, the last known HPA digest is kept, so a failed listing is not recorded as an HPA change.
 
 When a recommendation is detected as applied (its rollout has completed and the live requests match the proposal), GreenKube records one immutable **change** per plan and workload revision:
 
@@ -47,6 +47,8 @@ When a recommendation is detected as applied (its rollout has completed and the 
 | `baseline_window_end` | The PR merge, otherwise the plan approval, otherwise the rollout completion. |
 
 At the same time GreenKube freezes a **baseline snapshot**: the workload's hourly observations over the baseline window, the load-driver series available for that window, the unit prices observed in it, the dominant carbon-intensity source and the Impact Model version. The snapshot carries a `content_sha256` over its content; `GET /api/v2/changes/{id}` reports whether it still verifies. Measurements always use the frozen snapshot, never a re-read of the baseline period.
+
+Evidence is never frozen from a failed read. When the metrics of the baseline window cannot be read (a database error or timeout), no snapshot is written and the change stays `applied`; the next lifecycle pass retries. When a Prometheus load-driver query fails (as opposed to returning no series), the snapshot waits for Prometheus for up to 24 hours after the change was recorded; after that it is frozen without that driver and lists it in `collector_versions.load_drivers_unavailable`.
 
 ## 2. Windows
 
@@ -75,7 +77,7 @@ An hour counts for a quantity when at least half of it is covered by qualifying 
 
 The counterfactual is adjusted by a **load driver**, the hourly amount of work the workload was asked to do. GreenKube takes the first candidate whose coverage is at least `CHANGE_MEASUREMENT_MIN_COVERAGE` in both windows and whose baseline is not all zero:
 
-1. requests per second from the service mesh or ingress: Istio `istio_requests_total{reporter="destination"}`, Linkerd `response_total{direction="inbound"}`, then ingress-nginx `nginx_ingress_controller_requests` for a Service named after the workload;
+1. requests per second from the service mesh or ingress: Istio `istio_requests_total{reporter="destination"}`, Linkerd `response_total{direction="inbound"}`, ingress-nginx `nginx_ingress_controller_requests` for a Service named after the workload, then Envoy `envoy_cluster_upstream_rq_total` for Contour-style clusters (`<namespace>_<service>_<port>`) of a Service named after the workload;
 2. the PromQL expression in the workload annotation `greenkube.io/load-metric` (`$namespace` and `$workload` are substituted);
 3. the workload's CPU usage from GreenKube's metrics. It is the weakest driver (a CPU change can move it) and is flagged `weak`.
 
@@ -122,7 +124,7 @@ The generator is seeded from the change, the measurement sequence and the quanti
 
 ### Outcome rule
 
-The rule is applied once, at the end of the post-window (plus one hour of grace for late samples). There is no repeated testing.
+The rule is applied once, at the end of the post-window (plus one hour of grace for late samples). There is no repeated testing. A decision is only written from complete reads: when the post-window metrics or the health gates cannot be read, nothing is recorded and the next pass retries; when a Prometheus load driver fails, the decision waits up to 24 hours for it, then is made without it and lists it in `counterfactual_params.load_drivers_unavailable` (`pre` and `post`).
 
 | Condition (on `allocated_cost`) | Outcome |
 |---|---|
@@ -157,7 +159,7 @@ The same per-replica health gates as the interim verifier apply to the change's 
 
 They are evaluated twice:
 
-- once the interim health window has elapsed, so a harmful change is flagged within `VERIFICATION_WINDOW_HOURS` instead of at the end of the post-window. A failure sends every awaiting recommendation of the change to `rollback_review`;
+- once the interim health window has elapsed, so a harmful change is flagged within `VERIFICATION_WINDOW_HOURS` instead of at the end of the post-window. A failure sends every awaiting recommendation of the change to `rollback_review`. When the metrics cannot be read, the check is not recorded and is retried on the next pass;
 - at the decision, over the whole post-window. The gates are stored in the measurement.
 
 A health failure does not change the measurement outcome: the saving is still evidence about the change. It changes what happens to the recommendations.
@@ -166,7 +168,7 @@ A health failure does not change the measurement outcome: the saving is still ev
 
 A change is measured once, on its workload. The saving is split between its recommendations:
 
-- **by cost component** when the workload's rows carry the CPU/RAM split: CPU recommendations share the `cost_cpu` saving and memory recommendations the `cost_ram` saving, each in proportion to the request reduction it made;
+- **by cost component** when the workload's rows carry the CPU/RAM split: CPU recommendations share the `cost_cpu` saving and memory recommendations the `cost_ram` saving, each in proportion to the request reduction it made. A recommendation claims its component share only when that component's own interval shows a saving: in a `realized` change, a recommendation whose component was `not_realized` (for example memory requests that grew) or `inconclusive` gets that outcome instead of `verified`;
 - otherwise **by projected share** of the `allocated_cost` saving (equal shares when nothing was projected).
 
 Shares within a basis sum to one, so a change is never claimed twice. Each recommendation receives one immutable row in `savings_measurements` (`change_id`, `group_id` = the change measurement), with its share of the estimates and the change's outcome. Its status follows:
@@ -178,7 +180,7 @@ Shares within a basis sum to one, so a change is never claimed twice. Each recom
 | `inconclusive`, `contaminated` | `applied` with `verification_status=inconclusive` (reasons prefixed `contaminated:` for a contaminated change). |
 | a health gate failed | `rollback_review`. |
 
-A recommendation that joins a change after it was measured gets an `inconclusive` row: it was not part of the split.
+A recommendation that joins a change after it was measured gets an `inconclusive` row: it was not part of the split. A realized change is measured once, so a re-measurement requested by one of its recommendations does not start a new measurement: the recommendation gets a new row with the existing decision and the reason `re-measurement not started: change … is realized and is measured once`.
 
 ## 9. Lifecycle (C2)
 
@@ -188,7 +190,7 @@ realized → regressed | closed
 not_realized | inconclusive | contaminated → measuring   (explicit re-measurement only)
 ```
 
-Each transition is a compare-and-swap on the stored state and version, written in the same transaction as its event (`change_recorded`, `measurement_started`, `health_checked`, `measurement_decided`, `remeasure_started`, `superseded`, `regressed`). A re-measurement (`POST /api/v1/recommendations/{id}/remeasure` on any of the change's recommendations) starts a new post-window at the next hour and a new measurement that supersedes the previous one; the baseline stays the frozen snapshot. A newer change on the same workload closes a realized change (`superseded`).
+The repository rejects any other transition (`measuring → measuring` is the only self-transition, used for `health_checked`). Each transition is a compare-and-swap on the stored state and version, written in the same transaction as its event (`change_recorded`, `measurement_started`, `health_checked`, `measurement_decided`, `remeasure_started`, `superseded`, `regressed`). A re-measurement (`POST /api/v1/recommendations/{id}/remeasure` on any of the change's recommendations) starts a new post-window at the next hour and a new measurement that supersedes the previous one; the baseline stays the frozen snapshot. A newer change on the same workload closes a realized change (`superseded`).
 
 A decision persisted before a crash is replayed: a change measurement and each recommendation's row are unique per measurement cycle, so a second pass reuses them instead of measuring again.
 
@@ -205,5 +207,5 @@ A decision persisted before a crash is replayed: a change measurement and each r
 - **Allocated, not billed.** The measured saving is allocated cost. The bill only drops when nodes are removed; pool-level realization (C10) is not implemented.
 - **Pool confounders.** Changes to other workloads on the same node pool are not detected as confounders.
 - **One baseline week.** With the default windows each hour of the week has a single baseline value; the interval reflects that noise, but an unusual baseline week (a holiday, an incident) biases the counterfactual. Use a longer `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` for such workloads.
-- **Load-driver heuristics.** The ingress-nginx driver assumes a Service named after the workload. Set `greenkube.io/load-metric` when that does not hold.
+- **Load-driver heuristics.** The ingress-nginx and Envoy drivers assume a Service named after the workload, and the Envoy driver assumes Contour's cluster naming. Set `greenkube.io/load-metric` when that does not hold.
 - **Spec observations depend on the lifecycle interval.** A spec change reverted between two detection passes is not seen.
