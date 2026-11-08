@@ -110,6 +110,18 @@ Rollback preview takes only the original plan ID. GreenKube snapshots the curren
 
 `POST /recommendations/{rec_id}/apply-pr` remains as a compatibility endpoint, but it uses the same server-resolved, render-validated plan path; workload annotations and the retired single-provider queue are not used. Pass `{"dry_run": true}` to receive the plan's source diff without changing Git. A normal request approves the exact validated digest, returns `202 Accepted` with the durable plan `operation_id`, and can be polled through `/automation/operations/{operation_id}`. Repeated requests reuse the deterministic plan operation, so they do not open duplicate PRs; closed or failed attempts can be re-planned without deleting their audit history. When automation is enabled, the standalone Helm profile runs plan processing inline; the production profile deploys a dedicated single-replica plan worker. Git provider credentials are configured through `automation.providers[].secretName` / `secretKey` Secret references and repository allowlists in Helm values; credential bytes are never put in the ConfigMap. Recommendation event history records plan creation, plan/action transitions, and authenticated actor identifiers.
 
+### Changes and measurements (`/api/v2`)
+
+These routes live under `/api/v2` (not `/api/v1`) and use the same authentication. A change is one workload revision applied by apply detection; see [Savings measurement](methodology/savings-measurement.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v2/changes` | Changes, newest first: target, recommendation IDs, plan and PR links (`pr_url`, `merge_sha`, `gitops_revision`), generations and spec digests before/after, rollout start and completion, `state` (`applied`, `measuring`, `realized`, `not_realized`, `inconclusive`, `contaminated`, `regressed`, `closed`), `post_window`. Filters: `namespace`, `state` (repeatable); `limit` 1–200 (default 50); `cursor` from the previous page's `next_cursor`. |
+| `GET` | `/api/v2/changes/{change_id}` | One change with its `baseline` snapshot metadata (window, covered hours, load drivers, price card, `content_sha256` and `content_verified`) and its lifecycle `events`. `404` when unknown. |
+| `GET` | `/api/v2/changes/{change_id}/measurements` | Decided measurements, oldest first: windows, `load_driver`, `counterfactual_params`, signed `estimates` per quantity (`rate_per_hour`, 90% `ci_low`/`ci_high`, `annualized` and its interval, `coverage`, `claimed`, `projection_accuracy`), `confounders`, `confidence`, `health`, `allocations`, `outcome`, `reasons`, `evidence_sha256`; and `recommendations`, the per-recommendation rows of that measurement. `404` when unknown. |
+
+Storage failures return `503`. Only `allocated_cost` is claimed for request changes; the other quantities are reported. Measured values are never added to projected ones.
+
 ### Provider webhooks
 
 | Method | Path | Description |

@@ -42,6 +42,7 @@ from greenkube.api.dependencies import (
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import automation as automation_router
+from greenkube.api.routers import changes as changes_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import gitops as gitops_router
@@ -396,6 +397,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
     app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])
     app.include_router(webhooks_router.router, prefix="/api/v1", tags=["Webhooks"])
+    app.include_router(changes_router.router, prefix="/api/v2", tags=["Changes"])
 
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)
     async def heartbeat():
