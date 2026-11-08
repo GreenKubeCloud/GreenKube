@@ -103,11 +103,15 @@ def load_template(value: str | None) -> str:
 
 
 def render_template(template: str, values: Mapping[str, str]) -> str:
-    """Substitute every placeholder; values are inserted verbatim, never re-expanded."""
+    """Substitute every placeholder; values are inserted verbatim, never re-expanded.
 
-    def substitute(match: re.Match[str]) -> str:
-        return values.get(match.group(1), "")
+    Blank lines left by empty sections are collapsed in the template text only,
+    before the values go in, so diffs and other values keep their exact content.
+    """
+    skeleton = PLACEHOLDER.sub(lambda match: match.group(0) if values.get(match.group(1)) else "", template)
+    skeleton = _BLANK_RUN.sub("\n\n", skeleton)
+    rendered = PLACEHOLDER.sub(lambda match: values.get(match.group(1), ""), skeleton)
+    return rendered.strip() + "\n"
 
-    rendered = PLACEHOLDER.sub(substitute, template)
-    # Collapse the blank lines left by empty sections.
-    return re.sub(r"\n{3,}", "\n\n", rendered).strip() + "\n"
+
+_BLANK_RUN = re.compile(r"\n(?:[ \t]*\n){2,}")

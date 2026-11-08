@@ -280,6 +280,16 @@ def test_custom_template_reorders_sections_and_the_footer_is_always_appended():
     assert footer is not None and footer["plan_id"] == "pln-1"
 
 
+def test_diffs_keep_their_blank_lines_while_empty_sections_leave_no_gap():
+    diff = "--- a/x.yaml\n+++ b/x.yaml\n a: 1\n\n\n\n-b: 2\n+b: 3"
+    body = render_body(_context(fx.plan(diff=diff)), SETTINGS)
+    assert f"```diff\n{diff}\n```" in body
+    template = validate_template("{{ summary }}\n\n{{ diffs }}\n\n\n  \n{{ why }}\n\nend")
+    custom = render_body(_context(fx.plan(diff=diff)), PullRequestRenderSettings(template=template))
+    assert f"```diff\n{diff}\n```" in custom
+    assert "</details>\n\n## Why" in custom
+
+
 def test_template_values_are_inserted_verbatim_and_never_reexpanded():
     plan = fx.plan(diff="{{ plan_id }} stays literal")
     body = render_body(_context(plan), SETTINGS)
