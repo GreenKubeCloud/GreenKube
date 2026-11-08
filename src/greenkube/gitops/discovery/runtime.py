@@ -9,7 +9,7 @@ import math
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
@@ -48,6 +48,7 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBinding,
     WorkloadBindingRepository,
 )
+from greenkube.utils.time import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -573,21 +574,15 @@ def _provider_candidate_id(candidate: WorkloadSource, provider_id: str) -> str:
 
 def _source_age_seconds(result: DiscoveryRefreshResult) -> float:
     observed_at = [
-        _as_utc_datetime(candidate.observed_at)
+        ensure_utc(candidate.observed_at)
         for binding in result.bindings
         for candidate in binding.candidates
         if isinstance(candidate.observed_at, datetime)
     ]
     if not observed_at:
         return 0.0
-    refreshed_at = _as_utc_datetime(result.refreshed_at)
+    refreshed_at = ensure_utc(result.refreshed_at)
     return max(0.0, (refreshed_at - min(observed_at)).total_seconds())
-
-
-def _as_utc_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _log_refresh_success(result: DiscoveryRefreshResult) -> None:

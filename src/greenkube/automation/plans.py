@@ -55,6 +55,7 @@ from greenkube.gitops.snapshots.models import (
     SnapshotFile,
 )
 from greenkube.storage.base_gitops_repository import AutomationPlanRepository
+from greenkube.utils.time import ensure_utc
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
 _COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
@@ -216,7 +217,7 @@ class AutomationPlanService:
         persist: bool,
         actor: str,
     ) -> Plan:
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         contents, file_metadata, base_revision = _archive_contents(snapshot, source)
         if source.renderer is RendererKind.KUSTOMIZE:
@@ -338,7 +339,7 @@ class AutomationPlanService:
             if (
                 existing.status in _EXPIREABLE_STATUSES
                 and existing.expires_at is not None
-                and _as_utc(existing.expires_at) <= now
+                and ensure_utc(existing.expires_at) <= now
             ):
                 # A fresh request after the previous identical preview expired re-plans instead of 409.
                 existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
@@ -471,7 +472,7 @@ class AutomationPlanService:
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "the current source contains no forward-created files or updates to reverse",
             )
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         self._validate_source(source, now)
         if source.renderer is not inverse.renderer:
             raise AutomationPlanError(
@@ -591,8 +592,8 @@ class AutomationPlanService:
         if plan is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, f"plan {plan_id!r} was not found")
 
-        now = _as_utc(self.clock())
-        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and _as_utc(plan.expires_at) <= now:
+        now = ensure_utc(self.clock())
+        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and ensure_utc(plan.expires_at) <= now:
             await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="plan_expired")
             raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
         if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED}:
@@ -678,8 +679,8 @@ class AutomationPlanService:
         plan = await self.repository.get_plan(plan_id)
         if plan is None or plan.expires_at is None or plan.status not in _EXPIREABLE_STATUSES:
             return plan
-        current_time = _as_utc(now if now is not None else self.clock())
-        if _as_utc(plan.expires_at) > current_time:
+        current_time = ensure_utc(now if now is not None else self.clock())
+        if ensure_utc(plan.expires_at) > current_time:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
@@ -693,7 +694,7 @@ class AutomationPlanService:
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("plan expiry limit must be a positive integer")
-        current_time = _as_utc(now if now is not None else self.clock())
+        current_time = ensure_utc(now if now is not None else self.clock())
         statuses = sorted(_EXPIREABLE_STATUSES, key=lambda status: status.value)
         expired_reader = getattr(self.repository, "list_expired_plans", None)
         if callable(expired_reader):
@@ -706,9 +707,9 @@ class AutomationPlanService:
                 for plan in candidates
                 if plan.status in _EXPIREABLE_STATUSES
                 and plan.expires_at is not None
-                and _as_utc(plan.expires_at) <= current_time
+                and ensure_utc(plan.expires_at) <= current_time
             ),
-            key=lambda item: (_as_utc(cast(datetime, item.expires_at)), item.plan_id),
+            key=lambda item: (ensure_utc(cast(datetime, item.expires_at)), item.plan_id),
         )[:limit]
         expired: list[Plan] = []
         for plan in due:
@@ -917,7 +918,7 @@ class AutomationPlanService:
                 AutomationErrorCode.UNSUPPORTED_SOURCE,
                 f"renderer {source.renderer.value!r} is not supported by the automation plan service",
             )
-        if source.expires_at is not None and _as_utc(source.expires_at) <= now:
+        if source.expires_at is not None and ensure_utc(source.expires_at) <= now:
             raise AutomationPlanError(AutomationErrorCode.SOURCE_CHANGED, "workload source binding has expired")
 
 
@@ -1141,9 +1142,3 @@ def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)

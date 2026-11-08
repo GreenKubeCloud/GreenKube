@@ -26,6 +26,7 @@ from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullReques
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
 
 router = APIRouter()
 WORKER_STALE_AFTER = timedelta(seconds=120)
@@ -251,7 +252,7 @@ async def automation_status(
         worker_healthy = False
     discovery_age = None
     if coverage is not None and coverage.last_refresh is not None:
-        discovery_age = max(0.0, (now - _aware_utc(coverage.last_refresh)).total_seconds())
+        discovery_age = max(0.0, (now - ensure_utc(coverage.last_refresh)).total_seconds())
 
     renderer_url = os.getenv("GITOPS_RENDERER_URL", "").strip()
     queue = (
@@ -332,16 +333,10 @@ async def _provider_token_resolvable(provider: GitOpsProviderConfig) -> bool:
     return bool(value and value.strip())
 
 
-def _aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def _iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _aware_utc(value).isoformat().replace("+00:00", "Z")
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _safe_host(value: str | None) -> str | None:

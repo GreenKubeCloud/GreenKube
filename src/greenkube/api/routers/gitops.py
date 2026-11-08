@@ -52,6 +52,7 @@ from greenkube.storage.base_gitops_repository import (
     freshen_workload_binding,
     freshen_workload_source,
 )
+from greenkube.utils.time import ensure_utc
 
 router = APIRouter(prefix="/gitops")
 
@@ -167,7 +168,7 @@ async def get_gitops_status(
     return GitOpsDiscoveryStatusResponse(
         cluster=cluster,
         discovery=_discovery_capabilities_response(availability),
-        last_refresh=_as_utc(summary.last_refresh) if summary.last_refresh is not None else None,
+        last_refresh=ensure_utc(summary.last_refresh) if summary.last_refresh is not None else None,
         coverage=_coverage_response(summary),
     )
 
@@ -376,8 +377,8 @@ def _workload_binding_response(
         candidates_truncated=binding.candidates_truncated or len(candidates) > candidate_limit,
         reason=_public_reason(binding.reason),
         provenance=[_provenance_response(candidate) for candidate in _provenance_sources(binding, visible_candidates)],
-        observed_at=_as_utc(binding.observed_at),
-        expires_at=_as_utc(binding.expires_at) if binding.expires_at is not None else None,
+        observed_at=ensure_utc(binding.observed_at),
+        expires_at=ensure_utc(binding.expires_at) if binding.expires_at is not None else None,
     )
 
 
@@ -398,8 +399,8 @@ def _source_response(source: WorkloadSource, *, now: datetime | None = None) -> 
         reason=_public_reason(reason),
         revision=_public_revision(source.revision),
         source_revision=_public_revision(source.source_revision),
-        observed_at=_as_utc(source.observed_at),
-        expires_at=_as_utc(source.expires_at) if source.expires_at is not None else None,
+        observed_at=ensure_utc(source.observed_at),
+        expires_at=ensure_utc(source.expires_at) if source.expires_at is not None else None,
         generation_token=binding_candidate_generation_token(source),
     )
 
@@ -426,7 +427,7 @@ def _provenance_response(source: WorkloadSource) -> GitOpsBindingProvenanceRespo
         renderer=source.renderer,
         revision=_public_revision(source.revision),
         source_revision=_public_revision(source.source_revision),
-        observed_at=_as_utc(source.observed_at),
+        observed_at=ensure_utc(source.observed_at),
     )
 
 
@@ -497,7 +498,3 @@ def _public_revision(value: str | None) -> str | None:
     if value is None or not _REVISION_PATTERN.fullmatch(value):
         return None
     return value
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

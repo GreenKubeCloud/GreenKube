@@ -57,6 +57,7 @@ from greenkube.storage.gitops_mapper import (
     row_to_workload_source,
 )
 from greenkube.storage.unit_of_work import UnitOfWork
+from greenkube.utils.time import ensure_utc
 
 _PRUNE_BATCH_SIZE = 100
 _PLAN_HYDRATION_BATCH_SIZE = 500
@@ -459,7 +460,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         """
 
     def _workload_binding_freshness_parameters(self, now: datetime) -> tuple[Any, Any, Any, Any]:
-        current = _as_utc(now)
+        current = ensure_utc(now)
         ttl = configured_binding_ttl()
         return (
             self._db_datetime(current),
@@ -816,11 +817,11 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         ):
             raise ValueError("manual binding source generation does not match its audit event")
 
-        observed_now = _as_utc(now)
+        observed_now = ensure_utc(now)
         if (
             binding.source.expires_at is None
-            or _as_utc(binding.source.expires_at) <= observed_now
-            or _as_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
+            or ensure_utc(binding.source.expires_at) <= observed_now
+            or ensure_utc(binding.source.expires_at) > observed_now + configured_binding_ttl()
         ):
             raise ValueError("manual binding expiry must be bounded by the binding TTL")
         async with self._serialized_transaction() as connection:
@@ -859,8 +860,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 or candidate.provider_id == "unresolved"
                 or candidate.repo_url == "unresolved"
                 or binding_candidate_generation_token(candidate) != expected_generation_token
-                or (candidate.expires_at is not None and _as_utc(candidate.expires_at) <= observed_now)
-                or observed_now - _as_utc(candidate.observed_at) >= configured_binding_ttl()
+                or (candidate.expires_at is not None and ensure_utc(candidate.expires_at) <= observed_now)
+                or observed_now - ensure_utc(candidate.observed_at) >= configured_binding_ttl()
             ):
                 raise WorkloadBindingConflictError("workload binding candidate generation changed")
             await self._save_workload_binding_on_connection(connection, binding)
@@ -1074,7 +1075,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         )
         if selected_statuses is not None and not selected_statuses:
             return WorkloadBindingPage((), None, False)
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
         if cluster is not None:
@@ -1136,7 +1137,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         cluster: str | None = None,
         now: datetime | None = None,
     ) -> WorkloadBindingCoverage:
-        current_at = _as_utc(now or datetime.now(timezone.utc))
+        current_at = ensure_utc(now or datetime.now(timezone.utc))
         status_expression = self._workload_binding_status_expression("b")
         clauses: list[str] = []
         params: list[Any] = list(self._workload_binding_freshness_parameters(current_at))
@@ -2371,7 +2372,3 @@ def _same_binding_material_state(left: WorkloadBinding, right: WorkloadBinding) 
         and left.candidates_truncated == right.candidates_truncated
         and left_candidates == right_candidates
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

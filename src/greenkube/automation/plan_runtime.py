@@ -107,6 +107,7 @@ from greenkube.storage.base_gitops_repository import (
 from greenkube.storage.base_plan_operation_repository import PlanOperationRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.time import ensure_utc
 
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
@@ -593,9 +594,9 @@ class RuntimePlanService:
                 AutomationErrorCode.AMBIGUOUS_BINDING,
                 "resolved GitOps binding does not match the persisted recommendation target",
             )
-        now = _as_utc(self._policy_evaluator.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._policy_evaluator.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
@@ -960,9 +961,9 @@ class RuntimePlanService:
                 "the resolved workload source no longer matches the original plan",
             )
         source = _with_binding_policy_evidence(source, binding)
-        now = _as_utc(self._plan_service.clock())
-        if (binding.expires_at is not None and _as_utc(binding.expires_at) <= now) or (
-            source.expires_at is not None and _as_utc(source.expires_at) <= now
+        now = ensure_utc(self._plan_service.clock())
+        if (binding.expires_at is not None and ensure_utc(binding.expires_at) <= now) or (
+            source.expires_at is not None and ensure_utc(source.expires_at) <= now
         ):
             raise AutomationPlanError(
                 AutomationErrorCode.SOURCE_CHANGED,
@@ -1685,10 +1686,6 @@ def kustomize_rollback_renderer(
 async def build_plan_api_service(**runtime_options: Any) -> RuntimePlanService:
     """Build the source-safe API plan facade from the production repositories."""
     return (await create_plan_runtime(**runtime_options)).plan_service
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _with_binding_policy_evidence(source: WorkloadSource, binding: WorkloadBinding) -> WorkloadSource:

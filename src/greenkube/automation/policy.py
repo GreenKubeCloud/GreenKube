@@ -21,6 +21,7 @@ from greenkube.gitops.contracts import (
 )
 from greenkube.models.metrics import RecommendationRecord, RiskLevel
 from greenkube.storage.base_gitops_repository import AutomationPlanRecord
+from greenkube.utils.time import ensure_utc
 
 _RISK_RANK = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
 _ACTIVE_PLAN_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED, PlanStatus.APPLYING})
@@ -242,7 +243,7 @@ class AutomationPolicyEvaluator:
         exclude_plan_id: str | None = None,
         exclude_plan_ids: Sequence[str] = (),
     ) -> AutomationPolicyResult:
-        now = _as_utc(self.clock())
+        now = ensure_utc(self.clock())
         workload = {
             "cluster": source.cluster,
             "namespace": source.namespace,
@@ -944,7 +945,7 @@ class AutomationPolicyEvaluator:
                     )
                     return
                 timestamp = record.updated_at or timestamp
-            timestamps.append(_as_utc(timestamp))
+            timestamps.append(ensure_utc(timestamp))
 
         most_recent = max(timestamps)
         eligible_at = most_recent + cooldown
@@ -1061,9 +1062,3 @@ def _same_workload(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
