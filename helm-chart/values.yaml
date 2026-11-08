@@ -460,13 +460,13 @@ config:
     minSamples: 36
     # --- Verification (apply detection, health gates, rollback review) ---
     verification:
-      # Observation window after a change lands before the outcome is verified.
+      # Fixed measurement window after the rollout completes (baseline: same length, ending at the PR merge).
       windowHours: 72
       # Minimum raw samples required before a verdict is rendered.
       minSamples: 36
-      # Measured savings must reach this ratio of the projection to pass the cost gate.
+      # Projection accuracy below which a realized saving is flagged (reported only, not a gate).
       minSavingsRatio: 0.5
-      # p95 usage must stay below proposed request x this factor to pass the health gate.
+      # Per-pod p95 usage must stay below the applied per-pod request x this factor.
       usageHeadroom: 1.1
       # Maximum allowed restart-count increase during the observation window.
       maxRestartDelta: 0

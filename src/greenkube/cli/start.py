@@ -325,8 +325,20 @@ async def run_recommendation_lifecycle() -> None:
         if applied:
             logger.info("Detected %d newly applied recommendation(s).", len(applied))
 
-        verifier = RecommendationVerifier(lifecycle, _combined_repo())
-        verified = await verifier.verify_due()
+        from ..collectors.workload_health_collector import WorkloadHealthCollector
+        from ..storage.measurement_repository import get_savings_measurement_repository
+
+        health_collector = WorkloadHealthCollector()
+        verifier = RecommendationVerifier(
+            lifecycle,
+            _combined_repo(),
+            health_collector=health_collector,
+            measurement_repo=get_savings_measurement_repository(),
+        )
+        try:
+            verified = await verifier.verify_due()
+        finally:
+            await health_collector.close()
         if verified:
             logger.info("Verified %d recommendation outcome(s).", len(verified))
 

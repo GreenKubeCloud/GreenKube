@@ -6,6 +6,11 @@ request matches the recommendation within the configured tolerance and an
 active recommendation existed for that target, the recommendation transitions
 to ``applied``. Ambiguous workload-level aggregates are never used to infer a
 multi-container target.
+
+A change counts as applied only once its rollout has completed (every replica
+updated and available, ``observedGeneration >= generation``); ``applied_at`` is
+the rollout completion time, so the verification after-window never includes
+old pods (C0.12, BUG-38).
 """
 
 from __future__ import annotations
@@ -13,8 +18,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Sequence, Tuple
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from greenkube.gitops.contracts import (
     ActionPlanV3,
@@ -59,6 +64,14 @@ class WorkloadSnapshot:
     observed_generation: int | None = None
     container_request_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
     container_request_values_valid: bool = True
+    # Rollout state; ``None`` means the reader does not report it (legacy/fake readers).
+    desired_replicas: int | None = None
+    current_replicas: int | None = None
+    updated_replicas: int | None = None
+    available_replicas: int | None = None
+    current_revision: str | None = None
+    update_revision: str | None = None
+    rollout_completed_at: datetime | None = None
 
 
 class WorkloadReader(Protocol):
@@ -212,6 +225,109 @@ def _parse_memory(value) -> int:
         return 0
 
 
+def _int_field(value, name: str, camel_case: str | None = None) -> int | None:
+    raw = _resource_field(value, name, camel_case) if value is not None else None
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_time(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _deployment_completed_at(status) -> datetime | None:
+    """Last update of the ``Progressing`` condition once the new ReplicaSet is available."""
+    conditions = _resource_field(status, "conditions") if status is not None else None
+    for condition in conditions or []:
+        if (
+            _resource_field(condition, "type") == "Progressing"
+            and str(_resource_field(condition, "status")) == "True"
+            and _resource_field(condition, "reason") == "NewReplicaSetAvailable"
+        ):
+            return _parse_time(_resource_field(condition, "last_update_time", "lastUpdateTime"))
+    return None
+
+
+def _rollout_fields(kind: str, spec, status) -> dict[str, Any]:
+    """Normalize rollout progress across Deployment, StatefulSet and DaemonSet."""
+    if kind == "DaemonSet":
+        return {
+            "desired_replicas": _int_field(status, "desired_number_scheduled", "desiredNumberScheduled") or 0,
+            "current_replicas": _int_field(status, "current_number_scheduled", "currentNumberScheduled") or 0,
+            "updated_replicas": _int_field(status, "updated_number_scheduled", "updatedNumberScheduled") or 0,
+            "available_replicas": _int_field(status, "number_available", "numberAvailable") or 0,
+        }
+    desired = _int_field(spec, "replicas")
+    fields: dict[str, Any] = {
+        "desired_replicas": 1 if desired is None else desired,
+        "current_replicas": _int_field(status, "replicas") or 0,
+        "updated_replicas": _int_field(status, "updated_replicas", "updatedReplicas") or 0,
+    }
+    available = _int_field(status, "available_replicas", "availableReplicas")
+    if kind == "StatefulSet":
+        if available is None:
+            available = _int_field(status, "ready_replicas", "readyReplicas")
+        fields["current_revision"] = _resource_field(status, "current_revision", "currentRevision") if status else None
+        fields["update_revision"] = _resource_field(status, "update_revision", "updateRevision") if status else None
+    else:
+        fields["rollout_completed_at"] = _deployment_completed_at(status)
+    fields["available_replicas"] = available or 0
+    return fields
+
+
+def rollout_complete(snapshot: WorkloadSnapshot) -> bool:
+    """True when every replica runs the current template and is available.
+
+    Readers that do not report rollout progress (``desired_replicas is None``)
+    are trusted on ``observedGeneration`` alone.
+    """
+    generation = snapshot.generation
+    observed = snapshot.observed_generation
+    if (
+        isinstance(generation, int)
+        and isinstance(observed, int)
+        and not isinstance(generation, bool)
+        and not isinstance(observed, bool)
+        and observed < generation
+    ):
+        return False
+    desired = snapshot.desired_replicas
+    if desired is None:
+        return True
+    updated = snapshot.updated_replicas if snapshot.updated_replicas is not None else desired
+    available = snapshot.available_replicas if snapshot.available_replicas is not None else desired
+    current = snapshot.current_replicas if snapshot.current_replicas is not None else updated
+    if updated < desired or available < desired or current != updated:
+        return False
+    if snapshot.current_revision and snapshot.update_revision and snapshot.current_revision != snapshot.update_revision:
+        return False
+    return True
+
+
+def rollout_completion_time(snapshot: WorkloadSnapshot, now: datetime) -> tuple[datetime, str]:
+    """Best known rollout completion time, never later than ``now``.
+
+    Deployments report it through their ``Progressing`` condition; otherwise the
+    detection time is used, which is a conservative (late) bound.
+    """
+    completed = snapshot.rollout_completed_at
+    if completed is not None and completed <= now:
+        return completed, "progressing_condition"
+    return now, "detection_time"
+
+
 class K8sWorkloadReader:
     """Reads Deployment/StatefulSet/DaemonSet requests via the Kubernetes API."""
 
@@ -267,6 +383,7 @@ class K8sWorkloadReader:
                     observed_generation=_resource_field(status, "observed_generation", "observedGeneration"),
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
+                    **_rollout_fields(kind, spec, status),
                 )
         return snapshots
 
@@ -423,6 +540,16 @@ class AppliedDetector:
 
             if record.id is None or not self._decreased(observed, current, recommended, tolerance):
                 continue
+            if not rollout_complete(snapshot):
+                logger.info(
+                    "Apply detection deferred for recommendation %d: rollout of %s/%s/%s is still in progress.",
+                    record.id,
+                    snapshot.namespace,
+                    snapshot.kind,
+                    snapshot.name,
+                )
+                continue
+            applied_at, completion_source = rollout_completion_time(snapshot, datetime.now(timezone.utc))
 
             method = (
                 ApplicationMethod.PR_MERGE.value
@@ -440,6 +567,17 @@ class AppliedDetector:
                     actual_memory=actual_memory,
                     application_method=method,
                     actor="detector",
+                    applied_at=applied_at,
+                    plan_id=synced_plan.plan_id if synced_plan is not None else None,
+                    rollout={
+                        "completed_at": applied_at.isoformat(),
+                        "completion_source": completion_source,
+                        "generation": snapshot.generation,
+                        "observed_generation": snapshot.observed_generation,
+                        "desired_replicas": snapshot.desired_replicas,
+                        "updated_replicas": snapshot.updated_replicas,
+                        "available_replicas": snapshot.available_replicas,
+                    },
                 )
                 if action_status is not None and self.action_status_repository is not None:
                     updated_count = await self.action_status_repository.set_recommendation_action_status(

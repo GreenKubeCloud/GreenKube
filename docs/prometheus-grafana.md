@@ -207,8 +207,8 @@ aggregate registries from separate controller or automation pods.
 | `greenkube_optimization_run_duration_seconds` | Histogram; no labels | Optimization-run duration in seconds |
 | `greenkube_optimization_analyzer_failures_total` | Counter; `source` | Failures by recommendation source |
 | `greenkube_recommendations_generated_total` | Counter; no labels | Recommendations emitted by completed optimization runs |
-| `greenkube_verification_outcomes_total` | Counter; `outcome` | Verification outcomes, including rollback reviews |
-| `greenkube_verification_health_gate_failures_total` | Counter; `gate` | Verification health-gate failures |
+| `greenkube_verification_outcomes_total` | Counter; `outcome` | Verification outcomes: `verified`, `not_realized`, `inconclusive`, `rollback_review` |
+| `greenkube_verification_health_gate_failures_total` | Counter; `gate` | Verification health-gate failures: `cpu_p95`, `memory_p95`, `restarts`, `oom_kills`, `readiness`, `cpu_throttling` |
 | `greenkube_last_successful_optimization_run_timestamp_seconds` | Gauge; no labels | Unix timestamp of the last fully successful optimization run |
 
 ### GitOps and PR-bot lifecycle metrics

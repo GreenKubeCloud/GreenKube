@@ -191,9 +191,19 @@ class MigrationRunner:
         To make migrations safe on databases where the ``CREATE TABLE``
         already includes the columns, each statement is executed individually
         and ``OperationalError`` from duplicate-column ``ALTER TABLE`` is
-        silently ignored.
+        silently ignored. Fragments are joined until SQLite reports a complete
+        statement, so trigger bodies (``BEGIN ...; END;``) stay intact.
         """
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        statements: list[str] = []
+        pending = ""
+        for fragment in sql.split(";"):
+            pending += fragment + ";"
+            if sqlite3.complete_statement(pending):
+                if pending.strip(" \t\r\n;"):
+                    statements.append(pending.strip())
+                pending = ""
+        if pending.strip(" \t\r\n;"):
+            statements.append(pending.strip())
         for stmt in statements:
             try:
                 await connection.execute(stmt)

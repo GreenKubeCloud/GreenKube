@@ -691,27 +691,51 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 update={"id": cursor.lastrowid, "created_at": event.created_at or datetime.now(timezone.utc)}
             )
 
-    async def transition_and_record_event(self, rec_id: int, updates: dict, event_type: str, actor: str, payload: dict):
-        """Atomically update a recommendation and append its lifecycle event."""
+    async def transition_and_record_event(
+        self,
+        rec_id: int,
+        updates: dict,
+        event_type: str,
+        actor: str,
+        payload: dict,
+        *,
+        expected_statuses: Optional[List[str]] = None,
+    ) -> Optional[RecommendationRecord]:
+        """Atomically update a recommendation and append its lifecycle event.
+
+        With ``expected_statuses`` the update is a compare-and-swap: nothing is
+        written and ``None`` is returned when the stored status differs.
+        """
         filtered = {k: v for k, v in updates.items() if k in MUTABLE_COLUMNS}
         if not filtered:
             raise ValueError("No mutable recommendation columns supplied.")
         now = datetime.now(timezone.utc)
         filtered.setdefault("updated_at", now)
+        where = "id = ?"
+        params = [_encode_value(value) for value in filtered.values()] + [rec_id]
+        if expected_statuses is not None:
+            where += f" AND status IN ({', '.join('?' for _ in expected_statuses)})"
+            params.extend(_encode_value(status) for status in expected_statuses)
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
-            params = [_encode_value(value) for value in filtered.values()] + [rec_id]
-            await conn.execute(
-                f"UPDATE recommendation_history SET {', '.join(f'{k} = ?' for k in filtered)} WHERE id = ?",
-                params,
-            )
-            await conn.execute(
-                """INSERT INTO recommendation_events
-                (recommendation_id, event_type, actor, payload, created_at)
-                VALUES (?, ?, ?, ?, ?)""",
-                (rec_id, event_type, actor, json.dumps(payload), to_iso_z(now)),
-            )
-            await conn.commit()
+            try:
+                cursor = await conn.execute(
+                    f"UPDATE recommendation_history SET {', '.join(f'{k} = ?' for k in filtered)} WHERE {where}",
+                    params,
+                )
+                if expected_statuses is not None and cursor.rowcount != 1:
+                    await conn.rollback()
+                    return None
+                await conn.execute(
+                    """INSERT INTO recommendation_events
+                    (recommendation_id, event_type, actor, payload, created_at)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (rec_id, event_type, actor, json.dumps(payload, default=str), to_iso_z(now)),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
             row = await (await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))).fetchone()
             return row_to_record(row)
 

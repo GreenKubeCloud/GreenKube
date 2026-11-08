@@ -75,9 +75,11 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 | `GET` | `/recommendations/savings` | Read realized savings (`last`, `namespace`). |
 | `GET` | `/recommendations/{rec_id}` | Read a recommendation record. |
 | `GET` | `/recommendations/{rec_id}/events` | Read its lifecycle audit trail. |
-| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. |
-| `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore a recommendation. |
-| `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. |
+| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. Only `active` or `pr_open` records can be applied; any other status returns `409`. |
+| `POST` | `/recommendations/{rec_id}/remeasure` | Start a new fixed-horizon measurement of an applied change whose last measurement was `not_realized` (`verification_status=failed`) or `inconclusive`. Optional body `{"reason": "..."}`. The other members of its attribution group (CPU and memory of one change) in the same state are re-measured with it over the same window. Returns `202` with the record (`verifying`); `409` for any other state (including a sibling already re-measured with its group), `404` when unknown. |
+| `POST` | `/recommendations/{rec_id}/rollback-review/dismiss` | Dismiss a false-positive `rollback_review` with a required, non-blank `{"reason": "..."}`: the record, and the other members of its attribution group still in review, return to `applied` and are measured again. `422` for a missing or blank reason, `409` outside `rollback_review`, `404` when unknown. |
+| `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore an `active`, `stale` or `expired` recommendation. `409` for an open PR or an applied change. |
+| `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. `409` when it is not `ignored`. |
 | `POST` | `/recommendations/{rec_id}/apply-pr` | Compatibility endpoint that previews or queues a validated GitOps plan. |
 | `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | Check eligibility with a read-only plan preview. |
 | `GET` | `/recommendations/{rec_id}/pull-requests` | List pull-request attempts for one recommendation. |
