@@ -196,6 +196,15 @@ data:
   VERIFICATION_MAX_THROTTLE_RATIO: {{ .maxThrottleRatio | default 0.05 | quote }}
   RECOMMENDATION_LIFECYCLE_INTERVAL: {{ .lifecycleInterval | default "5m" | quote }}
   {{- end }}
+  {{- with .changeMeasurement }}
+  CHANGE_MEASUREMENT_ENABLED: {{ ternary "true" "false" (ne .enabled false) | quote }}
+  CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: {{ .preWindowDays | default 7 | quote }}
+  CHANGE_MEASUREMENT_POST_WINDOW_DAYS: {{ .postWindowDays | default 7 | quote }}
+  CHANGE_MEASUREMENT_WARMUP_HOURS: {{ if hasKey . "warmupHours" }}{{ .warmupHours | quote }}{{ else }}"1"{{ end }}
+  CHANGE_MEASUREMENT_MIN_COVERAGE: {{ .minCoverage | default 0.8 | quote }}
+  CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: {{ .bootstrapSamples | default 1000 | int | quote }}
+  CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
+  {{- end }}
   {{- end }}
 
   # --- Impact Model ---

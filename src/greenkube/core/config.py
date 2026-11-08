@@ -344,6 +344,22 @@ class Config(BaseSettings):
     VERIFICATION_MIN_READINESS: float = 0.99
     # Maximum allowed CPU throttling ratio during the observation window.
     VERIFICATION_MAX_THROTTLE_RATIO: float = 0.05
+    # --- Change measurement (roadmap C1-C5, docs/methodology/savings-measurement.md) ---
+    # Record every detected change with a baseline snapshot and measure it with a
+    # counterfactual and a bootstrap CI. Off: changes are measured by the interim verifier.
+    CHANGE_MEASUREMENT_ENABLED: bool = True
+    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches.
+    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, ge=7)
+    # Post-change window (days) starting after the rollout and its warm-up.
+    CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
+    # Hours after rollout completion excluded from the post-window.
+    CHANGE_MEASUREMENT_WARMUP_HOURS: float = Field(1.0, ge=0)
+    # Minimum share of post-window hours matched with a baseline hour of the week.
+    CHANGE_MEASUREMENT_MIN_COVERAGE: float = Field(0.8, gt=0, le=1)
+    # Moving-block bootstrap resamples for the 90% confidence interval.
+    CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: int = Field(1000, ge=100, le=100000)
+    # Noise floor: not realized when the CI upper bound is at most this share of the counterfactual.
+    CHANGE_MEASUREMENT_EPSILON_RATIO: float = Field(0.02, ge=0, le=1)
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the

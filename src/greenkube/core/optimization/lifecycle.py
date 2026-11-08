@@ -298,13 +298,16 @@ class RecommendationLifecycle:
         baseline_window_end: Optional[datetime] = None,
         plan_id: Optional[str] = None,
         rollout: Optional[dict] = None,
+        change_id: Optional[str] = None,
     ) -> RecommendationRecord:
         """Marks an ``active``/``pr_open`` recommendation applied and freezes its baseline.
 
         ``applied_at`` is the rollout completion time (C0.12); it defaults to
         now. The baseline window ends at ``baseline_window_end`` when given,
         otherwise at the latest PR merge (or plan approval) recorded for the
-        recommendation, otherwise at ``applied_at``.
+        recommendation, otherwise at ``applied_at``. ``change_id`` links the
+        record to the change recorded by apply detection (C1); such records are
+        measured by the change-measurement pipeline.
         """
         from greenkube.core.recommendation_realization import estimate_realized_savings
 
@@ -331,6 +334,8 @@ class RecommendationLifecycle:
             baseline["plan_id"] = plan_id
         if rollout:
             baseline["rollout"] = rollout
+        if change_id is not None:
+            baseline["change_id"] = change_id
         request = ApplyRecommendationRequest(
             actual_cpu_request_millicores=actual_cpu,
             actual_memory_request_bytes=actual_memory,
@@ -366,6 +371,7 @@ class RecommendationLifecycle:
                 "applied_at": applied.isoformat(),
                 "baseline_window_end": window_end.isoformat(),
                 "plan_id": plan_id,
+                **({"change_id": change_id} if change_id is not None else {}),
             },
             expected_statuses=APPLICABLE_STATUSES,
         )

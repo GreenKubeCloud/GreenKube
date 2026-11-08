@@ -121,6 +121,53 @@ class SavingsMeasurementRepository:
         """Return every measurement of a recommendation, oldest first."""
         return await self._select("recommendation_id = {}", [recommendation_id])
 
+    async def list_for_change(self, change_id: str) -> List[SavingsMeasurement]:
+        """Per-recommendation measurements written for a change (C5 allocations), oldest first."""
+        return await self._select("change_id = {}", [change_id])
+
+    async def get_outcome_counts_by_source_capability(self) -> dict[tuple[str, str], dict[str, int]]:
+        """Outcome counts of decided measurements by recommendation source and capability (track record, I3).
+
+        Returns ``{(source, capability): {"realized": n, "not_realized": n, "rollback": n}}``.
+        Each recommendation counts once, by its latest measurement: ``realized``
+        and ``not_realized`` outcomes as such; a recommendation in
+        ``rollback_review`` or ``reverted`` (or whose latest measurement sent it
+        to rollback review) as ``rollback``. Inconclusive (and contaminated)
+        measurements say nothing about the source and are not counted.
+        """
+        query = (
+            "SELECT r.id AS recommendation_id, r.source AS source, r.capability AS capability, r.status AS status, "
+            "m.outcome AS outcome, m.sequence AS sequence FROM recommendation_history r "
+            "LEFT JOIN savings_measurements m ON m.recommendation_id = r.id "
+            "WHERE m.recommendation_id IS NOT NULL OR r.status IN ('reverted', 'rollback_review')"
+        )
+        async with self.db_manager.connection_scope() as conn:
+            if self._postgres:
+                rows = [dict(row) for row in await conn.fetch(query)]
+            else:
+                cursor = await conn.execute(query)
+                names = [column[0] for column in cursor.description or []]
+                rows = [dict(zip(names, row)) for row in await cursor.fetchall()]
+        latest: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            key = int(row["recommendation_id"])
+            current = latest.get(key)
+            if current is None or int(row.get("sequence") or 0) > int(current.get("sequence") or 0):
+                latest[key] = row
+        counts: dict[tuple[str, str], dict[str, int]] = {}
+        for row in latest.values():
+            outcome = row.get("outcome")
+            if row.get("status") in ("reverted", "rollback_review") or outcome == "rollback_review":
+                bucket = "rollback"
+            elif outcome in ("realized", "not_realized"):
+                bucket = str(outcome)
+            else:
+                continue
+            group = (str(row.get("source") or "greenkube"), str(row.get("capability") or "unknown"))
+            entry = counts.setdefault(group, {"realized": 0, "not_realized": 0, "rollback": 0})
+            entry[bucket] += 1
+        return counts
+
     async def _select(self, where: str, params: list[Any]) -> List[SavingsMeasurement]:
         if self._postgres:
             clause = where.format(*[f"${index}" for index in range(1, len(params) + 1)])
