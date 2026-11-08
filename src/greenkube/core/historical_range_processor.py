@@ -320,20 +320,6 @@ class HistoricalRangeProcessor:
             is_fallback=power.is_fallback,
         )
 
-    async def _write_idle_metrics(self, idle_rows: List[NodeIdleMetric]) -> None:
-        """Persists the ``__idle__`` rows of a range (idempotent upsert per node and step).
-
-        A storage error fails the window like any Prometheus error, so the
-        watermark is not advanced over a window without its idle rows.
-        """
-        repository = self.combined_metrics_repository
-        if not idle_rows or not isinstance(repository, CombinedMetricsRepository):
-            return
-        try:
-            await repository.write_idle_metrics(idle_rows)
-        except Exception as error:
-            raise RangeCollectionError(f"Could not store {len(idle_rows)} node idle row(s)") from error
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -365,6 +351,7 @@ class HistoricalRangeProcessor:
             raise ValueError(f"Could not parse end time: {end!r}")
         if end_dt <= start_dt:
             raise ValueError("Historical range end must be after start")
+        self.last_idle_metrics = []
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -837,10 +824,11 @@ class HistoricalRangeProcessor:
                 ", ".join(sorted(name or "<unresolved>" for name in unknown_power_nodes)),
             )
 
+        # Idle rows are returned, not written: the caller commits them with the
+        # pod rows after its leader-fence check (roadmap A14), so a replica that
+        # lost the Lease during the Prometheus queries writes nothing.
         self.last_idle_metrics = idle_rows
-        if not namespace:
-            await self._write_idle_metrics(idle_rows)
-        else:
+        if namespace:
             combined = [c for c in combined if c.namespace == namespace]
 
         await self.calculator.clear_cache()

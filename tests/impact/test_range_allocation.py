@@ -139,7 +139,10 @@ async def test_rows_carry_reservation_aware_allocation_and_idle_rows_conserve_no
         assert row.total_cost > 0
         assert row.total_cost == pytest.approx((row.cost_cpu or 0) + (row.cost_ram or 0))
 
-    # The idle row is persisted next to the pod rows.
+    # run_range only returns the idle rows; the collection job commits them
+    # after its leader-fence check (A14), next to the pod rows.
+    assert await repo.read_idle_metrics(BASE, END) == []
+    await repo.write_idle_metrics(processor.last_idle_metrics)
     (stored,) = await repo.read_idle_metrics(BASE, END)
     assert stored.joules == pytest.approx(idle.joules)
     assert stored.model_version == IMPACT_MODEL_VERSION
@@ -185,7 +188,7 @@ async def test_dcgm_gpu_power_is_attributed_to_pods_and_idle(setup):
 
 
 @pytest.mark.asyncio
-async def test_namespace_filtered_runs_do_not_write_idle_rows(setup):
+async def test_namespace_filtered_runs_expose_but_do_not_write_idle_rows(setup):
     prom = FakePrometheus()
     _cluster(prom)
     processor, repo = await setup(prom, FakeOpenCost(pods=()))

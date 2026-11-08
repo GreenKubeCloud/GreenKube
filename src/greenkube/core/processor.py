@@ -333,6 +333,11 @@ class DataProcessor:
         """Delegate historical range processing."""
         return await self._range_processor.run_range(start=start, end=end, step=step, namespace=namespace)
 
+    @property
+    def last_idle_metrics(self) -> list:
+        """``__idle__`` rows of the last :meth:`run_range` call (committed by the caller)."""
+        return self._range_processor.last_idle_metrics
+
     # ------------------------------------------------------------------
     # close()
     # ------------------------------------------------------------------
