@@ -31,7 +31,7 @@ Every recommendation returned by `GET /api/v1/recommendations`, `/recommendation
 | `action_kind` | The change GreenKube would write (`container_resources`), or `null` when the kind is not supported yet. |
 | `recommendation_ids` | The change set a plan must be created for (several containers of one workload are one pull request); `null` when not eligible. |
 
-Eligibility depends on live state (GitOps bindings, freeze windows, open pull requests, the clock), so it is computed when the recommendation is read and never stored. The checks run in this order: lifecycle status, action kind and container target, automation configuration, the workload's GitOps binding, evidence warm-up, then the automation policy. The policy part uses the same `AutomationPolicyEvaluator` that guards plan creation (read-only), so a recommendation shown as eligible passes the same gates when its plan is prepared; the plan itself can still fail on repository content (for example `needs_chart_mapping`).
+Eligibility depends on live state (GitOps bindings, freeze windows, open pull requests, the clock), so it is computed when the recommendation is read and never stored. The checks run in this order: lifecycle status, action kind and container target, automation configuration, the workload's GitOps binding, evidence warm-up, then the automation policy. The policy part uses the same `AutomationPolicyEvaluator` that guards plan creation (read-only), so a recommendation shown as eligible passes the same gates when its plan is prepared. A read that fails (bindings, open pull requests, the policy evaluation) blocks instead of being skipped; the plan itself can still fail on repository content (for example `needs_chart_mapping`).
 
 ## Blockers
 

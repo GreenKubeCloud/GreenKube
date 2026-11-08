@@ -113,7 +113,7 @@ Risk model v2 (roadmap I4) adds the workload facts the pooled usage distribution
 | `memory_decrease_best_effort`, `static_cpu_manager_incompatible` | In-place resize constraints: memory decreases apply on restart (reported); CPU resizes under the static CPU manager are high risk. |
 | `criticality_critical`, `criticality_high`, `criticality_low` | The `greenkube.io/criticality` label: `critical` raises one level, `high` is at least medium. |
 
-Scans observe replicas, per-replica usage and HPA targets. Labels, annotations, VPAs and PodDisruptionBudgets come from GitOps discovery evidence: they shape the expected value (criticality) and the eligibility of a pull request (policy gates) when a recommendation is read.
+Scans observe replicas (pods sampled within half a scrape interval of the latest sample, so scrape jitter does not hide replicas and a pod replaced by a rollout is not counted), per-replica usage and HPA targets. Labels, annotations, VPAs and PodDisruptionBudgets come from GitOps discovery evidence: they shape the expected value (criticality) and the eligibility of a pull request (policy gates) when a recommendation is read.
 
 **Ranking: risk-adjusted expected value.** Every recommendation carries a `value` block (roadmap I1) in the projection currency (`impact.pricing.currency`), per year:
 
