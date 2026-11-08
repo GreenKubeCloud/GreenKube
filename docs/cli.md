@@ -30,6 +30,8 @@ greenkube start [OPTIONS]
 
 This is the default runtime for the collector container in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 
+The process also serves its control-loop metrics (recommendation scans, verification, collection) at `/prometheus/metrics` (and `/metrics`) on `CONTROLLER_METRICS_PORT` (default `9102`; the chart sets it from `collector.metricsPort`; `0` disables the listener). Scrapes need a bearer token only when `GREENKUBE_API_KEY` is set in the controller's environment. A port that cannot be bound is logged and the controller keeps running without the listener.
+
 ### `greenkube demo`
 
 Start GreenKube in demo mode with pre-populated sample data — no live cluster required. Creates a temporary SQLite database, starts the API server and serves the dashboard.

@@ -63,7 +63,7 @@ tests:
             name: AUTOMATION_MODE
             value: worker
 
-  - it: gives the API an HTTP port and the worker a scrape port
+  - it: gives the API an HTTP port and the controller and worker scrape ports
     set:
       profile: production
       automation.enabled: true
@@ -75,8 +75,11 @@ tests:
           path: spec.template.spec.containers[0].ports[0]
       - documentIndex: 1
         equal:
-          path: spec.template.spec.containers[0].ports[0].name
-          value: controller-metrics
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: controller-metrics
+              containerPort: 9102
+              protocol: TCP
       - documentIndex: 1
         equal:
           path: spec.template.spec.containers[0].livenessProbe.exec.command[0]

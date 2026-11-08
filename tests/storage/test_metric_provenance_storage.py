@@ -160,8 +160,9 @@ async def test_hourly_readers_keep_sample_count_and_provenance(db):
 
     await MetricsCompressor(db, Config()).run(now=T0 + timedelta(days=2))
 
-    pod_hourly = await repo.read_hourly_metrics(T0, T0)
-    container_hourly = await repo.read_hourly_container_metrics(T0, T0 + timedelta(hours=1))
+    # Hourly readers are half-open: [start, end) (A2).
+    pod_hourly = await repo.read_hourly_metrics(T0, T0 + timedelta(hours=1))
+    container_hourly = await repo.read_hourly_container_metrics(T0, T0 + timedelta(hours=2))
 
     assert [row.sample_count for row in pod_hourly] == [12]
     by_bucket = {row.timestamp: row for row in container_hourly}

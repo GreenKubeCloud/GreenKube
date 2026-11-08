@@ -30,7 +30,6 @@ def _install_lifespan_dependencies(monkeypatch, config):
     monkeypatch.setattr(database, "get_db_manager", lambda: manager)
     monkeypatch.setattr(api_app, "get_config", lambda: config)
     monkeypatch.setattr(k8s_client, "close_k8s_client", _async_noop)
-    monkeypatch.setattr(api_app, "run_startup_recommendation_scan", _async_noop)
     return api_app, manager
 
 
@@ -92,7 +91,7 @@ async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_m
     async with api_app.lifespan(app):
         await asyncio.wait_for(started.wait(), timeout=1)
         assert app.state.automation_plan_service is service
-        assert len(app.state._startup_tasks) == 2
+        assert len(app.state._startup_tasks) == 1
         supervisor = app.state.automation_loop_supervisor
         assert supervisor is not None and supervisor.health.ready()
 
@@ -123,7 +122,7 @@ async def test_worker_mode_builds_api_service_without_starting_inline_task(monke
 
     async with api_app.lifespan(app):
         assert app.state.automation_plan_service is service
-        assert len(app.state._startup_tasks) == 1
+        assert len(app.state._startup_tasks) == 0
 
     assert calls == 0
 

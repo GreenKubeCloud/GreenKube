@@ -8,7 +8,7 @@ This page describes how GreenKube recommendations are generated, stored, shown, 
 
 Recommendations are derived from stored `CombinedMetric` records. These records already combine Kubernetes workload identity, resource requests, observed CPU and memory usage, energy, CO2e, cost, timestamps, grid intensity, and node metadata collected elsewhere in GreenKube.
 
-The API and startup scan use `RECOMMENDATION_LOOKBACK_DAYS` to read the recent metrics window from the combined metrics repository. The default is 7 days. When the recommender receives the analysis window length, projected savings are annualized from the observed window.
+Scheduled scans use `RECOMMENDATION_LOOKBACK_DAYS` to read the recent metrics window from the combined metrics repository. The default is 7 days. When the recommender receives the analysis window length, projected savings are annualized from the observed window.
 
 The optimization context can also include these optional Kubernetes and cost inputs:
 
@@ -21,7 +21,7 @@ The optimization context can also include these optional Kubernetes and cost inp
 
 VPA and Karpenter are separate optional recommendation sources. VPA reads recommendation-mode objects when its CRD is available; Karpenter reads NodePools/NodeClaims when compatible CRDs are available. Both connectors are enabled by default and skip cleanly when their APIs are absent.
 
-During API and startup scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever.
+During scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever.
 
 ## Lifecycle States
 
@@ -30,8 +30,8 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 | State | Meaning | How it is reached |
 |---|---|---|
 | `active` | The recommendation is currently valid and visible in active lists, top recommendations, Prometheus active gauges, Grafana cards, and the frontend Active tab. | Created by `RecommendationRecord.from_recommendation()` and inserted or refreshed by repository upsert. Ignored recommendations can also be restored to active. |
-| `stale` | A previously active recommendation no longer appears in the latest generated set. It is kept in history but no longer shown as active. | `reconcile_active_recommendations()` after a refresh or startup scan. |
-| `expired` | The recommendation passed `expires_at` (`generated_at + RECOMMENDATION_TTL_DAYS`) without being applied. It is hidden from active lists but retained for history. | `RecommendationLifecycle.expire()` during every refresh and every lifecycle job. |
+| `stale` | A previously active recommendation no longer appears in the latest generated set and every source that supported it completed the scan. It is kept in history but no longer shown as active. | `reconcile_active_recommendations()` at the end of each scan (see [Per-source reconciliation](#per-source-reconciliation)). |
+| `expired` | The recommendation passed `expires_at` (`generated_at + RECOMMENDATION_TTL_DAYS`) without being applied. It is hidden from active lists but retained for history. | `RecommendationLifecycle.expire()` during every scan and every lifecycle job. |
 | `ignored` | A user intentionally hid the recommendation with an optional reason. Ignored records are preserved for review and can be restored. | `PATCH /api/v1/recommendations/{id}/ignore`, only from `active`, `stale` or `expired` (an open PR or an applied change returns `409`). |
 | `pr_open` | The PR bot opened a pull request that applies the recommendation. | `POST /api/v1/recommendations/{id}/apply-pr`. |
 | `applied` | The change landed in the cluster. Applying freezes a verification baseline. A measured change whose saving was not realized (`verification_status=failed`) or inconclusive also stays `applied`. | `PATCH .../apply` (manual, only from `active` or `pr_open`; 409 otherwise), apply detection (Kubernetes API, once the rollout completed), or a merged PR. A dismissed rollback review returns here. |
@@ -56,17 +56,40 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 - **Terminal outcomes.** `not_realized` and `inconclusive` are never re-tested automatically. `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement window that supersedes the previous measurement (the baseline still ends at the original change). `POST /api/v1/recommendations/{id}/rollback-review/dismiss` with a non-blank reason returns a false-positive rollback review to `applied` and measures it again. Both act on the whole attribution group: every member in the same state starts the same new window (its events carry `attribution_group_ids` and `requested_via`), so asking again for a sibling returns `409`.
 - **Replays.** A decision persisted before a crash is replayed from its stored measurement on the next pass instead of being observed again, and the outcome metric is counted once, after the transition is written.
 
+## Scheduled Scans
+
+Recommendation scans run **only in the controller** (`greenkube start`), behind the controller Lease, never in API replicas:
+
+- The `recommendation_scan` job polls every 15 seconds. When no cluster-wide scan was requested within `RECOMMENDATION_SCAN_INTERVAL` (default `1h`), it queues a `scheduled` run; then it claims and executes queued runs, oldest first.
+- The poll stays idle until the controller has finished its initial work (collection, node analysis, lifecycle). That work ends with one cluster-wide scan that always runs, even when a scan from the previous pod still covers the interval, so the first scan after a (re)start sees the freshly collected data. In leader mode this happens when the controller first acquires the Lease.
+- Every scan is an **optimization run** (`optimization_runs` table): `queued` → `running` → `succeeded` or `failed`. Queuing and claiming are single conditional SQL statements, so two API replicas plus one controller (or a Lease hand-over between controllers) produce exactly one scheduled scan per interval, and each queued run executes once.
+- `POST /api/v1/optimization/runs` queues an on-demand run and returns `202 {"run_id", "status": "queued"}`. While a run is still queued for the same scope, its id is returned instead of queuing a duplicate; a queued cluster-wide run also covers namespaced requests. Poll `GET /api/v1/optimization/runs/{run_id}` until the status is terminal, then reload the recommendations.
+- `refresh=true` on the recommendation GET endpoints is **deprecated**: it returns the current data with a run id in the `X-GreenKube-Run-Id` response header. When a run covering the scope (the same namespace, or cluster-wide) is queued, running, or finished within the last 5 minutes, that run's id is returned (a failed run is reused for 1 minute only, then a refresh queues a retry); otherwise a `refresh` run is queued. Repeated page loads therefore do not chain scans. GET endpoints never run analyzers or write recommendations.
+- A run left `running` for more than 30 minutes (for example because its controller crashed) is marked `failed` by the next cycle. If its controller finishes it later, the `failed` outcome is kept.
+- Succeeded and failed runs older than 30 days are deleted when the next cluster-wide run is queued.
+- If no controller is running, queued runs stay `queued`.
+
+Each finished run records:
+
+| Field | Meaning |
+|---|---|
+| `recommendation_count` | Recommendations written by the run (an incomplete source's last known advice that was kept instead of a lower-priority replacement is not counted). |
+| `sources` | Per-source health: `succeeded`, `incomplete`, `failed` (with `error`, e.g. `timeout`) or `unavailable`, plus the number of recommendations and the duration. |
+| `failed_source_count` | Sources that failed or returned a partial result. A run with some failed sources is still `succeeded` (degraded, with `error` naming them); it is `failed` only when every attempted source failed, or when loading metrics or persisting failed. |
+| `new_count`, `changed_count`, `resolved_count`, `unchanged_count` | Diff against the active set of the scanned scope just before the run (for a namespaced run, that namespace only; cluster-scoped output of such a run is not counted). *Changed* means the proposal changed (winning source, current or recommended requests, schedule, node); projected-savings drift alone is not a change. *Resolved* recommendations became `stale`. |
+| `diff` | Up to 100 fingerprints per list (`new`, `changed`, `resolved`), with `truncated` when a list was longer. |
+
 ## Generation Flow
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
-2. `OptimizationEngine.refresh()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers. This loading logic is shared by API recommendation requests and the startup scan.
-3. Enabled **sources** run over the context. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
+2. `OptimizationEngine.run_scan()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers.
+3. Enabled **sources** run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes. A source that raises or times out is recorded as `failed` and the scan continues with the others. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
 4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
 5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with the multi-criteria ranking profile.
 6. Recommended CPU and memory requests are floored to configured minimums.
-7. API and startup paths convert recommendations to `RecommendationRecord` objects, upsert active records, and reconcile missing active records as stale.
+7. The scan converts recommendations to `RecommendationRecord` objects, upserts active records, reconciles missing active records as stale (per source, see below) and records the run outcome.
 
-The API and frontend are the only consumers of the engine; there is no CLI reporting command.
+The controller is the only process that runs and persists scans; the API reads persisted records and queues runs. There is no CLI reporting command.
 
 ## Sources, Evidence And Ranking
 
@@ -115,7 +138,15 @@ This identity allows pod, workload, namespace, and node recommendations to coexi
 
 Ignored records are left untouched by normal upsert so a user decision is not overwritten by the next scan. If a generated recommendation matches a previously applied record, the applied record can be refreshed so its realized savings reflect the current observed state.
 
-After each API or startup refresh, reconciliation compares the latest generated identities with currently active records. Any active record missing from the generated set becomes `stale`.
+### Per-source reconciliation
+
+At the end of each scan, reconciliation compares the latest generated identities with currently active records. An active record missing from the generated set becomes `stale` **only when every source that supported it** (its `sources` provenance, or its `source` for older rows) completed the scan. A source that failed, timed out, was unavailable or reported an incomplete result never causes staleness and never blocks persistence of the other sources: its previous recommendations stay active as "last known" until it completes again or their TTL expires. Recommendations from a source that is no longer configured reconcile normally.
+
+When the arbitration winner of an active recommendation (for example VPA) did not complete, a lower-priority source re-emitting the same target (for example native rightsizing) does not overwrite the last known advice, so proposals do not flap during a transient connector outage.
+
+A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and keep suppressing the native replacement for their targets, until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
+
+Connectors that degrade gracefully (return a partial list instead of raising) report an incomplete result by setting `last_collect_complete = False` on the source instance during `collect()`. The engine resets the flag to `True` before every `collect()` call, so a connector only sets it when the current call is partial.
 
 ## API Usage
 
@@ -123,9 +154,12 @@ All recommendation API paths are under `/api/v1`.
 
 | Method | Path | Behavior |
 |---|---|---|
-| `GET` | `/recommendations?namespace=&refresh=false` | Returns active records. If none exist, the first read generates and persists them; `refresh=true` schedules a refresh after the response. |
-| `GET` | `/recommendations/active?namespace=&refresh=false&source=&risk_level=&capability=` | Returns persisted active records. With `refresh=true`, runs generation and reconciliation first. Optional filters by source, risk level and capability. |
-| `GET` | `/recommendations/top?limit=5&metric=co2&profile=&namespace=&refresh=false` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. With `profile` (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`), the multi-criteria `ranking_score` drives the order. |
+| `GET` | `/recommendations?namespace=` | Returns persisted active records (never generates them). |
+| `GET` | `/recommendations/active?namespace=&source=&risk_level=&capability=` | Returns persisted active records ordered by `ranking_score` (highest first, unscored last), then projected annual cost savings (highest first, unknown last), then `id`. Optional filters by source, risk level and capability. |
+| `GET` | `/recommendations/top?limit=5&metric=co2&profile=&namespace=` | Returns ranked active recommendations with positive projected savings. `metric` is `co2` or `cost`; `limit` is 1 to 50. With `profile` (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`), the multi-criteria `ranking_score` drives the order. |
+| `POST` | `/optimization/runs` | Queues a scan for the controller (optional body `{"namespace": "..."}`); returns `202 {"run_id", "status"}`, deduplicated while a run is queued for the same scope. |
+| `GET` | `/optimization/runs?limit=20` | Lists recent runs, newest first (`limit` 1 to 100), with per-source health and diff counts. |
+| `GET` | `/optimization/runs/{run_id}` | Returns one run: `status` (`queued`, `running`, `succeeded`, `failed`), `requested_at`, `started_at`, `completed_at`, `recommendation_count`, `error`, `sources`, diff counts and `diff`. |
 | `GET` | `/recommendations/{id}` | Returns a single record including its full evidence block, risk/confidence assessment, patch plan and expiry. |
 | `GET` | `/recommendations/ignored?namespace=` | Returns ignored records. |
 | `GET` | `/recommendations/applied?namespace=` | Returns applied, verifying, verified and rollback-review records ordered by most recent application. |
@@ -139,6 +173,8 @@ All recommendation API paths are under `/api/v1`.
 | `GET` | `/recommendations/{id}/pull-requests` | Lists the pull-request attempts and their status for a recommendation. |
 | `GET` | `/automation/status` | Reports secret-free automation readiness, worker heartbeat, queue depth, discovery freshness, renderer configuration, and provider capability/preflight state. |
 
+`refresh=true` is still accepted on `/recommendations`, `/recommendations/active` and `/recommendations/top` but is deprecated: it returns the current data with an `X-GreenKube-Run-Id` header naming a run that covers the scope (a pending run or one finished within 5 minutes is reused, a failed one for 1 minute only; otherwise a run is queued).
+
 ### GitOps plan and PR workflow
 
 The bot resolves workload sources from Argo CD and Flux discovery, not from mandatory workload annotations:
@@ -151,8 +187,9 @@ The bot resolves workload sources from Argo CD and Flux discovery, not from mand
 Example lifecycle calls:
 
 ```bash
-# Refresh active records before reading them
-curl "http://localhost:8000/api/v1/recommendations/active?refresh=true"
+# Queue a scan, then poll the returned run until it is terminal
+curl -X POST "http://localhost:8000/api/v1/optimization/runs"
+curl "http://localhost:8000/api/v1/optimization/runs/17"
 
 # Apply a CPU rightsizing recommendation with the value actually deployed
 curl -X PATCH "http://localhost:8000/api/v1/recommendations/42/apply" \
@@ -174,7 +211,7 @@ Use the API to apply, ignore, or restore recommendations, and the dashboard to b
 
 ## Frontend Usage
 
-The web dashboard fetches active recommendations and realized savings in the background so the main dashboard can render even if recommendation refresh takes time.
+The web dashboard fetches active recommendations and realized savings in the background so the main dashboard can render independently of scans.
 
 The `/recommendations` page currently provides:
 
@@ -192,7 +229,7 @@ The `/recommendations` page currently provides:
 
 ## Prometheus And Grafana
 
-`/prometheus/metrics` refreshes recommendation gauges from the database on scrape. The startup scan also performs a best-effort recommendation refresh after the API starts, so dashboards are not empty after pod restarts when metrics already exist.
+`/prometheus/metrics` refreshes recommendation gauges from the database on scrape, so API restarts do not empty dashboards. The API does not scan at startup; the controller scans once right after its initial collection.
 
 Key recommendation metrics:
 
@@ -280,6 +317,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `VERIFICATION_MIN_READINESS` | `config.recommendations.verification.minReadiness` | `0.99` |
 | `VERIFICATION_MAX_THROTTLE_RATIO` | `config.recommendations.verification.maxThrottleRatio` | `0.05` |
 | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `config.recommendations.verification.lifecycleInterval` | `5m` |
+| `RECOMMENDATION_SCAN_INTERVAL` | `config.recommendations.scanInterval` | `1h` (`1m` to `24h`, units `s`, `m`, `h`) |
 
 `RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance. A decrease by itself, including an unrelated large decrease, is not sufficient. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
 
@@ -291,6 +329,8 @@ The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes 
 |---|---|
 | DTOs and lifecycle fields | `src/greenkube/models/metrics.py`, `src/greenkube/models/evidence.py` |
 | Optimization engine | `src/greenkube/core/optimization/engine.py`, `context_builder.py`, `context.py` |
+| Scheduled scans and run queue | `src/greenkube/core/optimization/scan_service.py`, `src/greenkube/storage/{sqlite,postgres}/optimization_run_repository.py`, `src/greenkube/api/routers/optimization.py` |
+| Per-source reconciliation and run diff | `src/greenkube/core/recommendation_reconciliation.py` |
 | Analyzers | `src/greenkube/core/optimization/analyzers/` |
 | Sources (native, VPA, Karpenter) | `src/greenkube/core/optimization/providers/`, `registry.py` |
 | Dedup / arbitration / provenance | `src/greenkube/core/optimization/dedup.py` |
@@ -308,7 +348,7 @@ The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes 
 | Automation API routes | `src/greenkube/api/routers/automation.py`, `plans.py`, `gitops.py`, `webhooks.py` |
 | GitOps automation | `src/greenkube/gitops/`, `src/greenkube/automation/` |
 | Prometheus gauges | `src/greenkube/api/metrics_endpoint.py` |
-| Startup scan & lifecycle job | `src/greenkube/api/startup.py`, `src/greenkube/cli/start.py` |
+| Scan & lifecycle jobs | `src/greenkube/cli/start.py` |
 | Migrations | `src/greenkube/core/migrations/scripts/{sqlite,postgres}/` |
 | Storage adapters | `src/greenkube/storage/recommendation_mapper.py`, `src/greenkube/storage/sqlite/recommendation_repository.py`, `src/greenkube/storage/postgres/recommendation_repository.py` |
 | Frontend | `frontend/src/routes/recommendations/+page.svelte`, `frontend/src/lib/api.js` |

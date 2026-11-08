@@ -210,6 +210,33 @@ These metrics are process-local. The API's `/prometheus/metrics` endpoint
 includes the registry of the API process serving the scrape; it does not
 aggregate registries from separate controller or automation pods.
 
+Recommendation scans and verification run in the **controller** (the
+`greenkube start` process), so the optimization-run and verification metrics
+below are recorded there and served by the controller's own listener:
+`/prometheus/metrics` on port `9102` (see
+[Controller metrics endpoint](#controller-metrics-endpoint)). The API endpoint
+does not report them. The chart renders the internal ClusterIP Service
+`<release>-controller-metrics`; with `monitoring.serviceMonitor.enabled=true`
+it also renders a controller ServiceMonitor next to the API one, and the
+optional NetworkPolicy admits Prometheus on that port. Without the Prometheus
+Operator, add a scrape job for the controller Service (add an `authorization`
+block with the API key only if `GREENKUBE_API_KEY` is set in the controller's
+environment):
+
+```yaml
+- job_name: greenkube-controller
+  metrics_path: /prometheus/metrics
+  static_configs:
+    - targets: ["greenkube-controller-metrics.greenkube.svc:9102"]
+```
+
+Every controller replica serves its registry, but only the Lease holder
+scans: aggregate counters with `sum()` and the last-success timestamp with
+`max()` (standbys report `0`). A run in which only some sources failed still
+ends `succeeded`; the failed sources are counted in
+`greenkube_optimization_analyzer_failures_total` and listed in the run's
+`sources` (`GET /api/v1/optimization/runs/{run_id}`).
+
 | Metric | Type and labels | Description |
 |---|---|---|
 | `greenkube_optimization_runs_total` | Counter; `status` | Completed optimization runs, with status `succeeded` or `failed` |
@@ -219,6 +246,9 @@ aggregate registries from separate controller or automation pods.
 | `greenkube_verification_outcomes_total` | Counter; `outcome` | Verification outcomes: `verified`, `not_realized`, `inconclusive`, `rollback_review` |
 | `greenkube_verification_health_gate_failures_total` | Counter; `gate` | Verification health-gate failures: `cpu_p95`, `memory_p95`, `restarts`, `oom_kills`, `readiness`, `cpu_throttling` |
 | `greenkube_last_successful_optimization_run_timestamp_seconds` | Gauge; no labels | Unix timestamp of the last fully successful optimization run |
+| `greenkube_recommendation_scan_window_seconds` | Gauge; no labels | Lookback window used by the latest recommendation scan |
+| `greenkube_recommendation_scan_metric_rows` | Gauge; no labels | Metric rows materialized by the latest recommendation scan |
+| `greenkube_recommendation_scan_resident_memory_bytes` | Gauge; no labels | Controller peak resident memory when the latest scan was built |
 
 ### GitOps and PR-bot lifecycle metrics
 
@@ -274,8 +304,8 @@ credential. The CLI enables its listener only when
 
 ### Controller metrics endpoint
 
-The controller (`greenkube start`: collection, compression, verification,
-GitOps sync observation) serves its own process-local registry at
+The controller (`greenkube start`: collection, compression, recommendation
+scans, verification, GitOps sync observation) serves its own process-local registry at
 `/prometheus/metrics` (also at Prometheus' default `/metrics` path) on
 `CONTROLLER_METRICS_PORT` (Helm
 `collector.metricsPort`, default `9102`; `0` disables it). The chart renders a
@@ -295,7 +325,7 @@ send it as a bearer token. Outside Kubernetes, `greenkube start` also listens on
 |---|---|---|
 | `greenkube_collection_source_requests_total` | Counter; `source` (`prometheus`, `opencost`, `electricity_maps`, `wattnet`, `kubernetes`, `other`), `outcome` (`success`, `empty`, `error`, `skipped`) | Requests to measurement sources |
 | `greenkube_collection_source_duration_seconds` | Histogram; `source` | Measurement source request duration |
-| `greenkube_collection_window_duration_seconds` | Histogram; no labels | Wall-clock duration of one collection window (collect, assemble, write) |
+| `greenkube_collection_run_duration_seconds` | Histogram; no labels | Wall-clock duration of one collection run (every due window: collect, assemble, write); per-source chunk durations are `greenkube_collection_window_duration_seconds{source}` |
 | `greenkube_metric_rows_written_total` | Counter; `scope` (`pod`, `container`), `dimension` (`cost`, `usage`, `power`, `intensity`), `source` (provenance value, `mixed` or `unset`) | Provenance mix of written metric rows |
 
 ---

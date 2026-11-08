@@ -2,6 +2,8 @@
 
 GreenKube exposes dashboard metrics and control-loop telemetry at `/prometheus/metrics`. The API endpoint is authenticated when `GREENKUBE_API_KEY` is configured and is scraped by the chart `ServiceMonitor`. In production worker mode, a separate ClusterIP Service and ServiceMonitor scrape the automation worker's own process-local control-loop registry; configure `secrets.apiKey` or `secrets.existingSecret` for bearer authentication. Control-loop metrics use bounded labels only; workload names and namespaces remain in the existing dashboard gauges.
 
+Recommendation scans and verification run in the controller, so `greenkube_optimization_*`, `greenkube_recommendations_generated_total`, `greenkube_last_successful_optimization_run_timestamp_seconds` and `greenkube_verification_*` come from the controller's own listener (port `9102`, Service `<release>-controller-metrics`, scraped by the controller ServiceMonitor), not from the API. Every controller replica is scraped and only the Lease holder scans, so the queries below aggregate with `sum()` (counters) and `max()` (timestamps).
+
 The targets below are example operational objectives, not service guarantees or reported measurements. API availability requires ingress or service-level telemetry from the operator's environment.
 
 ## Service-level objectives
@@ -34,6 +36,14 @@ groups:
     labels: { severity: warning }
     annotations:
       summary: "GreenKube optimization run failure rate is above 5%"
+  - alert: GreenKubeRecommendationScansStale
+    # Two missed scans at the default RECOMMENDATION_SCAN_INTERVAL (1h); adjust to
+    # your interval. "> 0" ignores controllers that have not scanned since start.
+    expr: time() - max(greenkube_last_successful_optimization_run_timestamp_seconds > 0) > 7200
+    for: 15m
+    labels: { severity: warning }
+    annotations:
+      summary: "No recommendation scan has succeeded for two scan intervals"
   - alert: GreenKubeVerificationRollbackReviews
     expr: |
       sum(rate(greenkube_verification_outcomes_total{outcome="rollback_review"}[6h]))

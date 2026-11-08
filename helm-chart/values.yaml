@@ -125,10 +125,11 @@ production:
         successThreshold: 1
     controller:
       replicas: 1
+      # The controller runs recommendation scans (E1); keep scan memory headroom.
       resources:
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
         requests:
           cpu: 100m
           memory: 128Mi
@@ -194,11 +195,16 @@ initContainer:
 # these process-heartbeat probes verify that its PID is still alive.
 collector:
   # Port of the controller's Prometheus endpoint (/prometheus/metrics and
-  # /metrics): collection health, provenance mix and verification telemetry.
-  # The chart keeps the API key out of the controller, so the endpoint is
-  # unauthenticated; monitoring.networkPolicy restricts it to Prometheus.
-  # Exposed through the <release>-controller-metrics Service and, when
-  # monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it.
+  # /metrics). The controller runs collection, verification and the scheduled
+  # recommendation scans, so their control-loop metrics (collection health,
+  # provenance mix, verification outcomes, greenkube_optimization_runs_total,
+  # greenkube_last_successful_optimization_run_timestamp_seconds, ...) are
+  # served here, not by the API. The chart keeps the API key out of the
+  # controller, so the endpoint is unauthenticated; monitoring.networkPolicy
+  # restricts it to Prometheus. Exposed through the
+  # <release>-controller-metrics Service and, when
+  # monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it;
+  # in the standalone profile it must differ from config.api.port.
   metricsPort: 9102
   livenessProbe:
     enabled: true
@@ -458,6 +464,10 @@ config:
     rankingWeights: ''
     # Minimum raw samples expected for a high-confidence recommendation.
     minSamples: 36
+    # Interval between scheduled recommendation scans. Scans run only in the
+    # controller (leader-gated); the API enqueues on-demand runs through
+    # POST /api/v1/optimization/runs. Accepts s, m or h (1m to 24h).
+    scanInterval: 1h
     # --- Verification (apply detection, health gates, rollback review) ---
     verification:
       # Fixed measurement window after the rollout completes (baseline: same length, ending at the PR merge).
@@ -562,13 +572,14 @@ secrets:
 
 # Pod resource requests and limits
 # -- Collector/scheduler container resources
-# This container runs periodic data collection (Prometheus, OpenCost, K8s API)
-# and writes to the database. Memory usage is proportional to the number of
-# pods in the cluster. For clusters with >200 pods, consider increasing limits.
+# This container runs periodic data collection (Prometheus, OpenCost, K8s API),
+# writes to the database and runs the scheduled recommendation scans. Memory
+# usage is proportional to the number of pods in the cluster. For clusters
+# with >200 pods, consider increasing limits.
 resources:
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
   requests:
     cpu: 100m
     memory: 128Mi
@@ -625,8 +636,7 @@ tests:
 
 # -- API container resources
 # This container serves the FastAPI REST API and the SPA frontend.
-# The API also materializes container-aware recommendation inputs during
-# refreshes; give the default lookback enough headroom for normal clusters.
+# Recommendation scans run in the controller; the API only queues them.
 apiResources:
   limits:
     cpu: 250m

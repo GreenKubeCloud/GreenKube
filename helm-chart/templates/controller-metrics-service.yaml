@@ -1,8 +1,13 @@
+{{- /*
+Internal Service for the controller's own /prometheus/metrics listener. The
+controller runs scans, verification and collection, so their control-loop
+metrics are recorded (and served) there, not in the API process.
+*/ -}}
 {{- if gt (int (include "greenkube.controllerMetricsPort" .)) 0 }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "greenkube.fullname" . }}-controller-metrics
+  name: {{ printf "%s-controller-metrics" (include "greenkube.fullname" .) | trunc 63 | trimSuffix "-" }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller-metrics

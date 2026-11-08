@@ -77,7 +77,14 @@ def cost_fields(cost: Optional[CostMetric], share: float, default_cost: float) -
 
 
 def power_source_for_profile(estimator: Any, profile: Any) -> str:
-    """Classify the power profile an energy estimate used (``power_source``)."""
+    """Classify the power profile an energy estimate used (``power_source``).
+
+    A resolved :class:`~greenkube.energy.node_power.NodePowerProfile` already
+    carries its provenance; raw profile dicts are classified by identity.
+    """
+    resolved_source = getattr(profile, "source", None)
+    if isinstance(resolved_source, str):
+        return resolved_source
     if profile is None or profile is getattr(estimator, "DEFAULT_INSTANCE_PROFILE", None):
         return PowerSource.DEFAULT_PROFILE.value
     profiles = getattr(estimator, "instance_profiles", None) or {}

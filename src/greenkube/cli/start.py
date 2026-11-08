@@ -187,13 +187,13 @@ async def analyze_nodes() -> None:
 
 async def async_write_combined_metrics_to_database(last: Optional[str] = None):
     """Wrapper to make write_combined_metrics_to_database suitable for scheduler."""
-    from ..core.observability import elapsed, record_collection_window, start_timer
+    from ..core.observability import elapsed, record_collection_run, start_timer
 
     timer = start_timer()
     try:
         await write_combined_metrics_to_database(last=last)
     finally:
-        record_collection_window(elapsed(timer))
+        record_collection_run(elapsed(timer))
 
 
 async def scheduled_write_metrics():
@@ -360,6 +360,49 @@ def _collection_offset_seconds(cfg) -> float:
         return 60.0
 
 
+async def run_recommendation_scan(
+    should_continue: Callable[[], bool] | None = None,
+    *,
+    force: bool = False,
+) -> None:
+    """Schedule and execute queued recommendation scans (E1).
+
+    Runs only in the controller, behind the Lease: each cycle queues the
+    scheduled scan when ``RECOMMENDATION_SCAN_INTERVAL`` elapsed and executes
+    queued runs, including API requests from ``POST /optimization/runs``.
+    ``force`` queues a cluster-wide scan regardless of the interval; the
+    controller uses it once, right after its initial collection.
+    """
+    try:
+        from ..core.optimization.scan_service import create_recommendation_scan_service
+
+        service = create_recommendation_scan_service(should_continue=should_continue)
+        executed = await service.tick(force=force)
+        if executed:
+            logger.info("Recommendation scan cycle executed %d run(s).", len(executed))
+    except Exception as e:
+        logger.error("Recommendation scan task failed: %s", e)
+
+
+class _InitialControllerWork:
+    """Whether this controller finished its initial (post-start) work cycle.
+
+    The recommendation scan poll stays idle until then: a poll firing while
+    the initial collection is still writing metrics would scan an empty or
+    stale dataset and cover the whole scan interval with it.
+    """
+
+    def __init__(self) -> None:
+        self._done = False
+
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    def mark_done(self) -> None:
+        self._done = True
+
+
 def _create_controller_leader_election(cfg):
     """Build the optional controller Lease elector from the chart-provided settings."""
     if not getattr(cfg, "LEADER_ELECTION_ENABLED", False):
@@ -420,29 +463,42 @@ async def _run_initial_controller_task(
     return True
 
 
-async def _run_deferred_initial_controller_work(initial_tasks, should_run, stop_event: asyncio.Event) -> None:
-    """Run each startup task once when this controller first acquires its Lease."""
+async def _run_deferred_initial_controller_work(
+    initial_tasks,
+    should_run,
+    stop_event: asyncio.Event,
+    on_finished: Callable[[], None] | None = None,
+) -> None:
+    """Run each startup task once when this controller first acquires its Lease.
+
+    ``on_finished`` is called however the work ends (complete, failed task,
+    shutdown) so jobs waiting for the initial cycle never stay idle forever.
+    """
     from ..core.leader_election import DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS
 
-    for callback, args, kwargs in initial_tasks:
-        while not stop_event.is_set():
-            if should_run():
+    try:
+        for callback, args, kwargs in initial_tasks:
+            while not stop_event.is_set():
+                if should_run():
+                    try:
+                        if await _run_initial_controller_task(callback, should_run, *args, **kwargs):
+                            break
+                    except Exception:
+                        logger.exception("Deferred initial controller task %s failed.", callback.__name__)
+                        return
                 try:
-                    if await _run_initial_controller_task(callback, should_run, *args, **kwargs):
-                        break
-                except Exception:
-                    logger.exception("Deferred initial controller task %s failed.", callback.__name__)
-                    return
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS,
-                )
-            except TimeoutError:
-                continue
-        else:
-            return
-    logger.info("Initial controller work complete.")
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=DEFAULT_LEADER_ELECTION_RETRY_PERIOD_SECONDS,
+                    )
+                except TimeoutError:
+                    continue
+            else:
+                return
+        logger.info("Initial controller work complete.")
+    finally:
+        if on_finished is not None:
+            on_finished()
 
 
 async def _start_gitops_sync_observer(
@@ -517,11 +573,13 @@ async def _async_start(last: Optional[str]):
     processor = None
     scheduler = None
     sync_task = None
-    # Serve the controller's own telemetry (verification, collection, provenance mix; A12, BUG-14).
-    from .controller_metrics import start_controller_metrics_server, stop_controller_metrics_server
-
-    metrics_endpoint = await start_controller_metrics_server(getattr(cfg, "CONTROLLER_METRICS_PORT", 0))
+    metrics_endpoint = None
     try:
+        # Serve the controller's own telemetry (scans, verification, collection,
+        # provenance mix; A12, BUG-14) on every replica, leader or standby.
+        from .controller_metrics import start_controller_metrics_server
+
+        metrics_endpoint = await start_controller_metrics_server(getattr(cfg, "CONTROLLER_METRICS_PORT", 0))
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
             should_run = None
@@ -586,6 +644,29 @@ async def _async_start(last: Optional[str]):
             getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
             skip_initial=True,
         )
+        # Leader-gated recommendation scans: schedule on RECOMMENDATION_SCAN_INTERVAL
+        # and drain API run requests. The poll stays idle until the initial
+        # controller work (collection, then one forced scan) has finished.
+        from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
+
+        initial_work = _InitialControllerWork()
+
+        async def recommendation_scan() -> None:
+            if not initial_work.done:
+                logger.debug("Recommendation scan poll waits for the initial controller work.")
+                return
+            await run_recommendation_scan(should_continue=should_run)
+
+        async def initial_recommendation_scan() -> None:
+            # Scan the data the initial collection just wrote, even when a
+            # scan (e.g. from the previous pod) already covers the interval.
+            await run_recommendation_scan(should_continue=should_run, force=True)
+
+        scheduler.add_job_from_string(
+            _leader_gated_callback(recommendation_scan, should_run),
+            RECOMMENDATION_SCAN_POLL_INTERVAL,
+            skip_initial=True,
+        )
         # Compress old raw metrics into hourly aggregates every hour.
         # skip_initial=True because both jobs are awaited once in the startup block below.
         scheduler.add_job(_leader_gated_callback(compress_metrics, should_run), interval_hours=1, skip_initial=True)
@@ -607,18 +688,27 @@ async def _async_start(last: Optional[str]):
             (run_recommendation_lifecycle, (), {}),
             (compress_metrics, (), {}),
             (refresh_dashboard_summary, (), {}),
+            (initial_recommendation_scan, (), {}),
         )
         if should_run is None:
             logger.info("Running initial controller work...")
-            for callback, args, kwargs in initial_tasks:
-                if not await _run_initial_controller_task(callback, should_run, *args, **kwargs):
-                    break
-            else:
-                logger.info("Initial collection complete.")
+            try:
+                for callback, args, kwargs in initial_tasks:
+                    if not await _run_initial_controller_task(callback, should_run, *args, **kwargs):
+                        break
+                else:
+                    logger.info("Initial collection complete.")
+            finally:
+                initial_work.mark_done()
         else:
             logger.info("Initial controller work will start after Lease acquisition.")
             initial_work_task = asyncio.create_task(
-                _run_deferred_initial_controller_work(initial_tasks, should_run, controller_stop_event),
+                _run_deferred_initial_controller_work(
+                    initial_tasks,
+                    should_run,
+                    controller_stop_event,
+                    on_finished=initial_work.mark_done,
+                ),
                 name="controller-initial-work",
             )
 
@@ -647,6 +737,8 @@ async def _async_start(last: Optional[str]):
             await asyncio.gather(*tasks, return_exceptions=True)
             if processor is not None:
                 await processor.close()
+            from .controller_metrics import stop_controller_metrics_server
+
             await stop_controller_metrics_server(metrics_endpoint)
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 

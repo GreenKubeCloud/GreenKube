@@ -285,6 +285,20 @@ tests:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
 
+  - it: should schedule recommendation scans hourly by default
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SCAN_INTERVAL
+          value: "1h"
+
+  - it: should reflect a custom recommendation scan interval
+    set:
+      config.recommendations.scanInterval: 30m
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SCAN_INTERVAL
+          value: "30m"
+
   - it: should set verification window defaults
     asserts:
       - equal:

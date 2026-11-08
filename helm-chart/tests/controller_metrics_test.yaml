@@ -168,3 +168,126 @@ tests:
             ports:
               - protocol: TCP
                 port: 9102
+
+  - it: uses a custom controller metrics port everywhere
+    set:
+      profile: production
+      collector.metricsPort: 9200
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/configmap.yaml
+      - templates/production-deployments.yaml
+      - templates/controller-metrics-service.yaml
+      - templates/networkpolicy.yaml
+    asserts:
+      - template: templates/configmap.yaml
+        equal:
+          path: data.CONTROLLER_METRICS_PORT
+          value: "9200"
+      - template: templates/production-deployments.yaml
+        documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9200
+      - template: templates/controller-metrics-service.yaml
+        equal:
+          path: spec.ports[0].port
+          value: 9200
+      - template: templates/networkpolicy.yaml
+        documentIndex: 1
+        equal:
+          path: spec.ingress[0].ports[0].port
+          value: 9200
+
+  - it: keeps the controller metrics Service when the API is disabled
+    set:
+      config.api.enabled: false
+    templates:
+      - templates/controller-metrics-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.type
+          value: ClusterIP
+
+  - it: scrapes the controller even when the API is disabled
+    set:
+      monitoring.serviceMonitor.enabled: true
+      config.api.enabled: false
+    templates:
+      - templates/controller-servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+
+  - it: lets Prometheus reach the standalone controller listener from a custom namespace
+    set:
+      monitoring.networkPolicy.enabled: true
+      monitoring.networkPolicy.prometheusNamespace: observability
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: app
+      - contains:
+          path: spec.ingress
+          content:
+            from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: observability
+                podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: prometheus
+            ports:
+              - protocol: TCP
+                port: 9102
+
+  - it: lets Prometheus reach only the controller metrics port on production controllers
+    set:
+      profile: production
+      monitoring.networkPolicy.enabled: true
+    templates:
+      - templates/networkpolicy.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: controller
+      - documentIndex: 1
+        equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: monitoring
+                  podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: prometheus
+              ports:
+                - protocol: TCP
+                  port: 9102
+
+  - it: rejects a controller metrics port that collides with the API in the standalone pod
+    set:
+      collector.metricsPort: 8000
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: collector.metricsPort must differ from config.api.port
+
+  - it: allows the API port for the controller metrics in the production profile
+    set:
+      profile: production
+      collector.metricsPort: 8000
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 8000

@@ -315,7 +315,9 @@ inline
 {{- end -}}
 
 {{/*
-Validate and return the controller metrics port (0 disables the listener).
+Validate and return the controller metrics port (0 disables the listener). The
+standalone pod shares one network namespace between the controller and the API,
+so the ports must differ.
 */}}
 {{- define "greenkube.controllerMetricsPort" -}}
 {{- $rawPort := .Values.collector.metricsPort | default 0 | toString -}}
@@ -325,6 +327,9 @@ Validate and return the controller metrics port (0 disables the listener).
 {{- $port := int $rawPort -}}
 {{- if gt $port 65535 -}}
 {{- fail "collector.metricsPort must be an integer between 0 (disabled) and 65535" -}}
+{{- end -}}
+{{- if and (gt $port 0) (ne .Values.profile "production") .Values.config.api.enabled (eq $port (int .Values.config.api.port)) -}}
+{{- fail "collector.metricsPort must differ from config.api.port" -}}
 {{- end -}}
 {{- $port -}}
 {{- end -}}

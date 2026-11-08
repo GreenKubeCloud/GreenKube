@@ -67,6 +67,10 @@ class MovedHeadProvider(FakeGitProvider):
             return self.branches[ref]
         return self.trees.get(ref, {})
 
+    def _tree_at(self, ref: str) -> dict[str, GitFile]:
+        # Blob-ID reads and tree comparisons resolve every immutable revision, moved head included.
+        return self._tree(ref)
+
     async def get_file(self, repo: GitRepository, path: str, ref: str) -> GitFile | None:
         self.file_reads.append((path, ref))
         file = self._tree(ref).get(path)

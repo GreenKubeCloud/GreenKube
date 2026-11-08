@@ -9,12 +9,13 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Collection, List, Optional
 
 import aiosqlite
 
 from greenkube.core.recommendation_ranking import normalize_savings_metric
 from greenkube.core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
+from greenkube.core.recommendation_reconciliation import may_mark_stale
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -30,10 +31,17 @@ from greenkube.storage.recommendation_mapper import (
     RECORD_COLUMNS,
     record_values,
     row_to_record,
+    sources_from_json,
 )
 from greenkube.utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
+
+#: Default order of active lists (E2, BUG-20): ranking score, then projected
+#: cost savings, NULLs last on both backends, then a stable id tie-break.
+ACTIVE_ORDER_BY = (
+    "ranking_score IS NULL, ranking_score DESC, potential_savings_cost IS NULL, potential_savings_cost DESC, id ASC"
+)
 
 #: Columns that lifecycle services may update through ``update_recommendation_fields``.
 MUTABLE_COLUMNS: frozenset = frozenset(
@@ -300,17 +308,23 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         self,
         records: List[RecommendationRecord],
         namespace: Optional[str] = None,
+        incomplete_sources: Optional[Collection[str]] = None,
     ) -> int:
-        """Marks active recommendations absent from the latest generated set as stale."""
+        """Marks active recommendations absent from the latest generated set as stale.
+
+        Recommendations supported by a source listed in ``incomplete_sources``
+        are kept active: a failed or partial source never causes staleness.
+        """
         current_keys = {_identity_key(record) for record in records}
+        blocked = frozenset(incomplete_sources or ())
         now = to_iso_z(datetime.now(timezone.utc))
 
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             params: list = []
             query = (
-                "SELECT id, pod_name, container_name, namespace, type, scope, target_node, fingerprint "
-                "FROM recommendation_history WHERE status = 'active'"
+                "SELECT id, pod_name, container_name, namespace, type, scope, target_node, fingerprint, "
+                "source, sources FROM recommendation_history WHERE status = 'active'"
             )
             if namespace:
                 query += " AND namespace = ?"
@@ -332,8 +346,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     fingerprint=row["fingerprint"],
                     description="placeholder",
                 )
-                if _identity_key(row_record) not in current_keys:
-                    stale_ids.append(row["id"])
+                if _identity_key(row_record) in current_keys:
+                    continue
+                if not may_mark_stale(row["source"], sources_from_json(row["sources"]), blocked):
+                    continue
+                stale_ids.append(row["id"])
 
             if not stale_ids:
                 return 0
@@ -405,7 +422,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 params.append(namespace)
 
             where = " AND ".join(conditions)
-            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY priority DESC, created_at DESC"
+            query = f"SELECT * FROM recommendation_history WHERE {where} ORDER BY {ACTIVE_ORDER_BY}"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
             return [row_to_record(r) for r in rows]

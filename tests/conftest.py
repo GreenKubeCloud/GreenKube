@@ -56,6 +56,9 @@ def mock_settings_env_vars(monkeypatch):
     monkeypatch.setenv("CLOUD_PROVIDER", "aws")
     monkeypatch.setenv("DEFAULT_ZONE", "FR")
     monkeypatch.setenv("CLUSTER_NAME", "")
+    # A local .env (e.g. PROMETHEUS_QUERY_RANGE_STEP=30m) must not change the
+    # collection step the tests are written against.
+    monkeypatch.setenv("PROMETHEUS_QUERY_RANGE_STEP", "5m")
 
     # Reload the singleton so all attributes pick up the patched env vars.
     config.reload()

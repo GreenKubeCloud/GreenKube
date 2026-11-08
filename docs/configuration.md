@@ -131,6 +131,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.minReadiness` | `VERIFICATION_MIN_READINESS` | `0.99` | Minimum pod readiness over the window: ready samples of `kube_pod_status_ready` (kube-state-metrics) over all samples of the observed pods, so each pod weighs its lifetime. Reported `not_available` when the series is missing. |
 | `config.recommendations.verification.maxThrottleRatio` | `VERIFICATION_MAX_THROTTLE_RATIO` | `0.05` | Maximum CPU throttling ratio (`container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`). Reported `not_available` for containers without a CPU limit. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
+| `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). The controller also scans once right after its initial collection. On-demand scans are queued with `POST /api/v1/optimization/runs`. |
 
 ### Impact Model (`impact`)
 
@@ -356,7 +357,9 @@ Rendering never uses `lookup` or random functions, so `helm template` output is 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `collector.metricsPort` | `9102` | `CONTROLLER_METRICS_PORT`. Port of the controller's Prometheus endpoint at `/prometheus/metrics` (also served at `/metrics`) (collection source requests/errors, collection window duration, provenance mix of written rows, verification outcomes, GitOps sync telemetry). Served through the `<release>-controller-metrics` ClusterIP Service and scraped by a dedicated ServiceMonitor when `monitoring.serviceMonitor.enabled`. `0` disables the listener, the Service and the ServiceMonitor. |
+| `collector.metricsPort` | `9102` | `CONTROLLER_METRICS_PORT`. Port of the controller's Prometheus endpoint at `/prometheus/metrics` (also served at `/metrics`) (collection source requests/errors, collection run duration, provenance mix of written rows, recommendation scans and optimization runs, verification outcomes, GitOps sync telemetry). Served through the `<release>-controller-metrics` ClusterIP Service and scraped by a dedicated ServiceMonitor when `monitoring.serviceMonitor.enabled` (both are rendered even when `config.api.enabled` is false). `0` disables the listener, the Service and the ServiceMonitor. In the standalone profile the port must differ from `config.api.port` because both containers share the pod network. |
+
+Recommendation scans and verification run in the controller, so their metrics (`greenkube_optimization_runs_total`, `greenkube_last_successful_optimization_run_timestamp_seconds`, `greenkube_verification_outcomes_total`, ...) are served by this endpoint, not by the API. Every controller replica serves its registry, leader or standby.
 
 The chart keeps the API key out of the controller (least privilege), so this endpoint is reachable on the pod network only and serves bounded, non-sensitive counters; enable `monitoring.networkPolicy` to restrict it to Prometheus. When an API key is present in the controller's environment, scrapes must send it as a bearer token.
 
@@ -378,6 +381,8 @@ monitoring:
     additionalIngress: []
     additionalEgress: [] # Add narrow rules for external DB, Git provider, or Kubernetes API endpoints.
 ```
+
+The controller's own metrics endpoint is configured with `collector.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-collectormetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
 `prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
@@ -439,7 +444,7 @@ production:
 
 API, controller, and worker resources/probes keep their chart defaults unless you override them.
 
-Only the Lease holder runs controller jobs, GitOps discovery, and sync observation. The API ServiceAccount has read-only Kubernetes permissions for health and inventory endpoints. The automation worker must remain at one replica because the database queue provides the execution lease; the chart rejects other replica counts.
+Only the Lease holder runs controller jobs (including recommendation scans), GitOps discovery, and sync observation. Because scans run in the controller, its default memory limit is 1Gi. The API ServiceAccount has read-only Kubernetes permissions for health and inventory endpoints. The automation worker must remain at one replica because the database queue provides the execution lease; the chart rejects other replica counts.
 
 For production, create the API key and database credentials in a Kubernetes Secret and set `secrets.existingSecret`. When the bundled PostgreSQL is enabled, that Secret must contain `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`; when it is disabled, `DB_CONNECTION_STRING` is still required. See the [Installation guide](installation.md#production-api-key-handling).
 

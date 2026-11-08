@@ -308,9 +308,9 @@ The main orchestrator that coordinates the data pipeline from collection to metr
 
 #### **OptimizationEngine**
 
-Analyzes `CombinedMetric` data to identify optimization opportunities. It is the single orchestration path used by API recommendation requests and the startup scan (`src/greenkube/core/optimization/`). The CLI does not expose a recommendation command.
+Analyzes `CombinedMetric` data to identify optimization opportunities (`src/greenkube/core/optimization/`). It runs only in the controller: the leader-gated `recommendation_scan` job (`scan_service.py`) queues a scheduled run every `RECOMMENDATION_SCAN_INTERVAL` and executes queued runs, including API requests from `POST /api/v1/optimization/runs`. The job stays idle until the controller's initial collection is done, which ends with one forced cluster-wide scan on the fresh data. API replicas never scan; their recommendation GET endpoints are read-only. Each run is persisted in `optimization_runs` with per-source health and the new/changed/resolved diff. The CLI does not expose a recommendation command.
 
-**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile.
+**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile per source (a failed or incomplete source never blocks the others and never marks its recommendations stale).
 
 **Sources:**
 
@@ -514,8 +514,8 @@ The REST API is started by the separate `greenkube-api` entry point (`greenkube.
 
 #### **Grafana Integration**
 - **Dashboard:** `dashboards/greenkube-grafana.json`
-- **Data source:** Prometheus scraping `/prometheus/metrics`
-- **Helm resources:** `ServiceMonitor`, `NetworkPolicy`, Prometheus RBAC
+- **Data source:** Prometheus scraping `/prometheus/metrics` on the API (dashboard gauges) and on the controller's own listener (port `9102`: recommendation-scan, verification and collection control-loop metrics, recorded where that work runs)
+- **Helm resources:** `ServiceMonitor` (API, controller, and production worker), `NetworkPolicy`, Prometheus RBAC
 - **Panels:** KPIs, time-series (CO₂e, cost, energy), namespace breakdown, top pods, node utilization, grid intensity, recommendations
 
 ## Data Flow
@@ -759,6 +759,8 @@ helm-chart/
     ├── deployment.yaml        # Standalone collector + API
     ├── production-deployments.yaml # API, controller, automation worker
     ├── api-service.yaml       # API/UI ClusterIP Service
+    ├── controller-metrics-service.yaml # Controller metrics ClusterIP Service
+    ├── controller-servicemonitor.yaml  # Controller metrics ServiceMonitor
     ├── automation-worker.yaml # Standalone worker mode
     ├── configmap.yaml         # Non-secret config
     ├── secret.yaml            # Tokens and credentials
@@ -922,7 +924,7 @@ The recommendation-to-GitOps composition is intentionally fail-soft at external 
 
 | Boundary | Recovery contract | Verification |
 |---|---|---|
-| Startup recommendation refresh | Runs in a tracked background task; provider or database errors are logged and do not prevent liveness traffic. | `tests/integration/test_gitops_closed_loop.py::test_startup_refresh_failure_does_not_block_shutdown_or_health_state` |
+| Recommendation scans | API replicas never scan; the leader controller runs queued and scheduled runs, isolates each source (timeouts, failures) and records the outcome. A crashed claimer's run is failed after 30 minutes. | `tests/integration/test_gitops_closed_loop.py::test_api_lifespan_never_scans_and_still_closes_resources`, `tests/core/optimization/test_scan_service.py` |
 | Savings ledger write | A transient ledger failure is logged and counted (`greenkube_attribution_errors_total`); the accrual watermark does not move, so the next run backfills the same slots exactly once. | `tests/integration/test_gitops_closed_loop.py::test_savings_ledger_failure_is_recoverable` |
 | Rollback transition | Recommendations in `rollback_review` or `reverted` stop producing new ledger attribution while their history remains queryable. | `tests/integration/test_gitops_closed_loop.py::test_rollback_review_stops_future_savings_attribution` |
 

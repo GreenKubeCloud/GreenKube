@@ -64,11 +64,16 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 
 ### Recommendations and automation
 
+Recommendation GET endpoints never run analyzers and never write. Scans run in the leader controller every `RECOMMENDATION_SCAN_INTERVAL`, or on demand through `POST /optimization/runs`. The `refresh=true` query parameter on `/recommendations`, `/recommendations/active` and `/recommendations/top` is deprecated: it returns the current data with a run id in the `X-GreenKube-Run-Id` response header (exposed to CORS clients). A run covering the scope that is queued, running or finished within the last 5 minutes is reused (a failed run only for 1 minute, so a later refresh retries); otherwise a run is queued. Poll `GET /optimization/runs/{run_id}` and reload when the run is terminal. Runs are kept for 30 days.
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/recommendations` | Read active records in an optional `namespace`; generates records on an empty first read. `refresh=true` schedules a background refresh. |
-| `GET` | `/recommendations/active` | Read active records; `refresh=true` refreshes before returning. Supports `namespace`, `source`, `risk_level`, and `capability` filters. |
-| `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or a ranking `profile`; supports `namespace` and `refresh`; `limit` defaults to 5. |
+| `GET` | `/recommendations` | Read persisted active records in an optional `namespace`. Never runs the optimizer. |
+| `GET` | `/recommendations/active` | Read persisted active records, ordered by `ranking_score` (unscored last), then projected cost savings (unknown last), then `id`. Supports `namespace`, `source`, `risk_level`, and `capability` filters. |
+| `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or a ranking `profile`; supports `namespace`; `limit` defaults to 5. |
+| `POST` | `/optimization/runs` | Queue a recommendation scan for the controller (optional body `{"namespace": "..."}`). Returns `202 {"run_id", "status": "queued"}` and a `Location` header; while a run is queued for the same scope (or a cluster-wide run is queued) its id is returned instead of a duplicate. |
+| `GET` | `/optimization/runs` | List recent runs, newest first (`limit` 1–100, default 20), with per-source health and new/changed/resolved counts. |
+| `GET` | `/optimization/runs/{run_id}` | Read one run: `run_id`, `status` (`queued`, `running`, `succeeded`, `failed`), `trigger`, `requested_at`, `started_at`, `completed_at`, `recommendation_count`, `sources`, diff counts, `diff`, `error`. `404` when unknown. |
 | `GET` | `/recommendations/ignored` | List ignored records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/applied` | List applied records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/history` | List records by required ISO-8601 `start`/`end`, optional `type`, and optional `namespace`. |

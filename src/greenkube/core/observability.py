@@ -247,9 +247,11 @@ COLLECTION_SOURCE_DURATION = Histogram(
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
     registry=REGISTRY,
 )
-COLLECTION_WINDOW_DURATION = Histogram(
-    "greenkube_collection_window_duration_seconds",
-    "Wall-clock duration of one metrics collection window (collect, assemble and write).",
+# Per-source chunk durations are ``greenkube_collection_window_duration_seconds{source}``
+# (:mod:`greenkube.core.collection_telemetry`); this histogram times the whole run.
+COLLECTION_RUN_DURATION = Histogram(
+    "greenkube_collection_run_duration_seconds",
+    "Wall-clock duration of one metrics collection run (every due window: collect, assemble and write).",
     buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
     registry=REGISTRY,
 )
@@ -404,9 +406,9 @@ def record_collection_request(source: str, outcome: str, duration_seconds: float
         COLLECTION_SOURCE_DURATION.labels(source=safe_source).observe(_nonnegative_seconds(duration_seconds))
 
 
-def record_collection_window(duration_seconds: float) -> None:
-    """Observe the wall-clock duration of one metrics collection window."""
-    COLLECTION_WINDOW_DURATION.observe(_nonnegative_seconds(duration_seconds))
+def record_collection_run(duration_seconds: float) -> None:
+    """Observe the wall-clock duration of one metrics collection run."""
+    COLLECTION_RUN_DURATION.observe(_nonnegative_seconds(duration_seconds))
 
 
 def record_metric_provenance(rows: Iterable[object]) -> None:

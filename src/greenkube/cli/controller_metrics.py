@@ -1,11 +1,17 @@
 """Authenticated Prometheus endpoint for the controller process (roadmap A12, BUG-14).
 
-The controller runs collection, compression, verification and GitOps sync
-observation. Their telemetry lives in the process-local control-loop registry
-(:mod:`greenkube.core.observability`), which the API process cannot see. This
-module serves that registry on ``CONTROLLER_METRICS_PORT`` (default 9102) at
-``/prometheus/metrics`` (the chart-wide convention) and at Prometheus' default
-``/metrics`` path (the controller serves no UI, so nothing collides with it).
+The controller runs collection, compression, verification, GitOps sync
+observation and, since E1, the scheduled recommendation scans. Their telemetry
+(``record_verification``, ``record_run``, ``record_analyzer_failure``,
+``record_recommendation_scan_resources`` ...) lives in the process-local
+control-loop registry (:mod:`greenkube.core.observability`), which the API
+process cannot see. This module serves that registry on
+``CONTROLLER_METRICS_PORT`` (default 9102) at ``/prometheus/metrics`` (the
+chart-wide convention) and at Prometheus' default ``/metrics`` path (the
+controller serves no UI, so nothing collides with it).
+
+The listener is started for every controller replica, leader or standby:
+counters stay correct under ``sum()`` because only the Lease holder scans.
 
 Access model: the Helm chart keeps the API key out of the controller (least
 privilege), so the endpoint is reachable on the pod network only (ClusterIP
@@ -95,6 +101,21 @@ async def _serve(server: EmbeddedMetricsServer) -> None:
         raise RuntimeError(f"controller metrics listener exited with status {exc.code}") from None
 
 
+def _report_unexpected_exit(server: EmbeddedMetricsServer):
+    """Log a listener that stops while the controller keeps running."""
+
+    def callback(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Controller metrics listener stopped unexpectedly: %s", error)
+        elif not server.should_exit:
+            logger.error("Controller metrics listener stopped unexpectedly; scrapes will fail until restart.")
+
+    return callback
+
+
 @dataclass
 class ControllerMetricsHandle:
     server: EmbeddedMetricsServer
@@ -128,6 +149,7 @@ async def start_controller_metrics_server(
         await asyncio.gather(task, return_exceptions=True)
         logger.error("Controller metrics endpoint could not start on port %s; continuing without it.", port)
         return None
+    task.add_done_callback(_report_unexpected_exit(server))
     logger.info("Controller metrics endpoint listening on %s:%s%s", host, port, CONTROLLER_METRICS_PATH)
     return ControllerMetricsHandle(server=server, task=task)
 

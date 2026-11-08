@@ -83,6 +83,7 @@ spec:
     {{- toYaml $root.Values.monitoring.networkPolicy.additionalIngress | nindent 4 }}
     {{- end }}
     {{- if $controllerIngress }}
+    # Prometheus scrapes the controller's own control-loop metrics listener.
     - from:
         - namespaceSelector:
             matchLabels:

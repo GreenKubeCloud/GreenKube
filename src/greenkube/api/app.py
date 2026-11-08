@@ -47,9 +47,10 @@ from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import gitops as gitops_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
+from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plans as plans_router
 from greenkube.api.routers import webhooks as webhooks_router
-from greenkube.api.startup import run_plan_expiry_loop, run_startup_recommendation_scan
+from greenkube.api.startup import run_plan_expiry_loop
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.supervision import SupervisedLoop
@@ -255,8 +256,9 @@ async def lifespan(app: FastAPI):
                 app.state._plan_worker_task = supervisor.start()
 
     # Start tracked background startup tasks so we can cancel them on shutdown.
+    # Recommendation scans run only in the leader controller (E1); the API
+    # queues runs through POST /api/v1/optimization/runs.
     app.state._startup_tasks = []
-    app.state._startup_tasks.append(asyncio.create_task(run_startup_recommendation_scan()))
     plan_api_service = getattr(app.state, "automation_plan_service", None)
     if plan_api_service is not None:
         if callable(getattr(plan_api_service, "expire_due_plans", None)) and callable(
@@ -371,6 +373,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
         allow_credentials=cors_allow_credentials,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["X-GreenKube-Run-Id"],
     )
     trusted_hosts = [h.strip() for h in getattr(cfg, "TRUSTED_HOSTS", "*").split(",") if h.strip()]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts or ["*"])
@@ -384,6 +387,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(namespaces.router, prefix="/api/v1", tags=["Namespaces"])
     app.include_router(nodes.router, prefix="/api/v1", tags=["Nodes"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["Recommendations"])
+    app.include_router(optimization_router.router, prefix="/api/v1", tags=["Optimization runs"])
     app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])

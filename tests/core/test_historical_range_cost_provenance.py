@@ -38,7 +38,8 @@ class FreshIntensity(CarbonIntensityRepository):
 
 
 def _series(query: str) -> list[dict]:
-    ts = START.timestamp()
+    # The sample evaluated at END describes the half-open window [START, END) (A2).
+    ts = END.timestamp()
     if "container_cpu_usage_seconds_total" in query:
         return [
             {

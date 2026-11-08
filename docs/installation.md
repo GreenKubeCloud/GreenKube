@@ -184,8 +184,8 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `image.tag` | chart app version | Image tag. Must be a tag, not a `sha256:` digest. |
 | `image.digest` | `""` | Pin the exact image with `sha256:<64 hex>`; takes precedence over `image.tag`. |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
-| `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API builds recommendation inputs during refresh, so keep memory headroom. |
-| `resources` | 100m/128Mi requests, 500m/512Mi limits | Collector/worker resources. Memory grows with the number of pods. |
+| `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API only queues recommendation scans; it never runs them. |
+| `resources` | 100m/128Mi requests, 500m/1Gi limits | Collector/controller resources. This container runs the scheduled recommendation scans; memory grows with the number of pods. |
 | `tmp.sizeLimit` | `768Mi` | Scratch space for snapshots and renderer streaming. |
 
 #### Runtime configuration
@@ -488,7 +488,7 @@ If the installation is served under a sub-path, set `config.rootPath` (for examp
 
 - **Bundled PostgreSQL (default):** Simplest. Persistence is enabled by default with a 10 GiB volume. Set a fixed `postgres.auth.password` only when you manage the Secret yourself; otherwise the chart preserves a generated password across upgrades.
 - **External PostgreSQL:** Set `postgres.enabled=false`. With the chart-managed Secret, provide `secrets.dbConnectionString`; with `secrets.existingSecret`, put `DB_CONNECTION_STRING` in that Secret. Tune `config.db.sslMode`, `config.db.poolMinSize`, `config.db.poolMaxSize`, and `config.db.statementTimeoutMs`.
-- **SQLite:** Acceptable for development only. If you use it, enable `config.persistence.enabled` so the database survives pod restarts.
+- **SQLite:** Acceptable for development only. If you use it, enable `config.persistence.enabled` so the database survives pod restarts. Outside the image (local runs), the Python `sqlite3` library must be SQLite 3.35 or later: the optimization run queue claims runs with `UPDATE ... RETURNING`. The GreenKube image ships 3.40.
 
 ## Optional: GitOps automation
 
