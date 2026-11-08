@@ -690,9 +690,6 @@ class AutomationPlanRepository(ABC):
     ) -> Plan | None: ...
 
     @abstractmethod
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]: ...
-
-    @abstractmethod
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]: ...
 
     @abstractmethod
@@ -708,9 +705,6 @@ class AutomationPlanRepository(ABC):
 
     @abstractmethod
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None: ...
-
-    @abstractmethod
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]: ...
 
 
 class WebhookDeliveryRepository(ABC):
@@ -758,13 +752,7 @@ class AutomationWorkerRepository(ABC):
     """Persistence port for worker heartbeats and leases."""
 
     @abstractmethod
-    async def upsert_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat: ...
-
-    @abstractmethod
     async def get_worker_heartbeat(self, worker_id: str) -> WorkerHeartbeat | None: ...
-
-    @abstractmethod
-    async def list_worker_heartbeats(self, *, status: str | None = None) -> list[WorkerHeartbeat]: ...
 
     @abstractmethod
     async def prune_worker_heartbeats(self, *, cutoff: datetime) -> int: ...

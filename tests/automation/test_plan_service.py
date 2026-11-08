@@ -215,10 +215,6 @@ class MemoryPlanRepository(AutomationPlanRepository):
         self.plans[plan_id] = updated
         return updated
 
-    async def list_recommendation_ids_for_plan(self, plan_id: str) -> list[int]:
-        plan = self.plans.get(plan_id)
-        return list(plan.recommendation_ids) if plan is not None else []
-
     async def list_plans_for_recommendation(self, recommendation_id: int) -> list[Plan]:
         return [plan for plan in self.plans.values() if recommendation_id in plan.recommendation_ids]
 
@@ -237,9 +233,6 @@ class MemoryPlanRepository(AutomationPlanRepository):
 
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None:
         return self.action_status.get(recommendation_id)
-
-    async def list_recommendations_by_action_status(self, status: ActionStatus) -> list[int]:
-        return [recommendation_id for recommendation_id, current in self.action_status.items() if current is status]
 
 
 class FakeGitBlobResolver:

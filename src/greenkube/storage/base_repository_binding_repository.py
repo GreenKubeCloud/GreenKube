@@ -16,6 +16,3 @@ class RepositoryBindingRepository(ABC):
 
     @abstractmethod
     async def list_bindings(self, cluster: str | None = None) -> list[RepositoryBinding]: ...
-
-    @abstractmethod
-    async def delete_binding(self, binding_id: int) -> bool: ...

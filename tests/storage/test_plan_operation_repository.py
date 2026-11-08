@@ -195,7 +195,6 @@ async def test_enqueue_is_idempotent_per_plan_and_digest(plan_operation_store):
     assert duplicate.plan_id == plan.plan_id
     assert await repository.get_by_operation_id(enqueued.operation_id) == enqueued
     assert await repository.get_by_plan_id(plan.plan_id) == enqueued
-    assert await repository.get_by_idempotency_key(idempotency_key) == enqueued
 
     with pytest.raises(ValueError, match="derived from the plan ID and digest"):
         await repository.enqueue(plan, idempotency_key="not-derived-from-the-plan")

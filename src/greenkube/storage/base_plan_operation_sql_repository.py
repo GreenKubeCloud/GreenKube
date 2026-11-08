@@ -228,9 +228,6 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
     async def get_by_plan_id(self, plan_id: str) -> Operation | None:
         return await self._get("plan_id = ?", plan_id)
 
-    async def get_by_idempotency_key(self, idempotency_key: str) -> Operation | None:
-        return await self._get("idempotency_key = ?", idempotency_key)
-
     async def _get(self, clause: str, value: str) -> Operation | None:
         async with self._connection() as connection:
             row = await self._fetchrow(

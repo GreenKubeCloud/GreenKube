@@ -36,7 +36,6 @@ from greenkube.models.metrics import PullRequestRecord, PullRequestStatus
 from greenkube.storage.base_gitops_repository import (
     GitOpsProviderConfig,
     PullRequestPollingLeaseNotOwnedError,
-    WorkerHeartbeat,
     WorkloadBinding,
     WorkloadBindingConflictError,
     WorkloadBindingEvent,
@@ -267,6 +266,16 @@ def _plan(
         created_at=datetime(2026, 10, 20, 12, 30, tzinfo=timezone.utc),
         expires_at=datetime(2026, 10, 22, 12, 30, tzinfo=timezone.utc),
     )
+
+
+async def _insert_worker_heartbeat(repository, worker_id: str, heartbeat_at: datetime) -> None:
+    async with repository._transaction() as connection:
+        await repository._execute(
+            connection,
+            "INSERT INTO automation_worker_heartbeats (worker_id, status, heartbeat_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (worker_id, "idle", repository._db_datetime(heartbeat_at), repository._db_datetime(heartbeat_at)),
+        )
 
 
 async def _insert_recommendations(manager, backend: str) -> None:
@@ -512,10 +521,8 @@ async def test_repository_credentials_are_removed_from_persisted_sources(gitops_
 async def test_worker_heartbeat_retention_removes_only_stale_rows(gitops_store):
     repository, _, _ = gitops_store
     now = datetime.now(timezone.utc)
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="stale-worker", heartbeat_at=now - timedelta(days=8))
-    )
-    await repository.upsert_worker_heartbeat(WorkerHeartbeat(worker_id="active-worker", heartbeat_at=now))
+    await _insert_worker_heartbeat(repository, "stale-worker", now - timedelta(days=8))
+    await _insert_worker_heartbeat(repository, "active-worker", now)
 
     removed = await repository.prune_worker_heartbeats(cutoff=now - timedelta(days=7))
 
@@ -624,12 +631,8 @@ async def test_automation_backlog_summary_reports_stuck_plans_operations_webhook
             (repository._db_datetime(stale), stuck_event.provider_id, stuck_event.delivery_id),
         )
 
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="backlog-stale-worker", status="idle", heartbeat_at=stale)
-    )
-    await repository.upsert_worker_heartbeat(
-        WorkerHeartbeat(worker_id="backlog-active-worker", status="idle", heartbeat_at=now)
-    )
+    await _insert_worker_heartbeat(repository, "backlog-stale-worker", stale)
+    await _insert_worker_heartbeat(repository, "backlog-active-worker", now)
 
     summary = await repository.get_automation_backlog_summary(stale_before=now - timedelta(minutes=15))
 
@@ -932,7 +935,7 @@ async def test_gitops_repository_starts_empty_and_persists_typed_provider_bindin
     assert await repository.list_provider_configs() == []
     assert await repository.list_workload_bindings() == []
     assert await repository.list_plans() == []
-    assert await repository.list_worker_heartbeats() == []
+    assert await repository.get_worker_heartbeat("any-worker") is None
 
     with pytest.raises(ValueError, match="set together"):
         GitOpsProviderConfig(id="incomplete-provider", provider_type="github", secret_name="token")
@@ -1484,7 +1487,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
     assert approved_rollback is not None
     assert await repository.save_plan_if_absent(rollback_plan) == approved_rollback
     assert await repository.list_plans(status=PlanStatus.VALIDATED) == [persisted_plan]
-    assert await repository.list_recommendation_ids_for_plan(plan.plan_id) == [9101, 9102]
     followup_plan = Plan(
         plan_id="plan-api-followup",
         recommendation_ids=[9101],
@@ -1498,7 +1500,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
         ),
     )
     await repository.save_plan(followup_plan)
-    assert await repository.list_recommendation_ids_for_plan(followup_plan.plan_id) == [9101]
     assert await repository.list_plans_for_workload(
         cluster=source.cluster,
         namespace=source.namespace,
@@ -1514,9 +1515,11 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
 
     assert await repository.set_recommendation_action_status([9101, 9102, 9101], ActionStatus.PLAN_READY) == 2
     assert await repository.get_recommendation_action_status(9101) is ActionStatus.PLAN_READY
-    assert await repository.list_recommendations_by_action_status(ActionStatus.PLAN_READY) == [9101, 9102]
+    assert await repository.get_recommendation_action_status(9102) is ActionStatus.PLAN_READY
     assert await repository.set_recommendation_action_status([9101, 9102], ActionStatus.PR_OPEN) == 2
-    assert await repository.list_recommendations_by_action_status(ActionStatus.PR_OPEN) == [9101, 9102]
+    assert {await repository.get_recommendation_action_status(rec_id) for rec_id in (9101, 9102)} == {
+        ActionStatus.PR_OPEN
+    }
     assert await repository.set_plan_status(plan.plan_id, PlanStatus.APPLIED) is not None
     assert (await repository.get_plan(plan.plan_id)).status is PlanStatus.APPLIED
 
@@ -1585,31 +1588,6 @@ async def test_plans_recommendations_webhook_dedupe_and_worker_heartbeat(gitops_
         stale_before=stale_before,
     )
     assert await repository.update_webhook_delivery("provider-github", "missing-delivery", status="processed") is None
-
-    heartbeat = WorkerHeartbeat(
-        worker_id="worker-a",
-        status="running",
-        heartbeat_at=datetime.now(timezone.utc),
-        lease_id="lease-a",
-        lease_owner="worker-a",
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-        metadata={"queue": "automation", "version": 1},
-    )
-    saved_heartbeat = await repository.upsert_worker_heartbeat(heartbeat)
-    assert await repository.get_worker_heartbeat(heartbeat.worker_id) == saved_heartbeat
-    assert saved_heartbeat.metadata == heartbeat.metadata
-
-    refreshed = WorkerHeartbeat(
-        worker_id="worker-a",
-        status="idle",
-        heartbeat_at=datetime.now(timezone.utc),
-        metadata={"queue": "automation", "version": 2},
-    )
-    saved_refreshed = await repository.upsert_worker_heartbeat(refreshed)
-    assert saved_refreshed.status == "idle"
-    assert saved_refreshed.lease_id is None
-    assert saved_refreshed.metadata == {"queue": "automation", "version": 2}
-    assert await repository.list_worker_heartbeats(status="idle") == [saved_refreshed]
 
 
 @pytest.mark.asyncio

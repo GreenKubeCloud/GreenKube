@@ -41,9 +41,6 @@ class PlanOperationRepository(ABC):
     async def get_by_plan_id(self, plan_id: str) -> Operation | None: ...
 
     @abstractmethod
-    async def get_by_idempotency_key(self, idempotency_key: str) -> Operation | None: ...
-
-    @abstractmethod
     async def claim_next(self, worker_id: str, *, lease_seconds: int = 900) -> PlanOperationLease | None: ...
 
     @abstractmethod
