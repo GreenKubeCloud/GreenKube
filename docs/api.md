@@ -69,8 +69,9 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/recommendations` | Read persisted active records in an optional `namespace`. Never runs the optimizer. |
-| `GET` | `/recommendations/active` | Read persisted active records, ordered by `ranking_score` (unscored last), then projected cost savings (unknown last), then `id`. Supports `namespace`, `source`, `risk_level`, and `capability` filters. |
-| `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or a ranking `profile`; supports `namespace`; `limit` defaults to 5. |
+| `GET` | `/recommendations/active` | Read persisted active records with their live expected value (`value`) and delivery `eligibility`, ordered by expected value (`ranking_score`, unscored last), then value, projected cost savings and identity. Supports `namespace`, `source`, `risk_level`, `capability`, `profile` and `carbon_price`. |
+| `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or by expected value (`metric=value`, a `profile` or a `carbon_price`); supports `namespace`; `limit` defaults to 5. |
+| `GET` | `/sources/track-record` | Measured realization rate per source family and capability, as Beta(α, β) entries. |
 | `POST` | `/optimization/runs` | Queue a recommendation scan for the controller (optional body `{"namespace": "..."}`). Returns `202 {"run_id", "status": "queued"}` and a `Location` header; while a run is queued for the same scope (or a cluster-wide run is queued) its id is returned instead of a duplicate. |
 | `GET` | `/optimization/runs` | List recent runs, newest first (`limit` 1–100, default 20), with per-source health and new/changed/resolved counts. |
 | `GET` | `/optimization/runs/{run_id}` | Read one run: `run_id`, `status` (`queued`, `running`, `succeeded`, `failed`), `trigger`, `requested_at`, `started_at`, `completed_at`, `recommendation_count`, `sources`, diff counts, `diff`, `error`. `404` when unknown. |
@@ -86,7 +87,7 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 | `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore an `active`, `stale` or `expired` recommendation. `409` for an open PR or an applied change. |
 | `DELETE` | `/recommendations/{rec_id}/ignore` | Restore an ignored recommendation. `409` when it is not `ignored`. |
 | `POST` | `/recommendations/{rec_id}/apply-pr` | **Deprecated.** Compatibility endpoint that previews or queues a validated GitOps plan; use `/automation/plans`. |
-| `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | **Deprecated.** Check eligibility with a read-only plan preview; use `/automation/plans`. |
+| `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | **Deprecated.** Read the recommendation's `eligibility` field, or check with a read-only plan preview through `/automation/plans`. |
 | `GET` | `/recommendations/{rec_id}/pull-requests` | List pull-request attempts for one recommendation. |
 | `GET` | `/automation/pull-requests` | List pending or open pull requests. |
 | `GET` | `/automation/status` | Report secret-free automation readiness: worker heartbeat, queue depth, plan backlog, discovery freshness, renderer configuration, and provider capability/preflight state. |

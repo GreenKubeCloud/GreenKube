@@ -386,30 +386,37 @@ class TestRecommendationsEndpoint:
 
         assert response.status_code == 200
         data = response.json()
-        assert data == [
-            {
-                "rank": 1,
-                "id": 42,
-                "type": "RIGHTSIZING_CPU",
-                "namespace": "production",
-                "resource": "checkout-api",
-                "scope": "workload",
-                "priority": "high",
-                "description": "Reduce checkout-api CPU request",
-                "reason": "",
-                "sort_metric": "co2",
-                "sort_value": 6200.0,
-                "projected_savings_co2e_grams": 6200.0,
-                "projected_savings_cost": 148.5,
-                "source": "greenkube",
-                "risk_level": None,
-                "confidence": None,
-                "effort": None,
-                "ranking_score": None,
-                "ranking_factors": {},
-                "expires_at": None,
-            }
-        ]
+        assert len(data) == 1
+        row = data[0]
+        value = row.pop("value")
+        eligibility = row.pop("eligibility")
+        score = row.pop("ranking_score")
+        factors = row.pop("ranking_factors")
+        assert row == {
+            "rank": 1,
+            "id": 42,
+            "type": "RIGHTSIZING_CPU",
+            "namespace": "production",
+            "resource": "checkout-api",
+            "scope": "workload",
+            "priority": "high",
+            "description": "Reduce checkout-api CPU request",
+            "reason": "",
+            "sort_metric": "co2",
+            "sort_value": 6200.0,
+            "projected_savings_co2e_grams": 6200.0,
+            "projected_savings_cost": 148.5,
+            "source": "greenkube",
+            "risk_level": None,
+            "confidence": None,
+            "effort": None,
+            "expires_at": None,
+        }
+        # The live decision: expected value in currency and delivery eligibility (I1, F10).
+        assert score == value["ev"]
+        assert sum(factors.values()) == pytest.approx(score, abs=0.05)
+        assert eligibility["can_open_pr"] is False
+        assert {blocker["code"] for blocker in eligibility["blockers"]} >= {"action_unavailable"}
         mock_reco_repo.get_top_recommendations.assert_awaited_once_with(
             limit=5,
             savings_metric="co2",

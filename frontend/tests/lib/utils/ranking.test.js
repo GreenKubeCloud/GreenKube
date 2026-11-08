@@ -50,8 +50,11 @@ describe('sortedRankingFactors', () => {
 describe('rankingFactorLabel', () => {
 	it('labels known factors and humanizes unknown ones', () => {
 		expect(rankingFactorLabel('risk')).toBe('Low risk');
-		expect(rankingFactorLabel('carbon')).toBe('Carbon savings');
+		expect(rankingFactorLabel('carbon')).toBe('Carbon value');
 		expect(rankingFactorLabel('blast_radius')).toBe('Blast radius');
+		expect(rankingFactorLabel('effort')).toBe('Effort');
+		expect(rankingFactorLabel('incident_risk')).toBe('Incident risk');
+		expect(rankingFactorLabel('reliability')).toBe('Incidents avoided');
 		expect(rankingFactorLabel('')).toBe('Unknown factor');
 		expect(rankingFactorLabel(undefined)).toBe('Unknown factor');
 	});

@@ -461,10 +461,20 @@ config:
     # --- Ranking & review ---
     # Time-to-live of a recommendation before it is considered expired (days).
     ttlDays: 14
-    # Multi-criteria ranking profile: balanced | carbon_first | cost_first | quick_wins | low_risk
+    # Default ranking profile: balanced | carbon_first | cost_first | quick_wins | low_risk.
+    # Recommendations are ranked by risk-adjusted expected value (EV, currency per
+    # year); profiles are presets over the carbon price (impact.carbonPricePerTonne),
+    # the risk aversion and the effort weight. Requests can override it with ?profile=.
     rankingProfile: balanced
-    # Optional JSON object overriding ranking weights, e.g. '{"carbon": 0.5, "risk": 0.3}'.
+    # Deprecated and ignored since the EV ranking (weights of the former batch-normalized score).
     rankingWeights: ''
+    # Expected cost (impact.pricing.currency) of a failed high-risk change on one
+    # workload of normal criticality. Scaled by risk level, blast radius (scope,
+    # greenkube.io/criticality label, single replica) and the profile's risk aversion.
+    incidentCost: 100
+    # Cost of one engineer hour, used to weigh implementation effort. 0 ignores
+    # effort, except in the quick_wins profile (at least 100 per hour).
+    engineerHourCost: 0
     # Minimum raw samples expected for a high-confidence recommendation.
     minSamples: 36
     # Interval between scheduled recommendation scans. Scans run only in the

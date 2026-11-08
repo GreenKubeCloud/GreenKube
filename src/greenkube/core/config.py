@@ -323,9 +323,18 @@ class Config(BaseSettings):
     # Time-to-live of a recommendation before it is considered expired.
     RECOMMENDATION_TTL_DAYS: int = 14
     # Ranking profile: balanced, carbon_first, cost_first, quick_wins, low_risk.
+    # Profiles are presets over the carbon price, risk aversion and effort
+    # weight of the expected value (EV) ranking (roadmap I1/I2).
     RECOMMENDATION_RANKING_PROFILE: str = "balanced"
-    # Optional JSON object overriding profile weights, e.g. '{"carbon": 0.5}'.
+    # Deprecated and ignored since the EV ranking (I1): weights of the former
+    # batch-normalized score. Kept so existing values files still load.
     RECOMMENDATION_RANKING_WEIGHTS: str = ""
+    # Expected cost (currency) of a failed high-risk change on one workload of
+    # normal criticality, scaled by risk level, blast radius and profile (I1).
+    RECOMMENDATION_INCIDENT_COST: float = 100.0
+    # Cost (currency) of one engineer hour. 0 ignores implementation effort
+    # except in the quick_wins profile (I1).
+    RECOMMENDATION_ENGINEER_HOUR_COST: float = 0.0
     # Minimum number of raw samples expected for a high-confidence recommendation.
     RECOMMENDATION_MIN_SAMPLES: int = 36
 
@@ -548,6 +557,13 @@ class Config(BaseSettings):
     def _validate_carbon_price(cls, value: float) -> float:
         if value < 0:
             raise ValueError("CARBON_PRICE_PER_TONNE must not be negative.")
+        return value
+
+    @field_validator("RECOMMENDATION_INCIDENT_COST", "RECOMMENDATION_ENGINEER_HOUR_COST", mode="after")
+    @classmethod
+    def _validate_decision_costs(cls, value: float, info) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{info.field_name} must be a finite, non-negative amount.")
         return value
 
     @field_validator("PROMETHEUS_QUERY_RANGE_STEP", mode="after")

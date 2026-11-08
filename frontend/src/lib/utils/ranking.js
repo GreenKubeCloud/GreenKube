@@ -2,19 +2,22 @@
  * Presentation helpers for recommendation ranking (K2).
  *
  * The server attaches `ranking_score` and a `ranking_factors` breakdown to
- * each recommendation. Factors are the weighted contribution of each
- * criterion; later ranking versions (I1) may express them in currency or as
- * objects, so every helper tolerates numbers and `{value}`-style entries.
+ * each recommendation. Since I1 the score is the risk-adjusted expected value
+ * and the factors are its terms in currency: positive gains (`cost`,
+ * `carbon`, `reliability`) and negative costs (`incident_risk`, `effort`).
+ * Every helper tolerates numbers and `{value}`-style entries.
  */
 
 const FACTOR_LABELS = {
-	carbon: 'Carbon savings',
+	carbon: 'Carbon value',
 	co2: 'Carbon savings',
 	cost: 'Cost savings',
 	value: 'Expected value',
 	confidence: 'Confidence',
 	risk: 'Low risk',
-	effort: 'Low effort',
+	reliability: 'Incidents avoided',
+	incident_risk: 'Incident risk',
+	effort: 'Effort',
 	actionability: 'Ready as a change',
 	source: 'Source authority',
 	track_record: 'Source track record',

@@ -184,6 +184,12 @@ data:
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}
+  {{- if not (kindIs "invalid" .incidentCost) }}
+  RECOMMENDATION_INCIDENT_COST: {{ .incidentCost | toString | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .engineerHourCost) }}
+  RECOMMENDATION_ENGINEER_HOUR_COST: {{ .engineerHourCost | toString | quote }}
+  {{- end }}
   RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
   RECOMMENDATION_SCAN_INTERVAL: {{ .scanInterval | default "1h" | quote }}
   {{- with .verification }}

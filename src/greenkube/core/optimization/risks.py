@@ -1,14 +1,73 @@
 # src/greenkube/core/optimization/risks.py
-"""Risk, confidence and effort assessment for recommendations."""
+"""Risk, confidence and effort assessment for recommendations (risk model v2, roadmap I4).
+
+The base risk of a rightsizing change compares the pooled usage distribution
+with the proposal. Risk model v2 then folds in what the pooled numbers hide or
+cannot know, from a :class:`WorkloadRiskProfile`:
+
+* per-replica headroom: the hottest replica, not the pool, must fit the request;
+* OOM and CPU-throttling history;
+* a singleton workload (one replica): a restart is an outage;
+* HPA, VPA and PDB interplay;
+* a JVM flag: heap sizing hides memory needs from the working set;
+* in-place resize constraints (memory decreases are best effort, the static
+  CPU manager is incompatible with CPU resizes);
+* the ``greenkube.io/criticality`` label.
+
+Unknown profile facts (``None``) never change the risk level.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, FrozenSet, List, Mapping, Optional
 
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import EffortLevel, Recommendation, RecommendationSource, RecommendationType, RiskLevel
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
+
+#: Workload label that declares business criticality: critical, high, normal or low.
+CRITICALITY_LABEL = "greenkube.io/criticality"
+#: Label or annotation flagging a JVM workload (``"true"``); ``greenkube.io/runtime: jvm`` also works.
+JVM_FLAG = "greenkube.io/jvm"
+RUNTIME_LABEL = "greenkube.io/runtime"
+
+CRITICALITY_LEVELS = ("critical", "high", "normal", "low")
+
+#: VPA update modes in which the VPA writes pod requests itself (a conflicting writer).
+CONFLICTING_VPA_UPDATE_MODES = frozenset({"Auto", "Recreate", "InPlace", "InPlaceOrRecreate"})
+
+#: CPU throttling ratio above which a CPU decrease is at least medium (high above the second value).
+THROTTLING_MEDIUM = 0.05
+THROTTLING_HIGH = 0.25
+
+_ORDER = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+_BY_RANK = {rank: level for level, rank in _ORDER.items()}
+_RIGHTSIZING = (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY)
+
+
+@dataclass(frozen=True)
+class WorkloadRiskProfile:
+    """Facts about the target workload that the pooled usage statistics cannot show.
+
+    Every field is optional: ``None`` means "not observed", never "safe".
+    """
+
+    replicas: Optional[int] = None
+    #: Highest per-replica p95 usage over the window (millicores / bytes).
+    replica_cpu_p95_max: Optional[float] = None
+    replica_memory_p95_max: Optional[float] = None
+    oom_events: Optional[int] = None
+    cpu_throttling_ratio: Optional[float] = None
+    #: Resources an HPA scales on (``cpu``, ``memory``); ``{"*"}`` when an HPA exists but its metrics are unknown.
+    hpa_resources: Optional[FrozenSet[str]] = None
+    vpa_update_mode: Optional[str] = None
+    pdb_conflict: Optional[bool] = None
+    criticality: Optional[str] = None
+    jvm: Optional[bool] = None
+    static_cpu_manager: Optional[bool] = None
 
 
 @dataclass
@@ -22,6 +81,68 @@ class RiskAssessment:
     effort: EffortLevel = EffortLevel.LOW
     reversible: bool = True
     requires_restart: bool = False
+
+
+def _at_least(current: RiskLevel, floor: RiskLevel) -> RiskLevel:
+    return current if _ORDER[current] >= _ORDER[floor] else floor
+
+
+def _raise(current: RiskLevel) -> RiskLevel:
+    return _BY_RANK[min(_ORDER[current] + 1, 2)]
+
+
+def normalize_criticality(value: Any) -> Optional[str]:
+    text = str(value).strip().lower() if value is not None else ""
+    return text if text in CRITICALITY_LEVELS else None
+
+
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("true", "yes", "1")
+
+
+def profile_from_binding_evidence(evidence: Optional[Mapping[str, Any]]) -> WorkloadRiskProfile:
+    """Reads workload labels, annotations and HPA/VPA/PDB facts from GitOps discovery evidence."""
+    if not isinstance(evidence, Mapping):
+        return WorkloadRiskProfile()
+    workload = evidence.get("workload") if isinstance(evidence.get("workload"), Mapping) else {}
+    labels = evidence.get("workload_labels") or (workload or {}).get("labels") or {}
+    annotations = (workload or {}).get("annotations") or {}
+    labels = labels if isinstance(labels, Mapping) else {}
+    annotations = annotations if isinstance(annotations, Mapping) else {}
+
+    jvm: Optional[bool] = None
+    if JVM_FLAG in labels or JVM_FLAG in annotations:
+        jvm = _truthy(labels.get(JVM_FLAG, annotations.get(JVM_FLAG)))
+    elif RUNTIME_LABEL in labels or RUNTIME_LABEL in annotations:
+        jvm = str(labels.get(RUNTIME_LABEL, annotations.get(RUNTIME_LABEL))).strip().lower() == "jvm"
+
+    hpa_resources: Optional[FrozenSet[str]] = None
+    hpas = evidence.get("hpa_targets")
+    if evidence.get("hpa_pdb_interactions_checked") is True and isinstance(hpas, list):
+        resources: set[str] = set()
+        for hpa in hpas:
+            if not isinstance(hpa, Mapping):
+                continue
+            metrics = [m for m in hpa.get("resource_metrics") or () if isinstance(m, Mapping)]
+            names = {str(m.get("name") or m.get("resource") or "").lower() for m in metrics} - {""}
+            resources.update(names or {"*"})
+        hpa_resources = frozenset(resources)
+
+    vpa_mode: Optional[str] = None
+    vpas = evidence.get("vpa_targets")
+    if evidence.get("vpa_interactions_checked") is True and isinstance(vpas, list):
+        modes = [str(v.get("update_mode")) for v in vpas if isinstance(v, Mapping) and v.get("update_mode")]
+        conflicting = [mode for mode in modes if mode in CONFLICTING_VPA_UPDATE_MODES]
+        vpa_mode = conflicting[0] if conflicting else (modes[0] if modes else "none")
+
+    pdb = evidence.get("pdb_conflict")
+    return WorkloadRiskProfile(
+        hpa_resources=hpa_resources,
+        vpa_update_mode=vpa_mode,
+        pdb_conflict=pdb if isinstance(pdb, bool) else None,
+        criticality=normalize_criticality(labels.get(CRITICALITY_LABEL)),
+        jvm=jvm,
+    )
 
 
 def _base_confidence(rec: Recommendation, evidence: Optional[RecommendationEvidence], config: "Config") -> tuple:
@@ -55,7 +176,7 @@ def _base_confidence(rec: Recommendation, evidence: Optional[RecommendationEvide
 
 
 def _assess_rightsizing(rec: Recommendation, evidence: Optional[RecommendationEvidence]) -> tuple:
-    """Risk of a CPU/memory rightsizing change."""
+    """Risk of a CPU/memory rightsizing change from the pooled usage distribution."""
     if evidence is None:
         return RiskLevel.MEDIUM, ["insufficient_evidence"]
 
@@ -84,12 +205,105 @@ def _assess_rightsizing(rec: Recommendation, evidence: Optional[RecommendationEv
     return RiskLevel.MEDIUM, ["missing_memory_usage"]
 
 
-def assess(rec: Recommendation, evidence: Optional[RecommendationEvidence], config: "Config") -> RiskAssessment:
+def _is_decrease(rec: Any, resource: str) -> bool:
+    if resource == "cpu":
+        current, proposed = rec.current_cpu_request_millicores, rec.recommended_cpu_request_millicores
+    else:
+        current, proposed = rec.current_memory_request_bytes, rec.recommended_memory_request_bytes
+    return current is not None and proposed is not None and proposed < current
+
+
+def apply_profile(
+    rec: Any,
+    level: RiskLevel,
+    factors: List[str],
+    profile: Optional[WorkloadRiskProfile],
+    *,
+    requires_restart: bool,
+) -> tuple:
+    """Folds workload facts into a risk level (risk model v2). Returns ``(level, factors)``."""
+    if profile is None:
+        return level, factors
+    factors = list(factors)
+
+    def add(factor: str) -> None:
+        if factor not in factors:
+            factors.append(factor)
+
+    if rec.type in _RIGHTSIZING:
+        resource = "cpu" if rec.type == RecommendationType.RIGHTSIZING_CPU else "memory"
+        proposed = rec.recommended_cpu_request_millicores if resource == "cpu" else rec.recommended_memory_request_bytes
+        hottest = profile.replica_cpu_p95_max if resource == "cpu" else profile.replica_memory_p95_max
+        if proposed and hottest is not None:
+            if hottest >= proposed:
+                level = RiskLevel.HIGH
+                add("replica_p95_exceeds_proposal")
+            elif hottest >= proposed * 0.9:
+                level = _at_least(level, RiskLevel.MEDIUM)
+                add("replica_p95_close_to_proposal")
+
+        if resource == "memory" and profile.oom_events:
+            level = RiskLevel.HIGH
+            add("oom_history")
+        if resource == "cpu" and profile.cpu_throttling_ratio is not None:
+            if profile.cpu_throttling_ratio > THROTTLING_HIGH:
+                level = RiskLevel.HIGH
+                add("cpu_throttling_history")
+            elif profile.cpu_throttling_ratio > THROTTLING_MEDIUM:
+                level = _at_least(level, RiskLevel.MEDIUM)
+                add("cpu_throttling_history")
+
+        if profile.hpa_resources:
+            if resource in profile.hpa_resources:
+                level = _at_least(level, RiskLevel.MEDIUM)
+                add("hpa_scales_on_resource")
+            elif "*" in profile.hpa_resources:
+                add("hpa_present")
+        if profile.vpa_update_mode in CONFLICTING_VPA_UPDATE_MODES:
+            level = RiskLevel.HIGH
+            add("vpa_conflicting_writer")
+        if profile.jvm and _is_decrease(rec, resource):
+            if resource == "memory":
+                level = RiskLevel.HIGH
+                add("jvm_heap_not_observable")
+            else:
+                level = _at_least(level, RiskLevel.MEDIUM)
+                add("jvm_startup_cpu")
+        if resource == "memory" and _is_decrease(rec, "memory"):
+            # In-place resize cannot reclaim memory below current usage: best effort or a restart.
+            add("memory_decrease_best_effort")
+        if resource == "cpu" and profile.static_cpu_manager:
+            level = RiskLevel.HIGH
+            add("static_cpu_manager_incompatible")
+
+    if profile.pdb_conflict and requires_restart:
+        level = _at_least(level, RiskLevel.MEDIUM)
+        add("pdb_blocks_disruption")
+    if profile.replicas == 1 and requires_restart:
+        level = _raise(level)
+        add("singleton_workload")
+    if profile.criticality == "critical":
+        level = _raise(level)
+        add("criticality_critical")
+    elif profile.criticality == "high":
+        level = _at_least(level, RiskLevel.MEDIUM)
+        add("criticality_high")
+    elif profile.criticality == "low":
+        add("criticality_low")
+    return level, factors
+
+
+def assess(
+    rec: Recommendation,
+    evidence: Optional[RecommendationEvidence],
+    config: "Config",
+    profile: Optional[WorkloadRiskProfile] = None,
+) -> RiskAssessment:
     """Computes risk level, factors, confidence and effort for a recommendation."""
     confidence, confidence_factors = _base_confidence(rec, evidence, config)
     assessment = RiskAssessment(confidence=confidence, confidence_factors=confidence_factors)
 
-    if rec.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY):
+    if rec.type in _RIGHTSIZING:
         assessment.risk_level, assessment.risk_factors = _assess_rightsizing(rec, evidence)
         assessment.effort = EffortLevel.LOW
         assessment.reversible = True
@@ -127,4 +341,11 @@ def assess(rec: Recommendation, evidence: Optional[RecommendationEvidence], conf
         assessment.effort = EffortLevel.LOW
         assessment.reversible = False
 
+    assessment.risk_level, assessment.risk_factors = apply_profile(
+        rec,
+        assessment.risk_level,
+        assessment.risk_factors,
+        profile,
+        requires_restart=assessment.requires_restart,
+    )
     return assessment

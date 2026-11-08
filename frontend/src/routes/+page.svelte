@@ -19,6 +19,7 @@
 	import Filters from '$lib/components/Filters.svelte';
 	import Chart from '$lib/components/Chart.svelte';
 	import Card from '$lib/components/Card.svelte';
+	import { describeExpectedValue } from '$lib/utils/decision.js';
 
 	// Slugs served by the pre-computed summary / timeseries cache tables
 	const PRECOMPUTED_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);
@@ -364,6 +365,7 @@
 						View all →
 					</a>
 				</div>
+				<!-- Server order: risk-adjusted expected value (I1), so these are the top-ranked cards. -->
 				<div class="divide-y divide-dark-700/50">
 					{#each recommendations.slice(0, 3) as rec}
 						{@const badge = recoBadge(rec.type)}
@@ -373,11 +375,18 @@
 								<p class="text-sm text-dark-200 font-medium truncate">{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}</p>
 								<p class="text-xs text-dark-500 mt-0.5">{rec.reason}</p>
 							</div>
-							{#if rec.potential_savings_co2e_grams}
-								<span class="text-xs text-green-400 whitespace-nowrap">
-									-{formatCO2(rec.potential_savings_co2e_grams)}
-								</span>
-							{/if}
+							<div class="text-right shrink-0">
+								{#if describeExpectedValue(rec)}
+									<p class="text-xs text-dark-200 whitespace-nowrap" data-testid="dashboard-expected-value">
+										{describeExpectedValue(rec)}
+									</p>
+								{/if}
+								{#if rec.potential_savings_co2e_grams}
+									<p class="text-xs text-green-400 whitespace-nowrap">
+										-{formatCO2(rec.potential_savings_co2e_grams)}
+									</p>
+								{/if}
+							</div>
 						</div>
 					{/each}
 				</div>

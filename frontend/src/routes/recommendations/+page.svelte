@@ -9,7 +9,6 @@
 		getOpenPullRequests,
 		getAutomationStatus,
 		getNamespaces,
-		getTopRecommendations,
 		ignoreRecommendation,
 		unignoreRecommendation,
 		createAutomationPlan,
@@ -32,8 +31,16 @@
 	import {
 		describeRankingFactors,
 		formatRankingScore,
+		rankingFactorLabel,
 		topRankingFactor
 	} from '$lib/utils/ranking.js';
+	import {
+		describeExpectedValue,
+		eligibilityOf,
+		formatMoney,
+		isReliabilityLane,
+		planTargetFor
+	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
 
 	// --- State ---
@@ -53,18 +60,13 @@
 	let expandedApplied = new Set(); // ids of expanded applied cards
 	let expandedEvidence = new Set(); // ids of active cards showing the evidence panel
 
-	// Ordering. 'server' keeps the API order (ranking score, then projected
-	// cost savings); the savings sorts are client-side; 'profile:*' re-ranks
-	// through /recommendations/top (top 50 only, the rest keep server order).
+	// Ordering. 'server' keeps the API order (risk-adjusted expected value,
+	// I1); the savings sorts are client-side; 'profile:*' reloads the list with
+	// ?profile= so the server re-scores and re-orders every match.
 	let sortMode = 'server';
-	let rankedIds = []; // recommendation ids ordered by the selected profile
-	let profileScores = new Map(); // id -> { ranking_score, ranking_factors } for the selected profile
-	let rankingError = '';
-	let rankingController = null;
 
-	const PROFILE_RANK_LIMIT = 50;
 	const SORT_OPTIONS = [
-		{ value: 'server', label: 'Ranking score (default)' },
+		{ value: 'server', label: 'Expected value (default)' },
 		{ value: 'cost', label: 'Projected cost savings' },
 		{ value: 'co2', label: 'Projected CO₂e savings' },
 		{ value: 'profile:balanced', label: 'Profile: balanced' },
@@ -140,7 +142,8 @@
 	let actionLoading = {}; // { [id]: bool }
 
 	// Reload whenever the namespace or a server-side filter changes.
-	$: loadKey = [$selectedNamespace ?? '', filterSource, filterRisk, filterCapability].join('|');
+	$: rankingProfile = sortMode.startsWith('profile:') ? sortMode.slice('profile:'.length) : '';
+	$: loadKey = [$selectedNamespace ?? '', filterSource, filterRisk, filterCapability, rankingProfile].join('|');
 	$: if (loadKey !== undefined) loadData();
 
 	let loadSeq = 0;
@@ -148,7 +151,6 @@
 	onDestroy(() => {
 		requestController.abort();
 		scanController?.abort();
-		rankingController?.abort();
 		stopPlanStatusPolling();
 		discardPreviewPlan();
 	});
@@ -184,6 +186,7 @@
 					source: filterSource || undefined,
 					risk_level: filterRisk || undefined,
 					capability: filterCapability || undefined,
+					profile: rankingProfile || undefined,
 					signal
 				}),
 				getIgnoredRecommendations({ namespace, signal }),
@@ -210,7 +213,6 @@
 		} finally {
 			if (seq === loadSeq) loading = false;
 		}
-		if (seq === loadSeq && sortMode.startsWith('profile:')) loadProfileRanking(sortMode);
 	}
 
 	// --- Recommendation scan runs ---
@@ -347,63 +349,20 @@
 		return Number.isFinite(value) ? value : 0;
 	}
 
-	function sortRecommendations(list, mode, ids) {
+	function sortRecommendations(list, mode) {
 		if (mode === 'cost' || mode === 'co2') {
 			const key = mode === 'cost' ? 'potential_savings_cost' : 'potential_savings_co2e_grams';
 			// Stable: equal savings keep the server order.
 			return [...list].sort((a, b) => savingsValue(b, key) - savingsValue(a, key));
 		}
-		if (mode.startsWith('profile:') && ids.length) {
-			const position = new Map(ids.map((id, index) => [id, index]));
-			return [...list].sort(
-				(a, b) =>
-					(position.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (position.get(b.id) ?? Number.MAX_SAFE_INTEGER)
-			);
-		}
+		// Server order: expected value under the selected profile.
 		return list;
 	}
 
-	$: displayed = sortRecommendations(filtered, sortMode, rankedIds);
-
-	/** Score and factors matching the order shown (profile scores when a profile ranks). */
-	function rankingFor(rec, mode, scores) {
-		if (mode.startsWith('profile:') && scores.has(rec.id)) return scores.get(rec.id);
-		return { ranking_score: rec.ranking_score, ranking_factors: rec.ranking_factors };
-	}
-
-	async function loadProfileRanking(mode) {
-		rankingController?.abort();
-		rankingController = null;
-		rankedIds = [];
-		profileScores = new Map();
-		rankingError = '';
-		if (!mode.startsWith('profile:')) return;
-		const controller = new AbortController();
-		rankingController = controller;
-		try {
-			const ranked = await getTopRecommendations({
-				namespace: $selectedNamespace || undefined,
-				limit: PROFILE_RANK_LIMIT,
-				metric: 'co2',
-				profile: mode.slice('profile:'.length),
-				signal: controller.signal
-			});
-			if (rankingController !== controller || sortMode !== mode) return;
-			const rows = Array.isArray(ranked) ? ranked.filter((r) => r?.id != null) : [];
-			rankedIds = rows.map((r) => r.id);
-			profileScores = new Map(
-				rows.map((r) => [r.id, { ranking_score: r.ranking_score, ranking_factors: r.ranking_factors }])
-			);
-		} catch (e) {
-			if (e?.name !== 'AbortError' && rankingController === controller) {
-				rankingError = e?.message || 'The ranking profile could not be applied.';
-			}
-		}
-	}
+	$: displayed = sortRecommendations(filtered, sortMode);
 
 	function changeSort(mode) {
 		sortMode = mode;
-		loadProfileRanking(mode);
 	}
 
 	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
@@ -443,8 +402,6 @@
 	}
 
 	// --- GitOps plan preview ---
-	const RIGHTSIZING_TYPES = ['RIGHTSIZING_CPU', 'RIGHTSIZING_MEMORY'];
-
 	function recommendationKey(rec) {
 		return [
 			rec.namespace ?? '',
@@ -459,69 +416,39 @@
 		return openPrRecommendationIds.has(rec.id) || openPullRequestKeys.has(recommendationKey(rec));
 	}
 
+	/** The change set to plan, from the server's eligibility (F10); replaces client-side checks. */
 	function safeActionFor(rec) {
-		const action = rec?.action ?? rec?.patch?.action;
-		const id = Number(rec?.id);
-		const target = action?.target;
-		const recommendationIds = Array.isArray(action?.recommendation_ids)
-			? action.recommendation_ids.map(Number)
-			: [];
-		if (
-			!Number.isInteger(id) ||
-			id <= 0 ||
-			action?.version !== 3 ||
-			!action.action_id ||
-			!recommendationIds.length ||
-			!recommendationIds.every((recommendationId) => Number.isInteger(recommendationId) && recommendationId > 0) ||
-			new Set(recommendationIds).size !== recommendationIds.length ||
-			!recommendationIds.includes(id) ||
-			action.constraints?.container_targeted !== true ||
-			rec.scope !== 'workload' ||
-			!rec.owner_kind ||
-			!rec.owner_name ||
-			!rec.namespace ||
-			!rec.container_name ||
-			!target?.api_version ||
-			target?.kind !== rec.owner_kind ||
-			target?.name !== rec.owner_name ||
-			target?.namespace !== rec.namespace ||
-			!Array.isArray(action.operations) ||
-			!action.operations.length
-		) {
-			return null;
-		}
-
-		const containers = action.operations.map((operation) => operation?.container);
-		if (
-			new Set(containers).size !== containers.length ||
-			!action.operations.some((operation) => operation?.container === rec.container_name) ||
-			action.operations.some((operation) => {
-				const requests = operation?.resources?.requests;
-				return (
-					operation?.op !== 'set_container_resources' ||
-					typeof operation.container !== 'string' ||
-					!operation.container.trim() ||
-					!requests ||
-					typeof requests !== 'object' ||
-					Array.isArray(requests) ||
-					!Object.keys(requests).length ||
-					Object.entries(requests).some(
-						([resource, quantity]) =>
-							!['cpu', 'memory'].includes(resource) ||
-							typeof quantity !== 'string' ||
-							!quantity.trim()
-					)
-				);
-			})
-		) {
-			return null;
-		}
-
-		return { action, recommendationIds };
+		return planTargetFor(rec);
 	}
 
 	function hasSafePerContainerAction(rec) {
 		return Boolean(safeActionFor(rec));
+	}
+
+	/** "Cost savings $120 · Incident risk -$8" in the recommendation's currency. */
+	function describeFactorsInCurrency(rec) {
+		const factors = rec?.ranking_factors;
+		if (!factors || typeof factors !== 'object') return '';
+		return Object.entries(factors)
+			.filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount !== 0)
+			.sort((a, b) => b[1] - a[1])
+			.map(([key, amount]) => `${rankingFactorLabel(key)} ${formatMoney(amount, rec?.value?.currency)}`)
+			.join(' · ');
+	}
+
+	function blockerText(entry) {
+		return [entry.message, entry.fix].filter(Boolean).join(' ');
+	}
+
+	function manualReason(rec) {
+		const eligibility = eligibilityOf(rec);
+		if (eligibility?.canOpenPr) {
+			return automationStatusError
+				? 'Automation readiness could not be checked; pull-request preview is disabled.'
+				: 'The automation worker is not ready; apply this recommendation manually.';
+		}
+		const [first] = eligibility?.blockers ?? [];
+		return first ? blockerText(first) : 'This recommendation has no GitOps action planner; apply it manually.';
 	}
 
 	function canPreviewRecommendation(rec) {
@@ -1719,7 +1646,7 @@
 					class="bg-dark-800 border border-dark-600 rounded-lg px-2 py-1.5 text-xs text-dark-200"
 					value={sortMode}
 					on:change={(e) => changeSort(e.currentTarget.value)}
-					title="Ranking score is the server order. Profiles re-rank the top {PROFILE_RANK_LIMIT} recommendations of the selected namespace; source, risk and capability filters do not narrow that top list, so other matches keep the server order below it."
+					title="Expected value is the server order: projected value (cost and carbon) times the success probability, minus incident and effort costs. Profiles re-score every recommendation matching the filters."
 				>
 					{#each SORT_OPTIONS as option}
 						<option value={option.value}>{option.label}</option>
@@ -1810,12 +1737,6 @@
 			<button class="btn-secondary text-xs" on:click={clearFilters}>Clear filters ✕</button>
 		{/if}
 	</div>
-
-	{#if rankingError}
-		<div class="card text-sm text-amber-300" role="alert">
-			{rankingError} Showing the default ranking.
-		</div>
-	{/if}
 
 	{#if automationStatusError || (automationStatus === null && !loading)}
 		<div class="card text-sm text-amber-300" role="alert">
@@ -2203,8 +2124,9 @@
 				<div class="space-y-3">
 					{#each displayed as rec (rec.id)}
 						{@const cfg = getTypeConfig(rec.type)}
-						{@const ranking = rankingFor(rec, sortMode, profileScores)}
-						{@const topFactor = topRankingFactor(ranking.ranking_factors)}
+						{@const topFactor = topRankingFactor(rec.ranking_factors)}
+						{@const evText = describeExpectedValue(rec)}
+						{@const eligibility = eligibilityOf(rec)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
 								<div class="text-2xl shrink-0 mt-0.5">{cfg.icon}</div>
@@ -2219,19 +2141,17 @@
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if hasSafePerContainerAction(rec) && automationStatus?.enabled === true && automationStatus?.ready === true}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/10 text-green-400">Container action ready</span>
-												{:else if hasSafePerContainerAction(rec)}
+												{:else if activeTab === 'active'}
 													<span
 														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400"
-														title={automationStatusError
-															? 'Automation readiness could not be checked; pull-request preview is disabled.'
-															: automationStatus?.enabled
-																? 'The automation worker is not ready; apply this recommendation manually.'
-																: 'GitOps automation is disabled; apply this recommendation manually.'}
+														title={manualReason(rec)}
 													>Manual change required</span>
-												{:else if RIGHTSIZING_TYPES.includes(rec.type)}
-													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-500">No safe container action</span>
-												{:else}
-													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-400" title="This recommendation has no GitOps action planner; apply it manually.">Manual change required</span>
+												{/if}
+												{#if isReliabilityLane(rec)}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-purple-600/10 text-purple-300"
+														title="Increases resources to reduce incident risk; it costs money."
+													>Reliability</span>
 												{/if}
 												<span class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-300">
 													{getSourceConfig(rec.source).label}
@@ -2242,13 +2162,21 @@
 														{rec.risk_level} risk
 													</span>
 												{/if}
-												{#if ranking.ranking_score != null}
+												{#if evText}
 													<span
 														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-200"
-														title={describeRankingFactors(ranking.ranking_factors) || 'No ranking breakdown was returned.'}
+														title={describeFactorsInCurrency(rec) || 'No ranking breakdown was returned.'}
 														data-testid="ranking-score"
 													>
-														Score {formatRankingScore(ranking.ranking_score)}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
+														{evText}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
+													</span>
+												{:else if rec.ranking_score != null}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-dark-700 text-dark-200"
+														title={describeRankingFactors(rec.ranking_factors) || 'No ranking breakdown was returned.'}
+														data-testid="ranking-score"
+													>
+														Score {formatRankingScore(rec.ranking_score)}{topFactor ? ` · top factor: ${topFactor.label}` : ''}
 													</span>
 												{/if}
 												{#if activeTab === 'ignored'}
@@ -2317,6 +2245,24 @@
 
 									<!-- Description / reason -->
 									<p class="text-sm text-dark-400 mt-2">{rec.reason}</p>
+
+									<!-- Server eligibility (F10): why no pull request, and how to fix it -->
+									{#if activeTab === 'active' && eligibility && (eligibility.blockers.length || eligibility.warnings.length)}
+										<ul class="mt-2 space-y-1 text-xs" data-testid="eligibility-blockers">
+											{#each eligibility.blockers as blocker (blocker.code + blocker.message)}
+												<li class="text-dark-400">
+													<span class="text-amber-300">{blocker.message}</span>
+													{#if blocker.fix}<span class="text-dark-500"> — {blocker.fix}</span>{/if}
+												</li>
+											{/each}
+											{#each eligibility.warnings as warning (warning.code + warning.message)}
+												<li class="text-dark-500">
+													<span class="text-yellow-500/80">⚠ {warning.message}</span>
+													{#if warning.fix}<span> — {warning.fix}</span>{/if}
+												</li>
+											{/each}
+										</ul>
+									{/if}
 
 									<!-- CPU / Memory details -->
 									{#if rec.current_cpu_request_millicores != null || rec.current_memory_request_bytes != null}
