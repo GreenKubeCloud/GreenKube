@@ -87,7 +87,7 @@ def _plan(plan_id: str = "plan-one", digest: str | None = None) -> Plan:
         repo_url="https://github.com/acme/platform",
         ref="refs/heads/main",
         path="apps/api",
-        controller_kind=ControllerKind.EXPLICIT_REPOSITORY,
+        controller_kind=ControllerKind.ARGOCD,
         controller_name="api",
         controller_namespace="production",
         renderer=RendererKind.RAW,

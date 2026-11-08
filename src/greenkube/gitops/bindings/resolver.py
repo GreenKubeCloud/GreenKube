@@ -17,8 +17,6 @@ SOURCE_PRECEDENCE: dict[ControllerKind, int] = {
     ControllerKind.ARGOCD: 1,
     ControllerKind.FLUX_KUSTOMIZATION: 1,
     ControllerKind.FLUX_HELM_RELEASE: 2,
-    ControllerKind.EXPLICIT_REPOSITORY: 3,
-    ControllerKind.ANNOTATION: 4,
 }
 
 _DUPLICATE_STATUS_PRIORITY = {

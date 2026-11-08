@@ -52,8 +52,6 @@ class ControllerKind(StrEnum):
     ARGOCD = "argocd"
     FLUX_KUSTOMIZATION = "flux_kustomization"
     FLUX_HELM_RELEASE = "flux_helm_release"
-    EXPLICIT_REPOSITORY = "explicit_repository"
-    ANNOTATION = "annotation"
     MANUAL_RESOLUTION = "manual_resolution"
 
 
