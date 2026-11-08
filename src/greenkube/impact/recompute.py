@@ -25,7 +25,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.energy.node_power import resolve_node_power_profile
-from greenkube.impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, is_modeled_cost
+from greenkube.impact.rows import (
+    MetricRowAllocator,
+    NodeIdleMetric,
+    NodeSpec,
+    container_gpu_fields,
+    is_modeled_cost,
+)
 from greenkube.impact.types import HOURS_PER_YEAR, IMPACT_MODEL_VERSION
 from greenkube.models.metrics import CombinedMetric
 
@@ -106,6 +112,7 @@ def split_to_containers(pod: CombinedMetric, containers: Sequence[CombinedMetric
             "co2e_grams": pod.co2e_grams * share,
             "embodied_co2e_grams": (pod.embodied_co2e_grams or 0.0) * share,
             "model_version": pod.model_version,
+            **container_gpu_fields(pod, len(containers)),
         }
         if modeled:
             cost_cpu = (pod.cost_cpu or 0.0) * share

@@ -386,3 +386,15 @@ def group_rows_by_node_interval(
 def is_modeled_cost(source: Optional[str]) -> bool:
     """True for cost tiers the model computes itself (catalog or custom rates)."""
     return (source or "") in {CostSource.PRICING_CATALOG.value, CostSource.CUSTOM_RATE.value}
+
+
+def container_gpu_fields(pod: CombinedMetric, container_count: int) -> Dict[str, Any]:
+    """GPU fields of a pod's container rows.
+
+    DCGM attributes GPU power and utilization to pods, not containers: a
+    single container inherits them, several containers get none, so summing
+    container rows never counts the pod's GPU more than once.
+    """
+    if container_count == 1:
+        return {"gpu_power_watts": pod.gpu_power_watts, "gpu_usage_millicores": pod.gpu_usage_millicores}
+    return {"gpu_power_watts": None, "gpu_usage_millicores": None}

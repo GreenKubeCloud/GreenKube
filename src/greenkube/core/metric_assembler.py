@@ -14,6 +14,7 @@ from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
+from ..impact.rows import container_gpu_fields
 from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..models.provenance import (
@@ -516,6 +517,7 @@ class MetricAssembler:
             )
             total_memory_weight = sum(memory_weights)
             has_components = aggregate.cost_cpu is not None or aggregate.cost_ram is not None
+            gpu_fields = container_gpu_fields(aggregate, len(containers))
 
             for pod_metric, container_key, weight, memory_weight in zip(
                 containers, container_keys, cpu_weights, memory_weights, strict=True
@@ -545,6 +547,7 @@ class MetricAssembler:
                                 if container_key in resource_maps.container_timestamp_map
                                 else (aggregate.usage_source or UsageSource.PROMETHEUS.value)
                             ),
+                            **gpu_fields,
                             "cpu_limit": pod_metric.cpu_limit,
                             "memory_limit": pod_metric.memory_limit,
                             "co2e_grams": aggregate.co2e_grams * share,

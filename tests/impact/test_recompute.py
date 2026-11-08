@@ -16,7 +16,7 @@ from greenkube.cli.recompute import parse_since
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.impact import IMPACT_MODEL_VERSION
-from greenkube.impact.recompute import MetricRecomputer, container_weights
+from greenkube.impact.recompute import MetricRecomputer, container_weights, split_to_containers
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.node import NodeInfo
 from greenkube.storage.postgres.node_repository import PostgresNodeRepository
@@ -233,6 +233,14 @@ async def test_recompute_never_reads_modeled_costs_back_as_observed_prices(store
         first_idle.cost_source,
         pytest.approx(first_idle.total_cost),
     )
+
+
+def test_split_to_containers_never_duplicates_pod_gpu_power():
+    pod = _pod("a", 1000, 500, 2 * GIB, gpu_power_watts=60.0, gpu_usage_millicores=800)
+    two = split_to_containers(pod, [_container(pod, "app", 400, GIB), _container(pod, "sidecar", 100, GIB)])
+    assert all(row.gpu_power_watts is None and row.gpu_usage_millicores is None for row in two)
+    (one,) = split_to_containers(pod, [_container(pod, "app", 400, GIB)])
+    assert (one.gpu_power_watts, one.gpu_usage_millicores) == (60.0, 800)
 
 
 def test_container_weights_fall_back_like_collection():
