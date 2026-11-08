@@ -222,5 +222,82 @@ def _translate_glob(glob: str) -> str:
 
 
 def _gitea_regex(pattern: str) -> re.Pattern[str]:
-    # Go RE2 and Python agree on the subset used in CODEOWNERS files.
-    return re.compile(pattern.lstrip("/"))
+    # Go RE2 and Python agree on the subset used in CODEOWNERS files. Python's
+    # engine backtracks where RE2 does not, so constructs that can backtrack
+    # exponentially on a path (and RE2-only-invalid ones) are rejected.
+    pattern = pattern.lstrip("/")
+    if len(pattern) > MAX_GITEA_PATTERN_CHARS:
+        raise re.error(f"pattern longer than {MAX_GITEA_PATTERN_CHARS} characters")
+    _reject_backtracking_constructs(pattern)
+    return re.compile(pattern)
+
+
+#: Longest Gitea CODEOWNERS regular expression GreenKube compiles.
+MAX_GITEA_PATTERN_CHARS = 512
+
+
+def _reject_backtracking_constructs(pattern: str) -> None:
+    """Raise :class:`re.error` for a repeated group that itself repeats or alternates, backrefs and lookarounds.
+
+    ``(a+)+``, ``(a|aa)*`` or ``(x*){2,}`` make a backtracking engine take
+    exponential time on a non-matching path; RE2, which Gitea uses, rejects
+    backreferences and lookarounds, so no valid Gitea rule needs them.
+    """
+    # Per open group: does its body contain a repetition or an alternation?
+    stack: list[bool] = []
+    index, length = 0, len(pattern)
+    while index < length:
+        character = pattern[index]
+        if character == "\\":
+            if index + 1 < length and pattern[index + 1].isdigit() and pattern[index + 1] != "0":
+                raise re.error("backreferences are not supported")
+            index += 2
+            continue
+        if character == "[":
+            index = _skip_class(pattern, index)
+            continue
+        if character == "(":
+            if pattern.startswith(("(?=", "(?!", "(?<=", "(?<!"), index):
+                raise re.error("lookarounds are not supported")
+            stack.append(False)
+        elif character == ")":
+            risky = stack.pop() if stack else False
+            if risky and _repeats(pattern, index + 1):
+                raise re.error("a repeated group must not itself repeat or alternate")
+            if stack and (risky or _repeats(pattern, index + 1)):
+                stack[-1] = True
+        elif character == "|" and stack:
+            stack[-1] = True
+        elif character in "*+{" and stack and _repeats(pattern, index):
+            stack[-1] = True
+        index += 1
+
+
+def _repeats(pattern: str, index: int) -> bool:
+    """Whether a quantifier allowing more than one repetition starts at ``index``."""
+    if index >= len(pattern):
+        return False
+    if pattern[index] in "*+":
+        return True
+    match = re.match(r"\{(\d*)(,?)(\d*)\}", pattern[index:])
+    if match is None:
+        return False
+    low, comma, high = match.groups()
+    return bool(comma) and high != "1" or (not comma and low not in ("", "0", "1"))
+
+
+def _skip_class(pattern: str, index: int) -> int:
+    """Index just after the character class that starts at ``index``."""
+    index += 1
+    if index < len(pattern) and pattern[index] == "^":
+        index += 1
+    if index < len(pattern) and pattern[index] == "]":
+        index += 1
+    while index < len(pattern):
+        if pattern[index] == "\\":
+            index += 2
+            continue
+        if pattern[index] == "]":
+            return index + 1
+        index += 1
+    return index

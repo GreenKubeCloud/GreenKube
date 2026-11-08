@@ -128,6 +128,36 @@ apps/payments/.* @alice
     assert codeowners.owners_for(["README.md"]) == ["@docs", "@outside"]
 
 
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "(a+)+$",
+        "(a|aa)*b",
+        "((ab)*c)+",
+        "(x*){2,}",
+        "a{1,3}(b{2})+",
+        "(.*/)*deploy",
+        "(?=apps)apps/.*",
+        "(?<!x)apps/.*",
+        "apps/" + "a" * 600,
+    ],
+)
+def test_gitea_rules_that_could_backtrack_exponentially_are_rejected(pattern):
+    codeowners = parse_codeowners(f"{pattern} @evil\n.* @ok\n", "gitea")
+    assert codeowners.errors and "invalid pattern" in codeowners.errors[0]
+    assert codeowners.owners_for(["a" * 40 + "!"]) == ["@ok"]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["(docs|apps)/.*", "apps/[a-z+*(]+/.*\\.yaml", "(x)?apps/.*", "a{0,1}pps/.*", "(?:apps)/(payments)/.*"],
+)
+def test_ordinary_gitea_rules_still_compile(pattern):
+    codeowners = parse_codeowners(f"{pattern} @team\n", "gitea")
+    assert codeowners.errors == ()
+    assert codeowners.owners_for(["apps/payments/deployment.yaml"]) == ["@team"]
+
+
 def test_malformed_lines_are_reported_not_fatal():
     codeowners = parse_codeowners("[unterminated\n* @ok\n", "gitlab")
     assert codeowners.errors == ("line 1: invalid section header",)
