@@ -55,6 +55,7 @@ function actionReady(id) {
 		owner_kind: 'Deployment',
 		owner_name: 'api',
 		container_name: 'api',
+		eligibility: { can_open_pr: true, delivery_modes: ['direct', 'manual'], blockers: [], warnings: [], recommendation_ids: [id] },
 		action: {
 			version: 3,
 			action_id: `action-${id}`,
@@ -311,8 +312,22 @@ describe('filters (K2)', () => {
 
 describe('ordering and ranking (K2, BUG-20)', () => {
 	const serverOrder = [
-		rec(1, { pod_name: 'first-by-score', potential_savings_cost: 5, potential_savings_co2e_grams: 900, ranking_score: 0.9, ranking_factors: { carbon: 0.5, cost: 0.1 } }),
-		rec(2, { pod_name: 'second-by-score', potential_savings_cost: 50, potential_savings_co2e_grams: 10, ranking_score: 0.4, ranking_factors: { cost: 0.3, confidence: 0.1 } })
+		rec(1, {
+			pod_name: 'first-by-score',
+			potential_savings_cost: 5,
+			potential_savings_co2e_grams: 900,
+			ranking_score: 412.4,
+			ranking_factors: { carbon: 400, cost: 20, incident_risk: -7.6 },
+			value: { ev: 412.4, p_success: 0.82, currency: 'EUR', lane: 'savings' }
+		}),
+		rec(2, {
+			pod_name: 'second-by-score',
+			potential_savings_cost: 50,
+			potential_savings_co2e_grams: 10,
+			ranking_score: 35,
+			ranking_factors: { cost: 41, incident_risk: -6 },
+			value: { ev: 35, p_success: 0.9, currency: 'EUR', lane: 'savings' }
+		})
 	];
 
 	it('labels the default order truthfully and keeps the server order', async () => {
@@ -322,7 +337,7 @@ describe('ordering and ranking (K2, BUG-20)', () => {
 
 		const sort = screen.getByLabelText('Sort recommendations');
 		expect(sort).toHaveValue('server');
-		expect(within(sort).getByRole('option', { name: 'Ranking score (default)' })).toBeInTheDocument();
+		expect(within(sort).getByRole('option', { name: 'Expected value (default)' })).toBeInTheDocument();
 		expect(within(sort).queryByRole('option', { name: 'Projected savings' })).not.toBeInTheDocument();
 		expect(cardTitles()).toEqual(['first-by-score', 'second-by-score']);
 	});
@@ -338,23 +353,41 @@ describe('ordering and ranking (K2, BUG-20)', () => {
 		expect(api.getTopRecommendations).not.toHaveBeenCalled();
 	});
 
-	it('shows the ranking score and its top factor on each card', async () => {
+	it('shows the expected value, success probability and top factor on each card (I1)', async () => {
 		api.getActiveRecommendations.mockResolvedValue(serverOrder);
 		render(RecommendationsPage);
 		await screen.findByText('first-by-score');
 
 		const [first, second] = screen.getAllByTestId('ranking-score');
-		expect(first).toHaveTextContent('Score 0.90 · top factor: Carbon savings');
-		expect(first).toHaveAttribute('title', 'Carbon savings 0.50 · Cost savings 0.10');
-		expect(second).toHaveTextContent('Score 0.40 · top factor: Cost savings');
+		expect(first).toHaveTextContent('≈ €412/yr expected · 82% success · top factor: Carbon savings');
+		expect(first).toHaveAttribute('title', 'Carbon value €400 · Cost savings €20 · Incident risk -€7.60');
+		expect(second).toHaveTextContent('≈ €35/yr expected · 90% success · top factor: Cost savings');
 	});
 
-	it('re-ranks with a profile and shows the profile scores', async () => {
-		api.getActiveRecommendations.mockResolvedValue(serverOrder);
-		api.getTopRecommendations.mockResolvedValue([
-			{ id: 2, ranking_score: 0.8, ranking_factors: { cost: 0.55 } },
-			{ id: 1, ranking_score: 0.2, ranking_factors: { carbon: 0.1 } }
+	it('falls back to the plain score from an older server', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			rec(1, { pod_name: 'legacy', ranking_score: 0.9, ranking_factors: { carbon: 0.5, cost: 0.1 } })
 		]);
+		render(RecommendationsPage);
+		await screen.findByText('legacy');
+
+		expect(screen.getByTestId('ranking-score')).toHaveTextContent('Score 0.90 · top factor: Carbon savings');
+	});
+
+	it('marks reliability recommendations', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			rec(1, { pod_name: 'oom-prone', value: { ev: 12, p_success: 0.9, currency: 'USD', lane: 'reliability' } })
+		]);
+		render(RecommendationsPage);
+		await screen.findByText('oom-prone');
+
+		expect(screen.getByText('Reliability')).toBeInTheDocument();
+	});
+
+	it('re-ranks with a profile through the server', async () => {
+		api.getActiveRecommendations.mockImplementation(async ({ profile } = {}) =>
+			profile === 'cost_first' ? [...serverOrder].reverse() : serverOrder
+		);
 		render(RecommendationsPage);
 		await screen.findByText('first-by-score');
 
@@ -363,10 +396,10 @@ describe('ordering and ranking (K2, BUG-20)', () => {
 		});
 
 		await vi.waitFor(() => expect(cardTitles()).toEqual(['second-by-score', 'first-by-score']));
-		expect(api.getTopRecommendations).toHaveBeenCalledWith(
-			expect.objectContaining({ profile: 'cost_first', limit: 50, signal: expect.any(AbortSignal) })
+		expect(api.getActiveRecommendations).toHaveBeenLastCalledWith(
+			expect.objectContaining({ profile: 'cost_first', signal: expect.any(AbortSignal) })
 		);
-		expect(screen.getAllByTestId('ranking-score')[0]).toHaveTextContent('Score 0.80 · top factor: Cost savings');
+		expect(api.getTopRecommendations).not.toHaveBeenCalled();
 	});
 });
 

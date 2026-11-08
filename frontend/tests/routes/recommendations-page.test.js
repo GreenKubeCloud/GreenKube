@@ -44,10 +44,15 @@ const recommendation = {
 	reason: 'CPU usage is consistently low'
 };
 
+function eligible(ids) {
+	return { can_open_pr: true, delivery_modes: ['direct', 'manual'], blockers: [], warnings: [], recommendation_ids: ids };
+}
+
 function actionReadyRecommendation(ids = [101]) {
 	return {
 		...recommendation,
 		container_name: 'api',
+		eligibility: eligible(ids),
 		action: {
 			version: 3,
 			action_id: 'action-101',
@@ -316,7 +321,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			...recommendation,
 			id: 102,
 			container_name: 'sidecar',
-			action: groupedAction
+			action: groupedAction,
+			eligibility: eligible([101, 102])
 		};
 		api.getActiveRecommendations.mockResolvedValue([apiRecommendation, sidecarRecommendation]);
 		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
@@ -673,9 +679,21 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(api.approveAutomationPlan).not.toHaveBeenCalled();
 	});
 
-	it('does not offer plan preview for an action without a safe container target', async () => {
+	it('does not offer plan preview when the server reports a blocker, and shows its fix (F10)', async () => {
 		const unsafeRecommendation = actionReadyRecommendation();
-		unsafeRecommendation.action.constraints.container_targeted = false;
+		unsafeRecommendation.eligibility = {
+			can_open_pr: false,
+			delivery_modes: ['manual'],
+			blockers: [
+				{
+					code: 'requires_container_target',
+					message: 'The proposed change does not target one named container of the workload.',
+					fix: 'Rescan once the container metrics are collected.'
+				}
+			],
+			warnings: [],
+			recommendation_ids: null
+		};
 		api.getActiveRecommendations.mockResolvedValue([unsafeRecommendation]);
 
 		render(RecommendationsPage);
@@ -683,6 +701,53 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		await screen.findByText('CPU usage is consistently low');
 		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
 		expect(screen.queryByRole('button', { name: 'Create pull request' })).not.toBeInTheDocument();
+		const blockers = screen.getByTestId('eligibility-blockers');
+		expect(blockers).toHaveTextContent('The proposed change does not target one named container of the workload.');
+		expect(blockers).toHaveTextContent('Rescan once the container metrics are collected.');
+		expect(screen.getByText('Manual change required')).toHaveAttribute(
+			'title',
+			'The proposed change does not target one named container of the workload. Rescan once the container metrics are collected.'
+		);
+	});
+
+	it('trusts the server eligibility instead of re-checking the action client-side', async () => {
+		// The typed action is not even returned: the server decision is authoritative.
+		const serverEligible = { ...recommendation, id: 101, action: undefined, eligibility: eligible([101]) };
+		api.getActiveRecommendations.mockResolvedValue([serverEligible]);
+		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+
+		expect(api.createAutomationPlan).toHaveBeenCalledWith([101]);
+	});
+
+	it('shows a warming-up blocker with its ETA', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{
+				...recommendation,
+				eligibility: {
+					can_open_pr: false,
+					delivery_modes: ['manual'],
+					blockers: [
+						{
+							code: 'warming_up',
+							message: 'Collecting evidence: 12/36 samples, 17% coverage (minimum 50%).',
+							fix: 'Eligible in ~31h; no action is needed.'
+						}
+					],
+					warnings: [{ code: 'singleton_workload', message: 'The workload runs a single replica.', fix: '' }],
+					eligible_at: '2099-01-01T00:00:00+00:00'
+				}
+			}
+		]);
+
+		render(RecommendationsPage);
+
+		const blockers = await screen.findByTestId('eligibility-blockers');
+		expect(blockers).toHaveTextContent('Collecting evidence: 12/36 samples');
+		expect(blockers).toHaveTextContent('Eligible in ~31h');
+		expect(blockers).toHaveTextContent('The workload runs a single replica.');
 	});
 
 	it('does not fall back to annotation-based PR handling when plan preparation is unavailable', async () => {

@@ -322,7 +322,8 @@ export function getRecommendations({ namespace } = {}) {
 }
 
 /**
- * Active recommendations in server order (ranking score first).
+ * Active recommendations in server order (risk-adjusted expected value first),
+ * each with its `value` and delivery `eligibility`.
  *
  * The UI never passes `refresh`: a scan is requested explicitly through
  * {@link requestOptimizationRun} so page loads stay read-only (BUG-25).
@@ -331,16 +332,37 @@ export function getRecommendations({ namespace } = {}) {
  * @param {string} [opts.source] — greenkube | vpa | karpenter | …
  * @param {string} [opts.risk_level] — low | medium | high
  * @param {string} [opts.capability] — e.g. cpu_rightsizing
+ * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
+ * @param {number} [opts.carbon_price] — carbon price override (currency per tonne CO2e)
  * @param {boolean} [opts.refresh] — deprecated server-side scan trigger
  * @param {AbortSignal} [opts.signal]
  * @returns {Promise<Object[]>}
  */
-export function getActiveRecommendations({ namespace, source, risk_level, capability, refresh, signal } = {}) {
+export function getActiveRecommendations({
+	namespace,
+	source,
+	risk_level,
+	capability,
+	profile,
+	carbon_price,
+	refresh,
+	signal
+} = {}) {
 	return request(
 		`${BASE}/recommendations/active`,
-		{ namespace, source, risk_level, capability, refresh: refresh || undefined },
+		{ namespace, source, risk_level, capability, profile, carbon_price, refresh: refresh || undefined },
 		{ signal }
 	);
+}
+
+/**
+ * Measured realization rate per source family and capability (Beta(α, β) entries).
+ * @param {Object} [opts]
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<{method: string, prior: Object, entries: Object[]}>}
+ */
+export function getSourceTrackRecord({ signal } = {}) {
+	return request(`${BASE}/sources/track-record`, {}, { signal });
 }
 
 /**
@@ -348,7 +370,7 @@ export function getActiveRecommendations({ namespace, source, risk_level, capabi
  * @param {Object} opts
  * @param {string} [opts.namespace]
  * @param {number} [opts.limit]
- * @param {'co2'|'cost'} [opts.metric]
+ * @param {'co2'|'cost'|'value'} [opts.metric]
  * @param {string} [opts.profile] — balanced | carbon_first | cost_first | quick_wins | low_risk
  * @returns {Promise<Object[]>}
  */
