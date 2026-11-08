@@ -94,6 +94,14 @@ class TestParameters:
     def test_unknown_configured_profile_falls_back_to_balanced(self):
         assert resolve_parameters(_config(RECOMMENDATION_RANKING_PROFILE="nope")).profile == "balanced"
 
+    def test_deprecated_weights_are_ignored_with_a_warning(self, caplog, monkeypatch):
+        monkeypatch.setattr("greenkube.core.optimization.scoring._weights_warning_logged", False)
+        with caplog.at_level("WARNING"):
+            params = resolve_parameters(_config(RECOMMENDATION_RANKING_WEIGHTS='{"carbon": 0.9}'))
+            resolve_parameters(_config(RECOMMENDATION_RANKING_WEIGHTS='{"carbon": 0.9}'))
+        assert params == resolve_parameters(_config())
+        assert sum("RECOMMENDATION_RANKING_WEIGHTS is deprecated" in r.message for r in caplog.records) == 1
+
     def test_negative_carbon_price_is_rejected(self):
         with pytest.raises(ValueError):
             resolve_parameters(_config(), carbon_price=-1.0)

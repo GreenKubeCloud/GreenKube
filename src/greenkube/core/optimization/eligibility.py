@@ -395,17 +395,17 @@ def _evaluator_entries(result: AutomationPolicyResult) -> Tuple[List[Dict[str, s
     """Blockers and warnings of a policy evaluation, minus the gates evaluated locally."""
     details = {rejection.code.value: rejection.detail for rejection in result.rejections}
     rejected = [
-        check
+        (check.gate, check.code, check.message)
         for check in result.checks
         if check.state.value == "rejected" and check.code and check.gate not in _LOCAL_GATES
     ]
     blockers = [
-        _entry(check.code, check.message, details.get(check.code))
-        for check in rejected
-        if check.gate not in _WARNING_GATES
+        _entry(code, message, details.get(code))
+        for gate, code, message in rejected
+        if code and gate not in _WARNING_GATES
     ]
     warnings = [
-        _entry(check.code, check.message, details.get(check.code)) for check in rejected if check.gate in _WARNING_GATES
+        _entry(code, message, details.get(code)) for gate, code, message in rejected if code and gate in _WARNING_GATES
     ]
     warnings += [_entry(warning.code.value, warning.detail, warning.detail) for warning in result.warnings]
     return blockers, warnings

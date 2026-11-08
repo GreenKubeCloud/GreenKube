@@ -121,6 +121,22 @@ def _config_float(config: Any, name: str, default: float) -> float:
     return number if math.isfinite(number) and number >= 0 else default
 
 
+_weights_warning_logged = False
+
+
+def _warn_deprecated_weights(config: Any) -> None:
+    """RECOMMENDATION_RANKING_WEIGHTS tuned the retired batch-normalized score: say once that it is ignored."""
+    global _weights_warning_logged
+    if _weights_warning_logged or not str(getattr(config, "RECOMMENDATION_RANKING_WEIGHTS", "") or "").strip():
+        return
+    _weights_warning_logged = True
+    logger.warning(
+        "RECOMMENDATION_RANKING_WEIGHTS is deprecated and ignored: recommendations are ranked by expected value. "
+        "Use RECOMMENDATION_RANKING_PROFILE, CARBON_PRICE_PER_TONNE, RECOMMENDATION_INCIDENT_COST and "
+        "RECOMMENDATION_ENGINEER_HOUR_COST instead."
+    )
+
+
 def resolve_parameters(
     config: Any = None,
     profile: Optional[str] = None,
@@ -144,6 +160,7 @@ def resolve_parameters(
     price = float(carbon_price) if carbon_price is not None else base_price * preset.carbon_price_multiplier
     if not math.isfinite(price) or price < 0:
         raise ValueError("carbon_price must be a finite, non-negative number.")
+    _warn_deprecated_weights(config)
     hour_cost = max(_config_float(config, "RECOMMENDATION_ENGINEER_HOUR_COST", 0.0), preset.engineer_hour_cost_floor)
     return ValueParameters(
         profile=name,
