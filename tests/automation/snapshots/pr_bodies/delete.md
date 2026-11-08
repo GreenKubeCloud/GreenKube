@@ -31,6 +31,9 @@ Risk: **low**.
 Risk factors:
 - p95 usage remains below target
 
+Autoscalers and disruption budgets (HPA, VPA, PDB):
+- The policy result carries no HPA, VPA or PDB evidence for this workload; check the autoscalers and disruption budgets that target it before merging.
+
 Watch these for 24h after the rollout:
 - container restarts and `OOMKilled` events
 - CPU throttling of the changed containers
@@ -41,7 +44,7 @@ Watch these for 24h after the rollout:
 - Unit prices:
   - $0.0316/core-hour, $0.0042/GiB-hour, source `pricing_catalog` (aws/eu-west-3/m5.large)
 - Observed cost sources: `opencost`
-- Carbon intensity: 56 gCO₂e/kWh; power model profile
+- Carbon intensity: 56 gCO₂e/kWh (source: stored grid intensity of the observed samples, node-profile intensity where a sample has none); power model profile
 - PUE: 1.14
 - Realization factor: 0.80 (`realization_context`)
   - karpenter consolidation is enabled on pool default

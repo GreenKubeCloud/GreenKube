@@ -510,6 +510,11 @@ def _risk(context: PullRequestContext) -> str:
     headroom = _headroom_lines(context)
     if headroom:
         lines.extend(("", "Headroom over observed usage:", *headroom))
+    interactions = _interaction_notes(context)
+    if interactions:
+        lines.extend(
+            ("", "Autoscalers and disruption budgets (HPA, VPA, PDB):", *(f"- {note}" for note in interactions))
+        )
     watch: list[str] = []
     for record in context.recommendations:
         if record.evidence is None:
@@ -522,6 +527,100 @@ def _risk(context: PullRequestContext) -> str:
     watch.extend(item for item in _DEFAULT_WATCH if item not in watch)
     lines.extend(("", "Watch these for 24h after the rollout:", *(f"- {item}" for item in watch[:12])))
     return "\n".join(lines)
+
+
+def _interaction_notes(context: PullRequestContext) -> list[str]:
+    """HPA, VPA and PDB notes from the plan's policy checks and warnings, the risk factors and the action."""
+    notes: list[str] = []
+
+    def add(note: str) -> None:
+        text = fmt.inline(note, max_chars=400)
+        if text and text not in notes:
+            notes.append(text)
+
+    plan = context.plan
+    for operation in plan.action.operations:
+        if isinstance(operation, AddHorizontalPodAutoscaler):
+            add(
+                f"This plan adds a HorizontalPodAutoscaler ({operation.min_replicas}–{operation.max_replicas} "
+                "replicas). Its CPU target is a share of the container requests, so later request changes move the "
+                "scaling point; no other autoscaler (HPA, KEDA, a VPA in an active mode) should control the "
+                "replicas, and a PodDisruptionBudget must still allow evictions at the minimum replica count."
+            )
+    policy = plan.policy_result if isinstance(plan.policy_result, dict) else {}
+    checks = policy.get("checks") if isinstance(policy.get("checks"), list) else []
+    checked: set[str] = set()
+    for check in checks:
+        if not isinstance(check, dict) or check.get("gate") not in _INTERACTION_GATES:
+            continue
+        gate = str(check["gate"])
+        checked.update(_INTERACTION_GATES[gate])
+        state = str(check.get("state") or "")
+        message = str(check.get("message") or "").strip()
+        names = _interaction_names(check.get("observed"))
+        suffix = f" ({', '.join(names)})" if names else ""
+        prefix = _INTERACTION_LABELS[gate]
+        if state == "not_available":
+            add(f"{prefix}: not checked. {message}")
+        elif message:
+            add(f"{prefix} ({state or 'unknown'}): {message.rstrip('.')}{suffix}.")
+    warnings = policy.get("warnings") if isinstance(policy.get("warnings"), list) else []
+    for warning in warnings:
+        detail = warning.get("detail") if isinstance(warning, dict) else None
+        if isinstance(detail, str) and _INTERACTION_WORDS.search(detail):
+            add(f"Policy warning: {detail}")
+    for record in context.recommendations:
+        for factor in record.risk_factors:
+            explanation = _INTERACTION_FACTORS.get(str(factor))
+            if explanation is not None:
+                add(explanation)
+    if not context.is_rollback and plan.action.operations and not checked:
+        add(
+            "The policy result carries no HPA, VPA or PDB evidence for this workload; check the autoscalers and "
+            "disruption budgets that target it before merging."
+        )
+    return notes[:10]
+
+
+def _interaction_names(observed: object) -> list[str]:
+    names: list[str] = []
+    candidates: list[object] = []
+    if isinstance(observed, dict):
+        candidates.extend(observed.get("hpas") or ())
+    elif isinstance(observed, list):
+        candidates.extend(item.get("hpa") or item.get("vpa") for item in observed if isinstance(item, dict))
+    for item in candidates:
+        if isinstance(item, str) and item and item not in names:
+            names.append(fmt.inline(item, max_chars=80))
+    return names[:5]
+
+
+_INTERACTION_GATES = {
+    "hpa_interaction": ("hpa",),
+    "vpa_interaction": ("vpa",),
+    "pdb_interaction": ("pdb",),
+    "hpa_vpa_pdb_interactions": ("hpa", "vpa", "pdb"),
+}
+_INTERACTION_LABELS = {
+    "hpa_interaction": "HPA",
+    "vpa_interaction": "VPA",
+    "pdb_interaction": "PDB",
+    "hpa_vpa_pdb_interactions": "HPA/VPA/PDB",
+}
+_INTERACTION_WORDS = re.compile(r"\b(?:HPA|VPA|PDB|autoscaler|PodDisruptionBudget)", re.IGNORECASE)
+#: Risk-factor codes of the risk assessor (core.optimization.risks) that concern autoscalers or PDBs.
+_INTERACTION_FACTORS = {
+    "hpa_scales_on_resource": (
+        "An HPA scales this workload on a resource this change modifies: its utilization target is relative to the "
+        "request, so expect the replica count to move after the rollout."
+    ),
+    "hpa_present": "An HPA manages this workload; review its replica range after the change.",
+    "vpa_conflicting_writer": (
+        "A VPA in an active update mode writes this workload's requests and can override this change."
+    ),
+    "pdb_blocks_disruption": "A PodDisruptionBudget may block the rolling restart this change requires.",
+    "additive_autoscaling": "The autoscaler is additive: it changes replica counts, not container requests.",
+}
 
 
 def _headroom_lines(context: PullRequestContext) -> list[str]:
@@ -586,7 +685,10 @@ def _assumptions(context: PullRequestContext) -> str:
     if intensity is not None:
         power = assumptions.get("power_sources")
         power_text = f"; power model {', '.join(str(item) for item in power)}" if isinstance(power, list) else ""
-        lines.append(f"- Carbon intensity: {intensity:,.0f} gCO₂e/kWh{power_text}")
+        lines.append(f"- Carbon intensity: {intensity:,.0f} gCO₂e/kWh ({_intensity_source(assumptions)}){power_text}")
+    basis = assumptions.get("co2e_basis")
+    if isinstance(basis, str) and basis:
+        lines.append(f"- CO₂e basis: `{fmt.inline(basis, max_chars=60)}`")
     pue = _number(assumptions.get("pue"))
     if pue is not None:
         lines.append(f"- PUE: {pue:.2f}")
@@ -605,6 +707,20 @@ def _assumptions(context: PullRequestContext) -> str:
     versions = sorted({str(item.get("model_version")) for item in impacts if item.get("model_version")})
     lines.append(f"- Impact Model version: {', '.join(versions) or 'unknown'}")
     return "\n".join(lines)
+
+
+def _intensity_source(assumptions: dict[str, Any]) -> str:
+    """Where the intensity came from: the projection's recorded sources, else how the model derives it."""
+    sources = assumptions.get("intensity_sources")
+    if isinstance(sources, str):
+        sources = [sources]
+    if not isinstance(sources, list):
+        single = assumptions.get("intensity_source")
+        sources = [single] if isinstance(single, str) else []
+    names = [fmt.inline(item, max_chars=40) for item in sources if isinstance(item, str) and item.strip()]
+    if names:
+        return f"source {', '.join(f'`{name}`' for name in names[:5])}"
+    return "source: stored grid intensity of the observed samples, node-profile intensity where a sample has none"
 
 
 def _number(value: object) -> float | None:

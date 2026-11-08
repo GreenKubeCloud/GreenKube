@@ -43,6 +43,9 @@ Headroom over observed usage:
 - `api` cpu: proposed 200m is 1.67× the p95 (120m) and 1.11× the max
 - `api` memory: proposed 512Mi is 1.71× the p95 (300Mi) and 1.35× the max
 
+Autoscalers and disruption budgets (HPA, VPA, PDB):
+- The policy result carries no HPA, VPA or PDB evidence for this workload; check the autoscalers and disruption budgets that target it before merging.
+
 Watch these for 24h after the rollout:
 - Review if CPU p95 exceeds 220m.
 - container restarts and `OOMKilled` events

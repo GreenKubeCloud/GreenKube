@@ -355,3 +355,69 @@ def test_footer_payload_is_compact_json():
     body = render_body(SCENARIOS["rightsize"](), SETTINGS)
     raw = body.rstrip().splitlines()[-1][len("<!-- greenkube:v1 ") : -len(" -->")]
     assert json.loads(raw) == parse_footer(body)
+
+
+def test_risk_section_explains_hpa_vpa_and_pdb_interactions():
+    policy = {
+        "allowed": True,
+        "checks": [
+            {
+                "gate": "hpa_interaction",
+                "state": "passed",
+                "message": "HorizontalPodAutoscalers target the workload but do not scale on the resources this plan "
+                "changes.",
+                "observed": {"hpas": ["api-hpa"], "planned_resources": ["memory"]},
+            },
+            {
+                "gate": "vpa_interaction",
+                "state": "passed",
+                "message": "No VerticalPodAutoscaler actively writes this workload's requests.",
+                "observed": [{"vpa": "api-vpa", "update_mode": "Initial"}],
+            },
+            {
+                "gate": "pdb_interaction",
+                "state": "not_available",
+                "message": "PodDisruptionBudget evidence is not available for this workload.",
+            },
+            {"gate": "confidence", "state": "passed", "message": "Confidence is above the minimum."},
+        ],
+        "warnings": [
+            {"code": "policy_interaction_conflict", "detail": "VPA api-vpa sets requests when pods are created."},
+            {"code": "other", "detail": "Unrelated warning."},
+        ],
+    }
+    records = [fx.recommendation(41, risk_factors=["hpa_present", "pdb_blocks_disruption"])]
+    body = render_body(_context(fx.plan(policy_result=policy), records), SETTINGS)
+    risk = body.split("## Risk & what to watch", 1)[1].split("## Assumptions", 1)[0]
+    section = risk.split("Autoscalers and disruption budgets (HPA, VPA, PDB):", 1)[1].split("\n\n", 1)[0]
+    assert (
+        "- HPA (passed): HorizontalPodAutoscalers target the workload but do not scale on the resources this plan "
+        "changes (api-hpa)." in section
+    )
+    assert "- VPA (passed): No VerticalPodAutoscaler actively writes this workload's requests (api-vpa)." in section
+    assert "- PDB: not checked. PodDisruptionBudget evidence is not available for this workload." in section
+    assert "- Policy warning: VPA api-vpa sets requests when pods are created." in section
+    assert "- An HPA manages this workload; review its replica range after the change." in section
+    assert "- A PodDisruptionBudget may block the rolling restart this change requires." in section
+    assert "Unrelated warning" not in section and "Confidence" not in section
+    assert "carries no HPA, VPA or PDB evidence" not in section
+
+
+def test_hpa_plan_notes_how_the_new_autoscaler_interacts():
+    body = render_body(SCENARIOS["add_hpa"](), SETTINGS)
+    risk = body.split("## Risk & what to watch", 1)[1].split("## Assumptions", 1)[0]
+    assert "This plan adds a HorizontalPodAutoscaler (2–6 replicas)." in risk
+
+
+def test_assumptions_name_the_carbon_intensity_source_and_co2e_basis():
+    impact = fx.impact(cost=300.0, co2e_g=12_000.0)
+    impact["assumptions"] = {
+        **impact["assumptions"],
+        "intensity_sources": ["electricity_maps", "zone_default"],
+        "co2e_basis": "allocated_share_released",
+    }
+    body = render_body(_context(fx.plan(), [fx.recommendation(41, impact=impact)]), SETTINGS)
+    assert "- Carbon intensity: 56 gCO₂e/kWh (source `electricity_maps`, `zone_default`); power model profile" in body
+    assert "- CO₂e basis: `allocated_share_released`" in body
+    default = render_body(SCENARIOS["rightsize"](), SETTINGS)
+    assert "(source: stored grid intensity of the observed samples" in default
