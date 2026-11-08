@@ -279,7 +279,8 @@ class MetricsCollectionJob:
         """
         idle_rows = getattr(self.processor, "last_idle_metrics", None)
         write = getattr(self.metrics_repository, "write_idle_metrics", None)
-        if not idle_rows or write is None:
+        # Processors without idle rows (other range processors, test doubles) commit none.
+        if not isinstance(idle_rows, (list, tuple)) or not idle_rows or write is None:
             return
         try:
             await write(list(idle_rows))
