@@ -18,20 +18,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.skipif(os.getenv("GREENKUBE_E2E") != "1", reason="set GREENKUBE_E2E=1 to run the live loop")
 
-ARGO_STEPS = (
-    "argocd.automation_ready",
-    "argocd.binding",
-    "argocd.recommendation",
-    "argocd.plan_preview",
-    "argocd.approval",
-    "argocd.pull_request",
-    "argocd.merge",
-    "argocd.controller_sync",
-    "argocd.greenkube_merge_detected",
-    "argocd.greenkube_sync_confirmed",
-    "argocd.apply_detected",
-    "argocd.measurement_started",
+# Steps before the pull request: a resumed run (E2E_FRESH=0) skips them.
+PRE_PR_STEPS = ("recommendation", "plan_preview", "approval")
+LOOP_STEPS = (
+    "automation_ready",
+    "binding",
+    *PRE_PR_STEPS,
+    "pull_request",
+    "merge",
+    "controller_sync",
+    "greenkube_merge_detected",
+    "greenkube_sync_confirmed",
+    "apply_detected",
+    "measurement_started",
 )
+
+
+def expected_steps(controller: str, reached: set[str], env: dict[str, str]) -> set[str]:
+    """Steps that a successful loop of ``controller`` records as ``ok``."""
+    resumed = f"{controller}.resume" in reached
+    steps = {f"{controller}.{step}" for step in LOOP_STEPS if not (resumed and step in PRE_PR_STEPS)}
+    if env.get("E2E_WAIT_VERDICT", "1") == "1" and env.get("E2E_ALLOW_REGRESSION", "0") != "1":
+        steps.add(f"{controller}.verdict")
+    return steps
 
 
 def test_live_loop(tmp_path: Path) -> None:
@@ -43,8 +52,8 @@ def test_live_loop(tmp_path: Path) -> None:
     failed = [step for step in steps if step["status"] == "failed"]
     assert not failed, failed
     reached = {step["step"] for step in steps if step["status"] == "ok"}
-    expected = set(ARGO_STEPS)
+    expected = expected_steps("argocd", reached, env)
     if env.get("E2E_FLUX", "1") == "1":
-        expected |= {step.replace("argocd.", "flux.", 1) for step in ARGO_STEPS}
+        expected |= expected_steps("flux", reached, env)
     assert expected <= reached, sorted(expected - reached)
     assert result.returncode == 0

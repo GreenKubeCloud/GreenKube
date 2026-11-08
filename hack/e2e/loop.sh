@@ -13,6 +13,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 need_cmd kubectl curl jq
+require_e2e_context
 
 controller="${1:-argocd}"
 case "${controller}" in
@@ -22,6 +23,10 @@ case "${controller}" in
 esac
 : "${E2E_WAIT_VERDICT:=1}"
 : "${E2E_TIMEOUT_VERDICT:=1500}"
+# The verdict step fails unless every recommendation ends verified/passed. Set
+# to 1 to record any other verdict (regressed, not_realized, inconclusive...)
+# without failing.
+: "${E2E_ALLOW_REGRESSION:=0}"
 prefix="${controller}"
 
 fail_step() {
@@ -71,30 +76,38 @@ wait_until "binding of ${APPS_NAMESPACE}/${workload}" 300 10 binding_resolved ||
   fail_step binding "$(cat "${E2E_EVIDENCE_DIR}/${prefix}-binding.json" 2>/dev/null || echo 'no binding found')"
 evidence "${prefix}.binding" ok "$(jq -c '{status, binding: (.binding // {} | {controller, repo_url, path, renderer, provider_id, revision})}' "${E2E_EVIDENCE_DIR}/${prefix}-binding.json")"
 
-# A previous run may have stopped with a GreenKube PR still open for this
-# workload: resume from the merge instead of failing on the open-PR budget.
-find_open_pull_request() {
-  local recs id prs open
-  recs="$(gk_api GET "/recommendations/active?namespace=${APPS_NAMESPACE}")" || return 1
+# A previous run (E2E_FRESH=0) may have stopped after GreenKube opened or merged
+# a pull request for this workload. Resume from that pull request: from the
+# merge when it is still open, from the controller sync when it is merged.
+# Recommendations are read from the history (any status: active, pr_open,
+# applied, verified...), so this does not depend on how the lifecycle labels a
+# recommendation while its PR is open.
+find_previous_pull_request() {
+  local start end recs id prs candidate latest=""
+  start="$(jq -rn 'now - 7 * 86400 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
+  end="$(jq -rn 'now + 3600 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
+  recs="$(gk_api GET "/recommendations/history?namespace=${APPS_NAMESPACE}&start=${start}&end=${end}")" || return 1
   for id in $(jq -r --arg name "${workload}" '.[] | select(.owner_name == $name) | .id' <<<"${recs}"); do
     prs="$(gk_api GET "/recommendations/${id}/pull-requests")" || continue
-    open="$(jq -c '[.[] | select(.status == "open" and .plan_id != null)] | last // empty' <<<"${prs}")"
-    if [[ -n "${open}" ]]; then
-      printf '%s' "${open}"
-      return 0
+    candidate="$(jq -c '[.[] | select(.plan_id != null and (.status == "open" or .status == "merged"))]
+      | sort_by(.created_at) | last // empty' <<<"${prs}")"
+    [[ -n "${candidate}" ]] || continue
+    if [[ -z "${latest}" || "$(jq -r .created_at <<<"${candidate}")" > "$(jq -r .created_at <<<"${latest}")" ]]; then
+      latest="${candidate}"
     fi
   done
-  return 1
+  [[ -n "${latest}" ]] || return 1
+  printf '%s' "${latest}"
 }
 
-if pr_record="$(find_open_pull_request)"; then
+if pr_record="$(find_previous_pull_request)"; then
   plan_id="$(jq -r .plan_id <<<"${pr_record}")"
   pr_number="$(jq -r .pr_number <<<"${pr_record}")"
   rec_ids=()
   for id in $(gk_api GET "/automation/plans/${plan_id}" | jq -r '.recommendation_ids[]'); do
     rec_ids+=("${id}")
   done
-  evidence "${prefix}.resume" ok "open PR #${pr_number} of plan ${plan_id} for recommendations ${rec_ids[*]}"
+  evidence "${prefix}.resume" ok "$(jq -r .status <<<"${pr_record}") PR #${pr_number} of plan ${plan_id} for recommendations ${rec_ids[*]}"
 else
   # --- 2. Collection + recommendation scans until the workload is eligible -------------
   scan_once() {
@@ -194,29 +207,51 @@ evidence "${prefix}.pull_request" ok "$(jq -c --argjson files "$(jq -c '[.[].fil
   '{number, title, state, html_url, head: .head.ref, base: .base.ref, files: $files}' <<<"${gitea_pr}") greenkube_pr_url=$(jq -r .pr_url <<<"${pr_record}")"
 
 # --- 6. A reviewer merges the PR (Gitea API) ----------------------------------------------
-# Gitea computes mergeability asynchronously and answers 405 until it is known.
-merge_pr() {
-  gitea_api POST "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}/merge" \
-    "$(jq -cn --arg msg "Merge GreenKube rightsizing PR #${pr_number} (e2e)" '{Do: "merge", merge_message_field: $msg}')" \
-    >/dev/null 2>&1
-}
-wait_until "Gitea merge of PR #${pr_number}" 120 3 merge_pr ||
-  fail_step merge "Gitea merge API failed: $(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}" | jq -c '{state, mergeable, merged}')"
-merged_pr="$(gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}")"
+# Gitea computes mergeability asynchronously and answers 405 until it is known:
+# only that answer is retried. A PR that is already merged counts as merged; a
+# closed PR or any other error stops the loop at once.
+pr_api="/repos/${GITEA_OWNER}/${GITEA_REPO}/pulls/${pr_number}"
+merge_body="$(jq -cn --arg msg "Merge GreenKube rightsizing PR #${pr_number} (e2e)" '{Do: "merge", merge_message_field: $msg}')"
+merge_deadline=$((SECONDS + 120))
+while :; do
+  current_pr="$(gitea_api GET "${pr_api}")" || fail_step merge "cannot read PR #${pr_number} on Gitea"
+  [[ "$(jq -r .merged <<<"${current_pr}")" == "true" ]] && break
+  [[ "$(jq -r .state <<<"${current_pr}")" == "open" ]] ||
+    fail_step merge "PR #${pr_number} is $(jq -r .state <<<"${current_pr}") without being merged"
+  code="$(gitea_call POST "${pr_api}/merge" "${merge_body}")"
+  case "${code}" in
+    200 | 204) break ;;
+    405) ;; # mergeability not computed yet
+    *) fail_step merge "Gitea merge API answered HTTP ${code}: $(head -c 400 "${E2E_STATE_DIR}/gitea-last.json" 2>/dev/null)" ;;
+  esac
+  ((SECONDS < merge_deadline)) ||
+    fail_step merge "PR #${pr_number} still not mergeable after 120s: $(jq -c '{state, mergeable, merged}' <<<"${current_pr}")"
+  sleep 3
+done
+merged_pr="$(gitea_api GET "${pr_api}")"
 save_json "${prefix}-gitea-pr-merged" "${merged_pr}"
 merge_sha="$(jq -r .merge_commit_sha <<<"${merged_pr}")"
 [[ "$(jq -r .merged <<<"${merged_pr}")" == "true" ]] || fail_step merge "$(jq -c '{state, merged}' <<<"${merged_pr}")"
 evidence "${prefix}.merge" ok "PR #${pr_number} merged as ${merge_sha}"
 
 # --- 7. The GitOps controller syncs the merge commit --------------------------------------
+# The controller may already be at a later commit (a resumed run, or the other
+# loop merged after this one): accept the merge commit or any descendant of it.
+revision_includes() {
+  local revision="$1"
+  [[ -n "${revision}" && "${revision}" != "null" ]] || return 1
+  [[ "${revision}" == "${merge_sha}" ]] && return 0
+  gitea_api GET "/repos/${GITEA_OWNER}/${GITEA_REPO}/commits?sha=${revision}&limit=50&stat=false" 2>/dev/null |
+    jq -e --arg sha "${merge_sha}" 'any(.[]; .sha == $sha)' >/dev/null
+}
 if [[ "${controller}" == "argocd" ]]; then
   kubectl -n "${ARGOCD_NAMESPACE}" annotate application "${ARGOCD_APP}" argocd.argoproj.io/refresh=normal --overwrite >/dev/null
   controller_synced() {
     local app
     app="$(kubectl -n "${ARGOCD_NAMESPACE}" get application "${ARGOCD_APP}" -o json)" || return 1
     save_json "${prefix}-controller" "$(jq -c '{sync: .status.sync, health: .status.health, operation: .status.operationState.phase}' <<<"${app}")"
-    [[ "$(jq -r .status.sync.revision <<<"${app}")" == "${merge_sha}" &&
-      "$(jq -r .status.sync.status <<<"${app}")" == "Synced" &&
+    revision_includes "$(jq -r .status.sync.revision <<<"${app}")" &&
+      [[ "$(jq -r .status.sync.status <<<"${app}")" == "Synced" &&
       "$(jq -r .status.health.status <<<"${app}")" == "Healthy" ]]
   }
 else
@@ -225,8 +260,9 @@ else
     local ks
     ks="$(kubectl -n "${FLUX_NAMESPACE}" get kustomization "${FLUX_NAME}" -o json)" || return 1
     save_json "${prefix}-controller" "$(jq -c '{revision: .status.lastAppliedRevision, conditions: [.status.conditions[]? | {type, status, reason}]}' <<<"${ks}")"
-    [[ "$(jq -r .status.lastAppliedRevision <<<"${ks}")" == *"${merge_sha}" &&
-      "$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' <<<"${ks}")" == "True" ]]
+    # lastAppliedRevision reads "<branch>@sha1:<commit>".
+    revision_includes "$(jq -r '.status.lastAppliedRevision // "" | split(":") | last' <<<"${ks}")" &&
+      [[ "$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' <<<"${ks}")" == "True" ]]
   }
 fi
 wait_until "${controller} sync of ${merge_sha}" "${E2E_TIMEOUT_SYNC}" 5 controller_synced ||
@@ -309,12 +345,30 @@ if [[ "${E2E_WAIT_VERDICT}" == "1" ]]; then
       esac
     done
   }
-  if wait_until "measurement verdict" "${E2E_TIMEOUT_VERDICT}" 30 verdict_reached; then
-    evidence "${prefix}.verdict" ok "$(for id in "${rec_ids[@]}"; do jq -c '{id, status, verification_status, verified_at, cost_saved, carbon_saved_co2e_grams}' "${E2E_EVIDENCE_DIR}/${prefix}-recommendation-${id}.json"; done | tr '\n' ' ')"
-  else
+  if ! wait_until "measurement verdict" "${E2E_TIMEOUT_VERDICT}" 30 verdict_reached; then
     fail_step verdict "$(for id in "${rec_ids[@]}"; do jq -c '{id, status, verification_status}' "${E2E_EVIDENCE_DIR}/${prefix}-recommendation-${id}.json"; done)"
   fi
   save_json "${prefix}-savings" "$(gk_api GET /recommendations/savings || echo '{}')"
+  # Record the real outcome: "ok" only when every recommendation is
+  # verified/passed, otherwise "verdict_<status>_<verification_status>" of the
+  # first recommendation that did not pass.
+  verdict_status=ok
+  for id in "${rec_ids[@]}"; do
+    outcome="$(jq -r '"\(.status)_\(.verification_status // "none")"' "${E2E_EVIDENCE_DIR}/${prefix}-recommendation-${id}.json")"
+    if [[ "${outcome}" != "verified_passed" ]]; then
+      verdict_status="verdict_${outcome}"
+      break
+    fi
+  done
+  verdict_detail="$(for id in "${rec_ids[@]}"; do jq -c '{id, status, verification_status, verified_at, savings_realized, measured_cost_saved, measured_co2e_saved_grams}' "${E2E_EVIDENCE_DIR}/${prefix}-recommendation-${id}.json"; done | tr '\n' ' ')"
+  if [[ "${verdict_status}" == "ok" ]]; then
+    evidence "${prefix}.verdict" ok "${verdict_detail}"
+  elif [[ "${E2E_ALLOW_REGRESSION}" == "1" ]]; then
+    evidence "${prefix}.verdict" "${verdict_status}" "${verdict_detail} (allowed by E2E_ALLOW_REGRESSION=1)"
+  else
+    evidence "${prefix}.verdict" failed "${verdict_status}: ${verdict_detail}"
+    exit 1
+  fi
 fi
 
 log "Loop for ${controller}/${workload} complete. Evidence: ${E2E_EVIDENCE_DIR}"
