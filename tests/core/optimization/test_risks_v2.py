@@ -92,6 +92,32 @@ class TestRiskModelV2:
         assert result.risk_level == RiskLevel.HIGH
         assert "oom_history" in result.risk_factors
 
+    def test_oom_history_on_a_reliability_increase_is_the_avoided_incident(self):
+        # Two-way rightsizing (E9): an increase fixes the OOM kills, it is not made riskier by them.
+        evidence = RecommendationEvidence(
+            sample_count=200,
+            coverage_ratio=0.98,
+            restart_count=3,
+            proposed=ResourceSnapshot(memory_request_bytes=2 * 1024**3),
+            memory_usage=UtilizationStats(avg=900 * 1024**2, p95=1000 * 1024**2, max=1100 * 1024**2),
+        )
+        rec = _memory_rec(proposed=2 * 1024**3, current=1024**3)
+        result = _risk(rec, evidence, replicas=3, oom_events=2)
+        assert result.risk_level == RiskLevel.LOW
+        assert {"restart_history", "oom_history"} <= set(result.risk_factors)
+
+    def test_cpu_throttling_on_a_reliability_increase_keeps_the_risk(self):
+        rec = _cpu_rec(proposed=1500, current=1000)
+        evidence = RecommendationEvidence(
+            sample_count=200,
+            coverage_ratio=0.98,
+            proposed=ResourceSnapshot(cpu_request_millicores=1500),
+            cpu_usage=UtilizationStats(avg=800, p95=950, p99=980, max=1000),
+        )
+        result = _risk(rec, evidence, replicas=3, cpu_throttling_ratio=0.4)
+        assert result.risk_level == RiskLevel.LOW
+        assert "cpu_throttling_history" in result.risk_factors
+
     @pytest.mark.parametrize("ratio,level", [(0.1, RiskLevel.MEDIUM), (0.4, RiskLevel.HIGH), (0.01, RiskLevel.LOW)])
     def test_cpu_throttling_history(self, ratio, level):
         result = _risk(_cpu_rec(), _cpu_evidence(), replicas=3, cpu_throttling_ratio=ratio)

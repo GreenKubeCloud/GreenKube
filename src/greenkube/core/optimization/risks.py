@@ -6,7 +6,9 @@ with the proposal. Risk model v2 then folds in what the pooled numbers hide or
 cannot know, from a :class:`WorkloadRiskProfile`:
 
 * per-replica headroom: the hottest replica, not the pool, must fit the request;
-* OOM and CPU-throttling history;
+* OOM and CPU-throttling history (it raises the risk of a decrease; on a
+  reliability increase it is the incident the change avoids, so it is recorded
+  as a factor without raising the risk);
 * a singleton workload (one replica): a restart is an outage;
 * HPA, VPA and PDB interplay;
 * a JVM flag: heap sizing hides memory needs from the working set;
@@ -192,25 +194,38 @@ def _assess_rightsizing(rec: Recommendation, evidence: Optional[RecommendationEv
         return RiskLevel.MEDIUM, ["missing_cpu_usage"]
 
     # RIGHTSIZING_MEMORY
+    history: List[str] = []
     if evidence.restart_count:
-        return RiskLevel.HIGH, ["restart_history"]
+        if not _is_increase(rec, "memory"):
+            return RiskLevel.HIGH, ["restart_history"]
+        # Restarts are what a memory increase prevents (E9): recorded, not a risk of the change.
+        history = ["restart_history"]
     stats = evidence.memory_usage
     proposed_mem = evidence.proposed.memory_request_bytes
     if stats and proposed_mem:
         if stats.max >= proposed_mem:
-            return RiskLevel.HIGH, ["observed_max_exceeds_proposal"]
+            return RiskLevel.HIGH, [*history, "observed_max_exceeds_proposal"]
         if stats.p95 >= proposed_mem * 0.9:
-            return RiskLevel.MEDIUM, ["p95_close_to_proposal"]
-        return RiskLevel.LOW, ["sufficient_headroom"]
-    return RiskLevel.MEDIUM, ["missing_memory_usage"]
+            return RiskLevel.MEDIUM, [*history, "p95_close_to_proposal"]
+        return RiskLevel.LOW, [*history, "sufficient_headroom"]
+    return RiskLevel.MEDIUM, [*history, "missing_memory_usage"]
+
+
+def _requests(rec: Any, resource: str) -> tuple:
+    if resource == "cpu":
+        return rec.current_cpu_request_millicores, rec.recommended_cpu_request_millicores
+    return rec.current_memory_request_bytes, rec.recommended_memory_request_bytes
 
 
 def _is_decrease(rec: Any, resource: str) -> bool:
-    if resource == "cpu":
-        current, proposed = rec.current_cpu_request_millicores, rec.recommended_cpu_request_millicores
-    else:
-        current, proposed = rec.current_memory_request_bytes, rec.recommended_memory_request_bytes
+    current, proposed = _requests(rec, resource)
     return current is not None and proposed is not None and proposed < current
+
+
+def _is_increase(rec: Any, resource: str) -> bool:
+    """A reliability increase of the request (two-way rightsizing, roadmap E9)."""
+    current, proposed = _requests(rec, resource)
+    return current is not None and proposed is not None and proposed > current
 
 
 def apply_profile(
@@ -242,15 +257,21 @@ def apply_profile(
                 level = _at_least(level, RiskLevel.MEDIUM)
                 add("replica_p95_close_to_proposal")
 
+        # OOM kills and throttling make a decrease riskier; an increase is the fix
+        # for them (E9), so they are kept as factors (the incident it avoids) only.
+        increase = _is_increase(rec, resource)
         if resource == "memory" and profile.oom_events:
-            level = RiskLevel.HIGH
+            if not increase:
+                level = RiskLevel.HIGH
             add("oom_history")
         if resource == "cpu" and profile.cpu_throttling_ratio is not None:
             if profile.cpu_throttling_ratio > THROTTLING_HIGH:
-                level = RiskLevel.HIGH
+                if not increase:
+                    level = RiskLevel.HIGH
                 add("cpu_throttling_history")
             elif profile.cpu_throttling_ratio > THROTTLING_MEDIUM:
-                level = _at_least(level, RiskLevel.MEDIUM)
+                if not increase:
+                    level = _at_least(level, RiskLevel.MEDIUM)
                 add("cpu_throttling_history")
 
         if profile.hpa_resources:

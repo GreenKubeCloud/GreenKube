@@ -19,6 +19,7 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
+from greenkube.core.optimization.track_record import METHOD_MEASUREMENTS, load_track_record
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, InvalidChangeTransitionError
 from greenkube.verify.load_driver import PrometheusRangeReader
@@ -269,6 +270,10 @@ async def test_a_change_is_measured_once_and_split_across_its_recommendations(da
     assert await scenario.service.run_due(now=status.post_window_end + timedelta(hours=5)) == []
     counts = await scenario.measurements.get_outcome_counts_by_source_capability()
     assert sum(entry["realized"] for entry in counts.values()) == 2
+    # The decisioning track record (I3) reads these measurement outcomes.
+    book = await load_track_record(scenario.reco_repo)
+    assert book.method == METHOD_MEASUREMENTS
+    assert sum(entry.realized for entry in book.entries()) == 2
     events = [event.event_type for event in await scenario.changes.list_events(change.change_id)]
     assert events == ["change_recorded", "measurement_started", "health_checked", "measurement_decided"]
 

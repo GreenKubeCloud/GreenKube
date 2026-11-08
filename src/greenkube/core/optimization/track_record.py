@@ -6,11 +6,12 @@ that produced the change: ``realized`` adds one to alpha, ``not_realized`` and
 ``rollback_review`` add one to beta. ``inconclusive`` and ``contaminated``
 outcomes say nothing about the source and are only counted.
 
-Outcomes come from the change-measurement repository when it offers
-``get_outcome_counts_by_source_capability()``. Until then they are derived from
-the verification state of applied recommendations by
-:func:`outcome_counts_from_recommendations`, kept isolated so the source can be
-rewired without touching the scoring.
+Outcomes come from the savings measurements of change measurement
+(``SavingsMeasurementRepository.get_outcome_counts_by_source_capability()``,
+roadmap C): each recommendation counts once, by its latest measurement. A
+recommendation store without measurements (custom backends) falls back to the
+verification state of applied recommendations
+(:func:`outcome_counts_from_recommendations`).
 """
 
 from __future__ import annotations
@@ -206,10 +207,33 @@ def book_from_counts(rows: Any, method: str = METHOD_MEASUREMENTS) -> TrackRecor
     return TrackRecordBook(records=records, method=method)
 
 
-async def load_track_record(reco_repo: Any) -> TrackRecordBook:
-    """Load the track record; an unreadable store yields the empty book (priors only)."""
-    getter = getattr(reco_repo, "get_outcome_counts_by_source_capability", None)
+def measurement_repository_for(reco_repo: Any) -> Any:
+    """The savings measurement repository sharing the database of a SQL recommendation repository, if any."""
+    from greenkube.storage.measurement_repository import SavingsMeasurementRepository
+    from greenkube.storage.postgres.recommendation_repository import PostgresRecommendationRepository
+    from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
+
+    if isinstance(reco_repo, (PostgresRecommendationRepository, SQLiteRecommendationRepository)):
+        return SavingsMeasurementRepository(reco_repo.db_manager)
+    return None
+
+
+async def load_track_record(reco_repo: Any, measurement_repo: Any = None) -> TrackRecordBook:
+    """Load the track record; an unreadable store yields the empty book (priors only).
+
+    Outcome counts come from ``measurement_repo`` (by default the measurement
+    repository of a SQL ``reco_repo``), then from any repository offering
+    ``get_outcome_counts_by_source_capability()``, and otherwise from the
+    verification state of applied recommendations.
+    """
+    getter = None
     try:
+        if measurement_repo is None:
+            measurement_repo = measurement_repository_for(reco_repo)
+        for source in (measurement_repo, reco_repo):
+            getter = getattr(source, "get_outcome_counts_by_source_capability", None) if source is not None else None
+            if callable(getter):
+                break
         if callable(getter):
             return book_from_counts(await cast(Any, getter)(), method=METHOD_MEASUREMENTS)
         records = await reco_repo.get_recommendations_by_statuses(list(OUTCOME_STATUSES))

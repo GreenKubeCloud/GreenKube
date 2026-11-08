@@ -238,8 +238,26 @@ def _criticality_from_factors(risk_factors: Sequence[str]) -> Optional[str]:
 
 
 def default_delivery_mode(rec: Any) -> str:
-    """Delivery assumed at scan time: a PR for container rightsizing with a container target."""
-    if _text(getattr(rec, "type", None)) in ("RIGHTSIZING_CPU", "RIGHTSIZING_MEMORY") and all(
+    """Delivery assumed at scan time: a PR for a container request decrease with a container target.
+
+    Request increases (reliability, E9) are advisory until container resources
+    v2: GitOps actions are built for decreases only, so they are delivered manually.
+    """
+    rec_type = _text(getattr(rec, "type", None))
+    if rec_type == "RIGHTSIZING_CPU":
+        current, proposed = (
+            getattr(rec, "current_cpu_request_millicores", None),
+            getattr(rec, "recommended_cpu_request_millicores", None),
+        )
+    elif rec_type == "RIGHTSIZING_MEMORY":
+        current, proposed = (
+            getattr(rec, "current_memory_request_bytes", None),
+            getattr(rec, "recommended_memory_request_bytes", None),
+        )
+    else:
+        return "manual"
+    increase = current is not None and proposed is not None and proposed > current
+    if not increase and all(
         getattr(rec, name, None) for name in ("namespace", "owner_kind", "owner_name", "container_name")
     ):
         return "direct"

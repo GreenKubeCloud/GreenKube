@@ -9,6 +9,7 @@ import pytest
 from greenkube.core.optimization.scoring import (
     PROFILES,
     compute_value,
+    default_delivery_mode,
     normalize_profile,
     ranking_sort_key,
     resolve_parameters,
@@ -278,3 +279,23 @@ class TestRanking:
         scored = score_recommendations([_rec("a", cost=1.0)], config=_config())[0]
         unscored = RecommendationRecord.from_recommendation(_rec("b", cost=100.0))
         assert sorted([unscored, scored], key=ranking_sort_key)[0].pod_name == "a"
+
+
+class TestDeliveryMode:
+    def _container_rec(self, current, proposed):
+        return _rec("api").model_copy(
+            update={
+                "owner_kind": "Deployment",
+                "owner_name": "api",
+                "container_name": "api",
+                "current_cpu_request_millicores": current,
+                "recommended_cpu_request_millicores": proposed,
+            }
+        )
+
+    def test_container_decreases_are_delivered_by_pull_request(self):
+        assert default_delivery_mode(self._container_rec(1000, 300)) == "direct"
+
+    def test_reliability_increases_are_advisory(self):
+        # GitOps actions are built for decreases only (E9), so increases are applied manually.
+        assert default_delivery_mode(self._container_rec(1000, 1500)) == "manual"
