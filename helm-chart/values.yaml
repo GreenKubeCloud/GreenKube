@@ -486,6 +486,24 @@ config:
       maxThrottleRatio: 0.05
       # Interval between lifecycle jobs (apply detection, verification, expiry).
       lifecycleInterval: 5m
+    # --- Change measurement (docs/methodology/savings-measurement.md) ---
+    # Every detected change is recorded with a baseline snapshot and measured
+    # against an hour-of-week counterfactual with a 90% bootstrap CI.
+    changeMeasurement:
+      # false: changes are measured by the interim verifier (windowHours) instead.
+      enabled: true
+      # Baseline window in days, ending at the PR merge or plan approval (>= 7 recommended).
+      preWindowDays: 7
+      # Post-change window in days, starting after the rollout and its warm-up.
+      postWindowDays: 7
+      # Hours after rollout completion excluded from the post-window.
+      warmupHours: 1
+      # Minimum share of post-window hours matched with a baseline hour of the week.
+      minCoverage: 0.8
+      # Moving-block bootstrap resamples for the confidence interval.
+      bootstrapSamples: 1000
+      # Noise floor: not realized when the CI upper bound is at most this share of the counterfactual.
+      epsilonRatio: 0.02
 
 # ---------------------------------------------------------------------------
 # Impact Model (docs/methodology/impact-model.md)

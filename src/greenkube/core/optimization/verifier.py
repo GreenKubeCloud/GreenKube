@@ -527,6 +527,12 @@ def _awaiting(record: RecommendationRecord) -> bool:
     return _status_value(record) in VERIFIABLE_STATUSES and record.verification_status in AWAITING_MEASUREMENT
 
 
+def change_id_of(record: RecommendationRecord) -> Optional[str]:
+    """The change (C1) a record was applied by, when apply detection recorded one."""
+    value = _baseline_dict(record).get("change_id")
+    return str(value) if value not in (None, "") else None
+
+
 def _projected_share(record: RecommendationRecord, group: Sequence[RecommendationRecord]) -> float:
     projections = [max(float(member.potential_savings_cost or 0.0), 0.0) for member in group]
     total = sum(projections)
@@ -600,7 +606,11 @@ class RecommendationVerifier:
         """
         repo = self.lifecycle.repo
         records = await repo.get_recommendations_by_statuses(VERIFIABLE_STATUSES, namespace=namespace)
-        applied = [record for record in records if record.id is not None and record.applied_at is not None]
+        applied = [
+            record
+            for record in records
+            if record.id is not None and record.applied_at is not None and not self._change_managed(record)
+        ]
         targets = {attribution_target(record) for record in applied if _awaiting(record)}
         if not targets:
             return []
@@ -608,7 +618,10 @@ class RecommendationVerifier:
         candidates = applied + [
             record
             for record in settled
-            if record.id is not None and record.applied_at is not None and attribution_target(record) in targets
+            if record.id is not None
+            and record.applied_at is not None
+            and attribution_target(record) in targets
+            and not self._change_managed(record)
         ]
         now = self._now()
         updated: List[RecommendationRecord] = []
@@ -629,6 +642,10 @@ class RecommendationVerifier:
         finally:
             self._read_cache = None
         return updated
+
+    def _change_managed(self, record: RecommendationRecord) -> bool:
+        """Records applied by a recorded change are measured by the change pipeline (C1-C5), not here."""
+        return bool(getattr(self.config, "CHANGE_MEASUREMENT_ENABLED", True)) and change_id_of(record) is not None
 
     # ------------------------------------------------------------------
     # Group verification
@@ -898,6 +915,36 @@ class RecommendationVerifier:
         )
         observation.health = await self._collect_health(lead, pods, windows)
         return observation
+
+    async def health_gates_for(
+        self, group: Sequence[RecommendationRecord], start: datetime, end: datetime
+    ) -> List[HealthGateResult]:
+        """Health gates of ``group`` (records of one container) over ``[start, end)``.
+
+        Used by the change-measurement pipeline: the same per-replica usage,
+        restart, OOM, readiness and throttling gates as a verification, without
+        reading a baseline window.
+        """
+        members = list(group)
+        if not members:
+            return []
+        lead = members[0]
+        step = _step_seconds(self.config)
+        target = await self._read_series(lead, start, end)
+        pod_series = await self._read_pod_series(lead, start, end) if lead.container_name is not None else target
+        pods = sorted({metric.pod_name for metric in (pod_series or target) if metric.pod_name})
+        observation = _Observation(
+            scope="workload",
+            before=WindowRates(),
+            after=window_rates(target, step),
+            sample_steps=coverage_steps(target, step),
+            cpu_p95=per_pod_usage_p95(target, "cpu_usage_millicores", step),
+            memory_p95=per_pod_usage_p95(target, "memory_usage_bytes", step),
+            restart_increase=restart_increase(pod_series),
+            pods=pods,
+        )
+        observation.health = await self._collect_health(lead, pods, MeasurementWindows(start, start, start, end))
+        return self._health_gates(members, observation)
 
     async def _collect_health(
         self,
@@ -1223,9 +1270,33 @@ class RecommendationVerifier:
         previous_ids: List[str],
     ) -> RecommendationRecord:
         """Drive the lifecycle from the stored (immutable) decision."""
-        assert record.id is not None
         cost = _find(stored.estimates, "cost")
         co2e = _find(stored.estimates, "co2e_g")
+        return await self.apply_stored_measurement(
+            record,
+            stored,
+            baseline,
+            previous_ids,
+            measured_cost=_measured_value(cost, stored.outcome),
+            measured_co2e=_measured_value(co2e, stored.outcome),
+        )
+
+    async def apply_stored_measurement(
+        self,
+        record: RecommendationRecord,
+        stored: SavingsMeasurement,
+        baseline: dict,
+        previous_ids: List[str],
+        *,
+        measured_cost: Optional[float],
+        measured_co2e: Optional[float],
+    ) -> RecommendationRecord:
+        """Record a stored measurement on the recommendation and transition it.
+
+        Shared by the interim verifier and the change-measurement pipeline,
+        which passes signed measured values (C4: never floored).
+        """
+        assert record.id is not None
         updated_baseline = dict(baseline)
         updated_baseline["measured_ledger_input"] = stored.ledger_input
         updated_baseline["measurement_ids"] = [*previous_ids, stored.measurement_id]
@@ -1243,8 +1314,11 @@ class RecommendationVerifier:
         if missing:
             logger.info("Verification of %s: health signals not available: %s", record.id, ", ".join(missing))
 
-        measured_cost = _measured_value(cost, stored.outcome)
-        measured_co2e = _measured_value(co2e, stored.outcome)
+        if stored.change_id:
+            updated_baseline["change_id"] = stored.change_id
+            updated_baseline["change_measurement_id"] = stored.group_id
+            details["change_id"] = stored.change_id
+            details["change_measurement_id"] = stored.group_id
         updated = await self._transition(record.id, stored, updated_baseline, details, measured_cost, measured_co2e)
 
         from greenkube.core.observability import record_verification

@@ -308,25 +308,41 @@ async def run_recommendation_lifecycle() -> None:
         if expired:
             logger.info("Expired %d recommendation(s) past their TTL.", len(expired))
 
-        detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo())
-        applied = await detector.detect()
-        if applied:
-            logger.info("Detected %d newly applied recommendation(s).", len(applied))
-
         from ..collectors.workload_health_collector import WorkloadHealthCollector
+        from ..core.factory import get_pull_request_repository as _pr_repo
+        from ..storage.change_repository import get_change_repository
         from ..storage.measurement_repository import get_savings_measurement_repository
+        from ..verify.load_driver import PrometheusRangeReader
+        from ..verify.service import ChangeMeasurementService
 
         health_collector = WorkloadHealthCollector()
+        load_reader = PrometheusRangeReader()
+        combined_repo = _combined_repo()
         verifier = RecommendationVerifier(
             lifecycle,
-            _combined_repo(),
+            combined_repo,
             health_collector=health_collector,
             measurement_repo=get_savings_measurement_repository(),
         )
+        # Change measurement (C1-C5): the detector records changes, run_due measures them.
+        changes = ChangeMeasurementService(
+            lifecycle,
+            combined_repo,
+            get_change_repository(),
+            verifier=verifier,
+            load_reader=load_reader,
+            pull_request_repo=_pr_repo(),
+        )
         try:
+            detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo(), change_recorder=changes)
+            applied = await detector.detect()
+            if applied:
+                logger.info("Detected %d newly applied recommendation(s).", len(applied))
             verified = await verifier.verify_due()
+            verified += await changes.run_due()
         finally:
             await health_collector.close()
+            await load_reader.close()
         if verified:
             logger.info("Verified %d recommendation outcome(s).", len(verified))
 

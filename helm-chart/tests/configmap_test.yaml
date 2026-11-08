@@ -323,6 +323,50 @@ tests:
           path: data.VERIFICATION_MIN_SAVINGS_RATIO
           value: "0.75"
 
+  - it: should set change measurement defaults
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ENABLED
+          value: "true"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS
+          value: "7"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "7"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_WARMUP_HOURS
+          value: "1"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_MIN_COVERAGE
+          value: "0.8"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES
+          value: "1000"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
+          value: "0.02"
+
+  - it: should reflect custom change measurement settings
+    set:
+      config.recommendations.changeMeasurement.enabled: false
+      config.recommendations.changeMeasurement.postWindowDays: 14
+      config.recommendations.changeMeasurement.warmupHours: 0
+      config.recommendations.changeMeasurement.epsilonRatio: 0
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ENABLED
+          value: "false"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "14"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_WARMUP_HOURS
+          value: "0"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
+          value: "0"
+
   - it: should not render legacy single-provider git settings
     asserts:
       - isNull:

@@ -34,6 +34,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.verify.digest import hpa_digest, pod_template_digest
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -72,6 +73,10 @@ class WorkloadSnapshot:
     current_revision: str | None = None
     update_revision: str | None = None
     rollout_completed_at: datetime | None = None
+    # Change measurement (C1): pod-template and HPA digests, custom load-driver PromQL.
+    spec_digest: str | None = None
+    hpa_digest: str | None = None
+    load_metric: str | None = None
 
 
 class WorkloadReader(Protocol):
@@ -107,6 +112,33 @@ class ActionStatusRepository(Protocol):
         actor: str = "system",
         reason_code: str | None = None,
     ) -> "SyncPlanStatus | None": ...
+
+
+class ChangeRecorder(Protocol):
+    """Records applied changes and workload revisions (C1).
+
+    Implemented by :class:`greenkube.verify.service.ChangeMeasurementService`.
+    """
+
+    async def needs_observations(self) -> bool: ...
+
+    async def observe_workloads(
+        self, snapshots: Mapping[Tuple[str, str, str], Any], now: datetime | None = None
+    ) -> int: ...
+
+    async def change_id_for(
+        self, plan_id: str | None, snapshot: WorkloadSnapshot, completed_at: datetime
+    ) -> str | None: ...
+
+    async def record_change(
+        self,
+        change_id: str,
+        records: Sequence[RecommendationRecord],
+        *,
+        snapshot: WorkloadSnapshot | None = None,
+        plan: Any = None,
+        now: datetime | None = None,
+    ) -> Any: ...
 
 
 class SyncPlanStatus(Protocol):
@@ -328,6 +360,42 @@ def rollout_completion_time(snapshot: WorkloadSnapshot, now: datetime) -> tuple[
     return now, "detection_time"
 
 
+def _load_metric_annotation(metadata) -> str | None:
+    from greenkube.verify.load_driver import LOAD_METRIC_ANNOTATION
+
+    annotations = _resource_field(metadata, "annotations")
+    if not isinstance(annotations, Mapping):
+        return None
+    value = annotations.get(LOAD_METRIC_ANNOTATION)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+async def _read_hpa_digests() -> Dict[Tuple[str, str, str], str]:
+    """Digest of the HPA spec targeting each workload (best effort: empty when HPAs cannot be listed)."""
+    digests: Dict[Tuple[str, str, str], str] = {}
+    try:
+        from greenkube.core.k8s_client import get_autoscaling_v2_api
+
+        api = await get_autoscaling_v2_api()
+        if api is None:
+            return digests
+        result = await api.list_horizontal_pod_autoscaler_for_all_namespaces()
+    except Exception as exc:
+        logger.debug("Apply detection: could not list HPAs: %s", exc)
+        return digests
+    for item in getattr(result, "items", []) or []:
+        metadata = _resource_field(item, "metadata")
+        spec = _resource_field(item, "spec")
+        ref = _resource_field(spec, "scale_target_ref", "scaleTargetRef") if spec is not None else None
+        namespace = _resource_field(metadata, "namespace") if metadata is not None else None
+        kind = _resource_field(ref, "kind") if ref is not None else None
+        name = _resource_field(ref, "name") if ref is not None else None
+        digest = hpa_digest(spec)
+        if isinstance(namespace, str) and isinstance(kind, str) and isinstance(name, str) and digest:
+            digests[(namespace, kind, name)] = digest
+    return digests
+
+
 class K8sWorkloadReader:
     """Reads Deployment/StatefulSet/DaemonSet requests via the Kubernetes API."""
 
@@ -345,6 +413,7 @@ class K8sWorkloadReader:
             logger.warning("Apply detection: no Kubernetes configuration available.")
             return snapshots
 
+        hpas = await _read_hpa_digests()
         readers = (
             ("Deployment", api.list_deployment_for_all_namespaces),
             ("StatefulSet", api.list_stateful_set_for_all_namespaces),
@@ -383,6 +452,9 @@ class K8sWorkloadReader:
                     observed_generation=_resource_field(status, "observed_generation", "observedGeneration"),
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
+                    spec_digest=pod_template_digest(template),
+                    hpa_digest=hpas.get((namespace, kind, name)),
+                    load_metric=_load_metric_annotation(metadata),
                     **_rollout_fields(kind, spec, status),
                 )
         return snapshots
@@ -397,6 +469,7 @@ class AppliedDetector:
         reader: Optional[WorkloadReader] = None,
         config: Optional["Config"] = None,
         action_status_repository: Optional[ActionStatusRepository] = None,
+        change_recorder: Optional[ChangeRecorder] = None,
     ):
         from greenkube.core.config import get_config
 
@@ -404,6 +477,7 @@ class AppliedDetector:
         self.reader = reader if reader is not None else K8sWorkloadReader()
         self.config = config if config is not None else get_config()
         self.action_status_repository = action_status_repository
+        self.change_recorder = change_recorder
 
     def _target_key(self, record: RecommendationRecord) -> Optional[Tuple[str, str, str]]:
         namespace = record.namespace
@@ -438,16 +512,24 @@ class AppliedDetector:
             ["active", "pr_open", RecommendationStatus.ROLLBACK_REVIEW.value]
         )
         candidates = [r for r in records if r.type in RIGHTSIZING_TYPES]
-        if not candidates:
+        recorder = self.change_recorder
+        if not candidates and (recorder is None or not await recorder.needs_observations()):
             return []
 
         snapshots = await self.reader.read()
         if not snapshots:
             return []
+        detected_at = datetime.now(timezone.utc)
+        if recorder is not None:
+            # Pod-template revisions give changes their "before" digest and reveal later edits (C1, C4).
+            await recorder.observe_workloads(snapshots, detected_at)
 
         tolerance = float(getattr(self.config, "RECOMMENDATION_APPLY_TOLERANCE", 0.25))
         applied: List[RecommendationRecord] = []
         processed_rollbacks: set[str] = set()
+        #: Changes applied in this pass: change_id -> (records, workload snapshot, synced plan).
+        changes: Dict[str, Tuple[List[RecommendationRecord], WorkloadSnapshot, Any]] = {}
+        pass_change_ids: Dict[tuple, Optional[str]] = {}
 
         for record in candidates:
             if record.status is RecommendationStatus.ROLLBACK_REVIEW:
@@ -550,6 +632,15 @@ class AppliedDetector:
                 )
                 continue
             applied_at, completion_source = rollout_completion_time(snapshot, datetime.now(timezone.utc))
+            change_id: Optional[str] = None
+            if recorder is not None:
+                plan_id = synced_plan.plan_id if synced_plan is not None else None
+                identity = (plan_id, key, snapshot.uid, snapshot.generation, snapshot.spec_digest)
+                if identity in pass_change_ids:
+                    change_id = pass_change_ids[identity]
+                else:
+                    change_id = await recorder.change_id_for(plan_id, snapshot, applied_at)
+                    pass_change_ids[identity] = change_id
 
             method = (
                 ApplicationMethod.PR_MERGE.value
@@ -578,7 +669,10 @@ class AppliedDetector:
                         "updated_replicas": snapshot.updated_replicas,
                         "available_replicas": snapshot.available_replicas,
                     },
+                    change_id=change_id,
                 )
+                if change_id is not None:
+                    changes.setdefault(change_id, ([], snapshot, synced_plan))[0].append(updated)
                 if action_status is not None and self.action_status_repository is not None:
                     updated_count = await self.action_status_repository.set_recommendation_action_status(
                         [record.id],
@@ -601,6 +695,13 @@ class AppliedDetector:
                 )
             except Exception as exc:
                 logger.warning("Apply detection failed for recommendation %s: %s", record.id, exc)
+        if recorder is not None:
+            for change_id, (members, snapshot, plan) in changes.items():
+                try:
+                    await recorder.record_change(change_id, members, snapshot=snapshot, plan=plan, now=detected_at)
+                except Exception as exc:
+                    # The lifecycle job records it later from the recommendations' change_id.
+                    logger.warning("Could not record change %s: %s", change_id, exc)
         return applied
 
     @staticmethod
