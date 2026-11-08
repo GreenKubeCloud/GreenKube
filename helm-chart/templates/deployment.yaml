@@ -174,7 +174,7 @@ spec:
             - configMapRef:
                 name: {{ include "greenkube.fullname" . }}
           env:
-            {{- if eq .Values.config.apiAuthMode "api_key" }}
+            {{- if has .Values.config.apiAuthMode (list "api_key" "session") }}
             - name: GREENKUBE_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -413,3 +413,74 @@ def test_in_cluster_api_wraps_ipv6_hosts(monkeypatch, tmp_path):
 
     assert api.base_url == "https://[fd00::1]:443"
     assert api.token == "tok"
+
+
+# --------------------------------------------------------------------------- #
+# Initial admin Secret (F14)                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class MultiSecretApi:
+    def __init__(self, secrets: dict[str, dict] | None = None):
+        self.secrets = dict(secrets or {})
+        self.created: list[dict] = []
+        self.conflict_on_create = False
+
+    def read_secret(self, name):
+        return self.secrets.get(name)
+
+    def create_secret(self, body):
+        if self.conflict_on_create:
+            raise bootstrap.ConflictError("exists")
+        self.created.append(body)
+        self.secrets[body["metadata"]["name"]] = body
+
+    def patch_secret(self, name, body):  # pragma: no cover - must never be called for the admin Secret
+        raise AssertionError("the initial admin Secret is never patched by the hook")
+
+    def pvc_exists(self, name):
+        return False
+
+
+def _admin_settings(**overrides):
+    return _settings(initial_admin_secret="gk-initial-admin", initial_admin_username="admin", **overrides)
+
+
+def test_creates_the_initial_admin_secret_once_with_a_random_password():
+    api = MultiSecretApi()
+
+    message = bootstrap.ensure_initial_admin_secret(api, _admin_settings(), token=lambda length: "p" * length)
+
+    assert "Created Secret gk-initial-admin" in message
+    body = api.created[0]
+    assert _plain(body) == {"username": "admin", "password": "p" * 24}
+    assert body["metadata"]["labels"]["app.kubernetes.io/component"] == "initial-admin"
+    assert "app.kubernetes.io/instance" not in body["metadata"]["labels"]
+    assert "p" * 24 not in message
+
+
+def test_never_reissues_an_existing_or_erased_initial_admin_secret():
+    tombstone = {"metadata": {"name": "gk-initial-admin"}, "data": {}}
+    api = MultiSecretApi({"gk-initial-admin": tombstone})
+
+    message = bootstrap.ensure_initial_admin_secret(api, _admin_settings())
+
+    assert "already exists" in message
+    assert api.created == []
+
+
+def test_a_concurrently_created_initial_admin_secret_is_kept():
+    api = MultiSecretApi()
+    api.conflict_on_create = True
+
+    assert "concurrently" in bootstrap.ensure_initial_admin_secret(api, _admin_settings())
+
+
+def test_initial_admin_only_mode_needs_no_release_secret():
+    settings = bootstrap.Settings.from_env(
+        {"GREENKUBE_NAMESPACE": "gk", "GREENKUBE_INITIAL_ADMIN_SECRET": "gk-initial-admin"}
+    )
+
+    assert settings.secret_name == ""
+    assert settings.initial_admin_secret == "gk-initial-admin"
+    assert settings.initial_admin_username == "admin"

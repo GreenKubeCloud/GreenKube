@@ -23,14 +23,23 @@ spec:
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      # The API key protects /prometheus/metrics. The referenced Secret must
+      # An API key protects /prometheus/metrics. The referenced Secret must
       # exist in the ServiceMonitor namespace (monitoring.serviceMonitor.namespace)
-      # for Prometheus to read it.
+      # for Prometheus to read it. Prefer a key with only the metrics:read scope
+      # (monitoring.serviceMonitor.bearerTokenSecret); otherwise the deprecated
+      # bootstrap key GREENKUBE_API_KEY is used.
       authorization:
         type: Bearer
         credentials:
-          name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_API_KEY") }}
+          {{- with (.Values.monitoring.serviceMonitor.bearerTokenSecret | default dict) }}
+          {{- if .name }}
+          name: {{ .name }}
+          key: {{ .key | default "token" }}
+          {{- else }}
+          name: {{ include "greenkube.secretNameFor" (dict "context" $ "key" "GREENKUBE_API_KEY") }}
           key: GREENKUBE_API_KEY
+          {{- end }}
+          {{- end }}
       metricRelabelings:
         # Prometheus renames metric labels that conflict with Kubernetes discovery
         # labels (namespace, pod, cluster, region) by prefixing them with "exported_".

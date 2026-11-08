@@ -110,6 +110,18 @@ outside the Helm release, so the chart never renders generated values (N1).
 {{- end -}}
 
 {{/*
+Name of the Secret holding the generated first-admin password (F14), or empty
+when auth.admin.existingSecret provides it, sessions are off, or RBAC is not
+created (nothing could generate or read it then).
+*/}}
+{{- define "greenkube.initialAdminSecretName" -}}
+{{- $admin := (.Values.auth | default dict).admin | default dict -}}
+{{- if and .Values.rbac.create (eq (.Values.config.apiAuthMode | default "session") "session") (not $admin.existingSecret) -}}
+{{- printf "%s-initial-admin" (include "greenkube.fullname" . | trunc 49 | trimSuffix "-") -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Name of the chart-rendered Secret that holds credentials supplied in values.
 */}}
 {{- define "greenkube.valuesSecretName" -}}
@@ -188,6 +200,9 @@ true
   {{- else if $generates -}}
     {{- fail "rbac.create=false: the chart cannot create generated credentials without its bootstrap RBAC. Set secrets.existingSecret (recommended for GitOps), or supply secrets.apiKey and, for the bundled PostgreSQL, postgres.auth.password." -}}
   {{- end -}}
+{{- else if include "greenkube.initialAdminSecretName" . -}}
+{{- /* secrets.existingSecret: the hook only creates the initial-admin Secret. */ -}}
+true
 {{- end -}}
 {{- end -}}
 
@@ -266,6 +281,14 @@ Secret (see greenkube.secretNameFor), and a Secret without keys is omitted.
     items:
       {{- toYaml $selected | nindent 6 }}
   {{- end -}}
+{{- end -}}
+{{- $admin := ($context.Values.auth | default dict).admin | default dict -}}
+{{- if and $admin.existingSecret (has .component (list "api" "app")) }}
+- secret:
+    name: {{ $admin.existingSecret }}
+    items:
+      - key: {{ $admin.existingSecretKey | default "password" }}
+        path: AUTH_ADMIN_PASSWORD
 {{- end -}}
 {{- end -}}
 

@@ -15,6 +15,13 @@ Generated keys:
   POSTGRES_PASSWORD, DB_CONNECTION_STRING   for the bundled PostgreSQL when
                                             postgres.auth.password is empty.
 
+With GREENKUBE_INITIAL_ADMIN_SECRET set, the script also creates that Secret
+once with a random first-admin password (keys ``username`` and ``password``,
+roadmap F14). An existing Secret is never modified: the API erases its password
+after the first sign-in and keeps it as an empty tombstone, so a later hook run
+never issues a second initial password. GREENKUBE_SECRET_NAME may be empty
+(secrets.existingSecret) when only the initial-admin Secret is needed.
+
 The Secret carries no Helm or Argo CD tracking metadata: uninstalling the
 release keeps it, like the PostgreSQL volume whose password it holds.
 
@@ -42,6 +49,7 @@ DB_CONNECTION_STRING = "DB_CONNECTION_STRING"
 
 API_KEY_LENGTH = 64
 POSTGRES_PASSWORD_LENGTH = 24
+INITIAL_ADMIN_PASSWORD_LENGTH = 24
 _ALPHABET = string.ascii_letters + string.digits
 _SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 
@@ -77,6 +85,8 @@ class Settings:
     namespace: str
     secret_name: str
     release: str = ""
+    initial_admin_secret: str = ""
+    initial_admin_username: str = "admin"
     generate_api_key: bool = False
     generate_postgres_password: bool = False
     postgres_user: str = ""
@@ -89,12 +99,17 @@ class Settings:
     def from_env(cls, env: Mapping[str, str]) -> Settings:
         namespace = env.get("GREENKUBE_NAMESPACE", "").strip()
         secret_name = env.get("GREENKUBE_SECRET_NAME", "").strip()
-        if not namespace or not secret_name:
-            raise BootstrapError("GREENKUBE_NAMESPACE and GREENKUBE_SECRET_NAME are required")
+        initial_admin_secret = env.get("GREENKUBE_INITIAL_ADMIN_SECRET", "").strip()
+        if not namespace or not (secret_name or initial_admin_secret):
+            raise BootstrapError(
+                "GREENKUBE_NAMESPACE and GREENKUBE_SECRET_NAME or GREENKUBE_INITIAL_ADMIN_SECRET are required"
+            )
         settings = cls(
             namespace=namespace,
             secret_name=secret_name,
             release=env.get("GREENKUBE_RELEASE", "").strip(),
+            initial_admin_secret=initial_admin_secret,
+            initial_admin_username=env.get("GREENKUBE_INITIAL_ADMIN_USERNAME", "").strip() or "admin",
             generate_api_key=_flag(env.get("GREENKUBE_GENERATE_API_KEY")),
             generate_postgres_password=_flag(env.get("GREENKUBE_GENERATE_POSTGRES_PASSWORD")),
             postgres_user=env.get("GREENKUBE_POSTGRES_USER", "").strip(),
@@ -176,17 +191,45 @@ def _encode(data: Mapping[str, str]) -> dict[str, str]:
     return {key: base64.b64encode(value.encode("utf-8")).decode("ascii") for key, value in sorted(data.items())}
 
 
-def new_secret(settings: Settings, data: Mapping[str, str]) -> dict[str, Any]:
+def new_secret(
+    settings: Settings, data: Mapping[str, str], *, name: str | None = None, component: str = "credentials"
+) -> dict[str, Any]:
     annotations = dict(SECRET_ANNOTATIONS)
     if settings.release:
         annotations["greenkube.cloud/helm-release"] = settings.release
+    labels = {**SECRET_LABELS, "app.kubernetes.io/component": component}
     return {
         "apiVersion": "v1",
         "kind": "Secret",
-        "metadata": {"name": settings.secret_name, "labels": dict(SECRET_LABELS), "annotations": annotations},
+        "metadata": {"name": name or settings.secret_name, "labels": labels, "annotations": annotations},
         "type": "Opaque",
         "data": _encode(data),
     }
+
+
+def ensure_initial_admin_secret(
+    api: SecretApi,
+    settings: Settings,
+    *,
+    token: Callable[[int], str] = generate_token,
+) -> str:
+    """Create the initial-admin Secret once; never touch an existing one (F14)."""
+    name = settings.initial_admin_secret
+    if not name:
+        return "No initial admin Secret requested"
+    if api.read_secret(name) is not None:
+        return f"Secret {name} already exists; nothing to do"
+    body = new_secret(
+        settings,
+        {"username": settings.initial_admin_username, "password": token(INITIAL_ADMIN_PASSWORD_LENGTH)},
+        name=name,
+        component="initial-admin",
+    )
+    try:
+        api.create_secret(body)
+    except ConflictError:
+        return f"Secret {name} was created concurrently; nothing to do"
+    return f"Created Secret {name} with the initial admin password"
 
 
 class SecretApi(Protocol):
@@ -308,7 +351,10 @@ def main(env: Mapping[str, str] | None = None) -> int:
     try:
         settings = Settings.from_env(env)
         api = InClusterApi.from_environment(settings.namespace, env)
-        print(f"GreenKube: {ensure_credentials(api, settings)}")
+        if settings.secret_name:
+            print(f"GreenKube: {ensure_credentials(api, settings)}")
+        if settings.initial_admin_secret:
+            print(f"GreenKube: {ensure_initial_admin_secret(api, settings)}")
     except BootstrapError as error:
         print(f"GreenKube credentials bootstrap failed: {error}", file=sys.stderr)
         return 1

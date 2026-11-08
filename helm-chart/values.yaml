@@ -239,11 +239,16 @@ config:
   # Log output format: "json" (structured, for Loki/Grafana) or "console" (human-readable).
   logFormat: json
   # Runtime environment and API authentication mode.
-  # Development permits an empty API key for local demonstrations; production does not.
+  # Development leaves an instance without accounts or API key open for local
+  # demonstrations; production never does.
   environment: production
-  apiAuthMode: api_key
-  # Exact hostnames allowed for runtime service URL overrides. Existing
-  # Prometheus/OpenCost/Boavizta hosts remain accepted without this list.
+  # session (default): sign in to the UI with a username and password
+  # (server-side sessions); machines use scoped API keys (Bearer gk_...).
+  # api_key: Bearer API keys only, no browser sign-in. See auth.* below and
+  # docs/authentication.md.
+  apiAuthMode: session
+  # Exact hostnames allowed for service URLs. Existing Prometheus/OpenCost/
+  # Boavizta hosts remain accepted without this list.
   serviceUrlAllowlist: []
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
@@ -370,6 +375,12 @@ config:
 
   # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
   apiRateLimit: 60/minute
+
+  # Comma-separated IPs or CIDRs of reverse proxies (Ingress controller) whose
+  # X-Forwarded-For and X-Forwarded-Proto headers are trusted, for example
+  # "10.0.0.0/8". Needed for the session cookie to be marked Secure
+  # automatically when TLS terminates at the Ingress.
+  trustedProxyIps: ''
 
   # Root path prefix when the API is served behind a reverse proxy at a
   # sub-path (e.g. "/greenkube").  Leave empty for root deployments.
@@ -511,6 +522,40 @@ impact:
   carbonPricePerTonne: 100
 
 # ---------------------------------------------------------------------------
+# Authentication (sign in once: roadmap F14, F15)
+# ---------------------------------------------------------------------------
+# With config.apiAuthMode=session (default) the UI uses accounts and
+# server-side sessions. On the first start the API creates the account
+# auth.admin.username with the password stored in the Secret
+# "<release>-initial-admin" (created once by the credentials bootstrap hook;
+# read it with the command printed by `helm install`). The UI asks for a new
+# password at first sign-in and the API then erases the initial one.
+# Machines (CI, Prometheus, scripts) use scoped API keys created in
+# Settings > API keys. See docs/authentication.md.
+auth:
+  admin:
+    # Name of the first admin account.
+    username: admin
+    # Optional: an existing Secret holding the first admin password (GitOps).
+    # When set, no initial-admin Secret is generated and no password change
+    # is forced. The password only seeds the account: change it in the UI.
+    existingSecret: ''
+    existingSecretKey: password
+  session:
+    # auto: Secure cookie when the browser uses HTTPS (directly, or through a
+    # proxy listed in config.trustedProxyIps); always; never (plain-HTTP tests).
+    secureCookie: auto
+    # Sign out after this much inactivity (sliding).
+    idleTimeout: 12h
+    # Maximum session lifetime, and with "Keep me signed in".
+    absoluteLifetime: 7d
+    rememberLifetime: 30d
+  login:
+    # Failed sign-ins allowed per username (4x per client IP) before an
+    # exponential lockout.
+    rateLimit: 5/minute
+
+# ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
 # Option A (default): leave existingSecret empty. Values set below are rendered
@@ -555,8 +600,10 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # API key for GreenKube API authentication. An empty key leaves development
-  # API routes open; production configuration requires a non-empty key.
+  # Deprecated bootstrap API key (GREENKUBE_API_KEY): accepted as an admin
+  # Bearer key for one more minor release. Prefer scoped API keys created in
+  # Settings > API keys. Left empty, a key is generated once by the
+  # credentials bootstrap hook.
   apiKey: ''
 
   # PostgreSQL connection string (only used when db.type is "postgres" and
@@ -711,6 +758,13 @@ monitoring:
     additionalLabels: {}
     # Name of the Prometheus ServiceAccount (for RBAC). Defaults to "prometheus-k8s".
     prometheusServiceAccount: prometheus-k8s
+    # Bearer credential Prometheus sends to /prometheus/metrics. Recommended:
+    # create an API key with only the metrics:read scope (Settings > API keys),
+    # store it in a Secret in the ServiceMonitor namespace and reference it
+    # here. Empty: the deprecated bootstrap key GREENKUBE_API_KEY is used.
+    bearerTokenSecret:
+      name: ''
+      key: token
 
   networkPolicy:
     # Create a NetworkPolicy allowing Prometheus to scrape GreenKube on the API port.
