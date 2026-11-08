@@ -33,13 +33,27 @@ def _replica_p95_max(series: Sequence[CombinedMetric], attr: str) -> Optional[fl
 
 
 def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
-    """Replicas observed at the latest timestamp; unknown without timestamps."""
-    stamped = [metric for metric in series if metric.timestamp is not None]
-    if not stamped:
+    """Replicas observed in the latest sampling step; unknown without timestamps.
+
+    Replicas are rarely scraped at the very same instant, so a pod counts when its
+    last sample falls within half a sampling interval of the latest sample. Half an
+    interval absorbs scrape jitter but excludes a pod replaced by a rollout one step
+    earlier. The interval is the median gap between a pod's consecutive samples.
+    """
+    by_pod: Dict[str, List[datetime]] = defaultdict(list)
+    for metric in series:
+        if metric.timestamp is not None:
+            by_pod[metric.pod_name].append(metric.timestamp)
+    if not by_pod:
         return None
-    latest = max(metric.timestamp for metric in stamped if metric.timestamp is not None)
-    pods = {metric.pod_name for metric in stamped if metric.timestamp == latest}
-    return len(pods) or None
+    gaps: List[float] = []
+    for stamps in by_pod.values():
+        ordered = sorted(set(stamps))
+        gaps.extend((later - earlier).total_seconds() for earlier, later in zip(ordered, ordered[1:]))
+    tolerance = timedelta(seconds=percentile(gaps, 50) / 2) if gaps else timedelta(0)
+    last_seen = {pod: max(stamps) for pod, stamps in by_pod.items()}
+    latest = max(last_seen.values())
+    return sum(1 for seen in last_seen.values() if latest - seen <= tolerance) or None
 
 
 def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> WorkloadRiskProfile:

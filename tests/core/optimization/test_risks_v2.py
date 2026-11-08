@@ -208,6 +208,27 @@ class TestScanProfile:
         assert profile.replica_cpu_p95_max == pytest.approx(400.0)
         assert profile.hpa_resources == frozenset({"*"})
 
+    def test_counts_replicas_scraped_with_jittered_timestamps(self):
+        """Replicas sampled a few seconds apart are not mistaken for a singleton."""
+        start = datetime.now(timezone.utc) - timedelta(hours=2)
+        metrics = []
+        for step in range(12):
+            ts = start + timedelta(minutes=5 * step)
+            metrics += [
+                _metric("api-6d4b8c7f9-aaaaa", ts, 50),
+                _metric("api-6d4b8c7f9-bbbbb", ts + timedelta(seconds=3), 60),
+                _metric("api-6d4b8c7f9-ccccc", ts + timedelta(seconds=7), 70),
+            ]
+        profile = build_risk_profile(_cpu_rec(), OptimizationContext(config=Config(), container_metrics=metrics))
+        assert profile.replicas == 3
+
+    def test_a_pod_replaced_by_a_rollout_is_not_counted(self):
+        start = datetime.now(timezone.utc) - timedelta(hours=2)
+        metrics = [_metric("api-old-aaaaa", start + timedelta(minutes=5 * step), 50) for step in range(11)]
+        metrics.append(_metric("api-new-bbbbb", start + timedelta(minutes=55), 50))
+        profile = build_risk_profile(_cpu_rec(), OptimizationContext(config=Config(), container_metrics=metrics))
+        assert profile.replicas == 1
+
     def test_enrich_flags_a_hot_replica(self):
         start = datetime.now(timezone.utc) - timedelta(hours=2)
         metrics = []
