@@ -91,7 +91,7 @@ Rules:
 - Provider credentials are never rendered into a ConfigMap and are never returned by the API.
 - For GitLab, `apiBaseUrl` can point at a self-managed instance. For Gitea, point it at the Gitea API root (for example `https://gitea.example.com/api/v1`).
 - Set `webBaseUrl` when GreenKube must reach Gitea through an in-cluster API URL but users open pull requests through a different browser-reachable URL. It must be an HTTP(S) origin (no repository path or `/api/v1`); it is used only for pull-request links.
-- `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped.
+- `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped. Derived labels, drafts and CODEOWNERS reviewers are best effort (see [Pull-request content](#pull-request-content)).
 
 ## Create and validate a pull request
 
@@ -227,12 +227,99 @@ automation:
     teamReviewers: []
 ```
 
-- Labels default to none. Configure only labels that already exist in every target repository.
+- `labels` are added to every PR on top of the derived labels below. Labels no longer have to exist beforehand: GitHub and GitLab create missing labels implicitly, and GreenKube creates them through the Gitea label API.
+- `reviewers` and `teamReviewers` are always requested; they are also the fallback when a repository has no CODEOWNERS entry for the touched paths.
 - GitHub supports draft PRs, labels, reviewers, and team reviewers.
 - GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are not supported.
 - Gitea supports labels and reviewers; draft PRs and team reviewers are not supported.
 
 Provider capabilities are checked before a branch or commit is created. Missing capabilities surface as a typed `provider_capability_missing`-style error.
+
+## Pull-request content
+
+The PR is where most reviewers meet GreenKube, so it is written to be decided on in 30 seconds. Configure it under `automation.pr`:
+
+```yaml
+config:
+  externalUrl: https://greenkube.example.com # deep links; empty means no links
+automation:
+  pr:
+    titlePrefix: greenkube
+    template: '' # empty uses the built-in template
+    defaultLabels: true
+    draftHighRisk: true
+    codeowners: true
+    commitStatus: true
+    lifecycleComments: true
+    lifecycleLookbackDays: 30
+```
+
+**Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`. The verb follows the action (`rightsize`, `raise resources of`, `autoscale`, `delete`, or `revert …` for rollbacks). Titles are at most 72 characters: the resource details, then the CO₂e figure, are dropped before the title is cut, and the full summary is always in the body. `titlePrefix` sets the conventional-commit prefix; an empty prefix drops it.
+
+**Body.** The built-in template renders these sections:
+
+1. **Summary**: one sentence and a totals table per month and per year, for cost and CO₂e. The values are *projected* by the Impact Model, with the realization factor; they are never mixed with measured savings.
+2. **Changes**: per container, only the resources that change, as current → proposed with the delta.
+3. **Why**: per recommendation, the finding, the consensus line (sources and proposed value), the evidence (window, samples, coverage, p95, p99, max, restarts and OOM events) and a link to the recommendation.
+4. **Risk & what to watch**: the risk level and factors, headroom over p95 and max, and the signals to watch for 24 hours. An *Autoscalers and disruption budgets* list explains the HPA, VPA and PDB interactions: the plan's policy checks (`hpa_interaction`, `vpa_interaction`, `pdb_interaction`, with the autoscalers they found, or "not checked" when the evidence was missing), the policy warnings about them, the risk factors `hpa_scales_on_resource`, `hpa_present`, `vpa_conflicting_writer` and `pdb_blocks_disruption`, and, for a plan that adds an HPA, how the new autoscaler interacts with requests, other autoscalers and PDBs. When the policy result has no HPA, VPA or PDB evidence, the list says so.
+5. **Assumptions**: unit prices and their source, observed cost sources, carbon intensity and its source, the CO₂e basis (what the projection counts), PUE, realization factor, carbon price and Impact Model version. The intensity is the projection window's average; its source lists the intensity sources the Impact Model recorded and, when it records none (Impact Model 1.1), states how the value was derived: the stored grid intensity of the observed samples, or the node profile's intensity where a sample has none.
+6. **Rollback**: revert the PR, or the GreenKube rollback pull request from the change page. Layouts without automated rollback say so.
+7. **Verification plan**: when measurement starts and ends, the strategy, and where results are posted.
+8. Plan provenance and collapsible source and rendered diffs.
+9. A machine-readable footer on the body's last line: `<!-- greenkube:v1 {"plan_id":…,"recommendation_ids":[…],"revision":…,"change_set_id":…,"digest":…} -->`. Readers (`greenkube.automation.pr_content.parse_footer`) trust only the footer that ends the body, so a look-alike inside a diff, a recommendation reason or a custom template is ignored. Text appended after the footer by a manual edit makes the footer unreadable rather than replacing it.
+
+The body is at most 60,000 characters. When it would be longer, diffs are truncated first, then dropped; sections 1–7 and the footer are always kept. The sections share the space the template's own text leaves (each at most 6,000 characters; short sections keep their full text), so a long custom template shortens sections instead of cutting them off. Blank lines are collapsed only where an empty section leaves a gap; diffs are shown exactly. A recommendation whose Impact Model projection mixes currencies is left out of the cost totals and the title, with a note.
+
+**Template.** `automation.pr.template` (`GITOPS_PR_TEMPLATE`) replaces the built-in layout. It is Markdown with Jinja2-style placeholders: the sections `{{ summary }}`, `{{ changes }}`, `{{ why }}`, `{{ risk }}`, `{{ assumptions }}`, `{{ rollback }}`, `{{ verification }}`, `{{ provenance }}`, `{{ diffs }}`, and the values `{{ title }}`, `{{ plan_id }}`, `{{ digest }}`, `{{ workload }}`, `{{ namespace }}`, `{{ repository }}`, `{{ branch }}`, `{{ recommendation_ids }}`, `{{ risk_level }}`, `{{ plan_url }}`. Templates are logic-free: no loops, filters or code, and rendered values are never expanded again. An unknown placeholder or an unterminated `{{` fails at startup instead of leaking into PRs. The `greenkube:v1` footer is always appended, whatever the template.
+
+```yaml
+automation:
+  pr:
+    template: |
+      {{ summary }}
+
+      Owner checklist: confirm the change window with the on-call team.
+
+      {{ changes }}
+
+      {{ risk }}
+
+      {{ rollback }}
+
+      {{ verification }}
+
+      {{ diffs }}
+```
+
+**Commit.** The commit GreenKube creates in the GitOps repository uses the PR title as its subject and carries `GreenKube-Plan:` and `GreenKube-Recommendations:` trailers (plus `GreenKube-Rollback-Of:` for rollbacks), so the history of the GitOps repository points back to the plan.
+
+**Deep links.** With `config.externalUrl` (`GREENKUBE_EXTERNAL_URL`) set, PRs, commit statuses and status comments link to `/recommendations/{id}`, `/changes/{plan_id}` and `/ledger?change=…`. Without it they carry no links.
+
+### Labels, drafts and reviewers
+
+- **Labels** (`defaultLabels`): `greenkube`, `optimization/<capability>` (for example `optimization/cpu-rightsizing`), `risk/<level>`, and `reliability` when the plan raises a resource. Missing labels are created where the provider allows it (see above).
+- **Drafts** (`draftHighRisk`): a plan whose riskiest recommendation is `high` opens as a draft PR on GitHub, a `Draft:` merge request on GitLab, and with a `WIP:` title on Gitea. If the provider refuses the draft (for example a GitHub plan without draft PRs), GreenKube opens the PR ready for review instead of failing.
+- **CODEOWNERS** (`codeowners`): GreenKube reads `CODEOWNERS` at the plan's base revision from the provider's documented locations (GitHub: `.github/`, root, `docs/`; GitLab: root, `docs/`, `.gitlab/`; Gitea: root, `docs/`, `.gitea/`). GitHub and GitLab syntax are supported, including GitLab sections and default owners, and so are Gitea's regular-expression rules. The owners of the touched paths are requested as reviewers: `@user` as a user, `@org/team` as a team of the repository's organization (GitHub). E-mail owners and malformed lines are ignored, and so are Gitea rules that a backtracking engine could take exponential time on (a repeated group that itself repeats or alternates, lookarounds, rules over 512 characters). GitHub is never asked to review its own PR author, and when GitHub refuses a batch of reviewers (one unknown or non-collaborator login fails the whole request), each reviewer is requested alone so the valid ones are still asked. GitLab username-to-ID lookups are cached for an hour. Configured `reviewers` and `teamReviewers` are requested as well.
+
+Labels, reviewers and the validation status are added after the PR is open and recorded. A provider refusal is logged and never fails or retries the plan operation.
+
+## Lifecycle feedback on the PR
+
+**Validation status** (`commitStatus`). GreenKube sets the commit status `greenkube/validation` on the PR head: `success` when the rendered diff validated and policy allowed the plan, `failure` otherwise. The description says which (for example `render diff valid; policy passed with 1 warning(s)`), and the status links to the change page when `externalUrl` is set.
+
+**Status comment** (`lifecycleComments`). After the merge, GreenKube keeps one comment on the PR up to date with a timeline:
+
+| Step | Shows |
+|---|---|
+| Merged | The landed commit and time. |
+| Synced | The controller (Argo CD Application or Flux object) and the revision it runs, or the sync failure. |
+| Applied | When the rollout completed. |
+| Measuring | The measurement end (ETA). |
+| Outcome | `realized` with the measured annual savings and their 90% confidence interval, or `not_realized`, `inconclusive`, `contaminated`, or rollback review; with a link to the ledger. |
+
+The comment is posted once and then edited, never duplicated: it starts with the marker `<!-- greenkube:lifecycle v1 -->`, and GreenKube edits the marked comment that its own identity wrote. That identity is the token's user (`GET /user`) or, when the token may not read its own profile, the author of the PR, which GreenKube opened. A marked comment written by anyone else is never adopted or edited, so nobody can have GreenKube's status written into a comment they control, and a human comment is never overwritten. If the token changes to another user, the new user posts one new status comment and keeps it up to date. A body identical to the one last published costs no provider call. The sync step is posted as soon as the sync observer records it; applied, measuring and outcome are refreshed by the leader controller every 5 minutes for PRs merged within `lifecycleLookbackDays` (at most 25 comment writes per cycle). Outcomes come from change measurement; with change measurement off, from the interim verifier.
+
+Comments and statuses need a token that can write PR comments and commit statuses (GitHub: `Pull requests` and `Commit statuses` write; GitLab: `api`; Gitea: `write:repository` and `write:issue`, plus `read:user` so GreenKube can read its own identity; without it, the PR author is used).
 
 ## Provider API cost
 
@@ -325,7 +412,9 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
 - Descendant sync confirmation needs a provider ancestry API: GitHub compare, GitLab merge base, or a Gitea release that serves `GET /repos/{owner}/{repo}/compare/{basehead}`. Without it, a controller that already runs a later commit stays pending (`ancestry_unavailable`) until the sync timeout.
 - The planned-change check for a later commit compares only the files the plan edited, parsed as YAML or JSON. A later commit that overrides the planned values from another file (for example a second Helm values file) is not detected at sync time; apply detection then never matches the live workload and the plan stays `synced`. Files that no longer parse, or whose base content no longer matches the plan, never confirm a later commit.
-- Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options.
+- Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options. High-risk plans on Gitea are marked with a `WIP:` title instead of a draft.
+- CODEOWNERS team owners are requested only on GitHub; on GitLab and Gitea only user owners become reviewers (GitLab resolves usernames to numeric user IDs through its user API).
+- The "newer advice available" note of the status comment is a publisher hook; it shows only once recommendation revisions (E7) are wired to it.
 - If the CNI does not enforce NetworkPolicy, keep the renderer disabled unless you have independently validated an equivalent egress boundary.
 
 See the [API reference](api.md) for plan, GitOps, and webhook endpoints.

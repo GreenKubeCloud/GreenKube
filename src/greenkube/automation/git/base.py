@@ -51,6 +51,41 @@ class GitProviderCapability(StrEnum):
     FIND_OPEN_PULL_REQUEST_FOR_BRANCH = "find_open_pull_request_for_branch"
     DELETE_PLAN_BRANCH = "delete_plan_branch"
     COMMIT_ANCESTRY = "commit_ancestry"
+    #: Commit statuses on a PR head (``greenkube/validation``, J5).
+    COMMIT_STATUS = "commit_status"
+    #: Create and edit PR comments (the lifecycle comment, J5).
+    PULL_REQUEST_COMMENTS = "pull_request_comments"
+    #: Add labels and reviewers to an existing PR (derived metadata, J2/J3).
+    PULL_REQUEST_METADATA = "pull_request_metadata"
+
+
+#: Commit status states accepted by :meth:`GitProvider.set_commit_status`.
+CommitStatusState = Literal["pending", "success", "failure", "error"]
+#: How many comment pages a lifecycle-comment lookup reads at most.
+MAX_COMMENT_PAGES = 20
+COMMENT_PAGE_SIZE = 100
+MAX_COMMENT_CHARS = 60_000
+MAX_CODEOWNER_REVIEWERS = 10
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestComment:
+    """One provider comment on a pull request.
+
+    ``author_id`` is the provider's numeric user ID of the comment's author
+    (``user.id`` on GitHub and Gitea, ``author.id`` on GitLab), ``None`` when
+    the provider did not report one.
+    """
+
+    id: int
+    body: str
+    author_id: Optional[int] = None
+
+
+class CommentUpsertResult(StrEnum):
+    CREATED = "created"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
 
 
 class GitProviderError(RuntimeError):
@@ -999,6 +1034,184 @@ class GitProvider(ABC):
             raise GitProviderError(f"Plan branch operation targets provider '{repo.provider}', not '{self.name}'.")
         return validate_greenkube_plan_branch(branch)
 
+    # ------------------------------------------------------------------
+    # Pull-request experience (roadmap J2, J3, J5)
+    # ------------------------------------------------------------------
+
+    def _validate_pull_request_number(self, repo: GitRepository, number: object) -> int:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Pull-request operation must target a {self.name} repository.")
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitProviderError("Pull-request number must be a positive integer.")
+        return number
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: "PullRequestInfo",
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        """Add labels and reviewers to an open request without removing existing ones.
+
+        Missing labels are created where the provider allows it (GitHub and
+        GitLab create them implicitly; Gitea through its label API).
+        """
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_METADATA)
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        """Publish a commit status (e.g. ``greenkube/validation``) on ``sha``."""
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.COMMIT_STATUS)
+
+    def _validate_commit_status(self, repo: GitRepository, sha: str, state: str, context: str) -> str:
+        if not isinstance(repo, GitRepository) or repo.provider != self.name:
+            raise GitProviderError(f"Commit status must target a {self.name} repository.")
+        if state not in ("pending", "success", "failure", "error"):
+            raise GitProviderError(f"Unsupported commit status state {state!r}.")
+        if not isinstance(context, str) or not context.strip() or len(context) > 255:
+            raise GitProviderError("Commit status context must be 1-255 characters.")
+        return _validate_full_commit_sha(sha, provider=self.name, ref=str(sha))
+
+    async def upsert_pull_request_comment(
+        self,
+        repo: GitRepository,
+        number: int,
+        *,
+        marker: str,
+        body: str,
+    ) -> tuple[CommentUpsertResult, int]:
+        """Create or edit the one comment whose body starts with ``marker``; never post a duplicate.
+
+        An identical body is not written again. Returns the outcome and the comment ID.
+        """
+        if not self.supports(GitProviderCapability.PULL_REQUEST_COMMENTS):
+            raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+        number = self._validate_pull_request_number(repo, number)
+        if not isinstance(marker, str) or not marker.strip() or not body.startswith(marker):
+            raise GitProviderError("A managed pull-request comment must start with its marker.")
+        if len(body) > MAX_COMMENT_CHARS or "\x00" in body:
+            raise GitProviderError("Pull-request comment is too long or contains a NUL character.")
+        author_id = await self._managed_comment_author_id(repo, number)
+        existing = await self._find_marked_comment(repo, number, marker, author_id=author_id)
+        if existing is None:
+            created = await self._create_pull_request_comment(repo, number, body)
+            return CommentUpsertResult.CREATED, created
+        if existing.body.strip() == body.strip():
+            return CommentUpsertResult.UNCHANGED, existing.id
+        await self._update_pull_request_comment(repo, number, existing.id, body)
+        return CommentUpsertResult.UPDATED, existing.id
+
+    async def _managed_comment_author_id(self, repo: GitRepository, number: int) -> int:
+        """Return the user ID whose marker comments GreenKube may adopt and edit.
+
+        A marker is plain text that anyone with comment access can post, and
+        GreenKube's token can edit other users' comments. Adopting a foreign
+        marker comment would publish GreenKube's status under (and editable by)
+        someone else, or overwrite a human's text. Only comments written by
+        GreenKube's own identity are adopted: the token's user (``GET /user``)
+        or, when the token cannot read its own profile, the author of the pull
+        request, which GreenKube opened.
+        """
+        user_id = await self._authenticated_user_id()
+        if user_id is None:
+            pull_request = await self.get_pull_request(repo, number)
+            user_id = pull_request_author_id(pull_request.raw)
+        if user_id is None:
+            raise GitProviderError(
+                f"{self.name} did not report GreenKube's identity; the lifecycle comment is not published."
+            )
+        return user_id
+
+    async def _authenticated_user_id(self) -> Optional[int]:
+        """The numeric ID of the token's user, or ``None`` when the token may not read it."""
+        response = await self._request("GET", "/user", ok_statuses=(200, 401, 403))
+        if response.status_code != 200:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        return _positive_user_id(data.get("id") if isinstance(data, dict) else None)
+
+    async def _find_marked_comment(
+        self, repo: GitRepository, number: int, marker: str, *, author_id: int
+    ) -> Optional[PullRequestComment]:
+        for page in range(1, MAX_COMMENT_PAGES + 1):
+            comments, has_next = await self._list_pull_request_comments(repo, number, page)
+            for comment in comments:
+                if comment.author_id == author_id and comment.body.lstrip().startswith(marker):
+                    return comment
+            if not has_next:
+                return None
+        raise GitProviderError("Pull-request comment pagination exceeded the safety limit.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.PULL_REQUEST_COMMENTS)
+
+    async def read_codeowners(self, repo: GitRepository, revision: str):
+        """Parse the CODEOWNERS file at ``revision`` from the provider's documented locations.
+
+        Returns a :class:`~greenkube.automation.pr_content.codeowners.CodeOwners`
+        or ``None`` when the repository has none. Blob IDs come from the cached
+        tree where the adapter has one, so a missing file usually costs no call.
+        """
+        from greenkube.automation.pr_content.codeowners import CODEOWNERS_PATHS, Dialect, parse_codeowners
+
+        dialect: Dialect = "gitlab" if self.name == "gitlab" else "gitea" if self.name == "gitea" else "github"
+        paths = CODEOWNERS_PATHS[dialect]
+        blob_ids = await self.get_blob_ids(repo, revision, paths)
+        for path in paths:
+            if not blob_ids.get(path):
+                continue
+            git_file = await self._get_file_cached(repo, path, revision)
+            if git_file is not None:
+                return parse_codeowners(git_file.content, dialect)
+        return None
+
+    async def codeowner_reviewers(
+        self,
+        repo: GitRepository,
+        owners: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """Map CODEOWNERS owners to ``(reviewers, team_reviewers)`` this provider accepts.
+
+        ``@user`` becomes a user reviewer and ``@org/team`` a team of the
+        repository's organization; e-mail owners are skipped.
+        """
+        users: list[str] = []
+        teams: list[str] = []
+        for owner in owners:
+            if not owner.startswith("@"):
+                continue
+            name = owner[1:]
+            if "/" in name:
+                organization, _, team = name.partition("/")
+                if organization.casefold() == repo.owner.casefold() and team and "/" not in team:
+                    if team not in teams:
+                        teams.append(team)
+            elif name and name not in users:
+                users.append(name)
+        return users[:MAX_CODEOWNER_REVIEWERS], teams[:MAX_CODEOWNER_REVIEWERS]
+
     async def test_connection(self) -> bool:
         """Checks that the provider is reachable and the token is valid."""
         try:
@@ -1154,6 +1367,56 @@ def normalize_pull_request(data: dict, *, repo: GitRepository) -> PullRequestInf
         merge_commit_sha=merge_commit_sha,
         merge_commit_source=MergeCommitSource.MERGE_COMMIT.value if merge_commit_sha is not None else None,
     )
+
+
+def parse_comment_list(response: httpx.Response, *, provider: str) -> list[PullRequestComment]:
+    """Validate a provider's comment (or note) list: objects with an integer ``id`` and a ``body``."""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GitProviderError(f"{provider} returned invalid JSON for a comment list.") from exc
+    if not isinstance(data, list):
+        raise GitProviderError(f"{provider} returned an invalid comment list.")
+    comments: list[PullRequestComment] = []
+    for item in data:
+        comment_id = item.get("id") if isinstance(item, dict) else None
+        body = item.get("body") if isinstance(item, dict) else None
+        if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+            raise GitProviderError(f"{provider} returned a comment without a valid ID.")
+        author = item.get("user") or item.get("author")
+        comments.append(
+            PullRequestComment(
+                id=comment_id,
+                body=body if isinstance(body, str) else "",
+                author_id=_positive_user_id(author.get("id") if isinstance(author, dict) else None),
+            )
+        )
+    return comments
+
+
+def pull_request_author_id(raw: object) -> Optional[int]:
+    """The author's user ID from a raw PR payload (``user`` on GitHub/Gitea, ``author`` on GitLab)."""
+    if not isinstance(raw, dict):
+        return None
+    author = raw.get("user") or raw.get("author")
+    return _positive_user_id(author.get("id") if isinstance(author, dict) else None)
+
+
+def _positive_user_id(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def parse_comment_id(response: httpx.Response, *, provider: str) -> int:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GitProviderError(f"{provider} returned invalid JSON after creating a comment.") from exc
+    comment_id = data.get("id") if isinstance(data, dict) else None
+    if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
+        raise GitProviderError(f"{provider} returned an invalid comment after creating it.")
+    return comment_id
 
 
 def parse_pull_request_list(response: httpx.Response, *, repo: GitRepository) -> list[dict]:

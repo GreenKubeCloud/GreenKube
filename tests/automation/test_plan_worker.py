@@ -402,6 +402,7 @@ class FakeGitProvider:
         self.commit_requests: list[GitCommitRequest] = []
         self.pull_request_creations: list[tuple[str, str]] = []
         self.pull_request_bodies: list[str] = []
+        self.pull_request_titles: list[str] = []
         self.pull_request_options: list[PullRequestOptions | None] = []
         self.pull_request_option_ensures: list[PullRequestOptions | None] = []
         self.pull_request_fail_mode: str | None = None
@@ -509,6 +510,7 @@ class FakeGitProvider:
     ) -> PullRequestInfo:
         self.validate_pull_request_options(options)
         self.pull_request_creations.append((head, base))
+        self.pull_request_titles.append(title)
         self.pull_request_bodies.append(body)
         self.pull_request_options.append(options)
         if self.pull_request_fail_mode == "before":
@@ -861,18 +863,31 @@ async def test_pull_request_body_includes_evidence_impact_risk_diff_and_provenan
     assert await worker.process_once("worker-1")
 
     body = provider.pull_request_bodies[0]
-    assert "## Plan and provenance" in body
+    for heading in (
+        "## Summary",
+        "## Changes",
+        "## Why",
+        "## Risk & what to watch",
+        "## Assumptions",
+        "## Rollback",
+        "## Verification plan",
+    ):
+        assert heading in body
     assert "Repository: `acme/gitops`" in body
     assert "Revision drift: this plan targets branch head" in body
-    assert "## Recommendation evidence and impact" in body
-    assert "Projected annual savings: cost $12.50/year, carbon 42.000 g CO2e/year" in body
-    assert "CPU usage: p95 120m, max 200m" in body
-    assert "Risk factors: p95 usage remains below target" in body
-    assert "Review if CPU p95 exceeds 330m." in body
-    assert "## Source diff" in body
-    assert "## Rendered diff" in body
-    assert "## Verification" in body
+    assert "| Cost (USD) | $1.04 | $12.50 |" in body
+    assert "| `api` | requests.cpu | 1000m | 300m | −700m (-70%) |" in body
+    assert "CPU usage: p95 120m · p99 180m · max 200m" in body
+    assert "- p95 usage remains below target" in body
+    assert "- Review if CPU p95 exceeds 330m." in body
+    assert "<summary>Source diff</summary>" in body
+    assert "<summary>Rendered diff</summary>" in body
     assert "Recommendation evidence is unavailable for #42" in body
+    assert body.rstrip().endswith("-->") and '<!-- greenkube:v1 {"plan_id":"plan-1"' in body
+    assert provider.pull_request_titles == ["greenkube: rightsize payments/api · −$13/yr · −42 gCO₂e/yr"]
+    commit_message = provider.commit_requests[0].message
+    assert commit_message.startswith(provider.pull_request_titles[0] + "\n\n")
+    assert commit_message.endswith("GreenKube-Plan: plan-1\nGreenKube-Recommendations: 41, 42\n")
 
 
 @pytest.mark.asyncio
@@ -889,10 +904,10 @@ async def test_worker_forwards_pull_request_options_without_replacing_the_rich_b
 
     assert provider.pull_request_options == [options]
     body = provider.pull_request_bodies[0]
-    assert "## Plan and provenance" in body
-    assert "## Recommendation evidence and impact" in body
-    assert "## Rendered diff" in body
-    assert "## Verification" in body
+    assert "<summary>Plan provenance</summary>" in body
+    assert "## Why" in body
+    assert "<summary>Rendered diff</summary>" in body
+    assert "## Verification plan" in body
 
 
 @pytest.mark.asyncio

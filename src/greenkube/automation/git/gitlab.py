@@ -5,11 +5,17 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import List, Literal, Optional
 from urllib.parse import quote
 
 from greenkube.automation.git.base import (
+    COMMENT_PAGE_SIZE,
+    MAX_CODEOWNER_REVIEWERS,
+    CommitStatusState,
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
@@ -24,6 +30,7 @@ from greenkube.automation.git.base import (
     GitTreeComparison,
     GitTreeEntry,
     MergeCommitSource,
+    PullRequestComment,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_object,
@@ -32,12 +39,23 @@ from greenkube.automation.git.base import (
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    parse_comment_id,
+    parse_comment_list,
     parse_pull_request_list,
     pull_request_next_page,
     validate_git_ref,
 )
 
 logger = logging.getLogger(__name__)
+_GITLAB_STATUS_STATES = {"pending": "pending", "success": "success", "failure": "failed", "error": "failed"}
+
+#: CODEOWNERS username → user ID lookups, shared by every adapter of the process.
+#: Keyed by API base URL and username; unknown users are cached too.
+_USER_ID_CACHE: OrderedDict[tuple[str, str], tuple[Optional[int], float]] = OrderedDict()
+_USER_ID_CACHE_SIZE = 1_024
+_USER_ID_CACHE_TTL_SECONDS = 3_600.0
+#: Lookups one CODEOWNERS mapping may make, cached answers excluded.
+_MAX_USER_LOOKUPS = 2 * MAX_CODEOWNER_REVIEWERS
 
 
 class GitLabProvider(GitProvider):
@@ -57,6 +75,9 @@ class GitLabProvider(GitProvider):
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
             GitProviderCapability.COMMIT_ANCESTRY,
+            GitProviderCapability.COMMIT_STATUS,
+            GitProviderCapability.PULL_REQUEST_COMMENTS,
+            GitProviderCapability.PULL_REQUEST_METADATA,
         }
     )
 
@@ -463,6 +484,147 @@ class GitLabProvider(GitProvider):
         if response.status_code == 404:
             raise GitProviderError(f"Could not open a merge request in {repo.full_name}: project or branch not found.")
         return normalize_pull_request(response.json(), repo=repo)
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: PullRequestInfo,
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        """``add_labels`` (GitLab creates missing labels) and reviewers merged with the current ones."""
+        number = self._validate_pull_request_number(repo, pull_request.number)
+        if any("," in label for label in labels):
+            raise GitProviderError("GitLab labels cannot contain commas because its API uses comma-separated names.")
+        if any(re.fullmatch(r"[1-9][0-9]*", reviewer) is None for reviewer in reviewers):
+            raise GitProviderError("GitLab reviewers must be positive numeric user IDs.")
+        body: dict[str, object] = {}
+        if labels:
+            body["add_labels"] = ",".join(labels)
+        if reviewers:
+            raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
+            current = raw.get("reviewers")
+            if not isinstance(current, list):
+                current = (await self.get_pull_request(repo, number)).raw.get("reviewers")
+            current_ids = [
+                item["id"]
+                for item in (current if isinstance(current, list) else [])
+                if isinstance(item, dict) and isinstance(item.get("id"), int) and not isinstance(item.get("id"), bool)
+            ]
+            merged = list(dict.fromkeys([*current_ids, *(int(reviewer) for reviewer in reviewers)]))
+            if merged != current_ids:
+                body["reviewer_ids"] = merged
+        if not body:
+            return
+        response = await self._request(
+            "PUT", f"/projects/{self._project(repo)}/merge_requests/{number}", json_body=body
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitLab could not update merge request {number} in {repo.full_name}.")
+
+    async def codeowner_reviewers(
+        self,
+        repo: GitRepository,
+        owners: Sequence[str],
+    ) -> tuple[list[str], list[str]]:
+        """GitLab reviewers are user IDs: ``@username`` owners are looked up, groups are skipped."""
+        reviewer_ids: list[str] = []
+        lookups = 0
+        for owner in owners:
+            if len(reviewer_ids) >= MAX_CODEOWNER_REVIEWERS:
+                break
+            if not owner.startswith("@") or "/" in owner or len(owner) < 2:
+                continue
+            key = (self.api_base_url or "", owner[1:].casefold())
+            cached = _USER_ID_CACHE.get(key)
+            if cached is not None and cached[1] > time.monotonic():
+                _USER_ID_CACHE.move_to_end(key)
+                user_id = cached[0]
+            elif lookups >= _MAX_USER_LOOKUPS:
+                continue
+            else:
+                lookups += 1
+                user_id = await self._lookup_user_id(owner[1:])
+                _USER_ID_CACHE[key] = (user_id, time.monotonic() + _USER_ID_CACHE_TTL_SECONDS)
+                _USER_ID_CACHE.move_to_end(key)
+                while len(_USER_ID_CACHE) > _USER_ID_CACHE_SIZE:
+                    _USER_ID_CACHE.popitem(last=False)
+            if user_id is not None and str(user_id) not in reviewer_ids:
+                reviewer_ids.append(str(user_id))
+        return reviewer_ids, []
+
+    async def _lookup_user_id(self, username: str) -> Optional[int]:
+        response = await self._request("GET", "/users", params={"username": username})
+        if response.status_code == 404:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        user = data[0] if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) else None
+        user_id = user.get("id") if user is not None else None
+        if isinstance(user_id, int) and not isinstance(user_id, bool) and user_id > 0:
+            return user_id
+        return None
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        sha = self._validate_commit_status(repo, sha, state, context)
+        payload: dict[str, str] = {
+            "state": _GITLAB_STATUS_STATES[state],
+            "name": context,
+            "description": description[:255],
+        }
+        if target_url:
+            payload["target_url"] = target_url
+        response = await self._request(
+            "POST", f"/projects/{self._project(repo)}/statuses/{quote(sha, safe='')}", json_body=payload
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitLab could not set a commit status on {sha} in {repo.full_name}.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        response = await self._request(
+            "GET",
+            f"/projects/{self._project(repo)}/merge_requests/{number}/notes",
+            params={"per_page": str(COMMENT_PAGE_SIZE), "page": str(page), "sort": "asc", "order_by": "created_at"},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitLab could not list notes of merge request {number}.")
+        comments = parse_comment_list(response, provider=self.name)
+        next_page = response.headers.get("x-next-page")
+        has_next = bool(next_page) and next_page != "0" if next_page is not None else len(comments) >= COMMENT_PAGE_SIZE
+        return comments, has_next
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        response = await self._request(
+            "POST",
+            f"/projects/{self._project(repo)}/merge_requests/{number}/notes",
+            json_body={"body": body},
+            retryable=False,
+        )
+        return parse_comment_id(response, provider=self.name)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        response = await self._request(
+            "PUT",
+            f"/projects/{self._project(repo)}/merge_requests/{number}/notes/{comment_id}",
+            json_body={"body": body},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitLab note {comment_id} disappeared before it could be updated.")
 
     async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
         if isinstance(number, bool) or not isinstance(number, int) or number <= 0:

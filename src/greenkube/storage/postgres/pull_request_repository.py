@@ -240,6 +240,33 @@ class PostgresPullRequestRepository(PullRequestRepository):
             rows = await conn.fetch(query, *params)
             return [row_to_pull_request(row) for row in rows]
 
+    async def list_feedback_pull_requests(
+        self,
+        *,
+        merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> List[PullRequestRecord]:
+        self.validate_poll_page(limit, after_id)
+        params: list = [merged_since]
+        query = (
+            "SELECT * FROM recommendation_pull_requests "
+            "WHERE status = 'merged' "
+            "AND plan_id IS NOT NULL AND plan_id <> '' "
+            "AND provider_id IS NOT NULL AND provider_id <> '' "
+            "AND repo <> '' AND pr_number IS NOT NULL AND pr_number > 0 "
+            "AND merged_at >= $1"
+        )
+        if after_id is not None:
+            params.append(after_id)
+            query += f" AND id > ${len(params)}"
+        params.append(limit)
+        query += f" ORDER BY id ASC LIMIT ${len(params)}"
+
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(query, *params)
+            return [row_to_pull_request(row) for row in rows]
+
     async def list_branch_cleanup_candidates(
         self,
         *,

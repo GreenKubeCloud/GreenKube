@@ -10,6 +10,8 @@ from typing import List, Optional
 from urllib.parse import quote, urlsplit
 
 from greenkube.automation.git.base import (
+    COMMENT_PAGE_SIZE,
+    CommitStatusState,
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
@@ -20,6 +22,7 @@ from greenkube.automation.git.base import (
     GitRepository,
     GitTree,
     GitTreeEntry,
+    PullRequestComment,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_object,
@@ -28,6 +31,8 @@ from greenkube.automation.git.base import (
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    parse_comment_id,
+    parse_comment_list,
     parse_pull_request_list,
     pull_request_next_page,
     quote_git_path,
@@ -37,6 +42,13 @@ from greenkube.automation.git.base import (
 _TREE_ENTRY_TYPES = frozenset({"blob", "commit"})
 
 logger = logging.getLogger(__name__)
+
+
+def _author_login(pull_request: PullRequestInfo) -> str | None:
+    """The login of the PR's author (GreenKube's identity), when the payload carries it."""
+    user = pull_request.raw.get("user") if isinstance(pull_request.raw, dict) else None
+    login = user.get("login") if isinstance(user, dict) else None
+    return login if isinstance(login, str) and login else None
 
 
 class GitHubProvider(GitProvider):
@@ -57,6 +69,9 @@ class GitHubProvider(GitProvider):
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
             GitProviderCapability.COMMIT_ANCESTRY,
+            GitProviderCapability.COMMIT_STATUS,
+            GitProviderCapability.PULL_REQUEST_COMMENTS,
+            GitProviderCapability.PULL_REQUEST_METADATA,
         }
     )
 
@@ -412,26 +427,46 @@ class GitHubProvider(GitProvider):
             if response.status_code == 404:
                 raise GitProviderError("GitHub could not mark the existing pull request ready for review.")
         if selected_options.labels:
-            response = await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/issues/{pull_request.number}/labels",
-                json_body={"labels": list(selected_options.labels)},
-            )
-            if response.status_code == 404:
-                raise GitProviderError("GitHub could not apply configured labels to the pull request.")
-        if not selected_options.reviewers and not selected_options.team_reviewers:
-            return
+            await self._add_labels(repo, pull_request.number, selected_options.labels)
+        await self._request_reviewers(
+            repo,
+            pull_request.number,
+            selected_options.reviewers,
+            selected_options.team_reviewers,
+            author=_author_login(pull_request),
+        )
 
+    async def _add_labels(self, repo: GitRepository, number: int, labels: Sequence[str]) -> None:
+        # The issues API creates labels that do not exist yet (J2).
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/labels",
+            json_body={"labels": list(labels)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError("GitHub could not apply configured labels to the pull request.")
+
+    async def _request_reviewers(
+        self,
+        repo: GitRepository,
+        number: int,
+        requested_users: Sequence[str],
+        requested_teams: Sequence[str],
+        *,
+        author: str | None = None,
+    ) -> None:
+        if not requested_users and not requested_teams:
+            return
         response = await self._request(
             "GET",
-            f"/repos/{repo.owner}/{repo.name}/pulls/{pull_request.number}/requested_reviewers",
+            f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
         )
         if response.status_code == 404:
             raise GitProviderError("GitHub could not read requested reviewers for the pull request.")
         data = _git_response_object(
             response,
             provider=self.name,
-            ref=f"pull request {pull_request.number} reviewers",
+            ref=f"pull request {number} reviewers",
         )
         users = data.get("users", [])
         teams = data.get("teams", [])
@@ -446,16 +481,109 @@ class GitHubProvider(GitProvider):
         if len(existing_users) != len(users) or len(existing_teams) != len(teams):
             raise GitProviderError("GitHub returned an invalid requested-reviewers response.")
 
-        reviewers = [name for name in selected_options.reviewers if name.casefold() not in existing_users]
-        team_reviewers = [name for name in selected_options.team_reviewers if name.casefold() not in existing_teams]
-        if reviewers or team_reviewers:
-            response = await self._request(
-                "POST",
-                f"/repos/{repo.owner}/{repo.name}/pulls/{pull_request.number}/requested_reviewers",
-                json_body={"reviewers": reviewers, "team_reviewers": team_reviewers},
-            )
-            if response.status_code == 404:
-                raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+        # GitHub refuses a review request from the PR's own author (GreenKube's identity).
+        skipped = {author.casefold()} if author else set()
+        reviewers = [name for name in requested_users if name.casefold() not in existing_users | skipped]
+        team_reviewers = [name for name in requested_teams if name.casefold() not in existing_teams]
+        if not reviewers and not team_reviewers:
+            return
+        try:
+            await self._post_reviewers(repo, number, reviewers, team_reviewers)
+            return
+        except GitProviderError as error:
+            if error.status_code != 422 or len(reviewers) + len(team_reviewers) < 2:
+                raise
+        # One unknown, departed or non-collaborator login makes GitHub refuse the whole
+        # request (422); request each reviewer alone so the valid ones are still asked.
+        refused: list[str] = []
+        for users, teams in [*(([name], []) for name in reviewers), *(([], [name]) for name in team_reviewers)]:
+            try:
+                await self._post_reviewers(repo, number, users, teams)
+            except GitProviderError as error:
+                if error.status_code != 422:
+                    raise
+                refused.extend(users or [f"team {name}" for name in teams])
+        if refused:
+            raise GitProviderError(f"GitHub refused review requests for: {', '.join(refused)}.", status_code=422)
+
+    async def _post_reviewers(
+        self, repo: GitRepository, number: int, reviewers: Sequence[str], team_reviewers: Sequence[str]
+    ) -> None:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
+            json_body={"reviewers": list(reviewers), "team_reviewers": list(team_reviewers)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: PullRequestInfo,
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        number = self._validate_pull_request_number(repo, pull_request.number)
+        if labels:
+            await self._add_labels(repo, number, labels)
+        await self._request_reviewers(repo, number, reviewers, team_reviewers, author=_author_login(pull_request))
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        sha = self._validate_commit_status(repo, sha, state, context)
+        payload: dict[str, str] = {"state": state, "context": context, "description": description[:140]}
+        if target_url:
+            payload["target_url"] = target_url
+        response = await self._request(
+            "POST", f"/repos/{repo.owner}/{repo.name}/statuses/{quote(sha, safe='')}", json_body=payload
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub could not set a commit status on {sha} in {repo.full_name}.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            params={"per_page": str(COMMENT_PAGE_SIZE), "page": str(page)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub could not list comments of pull request {number}.")
+        comments = parse_comment_list(response, provider=self.name)
+        has_next = pull_request_next_page(response, repo=repo, current_page=page) is not None or (
+            "next" not in response.links and len(comments) >= COMMENT_PAGE_SIZE
+        )
+        return comments, has_next
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            json_body={"body": body},
+            retryable=False,
+        )
+        return parse_comment_id(response, provider=self.name)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo.owner}/{repo.name}/issues/comments/{comment_id}",
+            json_body={"body": body},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"GitHub comment {comment_id} disappeared before it could be updated.")
 
     async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
         if isinstance(number, bool) or not isinstance(number, int) or number <= 0:

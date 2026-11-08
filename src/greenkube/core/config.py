@@ -399,6 +399,27 @@ class Config(BaseSettings):
     GITOPS_DISCOVERY_INTERVAL: str = "5m"
     GITOPS_BINDING_TTL: str = "30m"
 
+    # --- Pull-request experience (roadmap J1-J5, docs/automation.md) ---
+    # Public URL of the GreenKube UI, for deep links in PRs (/recommendations/{id},
+    # /changes/{plan_id}, /ledger?change=). Empty: PRs carry no links.
+    GREENKUBE_EXTERNAL_URL: str = ""
+    # Prefix of PR titles ("greenkube: rightsize payments/api ..."); empty drops it.
+    GITOPS_PR_TITLE_PREFIX: str = "greenkube"
+    # PR body template with {{ section }} placeholders; empty uses the built-in template.
+    GITOPS_PR_TEMPLATE: str = ""
+    # Add greenkube, optimization/<capability>, risk/<level> and reliability labels.
+    GITOPS_PR_DEFAULT_LABELS: bool = True
+    # Open high-risk plans as draft PRs (GitLab "Draft:", Gitea "WIP:").
+    GITOPS_PR_DRAFT_HIGH_RISK: bool = True
+    # Request reviews from the CODEOWNERS of the touched paths.
+    GITOPS_PR_CODEOWNERS: bool = True
+    # Publish the greenkube/validation commit status on the PR head.
+    GITOPS_PR_COMMIT_STATUS: bool = True
+    # Keep one GreenKube status comment up to date on merged PRs (synced, applied, measuring, outcome).
+    GITOPS_PR_LIFECYCLE_COMMENTS: bool = True
+    # How long after the merge the status comment keeps being refreshed.
+    GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: int = Field(30, ge=1, le=365)
+
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
     # (see _compute_and_validate model validator). The raw env-var value is preserved in
@@ -447,6 +468,36 @@ class Config(BaseSettings):
         if mode not in {"disabled", "inline", "worker"}:
             raise ValueError("AUTOMATION_MODE must be 'disabled', 'inline', or 'worker'.")
         return mode
+
+    @field_validator("GREENKUBE_EXTERNAL_URL", mode="after")
+    @classmethod
+    def _validate_external_url(cls, value: str) -> str:
+        text = value.strip().rstrip("/")
+        if text and (
+            not text.startswith(("https://", "http://"))
+            or any(character.isspace() for character in text)
+            or "?" in text
+            or "#" in text
+        ):
+            raise ValueError("GREENKUBE_EXTERNAL_URL must be an http(s) URL without query or fragment.")
+        return text
+
+    @field_validator("GITOPS_PR_TITLE_PREFIX", mode="after")
+    @classmethod
+    def _validate_pr_title_prefix(cls, value: str) -> str:
+        text = value.strip()
+        if len(text) > 32 or any(ord(character) < 32 for character in text):
+            raise ValueError("GITOPS_PR_TITLE_PREFIX must be at most 32 printable characters.")
+        return text
+
+    @field_validator("GITOPS_PR_TEMPLATE", mode="after")
+    @classmethod
+    def _validate_pr_template(cls, value: str) -> str:
+        if not value.strip():
+            return ""
+        from greenkube.automation.pr_content.template import validate_template
+
+        return validate_template(value)
 
     @field_validator("GITOPS_DISCOVERY_INTERVAL", mode="before")
     @classmethod

@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Sequence
 from typing import List, Literal, Optional
 from urllib.parse import quote
 from uuid import uuid4
 
 from greenkube.automation.git.base import (
+    COMMENT_PAGE_SIZE,
+    CommitStatusState,
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
@@ -23,6 +26,7 @@ from greenkube.automation.git.base import (
     GitTreeChange,
     GitTreeComparison,
     GitTreeEntry,
+    PullRequestComment,
     PullRequestInfo,
     PullRequestOptions,
     _git_response_data,
@@ -32,6 +36,8 @@ from greenkube.automation.git.base import (
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    parse_comment_id,
+    parse_comment_list,
     parse_pull_request_list,
     pull_request_next_page,
     quote_git_path,
@@ -39,6 +45,7 @@ from greenkube.automation.git.base import (
 )
 
 logger = logging.getLogger(__name__)
+_LABEL_COLOR = "#2e7d32"
 
 MAX_REPOSITORY_FILES = 20_000
 MAX_CONTENTS_DEPTH = 64
@@ -67,6 +74,9 @@ class GiteaProvider(GitProvider):
             GitProviderCapability.FIND_OPEN_PULL_REQUEST_FOR_BRANCH,
             GitProviderCapability.DELETE_PLAN_BRANCH,
             GitProviderCapability.COMMIT_ANCESTRY,
+            GitProviderCapability.COMMIT_STATUS,
+            GitProviderCapability.PULL_REQUEST_COMMENTS,
+            GitProviderCapability.PULL_REQUEST_METADATA,
         }
     )
 
@@ -542,12 +552,107 @@ class GiteaProvider(GitProvider):
         else:
             raise GitProviderError("Gitea repository-label pagination exceeded its safe limit.")
 
-        missing = [name for name in labels if name not in label_ids]
-        if missing:
-            raise GitProviderError(
-                f"Gitea repository {repo.full_name} does not contain configured label(s): {', '.join(missing)}."
-            )
+        for name in labels:
+            if name not in label_ids:
+                # Labels no longer have to exist beforehand (J2): create the missing ones.
+                label_ids[name] = await self._create_label(repo, name)
         return [label_ids[name] for name in labels]
+
+    async def _create_label(self, repo: GitRepository, name: str) -> int:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/labels",
+            json_body={"name": name, "color": _LABEL_COLOR, "description": "Created by GreenKube"},
+            ok_statuses=(200, 201),
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Gitea repository {repo.full_name} does not allow creating label '{name}'.")
+        data = _git_response_data(response, provider=self.name, ref=f"label {name}")
+        label_id = data.get("id") if isinstance(data, dict) else None
+        if isinstance(label_id, bool) or not isinstance(label_id, int) or label_id <= 0:
+            raise GitProviderError(f"Gitea returned an invalid label after creating '{name}'.")
+        return label_id
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: PullRequestInfo,
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        number = self._validate_pull_request_number(repo, pull_request.number)
+        if labels:
+            label_ids = await self._resolve_label_ids(repo, tuple(labels))
+            response = await self._request(
+                "POST",
+                f"/repos/{repo.owner}/{repo.name}/issues/{number}/labels",
+                json_body={"labels": label_ids},
+            )
+            if response.status_code == 404:
+                raise GitProviderError(f"Gitea could not label pull request {number} in {repo.full_name}.")
+        if reviewers or team_reviewers:
+            response = await self._request(
+                "POST",
+                f"/repos/{repo.owner}/{repo.name}/pulls/{number}/requested_reviewers",
+                json_body={"reviewers": list(reviewers), "team_reviewers": list(team_reviewers)},
+            )
+            if response.status_code == 404:
+                raise GitProviderError(f"Gitea could not request reviewers on pull request {number}.")
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: Optional[str] = None,
+    ) -> None:
+        sha = self._validate_commit_status(repo, sha, state, context)
+        payload: dict[str, str] = {"state": state, "context": context, "description": description[:255]}
+        if target_url:
+            payload["target_url"] = target_url
+        response = await self._request(
+            "POST", f"/repos/{repo.owner}/{repo.name}/statuses/{quote(sha, safe='')}", json_body=payload
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Gitea could not set a commit status on {sha} in {repo.full_name}.")
+
+    async def _list_pull_request_comments(
+        self, repo: GitRepository, number: int, page: int
+    ) -> tuple[list[PullRequestComment], bool]:
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            params={"page": str(page), "limit": str(COMMENT_PAGE_SIZE)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Gitea could not list comments of pull request {number}.")
+        comments = parse_comment_list(response, provider=self.name)
+        # Older Gitea versions ignore paging and return every comment at once.
+        has_next = pull_request_next_page(response, repo=repo, current_page=page) is not None
+        return comments, has_next
+
+    async def _create_pull_request_comment(self, repo: GitRepository, number: int, body: str) -> int:
+        response = await self._request(
+            "POST",
+            f"/repos/{repo.owner}/{repo.name}/issues/{number}/comments",
+            json_body={"body": body},
+            retryable=False,
+        )
+        return parse_comment_id(response, provider=self.name)
+
+    async def _update_pull_request_comment(self, repo: GitRepository, number: int, comment_id: int, body: str) -> None:
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo.owner}/{repo.name}/issues/comments/{comment_id}",
+            json_body={"body": body},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Gitea comment {comment_id} disappeared before it could be updated.")
 
     async def create_pull_request(
         self,

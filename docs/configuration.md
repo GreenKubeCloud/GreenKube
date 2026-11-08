@@ -33,6 +33,7 @@ image:
 | `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `oidc`: reserved (`503`). See [Authentication](authentication.md). |
 | `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
 | `config.serviceUrlAllowlist` | `[]` | Exact service hostnames accepted in addition to the configured Prometheus/OpenCost/Boavizta hosts. |
+| `config.externalUrl` | `""` | `GREENKUBE_EXTERNAL_URL`. Public URL of the GreenKube UI (http(s), no query or fragment), used for deep links in pull requests, commit statuses and status comments. Empty: no links. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
 | `config.defaultZone` | `""` | Fallback Electricity Maps zone code for nodes whose zone or region cannot be mapped (e.g. `FR`, `DE`, `US-CAL-CISO`) |
@@ -182,6 +183,14 @@ Automation is disabled by default. The full workflow, supported source layouts, 
 | `automation.webhooks.enabled` | `false` | Enable signed provider webhook ingestion. |
 | `automation.policy` | See below | Risk, confidence, sample, coverage, PR-budget, cooldown, and freeze gates. |
 | `automation.pullRequests` | See below | Draft, label, reviewer, and team-reviewer options. |
+| `automation.pr.titlePrefix` | `greenkube` | `GITOPS_PR_TITLE_PREFIX`: prefix of PR titles (at most 32 characters); empty drops it. |
+| `automation.pr.template` | `''` | `GITOPS_PR_TEMPLATE`: PR body template with `{{ section }}` placeholders; empty uses the built-in template. See [Pull-request content](automation.md#pull-request-content). |
+| `automation.pr.defaultLabels` | `true` | `GITOPS_PR_DEFAULT_LABELS`: add `greenkube`, `optimization/<capability>`, `risk/<level>` and `reliability` labels. |
+| `automation.pr.draftHighRisk` | `true` | `GITOPS_PR_DRAFT_HIGH_RISK`: open high-risk plans as draft PRs. |
+| `automation.pr.codeowners` | `true` | `GITOPS_PR_CODEOWNERS`: request reviews from the CODEOWNERS of the touched paths. |
+| `automation.pr.commitStatus` | `true` | `GITOPS_PR_COMMIT_STATUS`: publish the `greenkube/validation` commit status on the PR head. |
+| `automation.pr.lifecycleComments` | `true` | `GITOPS_PR_LIFECYCLE_COMMENTS`: keep one GreenKube status comment up to date on merged PRs. |
+| `automation.pr.lifecycleLookbackDays` | `30` | `GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS`: how long after the merge the status comment is refreshed (1–365). |
 
 Configure providers through Secret references:
 
@@ -351,7 +360,7 @@ automation:
     teamReviewers: []
 ```
 
-Labels default to none. Configure only labels that already exist in every target repository.
+Configured labels are added on top of the derived `greenkube`, `optimization/<capability>`, `risk/<level>` and `reliability` labels (`automation.pr.defaultLabels`). They no longer have to exist beforehand: GitHub and GitLab create missing labels, and GreenKube creates them through the Gitea label API. Configured reviewers are requested in addition to the CODEOWNERS of the touched paths and are the fallback when there are none.
 
 GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab supports draft MRs, labels, and numeric reviewer IDs; team reviewers are unsupported. Gitea supports labels and reviewers; draft PRs and team reviewers are unsupported. Unsupported combinations fail before the provider creates a branch or commit.
 

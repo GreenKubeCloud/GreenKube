@@ -8,6 +8,8 @@ from typing import TypeVar
 from urllib.parse import quote
 
 from greenkube.automation.git.base import (
+    CommentUpsertResult,
+    CommitStatusState,
     GitCommitRequest,
     GitCommitResult,
     GitConflictError,
@@ -404,6 +406,58 @@ class _AuthorizedGitProvider(GitProvider):
 
     async def delete_plan_branch(self, repo: GitRepository, branch: str) -> None:
         await self._call(repo, lambda: self._provider.delete_plan_branch(repo, branch))
+
+    async def add_pull_request_metadata(
+        self,
+        repo: GitRepository,
+        pull_request: PullRequestInfo,
+        *,
+        labels: Sequence[str] = (),
+        reviewers: Sequence[str] = (),
+        team_reviewers: Sequence[str] = (),
+    ) -> None:
+        await self._call(
+            repo,
+            lambda: self._provider.add_pull_request_metadata(
+                repo, pull_request, labels=labels, reviewers=reviewers, team_reviewers=team_reviewers
+            ),
+        )
+
+    async def set_commit_status(
+        self,
+        repo: GitRepository,
+        sha: str,
+        *,
+        state: CommitStatusState,
+        context: str,
+        description: str,
+        target_url: str | None = None,
+    ) -> None:
+        await self._call(
+            repo,
+            lambda: self._provider.set_commit_status(
+                repo, sha, state=state, context=context, description=description, target_url=target_url
+            ),
+        )
+
+    async def upsert_pull_request_comment(
+        self,
+        repo: GitRepository,
+        number: int,
+        *,
+        marker: str,
+        body: str,
+    ) -> tuple[CommentUpsertResult, int]:
+        return await self._call(
+            repo,
+            lambda: self._provider.upsert_pull_request_comment(repo, number, marker=marker, body=body),
+        )
+
+    async def read_codeowners(self, repo: GitRepository, revision: str):
+        return await self._call(repo, lambda: self._provider.read_codeowners(repo, revision))
+
+    async def codeowner_reviewers(self, repo: GitRepository, owners: Sequence[str]) -> tuple[list[str], list[str]]:
+        return await self._call(repo, lambda: self._provider.codeowner_reviewers(repo, owners))
 
     async def test_connection(self) -> bool:
         try:

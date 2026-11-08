@@ -67,6 +67,16 @@ data:
   GITOPS_SYNC_TIMEOUT: {{ $syncTimeout | quote }}
   GITOPS_POLICY_JSON: {{ $policy | toJson | quote }}
   GITOPS_PULL_REQUESTS_JSON: {{ .Values.automation.pullRequests | toJson | quote }}
+  {{- $pr := .Values.automation.pr | default dict }}
+  GITOPS_PR_TITLE_PREFIX: {{ hasKey $pr "titlePrefix" | ternary $pr.titlePrefix "greenkube" | quote }}
+  GITOPS_PR_TEMPLATE: {{ $pr.template | default "" | quote }}
+  GITOPS_PR_DEFAULT_LABELS: {{ hasKey $pr "defaultLabels" | ternary $pr.defaultLabels true | quote }}
+  GITOPS_PR_DRAFT_HIGH_RISK: {{ hasKey $pr "draftHighRisk" | ternary $pr.draftHighRisk true | quote }}
+  GITOPS_PR_CODEOWNERS: {{ hasKey $pr "codeowners" | ternary $pr.codeowners true | quote }}
+  GITOPS_PR_COMMIT_STATUS: {{ hasKey $pr "commitStatus" | ternary $pr.commitStatus true | quote }}
+  GITOPS_PR_LIFECYCLE_COMMENTS: {{ hasKey $pr "lifecycleComments" | ternary $pr.lifecycleComments true | quote }}
+  GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: {{ $pr.lifecycleLookbackDays | default 30 | quote }}
+  GREENKUBE_EXTERNAL_URL: {{ .Values.config.externalUrl | default "" | trimSuffix "/" | quote }}
   {{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
   GITOPS_RENDERER_URL: {{ printf "http://%s-renderer:%v" (include "greenkube.fullname" .) .Values.rendererSandbox.servicePort | quote }}
   GITOPS_RENDERER_EGRESS_FIREWALL: {{ .Values.rendererSandbox.egressFirewall.enabled | quote }}

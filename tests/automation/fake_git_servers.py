@@ -17,6 +17,9 @@ import httpx
 
 from greenkube.automation.git.base import git_blob_id
 
+#: The user ID of GreenKube's token on every fake server.
+BOT_USER_ID = 4242
+
 
 @dataclass
 class FakeCommit:
@@ -114,12 +117,90 @@ class _RecordingServer:
         self.repository = repository
         self.requests: list[str] = []
         self.pull_requests: list[dict] = []
+        # Collaboration state (labels, reviewers, statuses, comments; roadmap J2-J5).
+        self.labels: dict[str, int] = {}
+        self.pull_request_labels: dict[int, list[str]] = {}
+        self.requested_reviewers: dict[int, list[str]] = {}
+        self.statuses: list[dict] = []
+        self.comments: dict[int, dict] = {}
+        self.users: dict[str, int] = {}
+        # The token's own user: ``GET /user`` answers ``identity_status`` with it.
+        self.identity = {"id": BOT_USER_ID, "login": "greenkube-bot", "username": "greenkube-bot"}
+        self.identity_status = 200
+
+    #: Path of the "authenticated user" endpoint and the comment/PR author key.
+    identity_path = "/user"
+    author_key = "user"
+
+    def _author(self, user_id: int) -> dict:
+        return {"id": user_id, "login": f"user-{user_id}", "username": f"user-{user_id}"}
+
+    def add_comment(self, comment_id: int, number: int, body: str, *, author_id: int) -> None:
+        """Seed a comment written by someone else (``author_id``)."""
+        self.comments[comment_id] = {"id": comment_id, "number": number, "body": body, "author_id": author_id}
+
+    def _comment(self, number: int, body: str) -> dict:
+        comment_id = 1000 + len(self.comments)
+        self.comments[comment_id] = {"id": comment_id, "number": number, "body": body, "author_id": BOT_USER_ID}
+        return {"id": comment_id, "body": body, self.author_key: self._author(BOT_USER_ID)}
+
+    def _comments_of(self, number: int) -> list[dict]:
+        return [
+            {"id": item["id"], "body": item["body"], self.author_key: self._author(item["author_id"])}
+            for item in self.comments.values()
+            if item["number"] == number
+        ]
+
+    def single_pull_request(self, number: int) -> httpx.Response:
+        if not 1 <= number <= len(self.pull_requests):
+            return _json(404, {"message": "Not Found"})
+        return _json(200, self.pull_requests[number - 1])
+
+    def collaboration(self, method: str, local: str, body: dict, *, issues: str) -> httpx.Response | None:
+        """Shared GitHub/Gitea-style labels, statuses, reviewers and issue comments."""
+        parts = local.strip("/").split("/")
+        if method == "POST" and len(parts) == 2 and parts[0] == "statuses":
+            self.statuses.append({"sha": parts[1], **body})
+            return _json(201, {"id": len(self.statuses), **body})
+        if method == "GET" and len(parts) == 2 and parts[0] == "pulls" and parts[1].isdigit():
+            return self.single_pull_request(int(parts[1]))
+        if len(parts) == 3 and parts[0] == "issues" and parts[2] == "labels" and method == "POST":
+            names = [
+                name if isinstance(name, str) else next(key for key, value in self.labels.items() if value == name)
+                for name in body["labels"]
+            ]
+            current = self.pull_request_labels.setdefault(int(parts[1]), [])
+            current.extend(name for name in names if name not in current)
+            return _json(200, [{"name": name} for name in current])
+        if len(parts) == 3 and parts[0] == "pulls" and parts[2] == "requested_reviewers":
+            number = int(parts[1])
+            current = self.requested_reviewers.setdefault(number, [])
+            if method == "GET":
+                return _json(200, {"users": [{"login": name} for name in current], "teams": []})
+            current.extend(name for name in [*body["reviewers"], *body["team_reviewers"]] if name not in current)
+            return _json(201, {"number": number})
+        if len(parts) == 3 and parts[0] == "issues" and parts[2] == "comments":
+            number = int(parts[1])
+            if method == "GET":
+                return _json(200, self._comments_of(number))
+            if method == "POST":
+                return _json(201, self._comment(number, body["body"]))
+        if method == "PATCH" and len(parts) == 3 and parts[:2] == [issues, "comments"]:
+            comment = self.comments.get(int(parts[2]))
+            if comment is None:
+                return _json(404, {"message": "Not Found"})
+            comment["body"] = body["body"]
+            return _json(200, {"id": comment["id"], "body": comment["body"]})
+        return None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.raw_path.decode().split("?", 1)[0]
         self.requests.append(f"{request.method} {unquote(path)}")
         query = {key: values for key, values in parse_qs(urlsplit(str(request.url)).query).items()}
         body = json.loads(request.content) if request.content else {}
+        if request.method == "GET" and path == self.identity_path:
+            payload = self.identity if self.identity_status == 200 else {"message": "Forbidden"}
+            return _json(self.identity_status, payload)
         response = self.route(request.method, path, query, body)
         if response is None:
             raise AssertionError(f"unexpected provider request: {request.method} {request.url}")
@@ -260,14 +341,17 @@ class FakeGitHubServer(_RecordingServer):
                 "merged": False,
                 "head": {"ref": body["head"], "sha": repository.refs[body["head"]]},
                 "base": {"ref": body["base"]},
+                "user": self._author(BOT_USER_ID),
             }
             self.pull_requests.append(pull_request)
             return _json(201, pull_request)
-        return None
+        return self.collaboration(method, local, body, issues="issues")
 
 
 class FakeGitLabServer(_RecordingServer):
     base_url = "https://gitlab.com"
+    identity_path = "/api/v4/user"
+    author_key = "author"
 
     def __init__(self, repository: FakeGitRepository, *, project: str = "acme/gitops") -> None:
         super().__init__(repository)
@@ -276,6 +360,10 @@ class FakeGitLabServer(_RecordingServer):
 
     def route(self, method: str, path: str, query: dict, body: dict) -> httpx.Response | None:
         repository = self.repository
+        if method == "GET" and path == "/api/v4/users":
+            username = query.get("username", [""])[0]
+            user_id = self.users.get(username)
+            return _json(200, [] if user_id is None else [{"id": user_id, "username": username}])
         if not path.startswith(self.prefix):
             return None
         local = path[len(self.prefix) :]
@@ -374,14 +462,42 @@ class FakeGitLabServer(_RecordingServer):
                 "source_branch": body["source_branch"],
                 "target_branch": body["target_branch"],
                 "sha": repository.refs[body["source_branch"]],
+                "reviewers": [],
+                "author": self._author(BOT_USER_ID),
             }
             self.pull_requests.append(merge_request)
             return _json(201, merge_request)
+        parts = local.strip("/").split("/")
+        if method == "POST" and len(parts) == 2 and parts[0] == "statuses":
+            self.statuses.append({"sha": parts[1], **body})
+            return _json(201, {"id": len(self.statuses), **body})
+        if method == "GET" and len(parts) == 2 and parts[0] == "merge_requests" and parts[1].isdigit():
+            return self.single_pull_request(int(parts[1]))
+        if method == "PUT" and len(parts) == 2 and parts[0] == "merge_requests":
+            merge_request = self.pull_requests[int(parts[1]) - 1]
+            if body.get("add_labels"):
+                current = self.pull_request_labels.setdefault(int(parts[1]), [])
+                current.extend(name for name in body["add_labels"].split(",") if name not in current)
+            if "reviewer_ids" in body:
+                merge_request["reviewers"] = [{"id": item} for item in body["reviewer_ids"]]
+            return _json(200, merge_request)
+        if len(parts) == 3 and parts[0] == "merge_requests" and parts[2] == "notes":
+            if method == "GET":
+                return _json(200, self._comments_of(int(parts[1])))
+            if method == "POST":
+                return _json(201, self._comment(int(parts[1]), body["body"]))
+        if method == "PUT" and len(parts) == 4 and parts[0] == "merge_requests" and parts[2] == "notes":
+            comment = self.comments.get(int(parts[3]))
+            if comment is None:
+                return _json(404, {"message": "404 Not found"})
+            comment["body"] = body["body"]
+            return _json(200, {"id": comment["id"], "body": comment["body"]})
         return None
 
 
 class FakeGiteaServer(_RecordingServer):
     base_url = "http://gitea.local"
+    identity_path = "/api/v1/user"
 
     def __init__(self, repository: FakeGitRepository, *, owner: str = "acme", name: str = "gitops") -> None:
         super().__init__(repository)
@@ -474,7 +590,13 @@ class FakeGiteaServer(_RecordingServer):
                 "merged": False,
                 "head": {"ref": body["head"], "sha": repository.refs[body["head"]]},
                 "base": {"ref": body["base"]},
+                "user": self._author(BOT_USER_ID),
             }
             self.pull_requests.append(pull_request)
             return _json(201, pull_request)
-        return None
+        if method == "GET" and local == "/labels":
+            return _json(200, [{"id": label_id, "name": name} for name, label_id in self.labels.items()])
+        if method == "POST" and local == "/labels":
+            self.labels[body["name"]] = 500 + len(self.labels)
+            return _json(201, {"id": self.labels[body["name"]], "name": body["name"]})
+        return self.collaboration(method, local, body, issues="issues")

@@ -51,9 +51,31 @@ automation:
     missingEvidence: ''
   pullRequests:
     draft: false
-    labels: [] # Optional; each configured label must already exist in the target repository.
-    reviewers: []
+    labels: [] # Optional extra labels; missing labels are created where the provider allows it.
+    reviewers: [] # Fallback reviewers, requested in addition to the CODEOWNERS of the touched paths.
     teamReviewers: []
+  # Pull-request experience: titles, body template, derived labels, CODEOWNERS
+  # reviewers, validation status and the lifecycle comment (docs/automation.md).
+  pr:
+    # Prefix of PR titles ("greenkube: rightsize payments/api ..."); empty drops it.
+    titlePrefix: greenkube
+    # PR body template: Markdown with {{ summary }}, {{ changes }}, {{ why }},
+    # {{ risk }}, {{ assumptions }}, {{ rollback }}, {{ verification }},
+    # {{ provenance }}, {{ diffs }} and scalar placeholders. Empty uses the
+    # built-in template. The greenkube:v1 footer is always appended.
+    template: ''
+    # Labels greenkube, optimization/<capability>, risk/<level> and reliability.
+    defaultLabels: true
+    # Open high-risk plans as draft PRs (GitLab "Draft:", Gitea "WIP:").
+    draftHighRisk: true
+    # Request reviews from the CODEOWNERS of the touched paths.
+    codeowners: true
+    # Publish the greenkube/validation commit status on the PR head.
+    commitStatus: true
+    # Keep one GreenKube status comment up to date on merged PRs
+    # (synced, applied, measuring, outcome) for lifecycleLookbackDays after the merge.
+    lifecycleComments: true
+    lifecycleLookbackDays: 30
   # Example:
   # providers:
   #   - id: github-main
@@ -250,6 +272,9 @@ config:
   # Exact hostnames allowed for service URLs. Existing Prometheus/OpenCost/
   # Boavizta hosts remain accepted without this list.
   serviceUrlAllowlist: []
+  # Public URL of the GreenKube UI (e.g. https://greenkube.example.com), used for
+  # deep links in pull requests and commit statuses. Empty: no links.
+  externalUrl: ''
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
