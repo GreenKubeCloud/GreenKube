@@ -40,39 +40,77 @@ The harness targets Minikube with the Docker runtime: it builds the GreenKube
 image inside Minikube (`eval $(minikube docker-env)`), so no registry is needed.
 On a workstation you also need `kubectl`, `helm`, `curl`, `jq` and `minikube`.
 
-You need a Gitea API token with read/write repository scope for the user that
-will own the sample repository (default user `greenkube`). Pass it as
-`GITEA_TOKEN`, or as a file with `GITEA_TOKEN_FILE`.
+You need a Gitea API token with read/write repository scope. Its user must be
+the owner of the sample repository (`GITEA_OWNER`, default `greenkube`), a
+member of that organization, or a Gitea administrator. Pass it as
+`GITEA_TOKEN`, or as a file with `GITEA_TOKEN_FILE`; there is no default.
 
 ## Run it
+
+Use a disposable cluster. The harness installs, upgrades and deletes objects,
+so it checks two things before it changes anything:
+
+- **The kubectl context.** Every script stops unless `kubectl config
+  current-context` is `minikube`. Set `E2E_KUBE_CONTEXT` to use another
+  disposable cluster's context.
+- **Ownership.** The harness labels everything it creates with
+  `greenkube.io/e2e=true` (the namespaces `greenkube` and `greenkube-e2e-apps`,
+  the Argo CD Application and the Flux objects) and writes `managed by
+  hack/e2e` in the sample repository's description. It never updates or deletes
+  an object with one of its names that lacks the marker: it stops, or with
+  `make e2e-clean` reports the object and leaves it alone. In particular it
+  never installs over, or deletes, a GreenKube release in a `greenkube`
+  namespace that it did not create. `E2E_ADOPT=1` takes such objects over,
+  for example an environment from a version of the harness without the marker.
+
+To install GreenKube next to the sample app and open the first pull request
+yourself from the UI, without deleting anything:
+
+```bash
+export GITEA_TOKEN=<gitea token>
+make quickstart
+```
+
+To run the whole loop unattended:
 
 ```bash
 export GITEA_TOKEN=<gitea token>
 make e2e
 ```
 
-`make e2e` starts from a clean slate: it removes what a previous run left (the
-GreenKube release and its database, the sample repository, the sample namespace
-and the harness's Argo CD/Flux objects), then runs the steps below. It leaves the
-environment running so you can explore it; `make e2e-status` prints the result
-of every step and `make e2e-clean` removes everything.
+> **`make e2e` is destructive by default (`E2E_FRESH=1`).** It first removes
+> what a previous run created: the GreenKube release and its namespace,
+> **including the PostgreSQL volume and the generated API key**, the sample
+> repository, the sample namespace and the harness's Argo CD/Flux objects. Only
+> objects that carry the ownership marker are removed. Use `E2E_FRESH=0` to keep
+> them.
+
+`make e2e` then runs the steps below. It leaves the environment running so you
+can explore it; `make e2e-status` prints the result of every step and
+`make e2e-clean` removes everything the harness created.
 
 Every setting is an environment variable with a default in `hack/e2e/lib.sh`.
 The most useful ones:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GITEA_TOKEN` / `GITEA_TOKEN_FILE` | — | Gitea token of `GITEA_OWNER` |
+| `GITEA_TOKEN` / `GITEA_TOKEN_FILE` | — (required) | Gitea token with access to `GITEA_OWNER` |
 | `GITEA_OWNER` / `GITEA_REPO` | `greenkube` / `greenkube-e2e-quickstart` | Sample repository (created and deleted by the harness) |
 | `GITEA_WEB_URL` | `http://localhost:3000` | Browser-facing Gitea origin used in pull-request links |
 | `GK_NAMESPACE` / `GK_RELEASE` | `greenkube` / `greenkube` | Where GreenKube is installed |
 | `GK_IMAGE_TAG` | `e2e-dev` | Tag of the image built from your checkout |
 | `GK_SKIP_BUILD` | `0` | `1` reuses an image already in Minikube |
 | `GK_EXTRA_VALUES` | — | Extra Helm values file |
+| `E2E_KUBE_CONTEXT` | `minikube` | The only kubectl context the harness runs against |
+| `E2E_ADOPT` | `0` | `1` takes over objects with the harness's names that lack its ownership marker |
 | `E2E_FLUX` | `1` | `0` skips the Flux path |
-| `E2E_FRESH` | `1` | `0` keeps the previous release, repository and data |
+| `E2E_FRESH` | `1` | `1` deletes the previous run's release, data, repository and namespaces first; `0` keeps them |
 | `E2E_WAIT_VERDICT` | `1` | `0` stops once the measurement has started |
+| `E2E_ALLOW_REGRESSION` | `0` | `1` records a verdict other than `verified`/`passed` without failing the run |
 | `E2E_STATE_DIR` | `$TMPDIR/greenkube-e2e` | Port-forward logs and the evidence of each step |
+
+The sample namespace is always `greenkube-e2e-apps`: the sample manifests, the
+Argo CD destination and the Flux overlay declare it.
 
 The scripts can also run one at a time, in this order: `build-image.sh`,
 `setup-repo.sh`, `setup-gitops.sh`, `install.sh`, `loop.sh argocd`,
@@ -153,7 +191,7 @@ api() { curl -fsS -H "Authorization: Bearer $GREENKUBE_API_KEY" -H 'Content-Type
 | GitOps sync | Argo CD Application `status.sync.revision` equals the merge commit and is `Synced`/`Healthy` (Flux: Kustomization `lastAppliedRevision`) |
 | Sync confirmation | `api /automation/plans/<plan_id>` → `merged`, then `synced` |
 | Apply detection | `api /recommendations/<id>` → status `applied`, `application_method` set |
-| Measurement | `api /recommendations/<id>` → `verification_status` set; after the 6-minute window, a verdict (`verified`, `not_realized`, `inconclusive`…) |
+| Measurement | `api /recommendations/<id>` → `verification_status` set; after the 6-minute window, a verdict. The run passes only on `verified`/`passed`; any other verdict (`regressed`, `rollback_review`, `not_realized`, `inconclusive`…) is recorded as `verdict_<status>_<verification_status>` and fails the run unless `E2E_ALLOW_REGRESSION=1` |
 
 Each step is recorded in `$E2E_STATE_DIR/evidence/steps.jsonl` with the API
 responses next to it, and `make e2e-status` prints them.
@@ -169,8 +207,14 @@ The Flux pull request does not edit the workload manifest: it adds a strategic
 merge patch under `flux/oversized-worker/greenkube-patches/` and references it
 from `kustomization.yaml`.
 
-If a run stops while a GreenKube pull request is still open, `loop.sh` resumes
-from that pull request instead of opening a second one.
+With `E2E_FRESH=0`, `loop.sh` resumes from the workload's latest GreenKube pull
+request instead of opening a second one: from the merge when it is still open,
+from the GitOps sync when it is already merged. It finds the pull request
+through `api '/recommendations/history?namespace=greenkube-e2e-apps&start=…&end=…'`,
+whatever status the recommendations have. The sync check accepts the merge
+commit or any later commit that contains it. The merge retries only while Gitea
+answers 405 (mergeability not computed yet); a closed pull request or any other
+error stops the run at once.
 
 ## Explore
 
@@ -200,4 +244,6 @@ make e2e-clean
 
 It removes the GreenKube release and namespace (database and generated
 credentials included), the sample namespace, the harness's Argo CD Application
-and Flux objects, and the sample repository. Nothing else is touched.
+and Flux objects, and the sample repository, but only those that carry the
+ownership marker, and only on the `E2E_KUBE_CONTEXT` context. Nothing else is
+touched.

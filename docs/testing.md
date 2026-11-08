@@ -71,4 +71,6 @@ request, merge, GitOps sync, apply detection and measurement. The scripts live i
 
 `tests/e2e/test_live_loop.py` wraps the same run and is skipped unless `GREENKUBE_E2E=1` (`make e2e-test`).
 `tests/e2e/test_quickstart_assets.py` always runs: it checks that the quickstart values render a valid configuration
-and that the sample repository and GitOps objects agree.
+and that the sample repository and GitOps objects agree. `tests/e2e/test_harness_safety.py` also always runs: with
+stub `kubectl`, `helm` and `curl` binaries, it checks that the harness scripts refuse any kubectl context other than
+`E2E_KUBE_CONTEXT` and never update or delete objects without the harness's ownership marker.
