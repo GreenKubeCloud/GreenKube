@@ -156,9 +156,15 @@ A change counts as applied only when two conditions hold:
 - the live workload moved past that baseline (new generation, or a recreated object observed at its current generation);
 - its per-container requests match the proposed values, within `RECOMMENDATION_APPLY_TOLERANCE`.
 
+### Change measurement
+
+Apply detection records each applied change: the workload revision it rolled out (generation and pod-template digests before and after), the pull request, merge commit and synced revision when it came through GitOps, the rollout start and completion, and a frozen **baseline snapshot** of the workload over the 7 days before the merge.
+
+The change is then measured once, after a 7-day post-window, against a **counterfactual**: the same hour of the week before the change, adjusted by the workload's load (mesh or ingress requests, a `greenkube.io/load-metric` annotation, or CPU usage). The saving gets a 90% confidence interval and confounders are checked (another change on the workload, a spec or HPA edit, replica, price or instance-type shifts). The outcome is `realized`, `not_realized`, `inconclusive` or `contaminated`, and the saving is split across the change's recommendations by cost component. Changes and measurements are served at `GET /api/v2/changes`. The method is described in [Savings measurement](methodology/savings-measurement.md).
+
 ### Verification
 
-Each applied change gets **one fixed-horizon measurement**:
+Changes recorded before change measurement shipped, or all changes when `CHANGE_MEASUREMENT_ENABLED=false`, get the interim **fixed-horizon measurement**. The health gates below also apply to change measurement (once after `VERIFICATION_WINDOW_HOURS`, then over the whole post-window):
 
 - **Windows:** the after-window starts when the rollout completes (every replica updated and available) and lasts `VERIFICATION_WINDOW_HOURS` (72 by default). The baseline window has the same length and ends when the pull request was merged (or the plan approved), so it never overlaps the change.
 - **Health (per replica):** per-pod p95 usage stays below the applied per-pod request plus headroom; per-pod restart deltas stay within the limit; no OOM kill, readiness above the minimum and CPU throttling below the maximum (read from kube-state-metrics and cAdvisor through Prometheus). A signal that cannot be read is reported `not_available`, never counted as a pass.
@@ -168,7 +174,7 @@ The outcome is `verified` (realized), `rollback_review` (a health check failed),
 
 Every decision is stored as an immutable measurement. A `not_realized` or `inconclusive` change is never re-tested automatically; `POST /api/v1/recommendations/{id}/remeasure` starts a new measurement that supersedes the previous one. An operator can dismiss a false-positive `rollback_review` with a reason, which returns the change to `applied` and measures it again. The CPU and memory records of one change stay one attribution group through both actions, so together they never claim the workload's saving twice.
 
-> Verification is in **beta**. The measurement method is being reworked to use counterfactual baselines, confidence intervals and per-change provenance.
+> Verification is in **beta**. Change measurement adds counterfactual baselines, confidence intervals and per-change provenance; the append-only, hash-chained ledger (C6) is not implemented yet.
 
 ### Rollback
 
@@ -182,7 +188,7 @@ GreenKube distinguishes several kinds of savings figures. They are never added t
 |---|---|---|
 | **Projected** | Expected annual impact of a recommendation, computed by the versioned [Impact Model](methodology/impact-model.md) | Available |
 | **Projected accrual** | The projection accrued hour by hour for a change that is applied but not yet verified (labelled `prorated` before 0.4) | Available |
-| **Measured** | The before/after difference observed by verification | Available (beta) |
+| **Measured** | The saving observed after the change: counterfactual minus actual with a 90% interval for changes measured by [change measurement](methodology/savings-measurement.md), a before/after difference for the interim verifier | Available (beta) |
 | **Allocated vs billed** *(planned)* | A request cut lowers what a workload is *allocated* immediately. The cloud bill only drops when nodes are removed, so this will be measured at node-pool level and reported separately. | Planned |
 
 The ledger accrues savings once per UTC hour slot and recommendation, with their method (`projected`, `measured` or `user_declared`). Accrual is idempotent and backfills downtime; ledger rows are never compressed or deleted. Changes that were not realized, are inconclusive, failed, are in rollback review or were reverted accrue nothing, and a recommendation that enters `rollback_review` has its earlier rows flagged `superseded`. The API reports `projected_annual`, `run_rate_annual` and `realized_to_date` as separate blocks.

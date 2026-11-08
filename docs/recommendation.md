@@ -44,6 +44,8 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 
 **Apply succeeded vs recommendation succeeded.** `application_method` records how the change landed (`manual`, `detected`, `pr_merge`, `webhook`, `polling`); `verified_at` and `verification_status` record whether the outcome matched the projection. Only verified savings count as measured. A GitOps action is not eligible for apply detection until its plan reaches `synced`; a merged-but-unsynced plan moves to `sync_failed` after the configured timeout.
 
+**Change measurement.** A change found by apply detection is recorded with a frozen baseline snapshot and measured once by the change-measurement pipeline: a 7-day post-window starting one hour after the rollout, an hour-of-week counterfactual adjusted by a load driver, a 90% moving-block bootstrap interval, confounder checks and an outcome (`realized`, `not_realized`, `inconclusive`, `contaminated`). The saving is split across the change's recommendations by cost component (or projected share), each recommendation receives its row in `savings_measurements` (with `change_id`) and moves to `verifying` during the post-window, then to `verified`, `applied` (`failed` or `inconclusive`) or `rollback_review` exactly as below. Health gates run after `VERIFICATION_WINDOW_HOURS` and again at the decision. See [Savings measurement](methodology/savings-measurement.md) and `GET /api/v2/changes`. The fixed-horizon verification below still measures changes recorded before this pipeline and every change when `CHANGE_MEASUREMENT_ENABLED=false`.
+
 **Verification (fixed horizon).** Every applied change gets one measurement, decided once:
 
 - **Windows.** `applied_at` is the rollout completion time (`updatedReplicas == replicas == availableReplicas` and `observedGeneration >= generation`; Deployments report it through their `Progressing` condition, otherwise the detection time is used). The after-window is `[applied_at, applied_at + VERIFICATION_WINDOW_HOURS)`. The baseline window has the same length and ends at the PR merge (or the plan approval for a manual apply), never after `applied_at`. The frozen baseline records the evidence window it copies (`captured_at`, `evidence_window`), its freeze time (`frozen_at`) and `baseline_window_end`.
@@ -320,11 +322,18 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `VERIFICATION_MIN_READINESS` | `config.recommendations.verification.minReadiness` | `0.99` |
 | `VERIFICATION_MAX_THROTTLE_RATIO` | `config.recommendations.verification.maxThrottleRatio` | `0.05` |
 | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `config.recommendations.verification.lifecycleInterval` | `5m` |
+| `CHANGE_MEASUREMENT_ENABLED` | `config.recommendations.changeMeasurement.enabled` | `true` |
+| `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` | `config.recommendations.changeMeasurement.preWindowDays` | `7` |
+| `CHANGE_MEASUREMENT_POST_WINDOW_DAYS` | `config.recommendations.changeMeasurement.postWindowDays` | `7` |
+| `CHANGE_MEASUREMENT_WARMUP_HOURS` | `config.recommendations.changeMeasurement.warmupHours` | `1` |
+| `CHANGE_MEASUREMENT_MIN_COVERAGE` | `config.recommendations.changeMeasurement.minCoverage` | `0.8` |
+| `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` | `config.recommendations.changeMeasurement.bootstrapSamples` | `1000` |
+| `CHANGE_MEASUREMENT_EPSILON_RATIO` | `config.recommendations.changeMeasurement.epsilonRatio` | `0.02` |
 | `RECOMMENDATION_SCAN_INTERVAL` | `config.recommendations.scanInterval` | `1h` (`1m` to `24h`, units `s`, `m`, `h`) |
 
 `RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance. A decrease by itself, including an unrelated large decrease, is not sufficient. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
 
-The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes in the collector/scheduler container) runs apply detection, outcome verification and TTL expiry.
+The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes in the collector/scheduler container) runs apply detection (which also records changes and workload revisions), outcome verification, change measurement and TTL expiry.
 
 ## Source Map
 
