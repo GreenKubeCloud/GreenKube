@@ -492,7 +492,7 @@ config:
     changeMeasurement:
       # false: changes are measured by the interim verifier (windowHours) instead.
       enabled: true
-      # Baseline window in days, ending at the PR merge or plan approval (>= 7 recommended).
+      # Baseline window in days, ending at the PR merge or plan approval (at least 7).
       preWindowDays: 7
       # Post-change window in days, starting after the rollout and its warm-up.
       postWindowDays: 7

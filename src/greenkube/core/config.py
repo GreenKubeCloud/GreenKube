@@ -344,8 +344,8 @@ class Config(BaseSettings):
     # Record every detected change with a baseline snapshot and measure it with a
     # counterfactual and a bootstrap CI. Off: changes are measured by the interim verifier.
     CHANGE_MEASUREMENT_ENABLED: bool = True
-    # Baseline window (days) ending at the PR merge or plan approval; >= 7 for hour-of-week matching.
-    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, gt=0)
+    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches.
+    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, ge=7)
     # Post-change window (days) starting after the rollout and its warm-up.
     CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Hours after rollout completion excluded from the post-window.

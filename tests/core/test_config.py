@@ -110,6 +110,19 @@ class TestLeaderElectionConfig:
         assert cfg.LEADER_ELECTION_LEASE_NAMESPACE == "greenkube"
 
 
+class TestChangeMeasurementWindowConfig:
+    @pytest.mark.parametrize("value", ["0", "3", "6.9"])
+    def test_a_baseline_shorter_than_a_week_is_rejected(self, value):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
+            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_PRE_WINDOW_DAYS"):
+                Config(_env_file=None)
+
+    @pytest.mark.parametrize("value", ["7", "14"])
+    def test_a_baseline_of_at_least_a_week_is_accepted(self, value):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
+
+
 class TestRecommendationApplyToleranceConfig:
     @pytest.mark.parametrize("value", ["-0.1", "1.01", "nan", "inf"])
     def test_invalid_apply_tolerance_is_rejected(self, value):
