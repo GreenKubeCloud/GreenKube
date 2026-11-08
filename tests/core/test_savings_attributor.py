@@ -1,226 +1,386 @@
 # tests/core/test_savings_attributor.py
-"""Tests for SavingsAttributor — the service that prorates annual recommendation
-savings into per-period time-series records."""
+"""Tests for SavingsAttributor — idempotent accrual of savings on a fixed UTC grid.
+
+Covers roadmap C0.4 (BUG-30), C0.7 (BUG-33) and C0.8 (BUG-34).
+"""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from typing import Dict, Iterable, List, Optional
 
 import pytest
 
-from greenkube.core.savings_attributor import _SECONDS_PER_YEAR, SavingsAttributor
-from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
+from greenkube.core.savings_attributor import (
+    _SECONDS_PER_YEAR,
+    ATTRIBUTION_ERRORS,
+    SavingsAttributor,
+    accrual_components,
+    annual_rates_by_method,
+    record_user_declared_savings,
+    user_declared_savings,
+    validate_user_declared_savings,
+)
+from greenkube.models.metrics import RecommendationBaseline, RecommendationRecord, RecommendationStatus
+from greenkube.models.metrics import RecommendationType as RT
+from greenkube.models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, UserDeclaredSavings
+from greenkube.storage.base_savings_repository import AccrualWatermarkConflict, SavingsLedgerRepository
+
+NOW = datetime(2026, 10, 1, 12, 7, tzinfo=timezone.utc)
+HOURLY_RATE = _SECONDS_PER_YEAR / 3600  # an annual rate that accrues exactly 1 per hour
 
 
-def _make_applied_rec(
+class FakeLedger(SavingsLedgerRepository):
+    """In-memory ledger with the same idempotency key and watermark CAS as the SQL adapters."""
+
+    def __init__(self) -> None:
+        self.rows: Dict[tuple, SavingsLedgerRecord] = {}
+        self.watermarks: Dict[tuple, datetime] = {}
+        self.fail_append = False
+
+    async def save_records(self, records: List[SavingsLedgerRecord]) -> int:
+        inserted = 0
+        for record in records:
+            key = (record.recommendation_id, record.measurement_method, record.slot_start or record.period_start)
+            if key not in self.rows:
+                self.rows[key] = record
+                inserted += 1
+        return inserted
+
+    async def append_accruals(self, records, *, cluster_name, stream, expected_watermark, new_watermark) -> int:
+        if self.fail_append:
+            raise RuntimeError("database unavailable")
+        if self.watermarks.get((cluster_name, stream)) != expected_watermark:
+            raise AccrualWatermarkConflict("moved")
+        self.watermarks[(cluster_name, stream)] = new_watermark
+        return await self.save_records(records)
+
+    async def supersede_for_recommendation(self, recommendation_id: int) -> int:
+        return 0
+
+    async def get_accrual_watermark(self, cluster_name: str, stream: str = "recommendation_savings"):
+        return self.watermarks.get((cluster_name, stream))
+
+    async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
+        floors: Dict[int, datetime] = {}
+        for record in self.rows.values():
+            if record.recommendation_id in set(recommendation_ids) and record.period_end is not None:
+                current = floors.get(record.recommendation_id)
+                floors[record.recommendation_id] = max(current, record.period_end) if current else record.period_end
+        return floors
+
+    async def get_accrual_breakdown(self, cluster_name, start_time=None, end_time=None, namespace=None):
+        totals: Dict[tuple, SavingsAccrualTotal] = {}
+        for record in self.rows.values():
+            key = (record.namespace, record.recommendation_type, record.measurement_method)
+            total = totals.setdefault(
+                key, SavingsAccrualTotal(namespace=key[0], recommendation_type=key[1], method=key[2])
+            )
+            total.co2e_saved_grams += record.co2e_saved_grams
+            total.cost_saved_dollars += record.cost_saved_dollars
+        return list(totals.values())
+
+    async def get_lifetime_counters(self, cluster_name: str) -> List[SavingsCounterTotal]:
+        return []
+
+    async def has_legacy_compressed_rows(self, cluster_name, start_time=None, end_time=None, namespace=None) -> bool:
+        return False
+
+    def method_sum(self, method: str, rec_id: Optional[int] = None) -> float:
+        return sum(
+            r.co2e_saved_grams
+            for r in self.rows.values()
+            if r.measurement_method == method and (rec_id is None or r.recommendation_id == rec_id)
+        )
+
+
+def _record(
     rec_id: int = 1,
-    co2e_annual: float | None = 150.5,
-    cost_annual: float | None = 12.3,
-    rec_type: RecommendationType = RecommendationType.OVERPROVISIONED_NODE,
-    namespace: str = "default",
+    *,
+    status: RecommendationStatus = RecommendationStatus.APPLIED,
+    verification_status: Optional[str] = "pending",
+    applied_at: Optional[datetime] = NOW - timedelta(hours=3),
+    co2e: Optional[float] = HOURLY_RATE,
+    cost: Optional[float] = HOURLY_RATE / 100,
+    **updates,
 ) -> RecommendationRecord:
     return RecommendationRecord(
         id=rec_id,
-        pod_name="test-pod",
-        namespace=namespace,
-        type=rec_type,
-        description="Test recommendation",
-        reason="overprovisioned",
-        priority="high",
-        scope="node",
-        status=RecommendationStatus.APPLIED,
-        carbon_saved_co2e_grams=co2e_annual,
-        cost_saved=cost_annual,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        pod_name=f"pod-{rec_id}",
+        namespace="prod",
+        type=RT.RIGHTSIZING_CPU,
+        description="cut cpu",
+        status=status,
+        verification_status=verification_status,
+        applied_at=applied_at,
+        carbon_saved_co2e_grams=co2e,
+        cost_saved=cost,
+        potential_savings_co2e_grams=co2e,
+        potential_savings_cost=cost,
+        confidence=0.8,
+        **updates,
     )
 
 
-class TestSavingsAttributorProratedCalculation:
-    """Unit tests for per-period savings proration."""
+def _errors(reason: str = "invalid_record") -> float:
+    return ATTRIBUTION_ERRORS.labels(reason=reason)._value.get()
 
-    def test_prorates_annual_co2_to_5_minute_period(self):
-        rec = _make_applied_rec(co2e_annual=52560.0, cost_annual=8760.0)
-        attributor = SavingsAttributor(
-            savings_repo=AsyncMock(),
-            cluster_name="test-cluster",
+
+class TestAccrualEligibility:
+    """C0.4 / BUG-30: only pending and verified outcomes accrue."""
+
+    def test_applied_pending_accrues_projected(self):
+        [component] = accrual_components(_record())
+        assert component.method == "projected"
+        assert component.co2e_grams_per_year == pytest.approx(HOURLY_RATE)
+
+    def test_verified_accrues_measured_values(self):
+        record = _record(
+            status=RecommendationStatus.VERIFIED,
+            verification_status="passed",
+            measured_co2e_saved_grams=90.0,
+            measured_cost_saved=7.5,
         )
-        records = attributor._compute_period_records([rec], period_seconds=300)
+        [component] = accrual_components(record)
+        assert (component.method, component.co2e_grams_per_year, component.cost_per_year) == ("measured", 90.0, 7.5)
 
-        assert len(records) == 1
-        expected_co2 = 52560.0 * 300 / _SECONDS_PER_YEAR
-        expected_cost = 8760.0 * 300 / _SECONDS_PER_YEAR
-        assert records[0].co2e_saved_grams == pytest.approx(expected_co2, rel=1e-4)
-        assert records[0].cost_saved_dollars == pytest.approx(expected_cost, rel=1e-4)
+    @pytest.mark.parametrize(
+        ("status", "verification_status"),
+        [
+            (RecommendationStatus.APPLIED, "failed"),  # not_realized
+            (RecommendationStatus.APPLIED, "inconclusive"),
+            (RecommendationStatus.APPLIED, "not_realized"),
+            (RecommendationStatus.FAILED, "failed"),
+            (RecommendationStatus.ROLLBACK_REVIEW, "failed"),
+            (RecommendationStatus.REVERTED, "passed"),
+            (RecommendationStatus.VERIFIED, "passed"),  # verified without measured values
+        ],
+    )
+    def test_failed_outcomes_accrue_nothing(self, status, verification_status):
+        assert accrual_components(_record(status=status, verification_status=verification_status)) == []
 
-    def test_prorates_real_recommendation(self):
-        """Verify the real-world OVERPROVISIONED_NODE recommendation (150.5 g/yr, $12.3/yr)."""
-        rec = _make_applied_rec(co2e_annual=150.5, cost_annual=12.3)
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        records = attributor._compute_period_records([rec], period_seconds=300)
+    def test_user_declared_quantities_are_labelled_user_declared(self):
+        record = _record(
+            baseline=RecommendationBaseline(
+                user_declared_savings=UserDeclaredSavings(cost_per_year=50.0).model_dump(mode="json")
+            )
+        )
+        components = {c.method: c for c in accrual_components(record)}
+        assert components["user_declared"].cost_per_year == 50.0
+        assert components["user_declared"].co2e_grams_per_year == 0.0
+        assert components["projected"].cost_per_year == 0.0
+        assert components["projected"].co2e_grams_per_year == pytest.approx(HOURLY_RATE)
 
-        assert len(records) == 1
-        expected = 150.5 * 300 / _SECONDS_PER_YEAR
-        assert records[0].co2e_saved_grams == pytest.approx(expected, rel=1e-4)
-        assert records[0].cost_saved_dollars == pytest.approx(12.3 * 300 / _SECONDS_PER_YEAR, rel=1e-4)
-        assert records[0].recommendation_id == 1
-        assert records[0].cluster_name == "minikube"
-        assert records[0].namespace == "default"
-        assert records[0].recommendation_type == "OVERPROVISIONED_NODE"
-
-    def test_skips_recommendation_without_co2_data(self):
-        """Recommendations without carbon_saved_co2e_grams should be skipped."""
-        rec = _make_applied_rec(co2e_annual=None, cost_annual=None)
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
-        records = attributor._compute_period_records([rec], period_seconds=300)
-
-        assert records == []
-
-    def test_skips_recommendation_with_zero_co2(self):
-        rec = _make_applied_rec(co2e_annual=0.0, cost_annual=0.0)
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
-        records = attributor._compute_period_records([rec], period_seconds=300)
-
-        assert records == []
-
-    def test_multiple_applied_recommendations(self):
-        recs = [
-            _make_applied_rec(rec_id=1, co2e_annual=52560.0, namespace="ns-a"),
-            _make_applied_rec(rec_id=2, co2e_annual=52560.0, namespace="ns-b"),
+    def test_annual_rates_never_mix_methods(self):
+        records = [
+            _record(1),
+            _record(
+                2,
+                status=RecommendationStatus.VERIFIED,
+                verification_status="passed",
+                measured_co2e_saved_grams=10.0,
+                measured_cost_saved=1.0,
+            ),
+            _record(3, status=RecommendationStatus.ROLLBACK_REVIEW),
         ]
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
-        records = attributor._compute_period_records(recs, period_seconds=300)
-
-        assert len(records) == 2
-        assert {r.namespace for r in records} == {"ns-a", "ns-b"}
-
-    def test_period_seconds_scaling(self):
-        """Larger periods produce proportionally larger savings."""
-        rec = _make_applied_rec(co2e_annual=52560.0)
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
-
-        r_5min = attributor._compute_period_records([rec], period_seconds=300)[0]
-        r_1h = attributor._compute_period_records([rec], period_seconds=3600)[0]
-
-        assert r_1h.co2e_saved_grams == pytest.approx(r_5min.co2e_saved_grams * 12, rel=1e-4)
-
-    def test_explicit_period_is_used_for_identity_and_timestamp(self):
-        rec = _make_applied_rec(co2e_annual=52560.0)
-        start = datetime(2026, 4, 30, 10, 0, tzinfo=timezone.utc)
-        end = start + timedelta(minutes=5)
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="test")
-
-        record = attributor._compute_period_records(
-            [rec],
-            period_start=start,
-            period_end=end,
-        )[0]
-
-        assert record.period_start == start
-        assert record.period_end == end
-        assert record.timestamp == end
-        assert record.period_seconds == 300
+        rates = annual_rates_by_method(records)
+        assert set(rates) == {"projected", "measured"}
+        assert rates["projected"]["count"] == 1
+        assert rates["measured"]["co2e_grams"] == 10.0
 
 
-class TestSavingsAttributorIntegration:
-    """Integration tests for the full attribute_period flow."""
+class TestAccrual:
+    @pytest.mark.asyncio
+    async def test_accrues_complete_slots_with_partial_first_slot(self):
+        ledger = FakeLedger()
+        result = await SavingsAttributor(ledger, "c").accrue([_record()], now=NOW)
+
+        assert result.written == 3
+        assert result.watermark == datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+        slots = sorted(r.slot_start for r in ledger.rows.values() if r.slot_start is not None)
+        assert slots == [NOW.replace(minute=0) - timedelta(hours=h) for h in (3, 2, 1)]
+        first = min(ledger.rows.values(), key=lambda r: r.period_start or NOW)
+        assert first.period_start == NOW - timedelta(hours=3)
+        assert first.co2e_saved_grams == pytest.approx(53 / 60)
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 2)
 
     @pytest.mark.asyncio
-    async def test_attribute_period_writes_to_repo(self):
-        mock_repo = AsyncMock()
-        mock_repo.save_records = AsyncMock(return_value=1)
-        rec = _make_applied_rec(co2e_annual=150.5, cost_annual=12.3)
-
-        attributor = SavingsAttributor(savings_repo=mock_repo, cluster_name="minikube")
-        count = await attributor.attribute_period([rec], period_seconds=300)
-
-        assert count == 1
-        mock_repo.save_records.assert_awaited_once()
-        saved_records = mock_repo.save_records.call_args[0][0]
-        assert len(saved_records) == 1
-        assert saved_records[0].co2e_saved_grams == pytest.approx(150.5 * 300 / _SECONDS_PER_YEAR, rel=1e-4)
+    async def test_second_run_writes_nothing(self):
+        """BUG-33: a restart or retry in the same slot never double counts."""
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c")
+        await attributor.accrue([_record()], now=NOW)
+        again = await attributor.accrue([_record()], now=NOW + timedelta(seconds=2))
+        assert again.slots == 0 and again.written == 0
+        assert len(ledger.rows) == 3
 
     @pytest.mark.asyncio
-    async def test_attribute_period_returns_zero_for_no_applicable_recs(self):
-        mock_repo = AsyncMock()
-        mock_repo.save_records = AsyncMock(return_value=0)
+    async def test_backfill_is_bounded_per_run_and_catches_up(self):
+        ledger = FakeLedger()
+        record = _record(applied_at=NOW - timedelta(days=30))
+        attributor = SavingsAttributor(ledger, "c", max_slots_per_run=24, initial_backfill=timedelta(days=2))
 
-        attributor = SavingsAttributor(savings_repo=mock_repo, cluster_name="minikube")
-        count = await attributor.attribute_period([], period_seconds=300)
+        first = await attributor.accrue([record], now=NOW)
+        second = await attributor.accrue([record], now=NOW)
+        third = await attributor.accrue([record], now=NOW)
 
-        assert count == 0
-        mock_repo.save_records.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_attribute_period_does_not_crash_on_repo_error(self):
-        """Errors in the repo must not propagate (collection continues)."""
-        mock_repo = AsyncMock()
-        mock_repo.save_records = AsyncMock(side_effect=RuntimeError("DB unavailable"))
-        rec = _make_applied_rec(co2e_annual=150.5)
-
-        attributor = SavingsAttributor(savings_repo=mock_repo, cluster_name="minikube")
-        # Should not raise
-        count = await attributor.attribute_period([rec], period_seconds=300)
-        assert count == 0
+        assert (first.slots, second.slots, third.slots) == (24, 24, 0)
+        assert len(ledger.rows) == 48
+        assert ledger.method_sum("projected") == pytest.approx(48.0)
 
     @pytest.mark.asyncio
-    async def test_get_cumulative_totals_returns_aggregated_values(self):
-        mock_repo = AsyncMock()
-        mock_repo.get_cumulative_totals = AsyncMock(
-            return_value={"OVERPROVISIONED_NODE": {"co2e_saved_grams": 42.0, "cost_saved_dollars": 3.5}}
+    async def test_verified_backfill_keeps_projection_before_verification(self):
+        ledger = FakeLedger()
+        record = _record(
+            status=RecommendationStatus.VERIFIED,
+            verification_status="passed",
+            applied_at=NOW - timedelta(hours=4),
+            verified_at=NOW - timedelta(hours=2),
+            measured_co2e_saved_grams=2 * HOURLY_RATE,
+            measured_cost_saved=0.0,
         )
-        attributor = SavingsAttributor(savings_repo=mock_repo, cluster_name="minikube")
-        totals = await attributor.get_cumulative_totals()
+        await SavingsAttributor(ledger, "c").accrue([record], now=NOW)
+        # 08:07-10:07 projected (1/h), 10:07-12:00 measured (2/h): the slot that
+        # holds verified_at is split pro rata between the two methods.
+        assert ledger.method_sum("projected") == pytest.approx(2.0)
+        assert ledger.method_sum("measured") == pytest.approx(2 * (53 / 60 + 1))
+        split_slot = NOW.replace(minute=0) - timedelta(hours=2)
+        in_split_slot = {r.measurement_method: r for r in ledger.rows.values() if r.slot_start == split_slot}
+        assert in_split_slot["projected"].period_end == record.verified_at
+        assert in_split_slot["measured"].period_start == record.verified_at
+        assert in_split_slot["measured"].period_end == split_slot + timedelta(hours=1)
 
-        assert totals["OVERPROVISIONED_NODE"]["co2e_saved_grams"] == pytest.approx(42.0)
-        mock_repo.get_cumulative_totals.assert_awaited_once_with(cluster_name="minikube")
+    @pytest.mark.asyncio
+    async def test_late_detected_apply_is_caught_up_behind_the_watermark(self):
+        """A change detected after its applied_at keeps the slots already behind the watermark."""
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c")
+        await attributor.accrue([], now=NOW)
+        assert ledger.watermarks[("c", "recommendation_savings")] == NOW.replace(minute=0)
+
+        late = _record(applied_at=NOW - timedelta(hours=5))
+        result = await attributor.accrue([late], now=NOW + timedelta(hours=1))
+
+        assert result.slots == 1
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 5)
+        again = await attributor.accrue([late], now=NOW + timedelta(hours=2))
+        assert again.written == 1
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 6)
+
+    @pytest.mark.asyncio
+    async def test_catch_up_is_bounded_and_skips_records_that_already_accrued(self):
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c", initial_backfill=timedelta(hours=2))
+        accrued = _record(1, applied_at=NOW - timedelta(hours=1))
+        await attributor.accrue([accrued], now=NOW)
+        assert ledger.method_sum("projected", rec_id=1) == pytest.approx(53 / 60)
+
+        # Record 1 already has ledger rows: no gap is re-accrued, only the new slot.
+        # Record 2 never accrued: caught up, but no further back than the backfill horizon.
+        old = _record(2, applied_at=NOW - timedelta(days=3))
+        await attributor.accrue([accrued, old], now=NOW + timedelta(hours=1))
+
+        assert ledger.method_sum("projected", rec_id=1) == pytest.approx(53 / 60 + 1)
+        assert ledger.method_sum("projected", rec_id=2) == pytest.approx(3.0)
+
+    @pytest.mark.asyncio
+    async def test_invalid_record_does_not_block_others(self):
+        """BUG-34: one invalid record is skipped and counted; the others accrue."""
+        ledger = FakeLedger()
+        before = _errors()
+        records = [
+            _record(1, co2e=float("nan")),
+            _record(2),
+            _record(3, applied_at=None),
+            _record(4, co2e=-HOURLY_RATE, cost=0.0),
+        ]
+        result = await SavingsAttributor(ledger, "c").accrue(records, now=NOW)
+
+        assert result.errors == 2
+        assert _errors() == before + 2
+        assert ledger.method_sum("projected", rec_id=2) == pytest.approx(53 / 60 + 2)
+        # Signed values are recorded as such, never floored at zero.
+        assert ledger.method_sum("projected", rec_id=4) == pytest.approx(-(53 / 60 + 2))
+
+    @pytest.mark.asyncio
+    async def test_watermark_conflict_writes_nothing(self):
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c")
+
+        async def moved(*args, **kwargs):
+            raise AccrualWatermarkConflict("moved")
+
+        ledger.append_accruals = moved  # type: ignore[method-assign]
+        result = await attributor.accrue([_record()], now=NOW)
+        assert result.conflict and result.written == 0 and not ledger.rows
+
+    @pytest.mark.asyncio
+    async def test_fence_stops_before_writing(self):
+        ledger = FakeLedger()
+        result = await SavingsAttributor(ledger, "c", fence=lambda: False).accrue([_record()], now=NOW)
+        assert result.fenced and not ledger.rows and not ledger.watermarks
+
+    @pytest.mark.asyncio
+    async def test_persist_failure_is_counted_not_raised(self):
+        ledger = FakeLedger()
+        ledger.fail_append = True
+        before = _errors("persist_failed")
+        result = await SavingsAttributor(ledger, "c").accrue([_record()], now=NOW)
+        assert result.written == 0 and result.errors == 1
+        assert _errors("persist_failed") == before + 1
+
+    @pytest.mark.asyncio
+    async def test_ineligible_records_accrue_nothing(self):
+        ledger = FakeLedger()
+        records = [
+            _record(1, verification_status="inconclusive"),
+            _record(2, verification_status="failed"),
+            _record(3, status=RecommendationStatus.ROLLBACK_REVIEW),
+        ]
+        result = await SavingsAttributor(ledger, "c").accrue(records, now=NOW)
+        assert result.written == 0 and result.errors == 0
 
 
-class TestSavingsAttributorMeasured:
-    """Phase 5: verified recommendations contribute measured values."""
+class TestUserDeclaredSavings:
+    """C0.8: user-declared savings are validated and never presented as measured."""
 
-    def _verified_rec(self) -> RecommendationRecord:
-        rec = _make_applied_rec(co2e_annual=150.5, cost_annual=12.3)
-        return rec.model_copy(
-            update={
-                "status": RecommendationStatus.VERIFIED,
-                "measured_co2e_saved_grams": 90.0,
-                "measured_cost_saved": 7.5,
-                "confidence": 0.87,
-            }
-        )
+    def test_accepts_values_within_bound(self):
+        declared = validate_user_declared_savings(_record(), co2e_grams_per_year=HOURLY_RATE * 2, cost_per_year=None)
+        assert declared is not None
+        assert declared.co2e_grams_per_year == HOURLY_RATE * 2
+        assert declared.flags == []
 
-    def test_verified_records_use_measured_values(self):
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        records = attributor._compute_period_records([self._verified_rec()], period_seconds=3600)
+    def test_returns_none_when_nothing_declared(self):
+        assert validate_user_declared_savings(_record(), co2e_grams_per_year=None, cost_per_year=None) is None
 
-        assert len(records) == 1
-        expected_co2 = 90.0 * 3600 / _SECONDS_PER_YEAR
-        assert records[0].measurement_method == "measured"
-        assert records[0].co2e_saved_grams == pytest.approx(expected_co2, rel=1e-4)
-        assert records[0].actual_value == pytest.approx(90.0)
-        assert records[0].confidence == pytest.approx(0.87)
+    def test_negative_values_are_flagged(self):
+        declared = validate_user_declared_savings(_record(), co2e_grams_per_year=None, cost_per_year=-5.0)
+        assert declared is not None
+        assert declared.flags == ["negative_cost_saved"]
 
-    def test_applied_records_stay_prorated(self):
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        records = attributor._compute_period_records([_make_applied_rec()], period_seconds=3600)
-        assert records[0].measurement_method == "prorated"
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+    def test_rejects_non_finite(self, value):
+        with pytest.raises(ValueError, match="finite"):
+            validate_user_declared_savings(_record(), co2e_grams_per_year=value, cost_per_year=None)
 
-    def test_verified_cost_only_record_is_attributed(self):
-        """A verified record with zero measured CO2 but positive cost is written."""
-        rec = self._verified_rec().model_copy(update={"measured_co2e_saved_grams": 0.0, "measured_cost_saved": 25.0})
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        records = attributor._compute_period_records([rec], period_seconds=3600)
+    def test_rejects_values_above_ten_times_projection(self):
+        with pytest.raises(ValueError, match="exceeds 10x"):
+            validate_user_declared_savings(_record(cost=10.0), co2e_grams_per_year=None, cost_per_year=101.0)
 
-        assert len(records) == 1
-        assert records[0].measurement_method == "measured"
-        assert records[0].co2e_saved_grams == 0.0
-        assert records[0].cost_saved_dollars > 0
+    def test_rejects_values_without_projection(self):
+        with pytest.raises(ValueError, match="no projected"):
+            validate_user_declared_savings(_record(cost=None), co2e_grams_per_year=None, cost_per_year=1.0)
 
-    def test_rollback_review_records_are_skipped(self):
-        rec = _make_applied_rec().model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        assert attributor._compute_period_records([rec], period_seconds=300) == []
+    @pytest.mark.asyncio
+    async def test_declaration_is_stored_on_the_baseline(self):
+        record = _record(baseline=RecommendationBaseline(sample_count=3))
+        declared = UserDeclaredSavings(cost_per_year=12.0, flags=["x"])
+        stored = {}
 
-    def test_reverted_records_are_skipped(self):
-        rec = _make_applied_rec().model_copy(update={"status": RecommendationStatus.REVERTED})
-        attributor = SavingsAttributor(savings_repo=AsyncMock(), cluster_name="minikube")
-        assert attributor._compute_period_records([rec], period_seconds=300) == []
+        class Repo:
+            async def update_recommendation_fields(self, rec_id, updates):
+                stored.update(updates)
+                return record.model_copy(update={"baseline": RecommendationBaseline(**updates["baseline"])})
+
+        updated = await record_user_declared_savings(Repo(), record, declared)
+        assert stored["baseline"]["sample_count"] == 3
+        restored = user_declared_savings(updated)
+        assert restored is not None and restored.cost_per_year == 12.0

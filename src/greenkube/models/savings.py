@@ -1,42 +1,102 @@
 # src/greenkube/models/savings.py
-"""Pydantic DTOs for the recommendation savings ledger."""
+"""Pydantic DTOs for the recommendation savings ledger.
+
+The ledger stores *accruals*: the share of an annual savings rate that was
+earned during one slot of a fixed UTC grid. Every accrual carries the method
+that produced it, and methods are never summed together (product principle 3):
+
+- ``projected``: GreenKube's projection for an applied change that has not been
+  measured yet (formerly labelled ``prorated``);
+- ``measured``: the verifier's measured savings for a verified change;
+- ``user_declared``: values supplied by a user on ``PATCH /apply``; they are
+  validated but never presented as measured.
+"""
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from math import isfinite
+from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+SavingsMethod = Literal["projected", "measured", "user_declared"]
+
+METHOD_PROJECTED = "projected"
+METHOD_MEASURED = "measured"
+METHOD_USER_DECLARED = "user_declared"
+SAVINGS_METHODS: tuple[str, ...] = (METHOD_PROJECTED, METHOD_MEASURED, METHOD_USER_DECLARED)
+
+# Accrual slots are one UTC hour long and aligned on the hour.
+ACCRUAL_SLOT_SECONDS = 3600
+
+
+def normalize_savings_method(value: Any) -> str:
+    """Map legacy method labels onto the current vocabulary.
+
+    ``prorated`` rows written before 0.4 are projections and are reported as
+    ``projected``. Unknown values are returned unchanged so they stay visible.
+    """
+    if value is None or value == "" or value == "prorated":
+        return METHOD_PROJECTED
+    return str(value)
+
+
+def floor_to_slot(value: datetime, slot_seconds: int = ACCRUAL_SLOT_SECONDS) -> datetime:
+    """Return the start of the UTC grid slot that contains ``value``."""
+    aware = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    epoch = int(aware.timestamp())
+    return datetime.fromtimestamp(epoch - epoch % slot_seconds, tz=timezone.utc)
+
+
+def _is_grid_slot(start: datetime, end: datetime) -> bool:
+    return (end - start).total_seconds() == ACCRUAL_SLOT_SECONDS and floor_to_slot(start) == start
 
 
 class SavingsLedgerRecord(BaseModel):
-    """A single prorated savings record for one collection period.
+    """One accrual of savings for one recommendation and one period.
 
-    One record is written per applied recommendation per collection cycle.
-    The ``co2e_saved_grams`` and ``cost_saved_dollars`` values represent
-    the fraction of the annual saving that is attributed to this period:
+    ``co2e_saved_grams`` and ``cost_saved_dollars`` hold the fraction of the
+    annual rate earned during ``[period_start, period_end)``:
 
-        co2e_period = annual_co2e / 8760 h × (period_seconds / 3600)
+        accrual = annual_rate × (period_end − period_start) / seconds_per_year
 
-    Accumulating these records over time gives a proper time-series that
-    Prometheus can expose as a DB-backed cumulative gauge, letting Grafana
-    use ``increase(metric[$__range])`` to display savings for any window.
+    ``slot_start`` is the start of the fixed UTC grid slot the accrual belongs
+    to. Together with ``recommendation_id`` and ``measurement_method`` it is the
+    idempotency key of the ledger, so the same slot can never be accrued twice.
+    Values are signed: a negative user-declared saving is recorded as such.
     """
 
     recommendation_id: int
     cluster_name: str = ""
     namespace: str = ""
     recommendation_type: str
-    co2e_saved_grams: float = Field(default=0.0, ge=0.0)
-    cost_saved_dollars: float = Field(default=0.0, ge=0.0)
+    co2e_saved_grams: float = 0.0
+    cost_saved_dollars: float = 0.0
     period_seconds: int = Field(default=300, gt=0)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     period_start: datetime | None = None
     period_end: datetime | None = None
-    # Phase 5: measurement provenance
-    measurement_method: str = Field("prorated", description="'prorated' (estimate) or 'measured' (verified).")
-    baseline_value: Optional[float] = Field(None, description="Baseline rate before the change.")
-    actual_value: Optional[float] = Field(None, description="Measured rate after the change.")
-    confidence: Optional[float] = Field(None, description="Confidence of the measurement, 0.0–1.0.")
+    slot_start: datetime | None = Field(
+        None, description="Start of the fixed UTC accrual slot (idempotency key with recommendation and method)."
+    )
+    measurement_method: str = Field(
+        METHOD_PROJECTED, description="'projected', 'measured' or 'user_declared'. Never summed together."
+    )
+    baseline_value: Optional[float] = Field(None, description="Annual projected CO2e saving of the recommendation.")
+    actual_value: Optional[float] = Field(None, description="Annual CO2e rate used for this accrual.")
+    confidence: Optional[float] = Field(None, description="Confidence attached to the source rate, 0.0–1.0.")
     superseded: bool = Field(False, description="True when a later outcome invalidated this attribution.")
+
+    @field_validator("co2e_saved_grams", "cost_saved_dollars")
+    @classmethod
+    def _finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("savings accruals must be finite numbers")
+        return value
+
+    @field_validator("measurement_method", mode="before")
+    @classmethod
+    def _method(cls, value: Any) -> str:
+        return normalize_savings_method(value)
 
     def model_post_init(self, __context: object) -> None:
         """Keep legacy timestamp-only records representable as explicit periods."""
@@ -44,6 +104,9 @@ class SavingsLedgerRecord(BaseModel):
             self.period_end = self.timestamp
         if self.period_start is None:
             self.period_start = self.period_end - timedelta(seconds=self.period_seconds)
+        if self.slot_start is None and _is_grid_slot(self.period_start, self.period_end):
+            # A record that covers exactly one grid slot is that slot.
+            self.slot_start = self.period_start
 
 
 class SavingsCumulativeTotals(BaseModel):
@@ -54,3 +117,106 @@ class SavingsCumulativeTotals(BaseModel):
     co2e_saved_grams: float = 0.0
     cost_saved_dollars: float = 0.0
     record_count: int = 0
+
+
+class SavingsAccrualTotal(BaseModel):
+    """Net ledger accruals for one (namespace, recommendation type, method) group."""
+
+    namespace: str = ""
+    recommendation_type: str = "unknown"
+    method: str = METHOD_PROJECTED
+    co2e_saved_grams: float = 0.0
+    cost_saved_dollars: float = 0.0
+
+
+class SavingsCounterTotal(BaseModel):
+    """Monotonic lifetime counters for one (recommendation type, method) group.
+
+    ``accrued_*`` only ever grows as accruals are appended. ``reversed_*`` grows
+    when accruals are superseded (rollback review) or when a negative accrual is
+    recorded. The net saving is ``accrued − reversed``.
+    """
+
+    recommendation_type: str = "unknown"
+    method: str = METHOD_PROJECTED
+    accrued_co2e_grams: float = 0.0
+    accrued_cost_dollars: float = 0.0
+    reversed_co2e_grams: float = 0.0
+    reversed_cost_dollars: float = 0.0
+
+
+class UserDeclaredSavings(BaseModel):
+    """Annual savings a user declared on ``PATCH /apply``, after validation.
+
+    Stored on the recommendation's baseline under ``user_declared_savings``;
+    the attributor accrues declared quantities with ``method=user_declared``.
+    """
+
+    co2e_grams_per_year: Optional[float] = None
+    cost_per_year: Optional[float] = None
+    projected_co2e_grams_per_year: Optional[float] = None
+    projected_cost_per_year: Optional[float] = None
+    flags: List[str] = Field(default_factory=list, description="Validation flags, e.g. negative values.")
+    declared_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SavingsBlock(BaseModel):
+    """One savings figure with its method. Blocks are never summed together."""
+
+    method: SavingsMethod
+    basis: Literal["annual_rate", "accrued"] = Field(
+        ..., description="'annual_rate' for current yearly rates, 'accrued' for ledger sums over the window."
+    )
+    co2e_grams: float = 0.0
+    cost: float = 0.0
+    recommendation_count: int = Field(0, description="Recommendations contributing to an annual rate.")
+    start: Optional[datetime] = Field(None, description="Window start for accrued blocks (None means all time).")
+    end: Optional[datetime] = Field(None, description="Window end for accrued blocks.")
+
+
+def _deprecated(description: str) -> Any:
+    return Field(0.0, description=f"Deprecated: {description}", json_schema_extra={"deprecated": True})
+
+
+class SavingsReport(BaseModel):
+    """Response of ``GET /recommendations/savings``.
+
+    Three never-mixed blocks answer the core questions:
+
+    - ``projected_annual``: yearly savings GreenKube projects for applied
+      changes that have not been measured yet;
+    - ``run_rate_annual``: yearly savings measured on verified changes;
+    - ``realized_to_date``: measured savings accrued in the ledger over the
+      window (all time when no window is requested).
+
+    ``projected_to_date`` and the ``user_declared_*`` blocks are reported
+    separately and are never part of a realized figure. The flat ``total_*``,
+    ``measured_*`` and ``prorated_*`` fields are deprecated aliases kept for the
+    0.3 UI: ``total_*`` and ``measured_*`` equal ``realized_to_date`` and
+    ``prorated_*`` equals ``projected_to_date``.
+    """
+
+    namespace: Optional[str] = None
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+    projected_annual: SavingsBlock
+    run_rate_annual: SavingsBlock
+    realized_to_date: SavingsBlock
+    projected_to_date: SavingsBlock
+    user_declared_annual: SavingsBlock
+    user_declared_to_date: SavingsBlock
+    applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
+    verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
+    diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")
+
+    total_carbon_saved_co2e_grams: float = _deprecated("same as realized_to_date.co2e_grams.")
+    total_cost_saved: float = _deprecated("same as realized_to_date.cost.")
+    measured_carbon_saved_co2e_grams: float = _deprecated("same as realized_to_date.co2e_grams.")
+    measured_cost_saved: float = _deprecated("same as realized_to_date.cost.")
+    prorated_carbon_saved_co2e_grams: float = _deprecated("same as projected_to_date.co2e_grams.")
+    prorated_cost_saved: float = _deprecated("same as projected_to_date.cost.")
+    namespace_breakdown: List[dict] = Field(
+        default_factory=list,
+        description="Deprecated: realized accruals per namespace.",
+        json_schema_extra={"deprecated": True},
+    )

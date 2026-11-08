@@ -101,8 +101,8 @@ The cluster, namespace, pod, node, recommendation, savings, and dashboard famili
 | `greenkube_cluster_energy_joules_total` | `cluster` | Total energy consumed (J) |
 | `greenkube_cluster_pod_count` | `cluster` | Number of running pods |
 | `greenkube_cluster_namespace_count` | `cluster` | Number of active namespaces |
-| `greenkube_cluster_co2e_saved_grams_total` | `cluster` | Annual projected CO₂e savings from applied recommendations (g) — legacy, prefer `greenkube_dashboard_savings_co2e_grams_total` |
-| `greenkube_cluster_cost_saved_dollars_total` | `cluster` | Annual projected cost savings from applied recommendations ($) — legacy, prefer `greenkube_dashboard_savings_cost_dollars_total` |
+| `greenkube_cluster_co2e_saved_grams_total` | `cluster` | Annual projected CO₂e savings rate of applied recommendations still accruing as projected (g/year) — legacy, prefer `greenkube_savings_run_rate_annual_co2e_grams` |
+| `greenkube_cluster_cost_saved_dollars_total` | `cluster` | Annual projected cost savings rate of applied recommendations still accruing as projected ($/year) — legacy, prefer `greenkube_savings_run_rate_annual_cost_dollars` |
 | `greenkube_carbon_intensity_zone` | `cluster`, `zone` | Current grid carbon intensity per electricity zone (gCO₂/kWh) |
 | `greenkube_carbon_intensity_score` | `cluster` | Energy-weighted average grid carbon intensity across the cluster (gCO₂/kWh) |
 | `greenkube_sustainability_dimension_score` | `cluster`, `namespace`, `dimension` | Score per sustainability dimension — emitted per namespace and with `namespace="__all__"` for the cluster aggregate |
@@ -169,9 +169,14 @@ All node metrics share labels `node`, `instance_type`, `zone`, `region`, `cloud_
 | `greenkube_recommendations_savings_co2e_grams` | `cluster`, `type` | Projected annual CO₂e savings per recommendation type (g) |
 | `greenkube_recommendations_savings_cost_dollars` | `cluster`, `type` | Projected annual cost savings per recommendation type ($) |
 | `greenkube_top_recommendations` | `cluster`, `rank`, `sort_metric`, `value_metric`, `namespace`, `type`, `resource`, `scope`, `priority` | Ranked active recommendations. `sort_metric` is `co2` or `cost`; `value_metric` is `co2e_grams` or `cost_dollars` so Grafana can display both projected annual savings values for each ranked action |
-| `greenkube_co2e_savings_attributed_grams_total` | `cluster`, `recommendation_type` | Cumulative CO₂e savings since installation (g) — prefer `greenkube_dashboard_savings_co2e_grams_total` for windowed queries |
-| `greenkube_cost_savings_attributed_dollars_total` | `cluster`, `recommendation_type` | Cumulative cost savings since installation ($) — prefer `greenkube_dashboard_savings_cost_dollars_total` for windowed queries |
-| `greenkube_savings_measured_vs_projected_ratio` | `cluster` | Share of attributed CO₂e savings verified by measurement (0–1) |
+| `greenkube_co2e_savings_attributed_grams_total` | `cluster`, `recommendation_type`, `method` | **Counter.** CO₂e accrued in the savings ledger since installation (g). `method` is `projected`, `measured` or `user_declared`; only `measured` is realized savings |
+| `greenkube_cost_savings_attributed_dollars_total` | `cluster`, `recommendation_type`, `method` | **Counter.** Cost accrued in the savings ledger since installation ($) |
+| `greenkube_co2e_savings_reversed_grams_total` | `cluster`, `recommendation_type`, `method` | **Counter.** CO₂e reversed (g): every superseded accrual (for example after a rollback review) plus negative accruals such as negative declared savings. Net savings = attributed − reversed |
+| `greenkube_cost_savings_reversed_dollars_total` | `cluster`, `recommendation_type`, `method` | **Counter.** Cost reversed ($) |
+| `greenkube_savings_run_rate_annual_co2e_grams` | `cluster`, `method` | Current annual CO₂e savings rate of applied recommendations, by method (g/year) |
+| `greenkube_savings_run_rate_annual_cost_dollars` | `cluster`, `method` | Current annual cost savings rate of applied recommendations, by method ($/year) |
+| `greenkube_savings_measured_vs_projected_ratio` | `cluster` | Share of net accrued CO₂e savings that is measured rather than projected (0–1) |
+| `greenkube_attribution_errors_total` | `reason` | **Counter.** Recommendations skipped by savings attribution (`invalid_record`) or accrual batches that could not be stored (`persist_failed`). Process-local (see below) |
 
 ### Pre-computed dashboard summary metrics
 
@@ -184,16 +189,20 @@ These gauges are refreshed on every Prometheus scrape and serve the `$dashboard_
 | `greenkube_dashboard_summary_energy_joules_total` | `cluster`, `window`, `namespace` | Pre-computed energy total for a fixed time window |
 | `greenkube_dashboard_summary_pod_count` | `cluster`, `window`, `namespace` | Pre-computed pod count for a fixed time window |
 | `greenkube_dashboard_summary_namespace_count` | `cluster`, `window`, `namespace` | Pre-computed namespace count for a fixed time window |
-| `greenkube_dashboard_savings_co2e_grams_total` | `cluster`, `window`, `namespace`, `recommendation_type` | DB-backed CO₂e savings attributed during a fixed dashboard time window |
-| `greenkube_dashboard_savings_cost_dollars_total` | `cluster`, `window`, `namespace`, `recommendation_type` | DB-backed cost savings attributed during a fixed dashboard time window |
+| `greenkube_dashboard_savings_co2e_grams_total` | `cluster`, `window`, `namespace`, `recommendation_type` | Realized (measured) CO₂e savings accrued during a fixed dashboard time window |
+| `greenkube_dashboard_savings_cost_dollars_total` | `cluster`, `window`, `namespace`, `recommendation_type` | Realized (measured) cost savings accrued during a fixed dashboard time window |
+| `greenkube_dashboard_savings_accrued_co2e_grams` | `cluster`, `window`, `namespace`, `recommendation_type`, `method` | CO₂e accrued during the window, by method. Never sum methods |
+| `greenkube_dashboard_savings_accrued_cost_dollars` | `cluster`, `window`, `namespace`, `recommendation_type`, `method` | Cost accrued during the window, by method. Never sum methods |
 
 > **Dashboard window metrics vs. cumulative totals**
 >
-> Use `greenkube_dashboard_savings_co2e_grams_total` / `greenkube_dashboard_savings_cost_dollars_total` to display exact savings for the selected `$dashboard_window`. These values are pre-computed from the DB on each scrape — no `increase()` wrapper needed.
+> Use `greenkube_dashboard_savings_co2e_grams_total` / `greenkube_dashboard_savings_cost_dollars_total` to display exact realized savings for the selected `$dashboard_window`. These values are pre-computed from the DB on each scrape — no `increase()` wrapper needed. A window that starts in the middle of an accrual hour includes that partial hour pro rata.
 >
-> `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` are cumulative totals since installation and are kept for backward compatibility.
+> `greenkube_co2e_savings_attributed_grams_total` and `greenkube_cost_savings_attributed_dollars_total` are monotonic counters computed from the append-only ledger; `increase()` and `rate()` work on them. Subtract the `*_reversed_*_total` counters for net savings, and always filter on `method`.
 >
 > The `greenkube_cluster_co2e_saved_grams_total` / `greenkube_cluster_cost_saved_dollars_total` cluster metrics are *annual projections* only.
+>
+> Savings accrue on one-hour slots, so the savings gauges and counters (ledger counters, run rates and dashboard savings windows) are reloaded from the database at most once every 60 seconds per API process; scrapes in between reuse the previous values.
 
 ### Optimization control-loop metrics
 

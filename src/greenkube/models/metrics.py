@@ -575,10 +575,18 @@ class ApplyRecommendationRequest(BaseModel):
         None, description="Actual memory value applied (may differ from recommended)."
     )
     carbon_saved_co2e_grams: Optional[float] = Field(
-        None, description="Actual CO2e savings realised (computed server-side if omitted)."
+        None,
+        description=(
+            "User-declared annual CO2e savings (finite, at most 10x the projection, recorded as "
+            "user_declared and never as measured). Computed server-side if omitted."
+        ),
     )
     cost_saved: Optional[float] = Field(
-        None, description="Actual cost savings realised (computed server-side if omitted)."
+        None,
+        description=(
+            "User-declared annual cost savings (finite, at most 10x the projection, recorded as "
+            "user_declared and never as measured). Computed server-side if omitted."
+        ),
     )
     application_method: Optional[str] = Field(
         None, description="How the change landed: manual, detected, pr_merge, webhook, polling."

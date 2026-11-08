@@ -220,22 +220,22 @@ async def test_leader_gated_callback_hands_the_job_a_fence_for_the_lease_holder(
 
 @pytest.mark.asyncio
 async def test_attribute_recommendation_savings_success():
+    from greenkube.core.savings_attributor import AccrualResult
+
     reco_repo = MagicMock()
     reco_repo.get_applied_recommendations = AsyncMock(return_value=["rec"])
     savings_repo = MagicMock()
     attributor = MagicMock()
-    attributor.attribute_period = AsyncMock(return_value=1)
+    attributor.accrue = AsyncMock(return_value=AccrualResult(slots=1, written=1))
 
-    with patch(
-        "greenkube.core.config.get_config",
-        return_value=SimpleNamespace(PROMETHEUS_QUERY_RANGE_STEP="5m", CLUSTER_NAME="cluster-a"),
-    ):
+    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(CLUSTER_NAME="cluster-a")):
         with patch("greenkube.core.factory.get_recommendation_repository", return_value=reco_repo):
             with patch("greenkube.core.factory.get_savings_ledger_repository", return_value=savings_repo):
-                with patch("greenkube.core.savings_attributor.SavingsAttributor", return_value=attributor):
+                with patch("greenkube.core.savings_attributor.SavingsAttributor", return_value=attributor) as cls:
                     await start_module.attribute_recommendation_savings()
 
-    attributor.attribute_period.assert_awaited_once_with(["rec"], period_seconds=300)
+    cls.assert_called_once_with(savings_repo=savings_repo, cluster_name="cluster-a")
+    attributor.accrue.assert_awaited_once_with(["rec"])
 
 
 @pytest.mark.asyncio
@@ -245,27 +245,21 @@ async def test_attribute_recommendation_savings_handles_error():
 
 
 @pytest.mark.asyncio
-async def test_compress_metrics_success_with_savings_compression():
+async def test_compress_metrics_never_touches_the_savings_ledger():
+    """C0.6 / BUG-32: ledger rows are append-only; the compression job leaves them alone."""
     compressor = MagicMock()
     compressor.run = AsyncMock(return_value={"hours_compressed": 2, "raw_rows_pruned": 3, "hourly_rows_pruned": 4})
     compressor.refresh_namespace_cache = AsyncMock()
     savings_repo = MagicMock()
-    savings_repo.compress_to_hourly = AsyncMock(return_value=5)
-    savings_repo.prune_raw = AsyncMock()
 
     with patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=compressor):
         with patch("greenkube.core.db.get_db_manager", return_value=MagicMock()):
             with patch("greenkube.core.factory.get_savings_ledger_repository", return_value=savings_repo):
-                with patch(
-                    "greenkube.core.config.get_config",
-                    return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, METRICS_RAW_RETENTION_DAYS=30),
-                ):
-                    await start_module.compress_metrics()
+                await start_module.compress_metrics()
 
     compressor.run.assert_awaited_once()
     compressor.refresh_namespace_cache.assert_awaited_once()
-    savings_repo.compress_to_hourly.assert_awaited_once_with(cutoff_hours=24)
-    savings_repo.prune_raw.assert_awaited_once_with(retention_days=30)
+    assert savings_repo.method_calls == []
 
 
 @pytest.mark.asyncio

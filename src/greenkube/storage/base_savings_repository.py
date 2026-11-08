@@ -1,75 +1,68 @@
 # src/greenkube/storage/base_savings_repository.py
-"""Abstract interface for the recommendation savings ledger repository."""
+"""Abstract interface for the recommendation savings ledger repository.
+
+The ledger is append-only: accrual rows are inserted once per recommendation,
+method and UTC slot and are never compressed, overwritten or deleted. The only
+mutation is the ``superseded`` flag set when a later outcome invalidates past
+accruals. Every read goes through the ``savings_accruals_v1`` view, which
+also exposes the ``legacy_compressed`` hourly rows left by releases before 0.4.
+"""
 
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
-from ..models.savings import SavingsLedgerRecord
+from ..models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord
+
+ATTRIBUTION_STREAM = "recommendation_savings"
+
+
+class AccrualWatermarkConflict(RuntimeError):
+    """Raised when another writer advanced the accrual watermark first."""
 
 
 class SavingsLedgerRepository(ABC):
     """Port for persisting and querying the recommendation savings ledger."""
 
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
     @abstractmethod
     async def save_records(self, records: List[SavingsLedgerRecord]) -> int:
-        """Persist a batch of raw period savings records.
+        """Append accrual rows, ignoring rows whose idempotency key already exists.
 
-        Args:
-            records: Records computed by SavingsAttributor for the current period.
+        The key is ``(recommendation_id, measurement_method, slot_start)`` for
+        grid accruals and ``(recommendation_id, period_start, period_end,
+        measurement_method)`` otherwise. Existing rows are never updated.
 
         Returns:
-            Number of rows inserted or updated.
+            Number of rows actually inserted.
         """
 
     @abstractmethod
-    async def get_cumulative_totals(
+    async def append_accruals(
         self,
+        records: List[SavingsLedgerRecord],
+        *,
         cluster_name: str,
-        group_by_method: bool = False,
-    ) -> Dict[str, Dict[str, float]]:
-        """Return cumulative savings grouped by recommendation_type.
+        stream: str,
+        expected_watermark: Optional[datetime],
+        new_watermark: datetime,
+    ) -> int:
+        """Atomically advance the accrual watermark and append ``records``.
 
-        Queries both the raw ledger and the hourly aggregates, combining
-        their totals so the caller always sees the full picture regardless
-        of compression state.
+        The watermark moves from ``expected_watermark`` (``None`` when absent)
+        to ``new_watermark`` with a compare-and-swap in the same transaction as
+        the inserts, so two writers can never both accrue the same slots.
 
-        Args:
-            cluster_name: Cluster identifier used for attribution.
-            group_by_method: When True, group by ``measurement_method``
-                (``prorated`` / ``measured``) instead of recommendation type.
+        Raises:
+            AccrualWatermarkConflict: another writer moved the watermark first;
+                nothing is written.
 
         Returns:
-            ``{group_key: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
-        """
-
-    @abstractmethod
-    async def get_window_totals(
-        self,
-        cluster_name: str,
-        start_time: datetime,
-        end_time: datetime,
-        namespace: str | None = None,
-        group_by_method: bool = False,
-    ) -> Dict[str, Dict[str, float]]:
-        """Return exact savings grouped by recommendation_type for a time window.
-
-        Queries both raw ledger rows and hourly aggregates so callers get the
-        same totals regardless of whether older savings records were compressed.
-        When ``namespace`` is provided, only savings attributed to that namespace
-        are included. An empty namespace string selects cluster-scoped rows that
-        have no namespace attribution.
-
-        Args:
-            cluster_name: Cluster identifier used for attribution.
-            start_time: Inclusive window start.
-            end_time: Inclusive window end.
-            namespace: Optional namespace filter.
-            group_by_method: When True, group by ``measurement_method`` instead
-                of recommendation type.
-
-        Returns:
-            ``{group_key: {"co2e_saved_grams": float, "cost_saved_dollars": float}}``
+            Number of rows inserted.
         """
 
     @abstractmethod
@@ -83,18 +76,102 @@ class SavingsLedgerRepository(ABC):
             Number of rows flagged.
         """
 
-    @abstractmethod
-    async def compress_to_hourly(self, cutoff_hours: int = 24) -> int:
-        """Aggregate raw records older than *cutoff_hours* into hourly buckets.
+    # ------------------------------------------------------------------
+    # Watermarks
+    # ------------------------------------------------------------------
 
-        Returns:
-            Number of hourly rows upserted.
+    @abstractmethod
+    async def get_accrual_watermark(self, cluster_name: str, stream: str = ATTRIBUTION_STREAM) -> Optional[datetime]:
+        """Return the end of the last accrued slot for a stream, or ``None``."""
+
+    @abstractmethod
+    async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
+        """Return the latest ``period_end`` already in the ledger per recommendation.
+
+        Accrual never starts before this instant, so rows written by earlier
+        releases (wall-clock periods, legacy hourly rows) are never re-accrued.
+        """
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def get_accrual_breakdown(
+        self,
+        cluster_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
+    ) -> List[SavingsAccrualTotal]:
+        """Return net accruals grouped by namespace, recommendation type and method.
+
+        Superseded rows are excluded. With a window, each row contributes the
+        share of its period that overlaps ``[start_time, end_time)``, so a
+        window that starts in the middle of a slot (or of a legacy hourly
+        bucket) includes that partial slot. Without a window, all rows count.
+        ``namespace=""`` selects cluster-scoped rows.
         """
 
     @abstractmethod
-    async def prune_raw(self, retention_days: int = 7) -> int:
-        """Delete raw records older than *retention_days*.
+    async def get_lifetime_counters(self, cluster_name: str) -> List[SavingsCounterTotal]:
+        """Return monotonic accrued / reversed totals per recommendation type and method.
 
-        Returns:
-            Number of rows deleted.
+        ``accrued`` sums positive accruals; ``reversed`` sums negative accruals
+        (negative declarations or signed projections) plus every superseded
+        accrual, so ``accrued - reversed`` is the net non-superseded total.
         """
+
+    @abstractmethod
+    async def has_legacy_compressed_rows(
+        self,
+        cluster_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        namespace: Optional[str] = None,
+    ) -> bool:
+        """Return True when legacy compressed hourly rows overlap the window.
+
+        ``namespace`` narrows the check like :meth:`get_accrual_breakdown`
+        (``""`` selects cluster-scoped rows).
+        """
+
+    # ------------------------------------------------------------------
+    # Convenience aggregations (backend independent)
+    # ------------------------------------------------------------------
+
+    async def get_window_totals(
+        self,
+        cluster_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        namespace: str | None = None,
+        group_by_method: bool = False,
+    ) -> Dict[str, Dict[str, float]]:
+        """Return net savings for a window grouped by recommendation type or method.
+
+        Rows partially inside the window contribute their overlapping share.
+        Grouping by type sums across methods and is therefore only meant for
+        callers that already filtered a single method; reporting code should
+        use :meth:`get_accrual_breakdown`.
+        """
+        breakdown = await self.get_accrual_breakdown(cluster_name, start_time, end_time, namespace=namespace)
+        return _group_totals(breakdown, group_by_method)
+
+    async def get_cumulative_totals(
+        self,
+        cluster_name: str,
+        group_by_method: bool = False,
+    ) -> Dict[str, Dict[str, float]]:
+        """Return all-time net savings grouped by recommendation type or method."""
+        breakdown = await self.get_accrual_breakdown(cluster_name)
+        return _group_totals(breakdown, group_by_method)
+
+
+def _group_totals(breakdown: List[SavingsAccrualTotal], group_by_method: bool) -> Dict[str, Dict[str, float]]:
+    result: Dict[str, Dict[str, float]] = defaultdict(lambda: {"co2e_saved_grams": 0.0, "cost_saved_dollars": 0.0})
+    for row in breakdown:
+        key = row.method if group_by_method else row.recommendation_type
+        result[key]["co2e_saved_grams"] += row.co2e_saved_grams
+        result[key]["cost_saved_dollars"] += row.cost_saved_dollars
+    return dict(result)

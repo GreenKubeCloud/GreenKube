@@ -72,10 +72,10 @@ When a binding page has more items, `has_more` is true and `next_cursor` can be 
 | `GET` | `/recommendations/ignored` | List ignored records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/applied` | List applied records, optionally filtered by `namespace`. |
 | `GET` | `/recommendations/history` | List records by required ISO-8601 `start`/`end`, optional `type`, and optional `namespace`. |
-| `GET` | `/recommendations/savings` | Read realized savings (`last`, `namespace`). |
+| `GET` | `/recommendations/savings` | Read `projected_annual`, `run_rate_annual` and `realized_to_date` savings blocks (`last`, `namespace`); `503` when the ledger is unavailable. |
 | `GET` | `/recommendations/{rec_id}` | Read a recommendation record. |
 | `GET` | `/recommendations/{rec_id}/events` | Read its lifecycle audit trail. |
-| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. Only `active` or `pr_open` records can be applied; any other status returns `409`. |
+| `PATCH` | `/recommendations/{rec_id}/apply` | Record an applied change and verification baseline. Only `active` or `pr_open` records can be applied; any other status returns `409`. Optional user-declared savings are validated (`422`) and accrued as `user_declared`; the projection stays server-side (`503` if the declaration cannot be stored after the apply). |
 | `POST` | `/recommendations/{rec_id}/remeasure` | Start a new fixed-horizon measurement of an applied change whose last measurement was `not_realized` (`verification_status=failed`) or `inconclusive`. Optional body `{"reason": "..."}`. The other members of its attribution group (CPU and memory of one change) in the same state are re-measured with it over the same window. Returns `202` with the record (`verifying`); `409` for any other state (including a sibling already re-measured with its group), `404` when unknown. |
 | `POST` | `/recommendations/{rec_id}/rollback-review/dismiss` | Dismiss a false-positive `rollback_review` with a required, non-blank `{"reason": "..."}`: the record, and the other members of its attribution group still in review, return to `applied` and are measured again. `422` for a missing or blank reason, `409` outside `rollback_review`, `404` when unknown. |
 | `PATCH` | `/recommendations/{rec_id}/ignore` | Ignore an `active`, `stale` or `expired` recommendation. `409` for an open PR or an applied change. |

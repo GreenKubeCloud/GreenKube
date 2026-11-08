@@ -42,6 +42,18 @@ from greenkube.models.metrics import (
     RecommendationType,
 )
 from greenkube.models.node import NodeInfo
+from greenkube.models.savings import SavingsAccrualTotal, SavingsCounterTotal
+
+
+def _sample(output: str, name: str, **labels: str) -> float | None:
+    """Return the value of the first exposed sample matching ``name`` and ``labels``."""
+    from prometheus_client.parser import text_string_to_metric_families
+
+    for family in text_string_to_metric_families(output):
+        for sample in family.samples:
+            if sample.name == name and all(sample.labels.get(k) == v for k, v in labels.items()):
+                return sample.value
+    return None
 
 
 @pytest.fixture
@@ -1157,11 +1169,26 @@ class TestRealizedSavingsMetrics:
     async def test_refresh_metrics_from_db_exposes_exact_dashboard_savings_windows(
         self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
     ):
-        """Verify exact DB-backed savings windows are exported without Prometheus increase()."""
+        """Windowed savings come from one ledger query per window; realized gauges show measured only."""
         mock_savings_repo = AsyncMock()
-        mock_savings_repo.get_cumulative_totals = AsyncMock(return_value={})
-        mock_savings_repo.get_window_totals = AsyncMock(
-            return_value={"RIGHTSIZING_CPU": {"co2e_saved_grams": 2.5, "cost_saved_dollars": 0.75}}
+        mock_savings_repo.get_lifetime_counters = AsyncMock(return_value=[])
+        mock_savings_repo.get_accrual_breakdown = AsyncMock(
+            return_value=[
+                SavingsAccrualTotal(
+                    namespace="prod",
+                    recommendation_type="RIGHTSIZING_CPU",
+                    method="measured",
+                    co2e_saved_grams=2.5,
+                    cost_saved_dollars=0.75,
+                ),
+                SavingsAccrualTotal(
+                    namespace="prod",
+                    recommendation_type="RIGHTSIZING_CPU",
+                    method="projected",
+                    co2e_saved_grams=40.0,
+                    cost_saved_dollars=4.0,
+                ),
+            ]
         )
 
         await refresh_metrics_from_db(
@@ -1175,12 +1202,129 @@ class TestRealizedSavingsMetrics:
         from prometheus_client import generate_latest
 
         output = generate_latest(REGISTRY).decode("utf-8")
-        assert "greenkube_dashboard_savings_co2e_grams_total" in output
-        assert 'recommendation_type="all"' in output
-        assert 'recommendation_type="RIGHTSIZING_CPU"' in output
-        assert 'namespace="__all__"' in output
+        realized = _sample(
+            output,
+            "greenkube_dashboard_savings_co2e_grams_total",
+            window="7d",
+            namespace="__all__",
+            recommendation_type="all",
+        )
+        assert realized == 2.5
         assert 'namespace="_cluster"' in output
-        assert 'window="604800s"' in output
-        assert "} 2.5" in output
+        assert 'namespace="prod"' in output
         assert 'window="31536000s"' in output
-        assert mock_savings_repo.get_window_totals.await_count == 14
+        projected = _sample(
+            output,
+            "greenkube_dashboard_savings_accrued_co2e_grams",
+            method="projected",
+            namespace="__all__",
+            recommendation_type="all",
+            window="7d",
+        )
+        assert projected == 40.0
+        assert mock_savings_repo.get_accrual_breakdown.await_count == 7
+
+    @pytest.mark.asyncio
+    async def test_savings_ledger_counters_are_exposed_as_monotonic_counters(
+        self, mock_combined_metrics_repo, mock_node_repo, mock_reco_repo
+    ):
+        """C0.14: *_total savings series are counters, split by method, with separate reversals."""
+        mock_savings_repo = AsyncMock()
+        mock_savings_repo.get_accrual_breakdown = AsyncMock(return_value=[])
+        mock_savings_repo.get_lifetime_counters = AsyncMock(
+            return_value=[
+                SavingsCounterTotal(
+                    recommendation_type="RIGHTSIZING_CPU",
+                    method="measured",
+                    accrued_co2e_grams=30.0,
+                    accrued_cost_dollars=3.0,
+                    reversed_co2e_grams=10.0,
+                    reversed_cost_dollars=1.0,
+                ),
+                SavingsCounterTotal(recommendation_type="RIGHTSIZING_CPU", method="projected", accrued_co2e_grams=60.0),
+            ]
+        )
+
+        await refresh_metrics_from_db(
+            mock_combined_metrics_repo,
+            mock_node_repo,
+            mock_reco_repo,
+            savings_repo=mock_savings_repo,
+            summary_repo=None,
+        )
+
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert "# TYPE greenkube_co2e_savings_attributed_grams_total counter" in output
+        assert "# TYPE greenkube_co2e_savings_reversed_grams_total counter" in output
+        labels = {"method": "measured", "recommendation_type": "RIGHTSIZING_CPU"}
+        assert _sample(output, "greenkube_co2e_savings_attributed_grams_total", **labels) == 30.0
+        assert _sample(output, "greenkube_co2e_savings_reversed_grams_total", **labels) == 10.0
+        assert _sample(output, "greenkube_savings_measured_vs_projected_ratio") == 0.25
+
+    def test_savings_rate_gauges_exclude_failed_outcomes(self):
+        """BUG-40: annual projected gauges ignore rollback_review, not_realized and inconclusive records."""
+        records = [
+            RecommendationRecord(
+                id=index,
+                type=RecommendationType.RIGHTSIZING_CPU,
+                description=f"rec {index}",
+                namespace="prod",
+                status=status,
+                verification_status=verification_status,
+                carbon_saved_co2e_grams=100.0,
+                cost_saved=10.0,
+                measured_co2e_saved_grams=measured,
+                measured_cost_saved=measured,
+            )
+            for index, status, verification_status, measured in (
+                (1, RecommendationStatus.APPLIED, "pending", None),
+                (2, RecommendationStatus.APPLIED, "failed", None),
+                (3, RecommendationStatus.APPLIED, "inconclusive", None),
+                (4, RecommendationStatus.ROLLBACK_REVIEW, "failed", None),
+                (5, RecommendationStatus.VERIFIED, "passed", 70.0),
+            )
+        ]
+        update_realized_savings_metrics(records)
+        from prometheus_client import generate_latest
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        assert _sample(output, "greenkube_cluster_co2e_saved_grams_total") == 100.0
+        assert _sample(output, "greenkube_savings_run_rate_annual_co2e_grams", method="projected") == 100.0
+        assert _sample(output, "greenkube_savings_run_rate_annual_co2e_grams", method="measured") == 70.0
+        implemented = _sample(
+            output, "greenkube_recommendations_implemented_total", namespace="__all__", type="RIGHTSIZING_CPU"
+        )
+        assert implemented == 5.0
+
+
+@pytest.mark.asyncio
+async def test_savings_refresh_is_throttled_between_scrapes(
+    mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, monkeypatch
+):
+    """Scrapes within the TTL reuse the savings gauges instead of rescanning the ledger."""
+    from greenkube.api import metrics_endpoint
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(metrics_endpoint.time, "monotonic", lambda: clock["now"])
+    savings_repo = AsyncMock()
+    savings_repo.get_lifetime_counters = AsyncMock(side_effect=[RuntimeError("down"), [], []])
+    savings_repo.get_accrual_breakdown = AsyncMock(return_value=[])
+    mock_reco_repo.get_applied_recommendations = AsyncMock(return_value=[])
+
+    async def scrape():
+        await refresh_metrics_from_db(
+            mock_combined_metrics_repo, mock_node_repo, mock_reco_repo, savings_repo=savings_repo
+        )
+
+    await scrape()  # the ledger read fails: nothing is cached
+    await scrape()  # retried, succeeds and is cached
+    clock["now"] += metrics_endpoint.SAVINGS_REFRESH_TTL_SECONDS - 1
+    await scrape()  # within the TTL: neither the ledger nor applied records are read
+    assert savings_repo.get_lifetime_counters.await_count == 2
+    assert mock_reco_repo.get_applied_recommendations.await_count == 1
+    clock["now"] += 1
+    await scrape()
+    assert savings_repo.get_lifetime_counters.await_count == 3
+    assert mock_reco_repo.get_applied_recommendations.await_count == 2

@@ -91,3 +91,14 @@ def mock_k8s_discovery(monkeypatch):
     except Exception:
         # If discovery module isn't importable, ignore — tests will patch more specifically.
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_savings_metrics_refresh_cache():
+    """Make every test start with a scrape that reloads the savings gauges."""
+    import sys
+
+    module = sys.modules.get("greenkube.api.metrics_endpoint")
+    if module is not None:
+        module.reset_savings_refresh_cache()
+    yield

@@ -202,37 +202,37 @@ async def scheduled_write_metrics():
 
 
 async def attribute_recommendation_savings() -> None:
-    """Attribute prorated savings for all applied recommendations to the ledger."""
+    """Accrue savings of applied recommendations on the fixed UTC ledger grid.
+
+    Every complete hour slot since the stored watermark is accrued exactly once,
+    so restarts and downtime neither double count nor lose savings.
+    """
     logger.info("--- Starting savings attribution task ---")
     try:
-        from ..core.config import get_config as _cfg
         from ..core.factory import get_recommendation_repository as _reco_repo
         from ..core.factory import get_savings_ledger_repository as _savings_repo
-        from ..core.savings_attributor import SavingsAttributor
+        from ..core.savings_attributor import SavingsAttributor, savings_cluster_name
 
-        cfg = _cfg()
-        # Derive period_seconds from PROMETHEUS_QUERY_RANGE_STEP
-        step = cfg.PROMETHEUS_QUERY_RANGE_STEP or "5m"
-        unit = step[-1]
-        value = int(step[:-1])
-        period_map = {"s": 1, "m": 60, "h": 3600}
-        period_seconds = value * period_map.get(unit, 60)
-
-        reco_repo = _reco_repo()
-        savings_repo = _savings_repo()
-        applied = await reco_repo.get_applied_recommendations()
-
-        cluster = cfg.CLUSTER_NAME or "default"
-        attributor = SavingsAttributor(savings_repo=savings_repo, cluster_name=cluster)
-        count = await attributor.attribute_period(applied, period_seconds=period_seconds)
-        logger.info("Savings attribution complete: %d records written.", count)
+        applied = await _reco_repo().get_applied_recommendations()
+        attributor = SavingsAttributor(savings_repo=_savings_repo(), cluster_name=savings_cluster_name())
+        result = await attributor.accrue(applied)
+        logger.info(
+            "Savings attribution complete: %d slot(s), %d row(s) written, %d error(s).",
+            result.slots,
+            result.written,
+            result.errors,
+        )
     except Exception as e:
         logger.error("Savings attribution task failed: %s", e)
     logger.info("--- Finished savings attribution task ---")
 
 
 async def compress_metrics() -> None:
-    """Compress old raw metrics into hourly aggregates and prune stale data."""
+    """Compress old raw metrics into hourly aggregates and prune stale data.
+
+    The savings ledger is append-only and is never compressed or pruned here:
+    its hourly rollups are read-side views (roadmap C0.6).
+    """
     logger.info("--- Starting metrics compression task ---")
     try:
         from ..core.db import get_db_manager
@@ -248,18 +248,6 @@ async def compress_metrics() -> None:
             stats["raw_rows_pruned"],
             stats["hourly_rows_pruned"],
         )
-        # Compress savings ledger too
-        try:
-            from ..core.config import get_config as _cfg
-            from ..core.factory import get_savings_ledger_repository as _savings_repo
-
-            savings_repo = _savings_repo()
-            cfg_c = _cfg()
-            compressed = await savings_repo.compress_to_hourly(cutoff_hours=cfg_c.METRICS_COMPRESSION_AGE_HOURS)
-            await savings_repo.prune_raw(retention_days=cfg_c.METRICS_RAW_RETENTION_DAYS)
-            logger.info("Savings ledger compression: %d hourly rows upserted.", compressed)
-        except Exception as e_s:
-            logger.error("Savings ledger compression failed: %s", e_s)
     except Exception as e:
         logger.error("Metrics compression failed: %s", e)
     logger.info("--- Finished metrics compression task ---")

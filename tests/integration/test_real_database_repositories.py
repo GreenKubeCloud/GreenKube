@@ -910,7 +910,8 @@ async def test_summary_and_timeseries_cache_repositories_upsert(real_database: R
 
 @pytest.mark.asyncio
 @pytest.mark.database
-async def test_savings_ledger_repository_keeps_totals_across_compression(real_database: RealDatabase):
+async def test_savings_ledger_repository_keeps_every_row(real_database: RealDatabase):
+    """The ledger is append-only: old rows stay readable and totals never shrink (C0.6, BUG-32)."""
     repo = real_database.savings_repository()
     now = datetime.now(timezone.utc).replace(microsecond=0)
     records = [
@@ -921,7 +922,7 @@ async def test_savings_ledger_repository_keeps_totals_across_compression(real_da
             recommendation_type="RIGHTSIZING_CPU",
             co2e_saved_grams=4.0,
             cost_saved_dollars=1.0,
-            timestamp=now - timedelta(hours=30),
+            timestamp=now - timedelta(days=30),
         ),
         SavingsLedgerRecord(
             recommendation_id=2,
@@ -935,16 +936,13 @@ async def test_savings_ledger_repository_keeps_totals_across_compression(real_da
     ]
 
     assert await repo.save_records(records) == 2
+    assert await repo.save_records(records) == 0
     totals = await repo.get_cumulative_totals("contract-cluster")
     assert totals["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(10.0)
 
-    assert await repo.compress_to_hourly(cutoff_hours=24) >= 1
-    compressed_totals = await repo.get_cumulative_totals("contract-cluster")
-    assert compressed_totals["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(10.0)
-
     window_totals = await repo.get_window_totals(
         "contract-cluster",
-        now - timedelta(hours=48),
+        now - timedelta(days=31),
         now,
         namespace="prod",
     )
