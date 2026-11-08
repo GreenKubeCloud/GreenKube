@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
@@ -74,6 +75,17 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
     AutomationErrorCode.ROLLBACK_CONFLICT: (409, "The original plan or current source changed."),
 }
 _CANCELLABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
+_MAX_PUBLIC_WARNINGS = 20
+_MAX_PUBLIC_WARNING_CHARS = 300
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
+_URL_CREDENTIALS = re.compile(r"(?P<scheme>\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
+_URL_QUERY = re.compile(r"(?P<url>\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s?#]+)\?[^\s#]*")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?P<key>\b(?:token|password|passwd|secret|api[_-]?key|access[_-]?token|authorization|credentials?)\b)"
+    r"(?P<separator>\s*[=:]\s*)[^\s,;]+",
+    re.IGNORECASE,
+)
+_PROVIDER_TOKEN = re.compile(r"\b(?:ghp|gho|ghs|ghu|ghr|github_pat|glpat)_[A-Za-z0-9_]{8,}\b")
 
 
 @router.post(
@@ -214,9 +226,49 @@ async def cancel_automation_plan(
     return _plan_response(cancelled)
 
 
+@router.delete(
+    "/automation/plans/{plan_id}",
+    status_code=204,
+    response_class=Response,
+    responses=_ERROR_RESPONSES,
+)
+async def delete_automation_plan(
+    plan_id: str,
+    http_request: Request,
+    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+) -> Response:
+    """Cancel an unapproved preview: a DRAFT or VALIDATED plan becomes SUPERSEDED.
+
+    Called by the UI when a preview is dismissed so re-opening it never returns 409.
+    Deleting an already superseded plan is a no-op; any other status returns 409.
+    """
+    if service is None:
+        return _service_unavailable(
+            "plan_service_unavailable", "Server-side automation plan service is not configured."
+        )
+    cancel = getattr(service, "cancel_plan", None)
+    if not callable(cancel):
+        return _service_unavailable("plan_cancel_unavailable", "Server-side plan cancellation is not configured.")
+    try:
+        cancelled = await cast(Any, cancel)(plan_id, actor=get_authenticated_actor(http_request))
+    except AutomationPlanError as error:
+        if error.code is AutomationErrorCode.PLAN_STALE:
+            return _error_response(
+                409,
+                AutomationErrorCode.PLAN_STALE.value,
+                "Only draft or validated plans can be cancelled.",
+            )
+        return _domain_error_response(error)
+    if cancelled is None:
+        return _error_response(404, "plan_not_found", "Automation plan not found.")
+    return Response(status_code=204)
+
+
 def _plan_response(plan: Plan, operation: Operation | None = None) -> AutomationPlanResponse:
     file_plan = plan.file_plan
-    validation = file_plan.validation if file_plan is not None else None
+    # Retention may have pruned file contents; the summary keeps paths and validation (D2).
+    rendered = file_plan if file_plan is not None else plan.file_plan_summary
+    validation = rendered.validation if rendered is not None else None
     return AutomationPlanResponse(
         plan_id=plan.plan_id,
         recommendation_ids=plan.recommendation_ids,
@@ -230,7 +282,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
             controller=f"{plan.source.controller_kind.value}/{plan.source.controller_name}",
             repo=_safe_repository_url(plan.source.repo_url),
             base_branch=plan.source.ref,
-            base_revision=file_plan.base_revision if file_plan is not None else None,
+            base_revision=rendered.base_revision if rendered is not None else None,
             path=plan.source.path,
             renderer=plan.source.renderer,
         ),
@@ -240,14 +292,14 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
                 operation=edit.operation,
                 original_sha=edit.original_sha,
             )
-            for edit in file_plan.files
+            for edit in rendered.files
         ]
-        if file_plan is not None
+        if rendered is not None
         else [],
         diff=file_plan.diff if file_plan is not None else None,
         rendered_diff=file_plan.rendered_diff if file_plan is not None else None,
-        warnings=["render-warning"] * min(len(file_plan.warnings), 20) if file_plan is not None else [],
-        warnings_truncated=bool(file_plan and len(file_plan.warnings) > 20),
+        warnings=_public_warnings(rendered.warnings) if rendered is not None else [],
+        warnings_truncated=bool(rendered is not None and len(rendered.warnings) > _MAX_PUBLIC_WARNINGS),
         validation=(
             AutomationPlanValidationResponse(
                 passed=validation.passed,
@@ -263,6 +315,28 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         created_at=plan.created_at,
         expires_at=plan.expires_at,
     )
+
+
+def _public_warnings(warnings: list[str]) -> list[str]:
+    """Return renderer warnings with credentials redacted and length bounded (D12, BUG-56).
+
+    Renderer warnings name repository paths and manifest keys, never values; URL
+    credentials, query strings and ``secret=value`` pairs are still redacted defensively.
+    """
+    public: list[str] = []
+    for warning in warnings[:_MAX_PUBLIC_WARNINGS]:
+        if not isinstance(warning, str):
+            continue
+        text = _CONTROL_CHARACTERS.sub(" ", warning)
+        text = _URL_CREDENTIALS.sub(r"\g<scheme>[redacted]@", text)
+        text = _URL_QUERY.sub(r"\g<url>?[redacted]", text)
+        text = _SECRET_ASSIGNMENT.sub(r"\g<key>\g<separator>[redacted]", text)
+        text = _PROVIDER_TOKEN.sub("[redacted]", text).strip()
+        if len(text) > _MAX_PUBLIC_WARNING_CHARS:
+            text = text[: _MAX_PUBLIC_WARNING_CHARS - 3] + "..."
+        if text:
+            public.append(text)
+    return public
 
 
 def _safe_repository_url(value: str) -> str:

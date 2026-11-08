@@ -1044,6 +1044,32 @@ async def test_approval_accepts_unchanged_current_base_revision(monkeypatch: pyt
     assert revision_resolver.lookups == [source.id]
 
 
+class MovedTouchedFileResolver(FakeGitBlobResolver):
+    """The planned manifest itself changed at the moved branch head."""
+
+    async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
+        if revision == BASE_REVISION:
+            return await super().get_blob_file(source, path, revision)
+        self.lookups.append((source.provider_id, path, revision))
+        return GitBlobFile(path=path, content=DEPLOYMENT + "# edited\n", blob_sha="9" * 40)
+
+
+@pytest.mark.asyncio
+async def test_approval_accepts_a_moved_head_when_touched_files_are_unchanged(monkeypatch: pytest.MonkeyPatch):
+    """D7 / BUG-49: an unrelated commit on the source branch must not stale an approval."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    blob_resolver = FakeGitBlobResolver()
+    service = _service(repository, blob_resolver, revision_resolver=FakePlanRevisionResolver("c" * 40))
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+
+    approved = await service.approve_plan(plan.plan_id, plan.digest)
+
+    assert approved.status is PlanStatus.APPROVED
+    assert ("github-main", "apps/payments/deployment.yaml", "c" * 40) in blob_resolver.lookups
+
+
 @pytest.mark.asyncio
 async def test_approval_marks_plan_stale_when_current_base_revision_moved(
     monkeypatch: pytest.MonkeyPatch,
@@ -1051,7 +1077,7 @@ async def test_approval_marks_plan_stale_when_current_base_revision_moved(
     repository = MemoryPlanRepository()
     source = _source()
     revision_resolver = FakePlanRevisionResolver("c" * 40)
-    service = _service(repository, revision_resolver=revision_resolver)
+    service = _service(repository, MovedTouchedFileResolver(), revision_resolver=revision_resolver)
     plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
     assert plan.digest is not None
 

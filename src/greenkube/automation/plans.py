@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -64,9 +64,13 @@ _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanS
 _STALEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _BUSY_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED, PlanStatus.SYNCED})
+_EXPIRY_BATCH_SIZE = 500
 _REPLANABLE_STATUSES = frozenset(
     {PlanStatus.CLOSED, PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
 )
+# Unapproved previews a newer request for the same workload replaces instead of 409 (D6, BUG-48).
+SUPERSEDABLE_PREVIEW_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED})
+_CANCELLABLE_PREVIEW_STATUSES = SUPERSEDABLE_PREVIEW_STATUSES
 
 
 class AutomationPlanError(RuntimeError):
@@ -373,8 +377,8 @@ class AutomationPlanService:
                 and existing.expires_at is not None
                 and _as_utc(existing.expires_at) <= now
             ):
-                await self._transition(existing, PlanStatus.STALE)
-                raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
+                # A fresh request after the previous identical preview expired re-plans instead of 409.
+                existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
             if existing.status in _REPLANABLE_STATUSES:
                 plan = await self._next_attempt_plan(plan)
             elif existing.status not in _REPLACEABLE_STATUSES | {PlanStatus.APPLYING, PlanStatus.PR_OPEN}:
@@ -385,10 +389,7 @@ class AutomationPlanService:
             else:
                 return existing
 
-        previous_plans = []
-        for previous_status in _BUSY_STATUSES | _REPLACEABLE_STATUSES:
-            previous_plans.extend(await self.repository.list_plans(status=previous_status))
-        previous_plans = [candidate for candidate in previous_plans if _same_workload_binding(candidate.source, source)]
+        previous_plans = await self._workload_plans(source, _BUSY_STATUSES | _REPLACEABLE_STATUSES)
         previous_plans.sort(key=lambda candidate: (candidate.created_at, candidate.plan_id))
         busy = [item for item in previous_plans if item.status in _BUSY_STATUSES]
         if busy:
@@ -400,7 +401,20 @@ class AutomationPlanService:
         if not persist:
             return plan
 
-        saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        # Compare-and-set insert: a concurrent request for the same deterministic plan ID must
+        # never overwrite a plan that already advanced (D12, BUG-56).
+        insert_if_absent = getattr(self.repository, "save_plan_if_absent", None)
+        if callable(insert_if_absent):
+            saved = await cast(Any, insert_if_absent)(plan, policy_result=policy_result, actor=actor)
+        else:
+            saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
+        if saved.digest != plan.digest or saved.source.id != plan.source.id:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                "plan ID was concurrently bound to a different source revision or digest; retry",
+            )
+        if saved.status is not plan.status:
+            return saved
         for previous in previous_plans:
             if previous.plan_id != saved.plan_id and previous.status in _REPLACEABLE_STATUSES:
                 await self._transition(previous, PlanStatus.SUPERSEDED)
@@ -569,12 +583,11 @@ class AutomationPlanService:
                     "the existing rollback plan is no longer actionable at this source revision",
                 )
             return existing
+        # Workload-scoped read (idx_automation_plans_workload) instead of every plan (D15, BUG-57).
         busy = [
             candidate
-            for candidate in await self.repository.list_plans()
+            for candidate in await self._workload_plans(source, _BUSY_STATUSES)
             if candidate.plan_id != original_plan.plan_id
-            and _same_workload_binding(candidate.source, source)
-            and candidate.status in _BUSY_STATUSES
         ]
         if busy:
             raise AutomationPlanError(
@@ -639,7 +652,9 @@ class AutomationPlanService:
                 "only a plan with successful render validation and a matching digest can be approved",
             )
         current_revision = await self._resolve_current_revision(plan.source)
-        if current_revision.lower() != plan.file_plan.base_revision.lower():
+        if current_revision.lower() != plan.file_plan.base_revision.lower() and not await self._touched_files_unchanged(
+            plan, current_revision
+        ):
             if plan.status in _STALEABLE_STATUSES:
                 await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="source_changed")
             raise AutomationPlanError(
@@ -705,19 +720,80 @@ class AutomationPlanService:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
-    async def expire_due_plans(self, *, now: datetime | None = None) -> list[Plan]:
+    async def expire_due_plans(self, *, now: datetime | None = None, limit: int = _EXPIRY_BATCH_SIZE) -> list[Plan]:
+        """Mark at most ``limit`` plans whose TTL elapsed as STALE, oldest expiry first.
+
+        The repository selects only expired rows instead of loading every live plan on each
+        sweep (D15, BUG-57); the next sweep picks up any remainder. PostgreSQL serves the range
+        from ``idx_automation_plans_status_expiry``; SQLite compares ``julianday(expires_at)``,
+        so it uses only the status prefix of that index, and the batch limit bounds the work.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("plan expiry limit must be a positive integer")
         current_time = _as_utc(now if now is not None else self.clock())
+        statuses = sorted(_EXPIREABLE_STATUSES, key=lambda status: status.value)
+        expired_reader = getattr(self.repository, "list_expired_plans", None)
+        if callable(expired_reader):
+            candidates = await cast(Any, expired_reader)(now=current_time, statuses=statuses, limit=limit)
+        else:
+            candidates = [plan for status in statuses for plan in await self.repository.list_plans(status=status)]
+        due = sorted(
+            (
+                plan
+                for plan in candidates
+                if plan.status in _EXPIREABLE_STATUSES
+                and plan.expires_at is not None
+                and _as_utc(plan.expires_at) <= current_time
+            ),
+            key=lambda item: (_as_utc(cast(datetime, item.expires_at)), item.plan_id),
+        )[:limit]
         expired: list[Plan] = []
-        for status in _EXPIREABLE_STATUSES:
-            for plan in await self.repository.list_plans(status=status):
-                if plan.expires_at is None or _as_utc(plan.expires_at) > current_time:
-                    continue
+        for plan in due:
+            try:
                 transitioned = await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
-                expired.append(transitioned)
+            except AutomationPlanError:
+                # A concurrent approval or replica already moved the plan; it is no longer due.
+                continue
+            expired.append(transitioned)
         return sorted(expired, key=lambda item: (item.created_at, item.plan_id))
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         return await self.repository.prune_automation_history(cutoff=cutoff)
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview: a DRAFT/VALIDATED plan becomes SUPERSEDED (D6)."""
+        plan = await self.repository.get_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is PlanStatus.SUPERSEDED:
+            return plan
+        if plan.status not in _CANCELLABLE_PREVIEW_STATUSES:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"plan cannot be cancelled from status {plan.status.value}",
+            )
+        return await self._transition(plan, PlanStatus.SUPERSEDED, actor=actor, reason_code="cancelled_by_user")
+
+    async def _workload_plans(self, source: WorkloadSource, statuses: frozenset[PlanStatus]) -> list[Plan]:
+        ordered_statuses = sorted(statuses, key=lambda status: status.value)
+        reader = getattr(self.repository, "list_plans_for_workload", None)
+        if callable(reader):
+            plans = await cast(Any, reader)(
+                cluster=source.cluster,
+                namespace=source.namespace,
+                workload_kind=source.workload_kind,
+                workload_name=source.workload_name,
+                statuses=ordered_statuses,
+            )
+        else:
+            plans = []
+            for status in ordered_statuses:
+                plans.extend(await self.repository.list_plans(status=status))
+        return [
+            candidate
+            for candidate in plans
+            if candidate.status in statuses and _same_workload_binding(candidate.source, source)
+        ]
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         plan = await self.repository.get_plan(plan_id)
@@ -794,6 +870,39 @@ class AutomationPlanService:
                 f"{path!r} is missing from the immutable base revision {revision}",
             )
         return git_file
+
+    async def _touched_files_unchanged(self, plan: Plan, revision: str) -> bool:
+        """Whether every file the plan edits is byte-identical at ``revision`` (D7, BUG-49).
+
+        Unrelated commits on a busy branch then no longer stale an approved plan; only a
+        change to a touched file requires re-rendering.
+        """
+        file_plan = plan.file_plan
+        resolver = self.git_blob_resolver
+        if file_plan is None or resolver is None:
+            return False
+        for edit in file_plan.files:
+            try:
+                git_file = await resolver.get_blob_file(plan.source, edit.path, revision)
+            except AutomationPlanError:
+                raise
+            except Exception as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PROVIDER_NOT_READY,
+                    f"could not resolve Git blob metadata for {edit.path!r} at {revision}",
+                ) from exc
+            if edit.operation == "create":
+                if git_file is not None:
+                    return False
+                continue
+            if (
+                git_file is None
+                or git_file.path != edit.path
+                or edit.original_sha is None
+                or git_file.blob_sha.lower() != edit.original_sha.lower()
+            ):
+                return False
+        return True
 
     async def _resolve_current_revision(self, source: WorkloadSource) -> str:
         resolver = self.revision_resolver

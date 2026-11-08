@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from greenkube.api.app import create_app
 from greenkube.api.dependencies import (
     get_automation_plan_service,
+    get_gitops_binding_repository,
     get_pull_request_repository,
     get_recommendation_repository,
 )
@@ -39,6 +40,7 @@ from greenkube.models.metrics import (
     RecommendationRecord,
     RecommendationType,
 )
+from greenkube.storage.base_gitops_repository import GitOpsProviderConfig
 from greenkube.storage.sqlite.pull_request_repository import SQLitePullRequestRepository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
@@ -489,3 +491,51 @@ class TestApplyPrEndpoint:
         assert "discovery" in body
         assert "renderer" in body
         assert isinstance(body["providers"], list)
+
+    async def test_token_configured_requires_a_resolvable_provider_secret(
+        self, automation_client, tmp_path, monkeypatch
+    ):
+        """D12 / BUG-56: token_configured used to mean "a plan service exists"."""
+        client, _, _, app = automation_client
+        monkeypatch.setenv("GITOPS_SECRET_MOUNT", str(tmp_path))
+        (tmp_path / "github-token").mkdir()
+        (tmp_path / "github-token" / "token").write_text("ghp_example\n")
+        (tmp_path / "gitea-token").mkdir()
+        (tmp_path / "gitea-token" / "token").write_text("   \n")
+
+        class Providers:
+            def __init__(self, configs):
+                self.configs = configs
+
+            async def list_provider_configs(self, *, enabled_only: bool = False):
+                return self.configs
+
+        def provider(provider_id: str, secret_name: str | None, *, enabled: bool = True) -> GitOpsProviderConfig:
+            return GitOpsProviderConfig(
+                id=provider_id,
+                provider_type="github",
+                enabled=enabled,
+                secret_name=secret_name,
+                secret_key="token" if secret_name else None,
+            )
+
+        app.dependency_overrides[get_automation_plan_service] = lambda: _FakePlanApiService(_plan(1))
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("blank", "gitea-token"), provider("missing", "absent-token"), provider("none", None)]
+        )
+        unresolved = client.get("/api/v1/automation/status").json()
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("disabled", "github-token", enabled=False)]
+        )
+        disabled = client.get("/api/v1/automation/status").json()
+        app.dependency_overrides[get_gitops_binding_repository] = lambda: Providers(
+            [provider("github-main", "github-token")]
+        )
+        resolved = client.get("/api/v1/automation/status").json()
+
+        assert unresolved["token_configured"] is False
+        assert [item["token_configured"] for item in unresolved["providers"]] == [False, False, False]
+        assert disabled["token_configured"] is False
+        assert disabled["providers"][0]["token_configured"] is True
+        assert resolved["token_configured"] is True
+        assert "ghp_example" not in json.dumps(resolved)

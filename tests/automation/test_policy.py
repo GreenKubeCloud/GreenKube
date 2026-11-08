@@ -421,3 +421,41 @@ async def test_missing_plan_history_fails_closed_for_budget_and_cooldown():
         "active_plan",
         "cooldown",
     }
+
+
+class _RecordHistory(_PlanHistory):
+    """Repository exposing the batched workload record read used by cooldowns (D15)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.record_reads: list[dict[str, Any]] = []
+
+    async def list_plan_records_for_workload(self, **identity: Any) -> list[AutomationPlanRecord]:
+        self.record_reads.append(identity)
+        return [
+            AutomationPlanRecord(plan=plan, updated_at=self.updated_at.get(plan.plan_id))
+            for plan in self.plans
+            if plan.status in identity["statuses"]
+        ]
+
+    async def get_plan_record(self, plan_id: str) -> AutomationPlanRecord | None:
+        raise AssertionError("cooldowns must not read plan records one by one")
+
+
+@pytest.mark.asyncio
+async def test_cooldown_reads_workload_history_with_one_batched_record_query():
+    source = _source()
+    merged_plan = _plan(source, plan_id="merged-plan", status=PlanStatus.MERGED)
+    synced_plan = _plan(source, plan_id="synced-plan", status=PlanStatus.SYNCED)
+    history = _RecordHistory(
+        (merged_plan, synced_plan),
+        updated_at={"merged-plan": _NOW - timedelta(hours=5), "synced-plan": _NOW - timedelta(minutes=10)},
+    )
+
+    result = await _evaluator(history=history).evaluate([_recommendation()], source)
+
+    assert len(history.record_reads) == 1
+    assert history.record_reads[0]["workload_name"] == source.workload_name
+    assert AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE in _codes(result)
+    cooldown = next(check for check in result.checks if check.gate == "cooldown")
+    assert cooldown.state is PolicyCheckState.REJECTED

@@ -50,8 +50,8 @@ image:
 | `config.api.enabled` | `true` | Serve the REST API and the SPA frontend. |
 | `config.api.host` | `0.0.0.0` | API bind address inside the container. |
 | `config.api.port` | `8000` | API/UI container and Service port. |
-| `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health`). |
-| `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`). |
+| `config.api.livenessProbe` | enabled | HTTP liveness probe settings (`path: /api/v1/health/heartbeat`, which answers while the process is responsive and does not depend on the automation loop). |
+| `config.api.readinessProbe` | enabled | HTTP readiness probe settings (`path: /api/v1/health`, which returns `503` while a supervised in-process automation loop is down or stale). |
 | `config.corsOrigins` | `""` | Comma-separated allowed CORS origins (`CORS_ORIGINS`). Empty (default) keeps the API same-origin. Credentials are allowed only for explicitly listed origins; `*` allows any origin without credentials. |
 | `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
@@ -262,7 +262,7 @@ The local Bubblewrap backend is used only when no remote renderer URL is configu
 
 #### Automation policy (`automation.policy`)
 
-Policy is evaluated on preview/plan creation and revalidated on approval. Risk, confidence, sample/coverage, open-PR budget, cooldown, change-freeze labels, and absolute freeze windows are configurable. Discovery also supplies live workload labels, rollout-in-progress state, controller health/suspend state, and HPA/PDB interaction evidence. A configured freeze label blocks only matching workloads; rollout, controller-health, and HPA/PDB gates reject a plan when their evidence reports a conflict and report `not_available` when discovery cannot collect it. The defaults align with the recommendation sample threshold and require medium-or-lower risk, at least 0.6 confidence, 36 samples, and 50% coverage.
+Policy is evaluated on preview/plan creation and revalidated on approval. Risk, confidence, sample/coverage, open-PR budget, cooldown, change-freeze labels, and absolute freeze windows are configurable. Discovery also supplies live workload labels, rollout-in-progress state, controller health/suspend state, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads. Rollout, controller-health, HPA, VPA and PDB gates reject a plan when their evidence reports a conflict. An HPA blocks only the resource it scales on, and a VPA blocks only in an active update mode (`Auto`, `Recreate`, `InPlaceOrRecreate`, `InPlace`). See [GitOps automation](automation.md#approval-and-policy). The defaults align with the recommendation sample threshold and require medium-or-lower risk, at least 0.6 confidence, 36 samples, and 50% coverage.
 
 `minCoverage` applies to the evidence attached to each recommendation: the observed CPU or memory samples divided by the expected observation points in that recommendation's window. `minSamples` is the minimum sample count for the recommendation. This is separate from GitOps discovery coverage (`GET /api/v1/gitops/status`), which measures resolved workload bindings. Lowering coverage or sample thresholds can make more PRs eligible but reduces the amount of observability backing each change.
 
@@ -277,7 +277,18 @@ automation:
     cooldownMinutes: 60
     changeFreezeLabels: []
     changeFreezeWindows: []
+    missingEvidence: ''
 ```
+
+`missingEvidence` sets what the live gates (rollout, controller health, HPA, VPA, PDB) do when discovery could not collect their evidence:
+
+| Value | Behavior |
+|---|---|
+| `fail` | Reject the plan with `policy_evidence_missing`. |
+| `warn` | Allow the plan, mark the gate `not_available`, and add a warning to `policy_result.warnings`. |
+| `''` (default) | `fail` for `profile: production`, `warn` for `standalone`. |
+
+Any other value fails `helm template`. Without Helm, an unset value in `GITOPS_POLICY_JSON` means `warn`.
 
 #### Pull request options (`automation.pullRequests`)
 

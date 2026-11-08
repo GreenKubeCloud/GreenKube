@@ -235,7 +235,7 @@ the finite values described below.
 | `greenkube_automation_failures_total` | Counter; `reason` (`plan`, `worker`, `polling`, `webhook`, `discovery`, `sync`, `other`) | Failures by fixed lifecycle subsystem category |
 | `greenkube_pull_requests_total` | Counter; `state` (`open`, `merged`, `closed`, `unchanged`, `unknown`), `provider` (`github`, `gitlab`, `gitea`, `other`) | Lifecycle states observed through polling or webhooks |
 | `greenkube_pull_request_merge_detection_seconds` | Histogram; no labels | Delay from provider-reported merge time to lifecycle detection |
-| `greenkube_webhook_deliveries_total` | Counter; `status` (`received`, `processed`, `duplicate`, `retryable`, `reconcile_unavailable`, `rejected`, `unavailable`, `error`) | Delivery processing outcomes |
+| `greenkube_webhook_deliveries_total` | Counter; `status` (`received`, `processed`, `duplicate`, `ignored`, `retryable`, `reconcile_unavailable`, `rejected`, `unavailable`, `error`) | Delivery processing outcomes; `ignored` counts verified deliveries for pull requests GreenKube does not track (answered `202`, never retried, not a failure) |
 | `greenkube_webhook_delivery_lag_seconds` | Histogram; no labels | Time from webhook ingress to the terminal HTTP response |
 | `greenkube_gitops_discovery_refreshes_total` | Counter; `status` (`succeeded`, `failed`, `cancelled`) | Discovery refresh outcomes |
 | `greenkube_gitops_bindings_total` | Gauge; `status` (`resolved`, `ambiguous`, `unresolved`, `blocked`, `stale`) | Current binding counts by resolution status |

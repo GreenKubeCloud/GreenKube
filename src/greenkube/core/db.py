@@ -45,6 +45,30 @@ class _ReentrantAsyncLock:
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         self.release()
 
+    @property
+    def depth(self) -> int:
+        """Nesting depth held by the current owner (0 when unowned)."""
+        return self._depth if self._owner is asyncio.current_task() else 0
+
+
+async def discard_leaked_sqlite_transaction(connection: aiosqlite.Connection) -> None:
+    """Roll back a transaction left open by a previous scope so it cannot poison later writes.
+
+    Callers must hold the SQLite operation lock at the outermost depth: no other scope
+    is then legitimately inside a transaction.
+    """
+    if connection.in_transaction:
+        logger.warning("Rolling back a SQLite transaction leaked by a previous database scope.")
+        await connection.rollback()
+
+
+async def _rollback_quietly(connection: aiosqlite.Connection) -> None:
+    try:
+        if connection.in_transaction:
+            await connection.rollback()
+    except Exception:
+        logger.exception("SQLite rollback after a failed database scope failed.")
+
 
 class DatabaseManager:
     """Manage the application's SQLite connection or PostgreSQL pool."""
@@ -55,6 +79,7 @@ class DatabaseManager:
         self.pool: asyncpg.Pool | None = None
         self._lock = asyncio.Lock()
         self._sqlite_operation_lock = _ReentrantAsyncLock()
+        self._savepoint_counter = 0
 
     @property
     def config(self) -> Config:
@@ -108,7 +133,61 @@ class DatabaseManager:
         await self.ensure_connection()
         assert self.connection is not None
         async with self._sqlite_operation_lock:
-            yield self.connection
+            connection = self.connection
+            outermost = self._sqlite_operation_lock.depth == 1
+            if outermost:
+                await discard_leaked_sqlite_transaction(connection)
+            try:
+                yield connection
+            except BaseException:
+                # An exception between a write and its commit must never leave the shared
+                # connection inside a transaction (BUG-50).
+                if outermost:
+                    await _rollback_quietly(connection)
+                raise
+
+    @asynccontextmanager
+    async def transaction(self, *, immediate: bool = False):
+        """Run one write transaction: commit on success, always roll back on error.
+
+        SQLite: serialized on the shared connection. When the calling task is already
+        inside a transaction (for example a ``UnitOfWork``), the block runs in a
+        SAVEPOINT so a failure only undoes its own statements.
+        PostgreSQL: always a dedicated pooled connection and transaction. It does not join a
+        ``UnitOfWork`` opened by the same task, so never call it while an outer PostgreSQL
+        transaction holds row locks it would need (it would wait on them); run those statements
+        on the ``UnitOfWork`` connection instead.
+        """
+        if self.db_type == "postgres":
+            await self.ensure_connection()
+            assert self.pool is not None
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    yield connection
+            return
+
+        async with self.connection_scope() as connection:
+            if self._sqlite_operation_lock.depth > 1 and connection.in_transaction:
+                self._savepoint_counter += 1
+                savepoint = f"greenkube_tx_{self._savepoint_counter}"
+                await connection.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    yield connection
+                except BaseException:
+                    await connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    await connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    raise
+                await connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return
+
+            await discard_leaked_sqlite_transaction(connection)
+            await connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            try:
+                yield connection
+            except BaseException:
+                await _rollback_quietly(connection)
+                raise
+            await connection.commit()
 
     async def ensure_connection(self) -> None:
         if self.db_type == "postgres":

@@ -5,7 +5,8 @@ API routes for exposing non-sensitive configuration and version information.
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from greenkube import __version__
 from greenkube.api.schemas import ConfigResponse, HealthResponse, VersionResponse
@@ -16,9 +17,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse)
-async def health():
-    """Health check endpoint."""
+@router.get("/health", response_model=HealthResponse, responses={503: {"model": HealthResponse}})
+async def health(request: Request):
+    """Readiness: degraded (503) when a supervised in-process automation loop is wedged (D9)."""
+    supervisor = getattr(request.app.state, "automation_loop_supervisor", None)
+    if supervisor is not None and not supervisor.health.ready():
+        return JSONResponse(
+            status_code=503,
+            content=HealthResponse(status="degraded", version=__version__).model_dump(),
+        )
     return HealthResponse(status="ok", version=__version__)
 
 

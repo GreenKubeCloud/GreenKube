@@ -300,9 +300,9 @@ async def create_gitops_discovery_runtime(
 
     await _ensure_unresolved_provider(repository)
 
+    shared_custom_objects_api = custom_objects_api if custom_objects_api is not None else _LazyCustomObjectsApi()
     if discovery_source is None:
-        selected_api = custom_objects_api if custom_objects_api is not None else _LazyCustomObjectsApi()
-        discovery_source = KubernetesDiscoverySource(selected_api)
+        discovery_source = KubernetesDiscoverySource(shared_custom_objects_api)
 
     if workload_inventory_reader is None:
         if apps_v1_api is not None:
@@ -312,6 +312,7 @@ async def create_gitops_discovery_runtime(
                 _LazyAppsV1Api(),
                 autoscaling_v2_api=_LazyAutoscalingV2Api(),
                 policy_v1_api=_LazyPolicyV1Api(),
+                custom_objects_api=shared_custom_objects_api,
             )
 
     configured_source = ConfiguredKubernetesDiscoverySource(

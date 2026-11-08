@@ -34,7 +34,7 @@ production:
           memory: 128Mi
       livenessProbe:
         enabled: true
-        path: /api/v1/health
+        path: /api/v1/health/heartbeat
         port: http-api
         initialDelaySeconds: 10
         periodSeconds: 30

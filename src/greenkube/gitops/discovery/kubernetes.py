@@ -60,6 +60,9 @@ _WORKLOAD_LISTS = (
     ("DaemonSet", "list_daemon_set_for_all_namespaces"),
 )
 _MISSING_CRD_EXCEPTION_NAMES = frozenset({"NoMatch", "NoMatchError", "ResourceNotFoundError"})
+_VPA_GROUP = "autoscaling.k8s.io"
+_VPA_VERSION = "v1"
+_VPA_PLURAL = "verticalpodautoscalers"
 
 
 class KubernetesWorkloadInventoryError(RuntimeError):
@@ -99,6 +102,7 @@ class KubernetesWorkloadInventoryReader:
         *,
         autoscaling_v2_api: Any | None = None,
         policy_v1_api: Any | None = None,
+        custom_objects_api: Any | None = None,
         page_size: int = _DEFAULT_WORKLOAD_INVENTORY_PAGE_SIZE,
         max_pages: int = _DEFAULT_WORKLOAD_INVENTORY_MAX_PAGES,
     ) -> None:
@@ -117,16 +121,21 @@ class KubernetesWorkloadInventoryReader:
         self._apps_v1_api = apps_v1_api
         self._autoscaling_v2_api = autoscaling_v2_api
         self._policy_v1_api = policy_v1_api
+        self._custom_objects_api = custom_objects_api
         self.page_size = page_size
         self.max_pages = max_pages
 
     async def list_workloads(self) -> list[Mapping[str, Any]]:
-        """List workloads and attach optional HPA/PDB policy evidence."""
+        """List workloads and attach optional HPA/VPA/PDB policy evidence."""
         workloads: list[Mapping[str, Any]] = []
         for kind, method_name in _WORKLOAD_LISTS:
             workloads.extend(await self._list_kind(kind, method_name))
         if self._autoscaling_v2_api is not None or self._policy_v1_api is not None:
-            snapshot = await _read_policy_snapshot(self._autoscaling_v2_api, self._policy_v1_api)
+            snapshot = await _read_policy_snapshot(
+                self._autoscaling_v2_api,
+                self._policy_v1_api,
+                self._custom_objects_api,
+            )
             workloads = [_with_policy_snapshot(workload, snapshot) for workload in workloads]
         return workloads
 
@@ -542,15 +551,39 @@ class _PolicySnapshot:
     hpa_targets: Mapping[tuple[str, str, str], Mapping[str, Any]]
     pod_disruption_budgets: tuple[Mapping[str, Any], ...]
     reason: str | None = None
+    vpa_checked: bool = False
+    vpa_targets: tuple[Mapping[str, Any], ...] = ()
 
 
 async def _read_policy_snapshot(
     autoscaling_v2_api: Any | None,
     policy_v1_api: Any | None,
+    custom_objects_api: Any | None = None,
 ) -> _PolicySnapshot:
     hpa_targets: dict[tuple[str, str, str], Mapping[str, Any]] = {}
     pdbs: list[Mapping[str, Any]] = []
+    vpas: list[Mapping[str, Any]] = []
     errors: list[str] = []
+    vpa_checked = False
+
+    if custom_objects_api is not None:
+        try:
+            response = await custom_objects_api.list_cluster_custom_object(
+                group=_VPA_GROUP,
+                version=_VPA_VERSION,
+                plural=_VPA_PLURAL,
+            )
+            for item in _listed_objects(response, "VerticalPodAutoscaler"):
+                normalized = _normalize_vpa(item)
+                if normalized is not None:
+                    vpas.append(normalized)
+            vpa_checked = True
+        except Exception as error:
+            if _is_missing_crd(error):
+                # No VPA CRD installed: nothing can conflict.
+                vpa_checked = True
+            else:
+                errors.append("vpa-read-failed")
 
     if autoscaling_v2_api is not None:
         try:
@@ -572,12 +605,15 @@ async def _read_policy_snapshot(
         except Exception:
             errors.append("pdb-read-failed")
 
-    checked = autoscaling_v2_api is not None and policy_v1_api is not None and not errors
+    hpa_pdb_errors = [error for error in errors if error != "vpa-read-failed"]
+    checked = autoscaling_v2_api is not None and policy_v1_api is not None and not hpa_pdb_errors
     return _PolicySnapshot(
         checked=checked,
         hpa_targets=hpa_targets,
         pod_disruption_budgets=tuple(pdbs),
         reason=",".join(errors) if errors else None,
+        vpa_checked=vpa_checked,
+        vpa_targets=tuple(vpas),
     )
 
 
@@ -593,19 +629,70 @@ def _normalize_hpa(resource: Any) -> tuple[tuple[str, str, str], Mapping[str, An
         return None
     metrics = _field(spec, "metrics")
     metric_types: list[str] = []
+    resource_metrics: list[dict[str, Any]] = []
     if isinstance(metrics, (list, tuple)):
         for metric in metrics:
             metric_type = _field(metric, "type")
             if isinstance(metric_type, str) and metric_type:
                 metric_types.append(metric_type)
+            resource_metric = _hpa_resource_metric(metric)
+            if resource_metric is not None:
+                resource_metrics.append(resource_metric)
+    if not metric_types:
+        # autoscaling/v2 defaults an HPA without metrics to 80% average CPU utilization.
+        resource_metrics.append({"resource": "cpu", "container": None, "target_type": "Utilization"})
     return (namespace, kind, target_name), {
         "name": name,
         "namespace": namespace,
         "target_kind": kind,
         "target_name": target_name,
         "metric_types": sorted(set(metric_types)),
+        "resource_metrics": resource_metrics,
         "min_replicas": _field(spec, "minReplicas") if isinstance(_field(spec, "minReplicas"), int) else None,
         "max_replicas": _field(spec, "maxReplicas") if isinstance(_field(spec, "maxReplicas"), int) else None,
+    }
+
+
+def _hpa_resource_metric(metric: Any) -> dict[str, Any] | None:
+    metric_type = _field(metric, "type")
+    if metric_type == "Resource":
+        source = _field(metric, "resource")
+    elif metric_type == "ContainerResource":
+        source = _field(metric, "containerResource") or _field(metric, "container_resource")
+    else:
+        return None
+    resource = _field(source, "name")
+    if not isinstance(resource, str) or not resource:
+        return None
+    container = _field(source, "container") if metric_type == "ContainerResource" else None
+    target_type = _field(_field(source, "target"), "type")
+    return {
+        "resource": resource,
+        "container": container if isinstance(container, str) and container else None,
+        "target_type": target_type if isinstance(target_type, str) and target_type else None,
+    }
+
+
+def _normalize_vpa(resource: Any) -> Mapping[str, Any] | None:
+    metadata = _field(resource, "metadata")
+    spec = _field(resource, "spec")
+    namespace = _field(metadata, "namespace")
+    name = _field(metadata, "name")
+    target = _field(spec, "targetRef") or _field(spec, "target_ref")
+    kind = _field(target, "kind")
+    target_name = _field(target, "name")
+    if not all(isinstance(value, str) and value for value in (namespace, name, kind, target_name)):
+        return None
+    update_mode = _field(_field(spec, "updatePolicy") or _field(spec, "update_policy"), "updateMode")
+    if update_mode is None:
+        update_mode = _field(_field(spec, "updatePolicy") or _field(spec, "update_policy"), "update_mode")
+    return {
+        "name": name,
+        "namespace": namespace,
+        "target_kind": kind,
+        "target_name": target_name,
+        # The VPA API defaults updateMode to "Auto" when no update policy is set.
+        "update_mode": update_mode if isinstance(update_mode, str) and update_mode else "Auto",
     }
 
 
@@ -677,6 +764,14 @@ def _with_policy_snapshot(workload: Mapping[str, Any], snapshot: _PolicySnapshot
             for pdb in snapshot.pod_disruption_budgets
             if pdb.get("namespace") == workload.get("metadata", {}).get("namespace")
         ],
+        "vpa_checked": snapshot.vpa_checked,
+        "vpa_targets": [
+            dict(vpa)
+            for vpa in snapshot.vpa_targets
+            if vpa.get("namespace") == (workload.get("metadata") or {}).get("namespace")
+            and vpa.get("target_kind") == workload.get("kind")
+            and vpa.get("target_name") == (workload.get("metadata") or {}).get("name")
+        ],
     }
     return result
 
@@ -708,7 +803,7 @@ def _with_live_workload_evidence(
     merged_labels = {**template_labels, **labels}
     rollout_in_progress = _workload_rollout_in_progress(resource, candidate.workload_kind)
     policy = _greenkube_policy_evidence(resource)
-    hpa_pdb = _hpa_pdb_interaction(candidate, merged_labels, resource, policy)
+    interactions = _policy_interaction_evidence(candidate, merged_labels, resource, policy)
 
     evidence = dict(candidate.evidence)
     evidence["workload_labels"] = merged_labels
@@ -718,11 +813,9 @@ def _with_live_workload_evidence(
     }
     if rollout_in_progress is not None:
         evidence["rollout_in_progress"] = rollout_in_progress
-    if hpa_pdb is not None:
-        interactions_checked, conflict = hpa_pdb
-        evidence["hpa_pdb_interactions_checked"] = interactions_checked
-        if conflict is not None:
-            evidence["hpa_pdb_conflict"] = conflict
+    # Raw interaction facts; the policy decides per planned resource whether they conflict (D13).
+    evidence.pop("hpa_pdb_conflict", None)
+    evidence.update(interactions)
     return candidate.model_copy(update={"evidence": evidence})
 
 
@@ -786,29 +879,50 @@ def _greenkube_policy_evidence(resource: Mapping[str, Any]) -> Mapping[str, Any]
     return value if isinstance(value, Mapping) else None
 
 
-def _hpa_pdb_interaction(
+def _policy_interaction_evidence(
     candidate: WorkloadSource,
     labels: Mapping[str, str],
     resource: Mapping[str, Any],
     policy: Mapping[str, Any] | None,
-) -> tuple[bool, bool | None] | None:
-    if policy is None or policy.get("checked") is not True:
-        return None
-    hpa_present = any(
-        isinstance(hpa, Mapping)
-        and hpa.get("name")
-        and text(hpa.get("target_kind")) == candidate.workload_kind
-        and text(hpa.get("target_name")) == candidate.workload_name
-        for hpa in policy.get("hpa_targets") or ()
-    )
-    desired = _field(as_mapping(_field(resource, "spec")) or {}, "replicas")
-    desired = desired if isinstance(desired, int) and not isinstance(desired, bool) else None
-    hard_pdb = any(
-        _pdb_blocks_disruption(pdb, labels, desired_replicas=desired)
-        for pdb in policy.get("pod_disruption_budgets") or ()
-        if isinstance(pdb, Mapping)
-    )
-    return True, bool(hpa_present or hard_pdb)
+) -> dict[str, Any]:
+    """HPA, PDB and VPA facts for the policy gates; absent keys mean "not checked"."""
+    if policy is None:
+        return {}
+    evidence: dict[str, Any] = {}
+    if policy.get("checked") is True:
+        evidence["hpa_pdb_interactions_checked"] = True
+        evidence["hpa_targets"] = [
+            {
+                "name": hpa.get("name"),
+                "metric_types": list(hpa.get("metric_types") or []),
+                "resource_metrics": [
+                    dict(metric) for metric in hpa.get("resource_metrics") or () if isinstance(metric, Mapping)
+                ],
+            }
+            for hpa in policy.get("hpa_targets") or ()
+            if isinstance(hpa, Mapping)
+            and hpa.get("name")
+            and text(hpa.get("target_kind")) == candidate.workload_kind
+            and text(hpa.get("target_name")) == candidate.workload_name
+        ]
+        desired = _field(as_mapping(_field(resource, "spec")) or {}, "replicas")
+        desired = desired if isinstance(desired, int) and not isinstance(desired, bool) else None
+        evidence["pdb_conflict"] = any(
+            _pdb_blocks_disruption(pdb, labels, desired_replicas=desired)
+            for pdb in policy.get("pod_disruption_budgets") or ()
+            if isinstance(pdb, Mapping)
+        )
+    if policy.get("vpa_checked") is True:
+        evidence["vpa_interactions_checked"] = True
+        evidence["vpa_targets"] = [
+            {"name": vpa.get("name"), "update_mode": vpa.get("update_mode")}
+            for vpa in policy.get("vpa_targets") or ()
+            if isinstance(vpa, Mapping)
+            and vpa.get("name")
+            and text(vpa.get("target_kind")) == candidate.workload_kind
+            and text(vpa.get("target_name")) == candidate.workload_name
+        ]
+    return evidence
 
 
 def _pdb_blocks_disruption(

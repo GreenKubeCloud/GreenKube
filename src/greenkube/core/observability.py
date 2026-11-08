@@ -261,7 +261,17 @@ _OPERATION_TYPES = frozenset({"apply", "rollback", "unknown"})
 _PR_STATES = frozenset({"open", "merged", "closed", "unchanged", "unknown"})
 _PR_PROVIDERS = frozenset({"github", "gitlab", "gitea", "other"})
 _WEBHOOK_STATUSES = frozenset(
-    {"received", "processed", "duplicate", "retryable", "reconcile_unavailable", "rejected", "unavailable", "error"}
+    {
+        "received",
+        "processed",
+        "duplicate",
+        "ignored",
+        "retryable",
+        "reconcile_unavailable",
+        "rejected",
+        "unavailable",
+        "error",
+    }
 )
 _BINDING_STATUSES = frozenset({"resolved", "ambiguous", "unresolved", "blocked", "stale"})
 _DISCOVERY_REFRESH_STATUSES = frozenset({"succeeded", "failed", "cancelled"})

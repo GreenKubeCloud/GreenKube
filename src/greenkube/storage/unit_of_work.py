@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from greenkube.core.db import DatabaseManager
+from greenkube.core.db import DatabaseManager, discard_leaked_sqlite_transaction
 
 
 class UnitOfWork:
@@ -32,6 +32,8 @@ class UnitOfWork:
             await self.manager._sqlite_operation_lock.acquire()
             self._owns_sqlite_lock = True
             try:
+                if self.manager._sqlite_operation_lock.depth == 1:
+                    await discard_leaked_sqlite_transaction(self.connection)
                 await self.connection.execute("BEGIN")
             except BaseException:
                 self.manager._sqlite_operation_lock.release()

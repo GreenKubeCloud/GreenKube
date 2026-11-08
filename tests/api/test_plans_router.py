@@ -21,6 +21,7 @@ from greenkube.gitops.contracts import (
     ControllerKind,
     FileEdit,
     FilePlan,
+    FilePlanSummary,
     Operation,
     Plan,
     PlanStatus,
@@ -113,7 +114,11 @@ def _plan(
         source_revision=_BASE_REVISION,
         renderer=renderer,
         validation=validation,
-        warnings=[_SECRET],
+        warnings=[
+            "apps/payments/deployment.yaml#0: ignored volatile metadata key 'resourceVersion'",
+            f"https://user:{_SECRET}@github.example.test/acme/gitops.git?access_token={_SECRET} is empty",
+            f"helm warning: token={_SECRET}; ghp_{_SECRET.replace('-', '')} leaked\x1b[0m",
+        ],
         digest=_DIGEST,
     )
     return Plan(
@@ -314,6 +319,9 @@ class _AutomationPlanApiService:
     ) -> Plan | None:
         return await self.plans.mark_stale(plan_id, actor=actor, reason_code=reason_code)
 
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        return await self.plans.cancel_plan(plan_id, actor=actor)
+
 
 @pytest.fixture
 def plan_api():
@@ -367,7 +375,13 @@ def test_create_uses_only_recommendation_ids_and_returns_safe_plan_projection(pl
             "original_sha": "b" * 40,
         }
     ]
-    assert body["warnings"] == ["render-warning"]
+    # D12 / BUG-56: real renderer warnings, with credentials redacted.
+    assert body["warnings"] == [
+        "apps/payments/deployment.yaml#0: ignored volatile metadata key 'resourceVersion'",
+        "https://[redacted]@github.example.test/acme/gitops.git?[redacted] is empty",
+        "helm warning: token=[redacted]; [redacted] leaked [0m",
+    ]
+    assert body["warnings_truncated"] is False
     assert body["source"]["repo"] == "https://github.example.test/acme/gitops.git"
     assert "actor" not in body
     assert _SECRET not in response.text
@@ -586,6 +600,26 @@ def test_get_plan_returns_safe_projection_and_404_for_missing_plan(plan_api):
     assert missing.json()["code"] == "plan_not_found"
 
 
+def test_get_plan_projects_a_plan_whose_files_were_pruned(plan_api):
+    """D2 / BUG-44: a pruned APPLIED plan must stay readable (previously HTTP 500)."""
+    client, _, repository, _, _ = plan_api
+    live = _plan(status=PlanStatus.APPLIED)
+    assert live.file_plan is not None
+    summary = FilePlanSummary.from_file_plan(live.file_plan, pruned_at=_NOW)
+    repository.plans["plan-1"] = live.model_copy(update={"file_plan": None, "file_plan_summary": summary})
+
+    response = client.get("/api/v1/automation/plans/plan-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "applied"
+    assert body["source"]["base_revision"] == _BASE_REVISION
+    assert body["files"] == [{"path": "apps/payments/deployment.yaml", "operation": "update", "original_sha": "b" * 40}]
+    assert body["validation"]["passed"] is True
+    assert body["diff"] is None
+    assert _SECRET not in response.text
+
+
 def test_rollback_preview_returns_a_persisted_inverse_plan_link(plan_api):
     client, _, _, service, _ = plan_api
     service.rollback_plan = _plan(
@@ -711,6 +745,35 @@ def test_cancel_marks_non_applying_plan_stale_and_conflicts_for_applying_plan(pl
     assert applying.json()["code"] == "plan_stale"
 
 
+def test_delete_cancels_a_preview_and_conflicts_for_progressed_plans(plan_api):
+    """D6 / BUG-48: dismissing a preview cancels it so re-opening never returns 409."""
+    client, _, repository, _, _ = plan_api
+    repository.plans["applying-plan"] = _plan(status=PlanStatus.APPLYING).model_copy(
+        update={"plan_id": "applying-plan"}
+    )
+    repository.plans["approved-plan"] = _plan(status=PlanStatus.APPROVED).model_copy(
+        update={"plan_id": "approved-plan"}
+    )
+
+    deleted = client.delete("/api/v1/automation/plans/plan-1")
+    deleted_again = client.delete("/api/v1/automation/plans/plan-1")
+    missing = client.delete("/api/v1/automation/plans/missing")
+    applying = client.delete("/api/v1/automation/plans/applying-plan")
+    approved = client.delete("/api/v1/automation/plans/approved-plan")
+
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert repository.plans["plan-1"].status is PlanStatus.SUPERSEDED
+    assert deleted_again.status_code == 204
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "plan_not_found"
+    assert applying.status_code == 409
+    assert applying.json()["code"] == "plan_stale"
+    assert repository.plans["applying-plan"].status is PlanStatus.APPLYING
+    assert approved.status_code == 409
+    assert repository.plans["approved-plan"].status is PlanStatus.APPROVED
+
+
 def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     client, _, _, _, _ = plan_api
 
@@ -718,7 +781,8 @@ def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     paths = schema["paths"]
 
     assert set(paths["/api/v1/automation/plans"]) == {"post"}
-    assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get", "delete"}
+    assert "204" in paths["/api/v1/automation/plans/{plan_id}"]["delete"]["responses"]
     assert set(paths["/api/v1/automation/plans/{plan_id}/rollback-preview"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}/approve"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}/cancel"]) == {"post"}

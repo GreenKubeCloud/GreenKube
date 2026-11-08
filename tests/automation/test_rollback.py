@@ -8,6 +8,8 @@ from typing import Any, cast
 
 import pytest
 
+from greenkube.automation.plan_runtime import RuntimePlanService
+from greenkube.automation.plans import AutomationPlanError
 from greenkube.automation.rollback import (
     KustomizeRollbackRenderer,
     RawManifestRollbackRenderer,
@@ -18,6 +20,7 @@ from greenkube.automation.rollback import (
 )
 from greenkube.gitops.contracts import (
     ActionPlanV3,
+    AutomationErrorCode,
     BindingStatus,
     ContainerRequestBaseline,
     ContainerResources,
@@ -25,6 +28,7 @@ from greenkube.gitops.contracts import (
     DeleteResource,
     FileEdit,
     FilePlan,
+    FilePlanSummary,
     Plan,
     PlanStatus,
     PreApplyWorkloadBaseline,
@@ -318,6 +322,32 @@ def test_forward_file_delete_is_not_guessed() -> None:
 
     with pytest.raises(UnsupportedRollbackError, match="delete"):
         build_inverse_plan(plan, {MANIFEST_PATH: BASE_CONTENT}, {}, CURRENT_BASE)
+
+
+@pytest.mark.asyncio
+async def test_plan_pruned_by_retention_explains_why_it_cannot_be_rolled_back() -> None:
+    plan = _plan(
+        [
+            FileEdit(
+                path=MANIFEST_PATH,
+                operation="update",
+                original_sha=_blob_sha(BASE_CONTENT),
+                content=FORWARD_CONTENT,
+            )
+        ]
+    )
+    assert plan.file_plan is not None
+    pruned = plan.model_copy(
+        update={"file_plan": None, "file_plan_summary": FilePlanSummary.from_file_plan(plan.file_plan)}
+    )
+
+    with pytest.raises(UnsupportedRollbackError, match="retention"):
+        build_inverse_plan(pruned, {MANIFEST_PATH: BASE_CONTENT}, {MANIFEST_PATH: FORWARD_CONTENT}, CURRENT_BASE)
+
+    # The rollback preview API rejects it with the same explanation before reading any snapshot.
+    with pytest.raises(AutomationPlanError, match="retention") as error:
+        await RuntimePlanService._validate_rollback_source_plan(cast(Any, object()), pruned)
+    assert error.value.code is AutomationErrorCode.ROLLBACK_UNSUPPORTED
 
 
 def test_unsupported_renderer_requires_an_explicit_exact_adapter() -> None:

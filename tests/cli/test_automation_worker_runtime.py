@@ -68,11 +68,15 @@ async def test_plans_queue_builds_production_runtime_without_injected_worker(mon
     assert len(recovery_calls) == 1
 
 
+class _StopLoop(BaseException):
+    """Escapes the supervised loop, which deliberately survives every ``Exception``."""
+
+
 @pytest.mark.asyncio
 async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
     worker = cast(PlanWorker, object())
     worker_ids: list[str] = []
-    stop_loop = RuntimeError("stop worker loop")
+    stop_loop = _StopLoop("stop worker loop")
 
     class Poller:
         async def run(self, stop_event):
@@ -89,7 +93,7 @@ async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
     monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
     monkeypatch.setattr(automation_worker, "process_once", process_once)
 
-    with pytest.raises(RuntimeError, match="stop worker loop"):
+    with pytest.raises(_StopLoop, match="stop worker loop"):
         await automation_worker._run_worker_loop(poll_seconds=0.1, plan_worker=worker)
 
     assert len(worker_ids) == 3
@@ -97,7 +101,75 @@ async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
+async def test_worker_iteration_failures_are_logged_retried_and_heartbeat(monkeypatch, caplog):
+    """D9 / BUG-51: one failed iteration used to end the queue loop silently."""
+    worker = cast(PlanWorker, object())
+    calls = 0
+    heartbeats = 0
+    delays: list[float] = []
+
+    class Poller:
+        async def run(self, stop_event):
+            await stop_event.wait()
+
+    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise ConnectionError("database is restarting")
+        if calls == 4:
+            raise _StopLoop()
+        return True
+
+    def heartbeat() -> None:
+        nonlocal heartbeats
+        heartbeats += 1
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay):
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
+    monkeypatch.setattr(automation_worker, "process_once", process_once)
+    monkeypatch.setattr(automation_worker.asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level("ERROR", logger="greenkube.cli.automation_worker"):
+        with pytest.raises(_StopLoop):
+            await automation_worker._run_worker_loop(poll_seconds=0.5, plan_worker=worker, heartbeat=heartbeat)
+
+    assert calls == 4
+    assert heartbeats == 4
+    assert len(delays) == 2 and all(delay > 0 for delay in delays)
+    assert "error_code=ConnectionError" in caplog.text
+    assert "database is restarting" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_worker_once_mode_still_surfaces_iteration_failures(monkeypatch):
+    worker = cast(PlanWorker, object())
+    stub_branch_cleanup(monkeypatch)
+
+    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(automation_worker, "process_once", process_once)
+
+    with pytest.raises(ConnectionError):
+        await automation_worker._run_worker_loop(poll_seconds=0.1, once=True, plan_worker=worker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected_status", "expected_error"),
+    [
+        ("merged", "processed", None),
+        # D11 / BUG-53: unknown pull requests become terminal instead of retrying forever.
+        ("unlinked", "ignored", "pull_request_unlinked"),
+    ],
+)
+async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch, outcome, expected_status, expected_error):
     event = PullRequestEvent(
         provider_id="provider-main",
         delivery_id="delivery-1",
@@ -171,7 +243,7 @@ async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
             self.calls += 1
             assert received_event == event
             assert newly_deduplicated is True
-            return SimpleNamespace(outcome=SimpleNamespace(value="merged"))
+            return SimpleNamespace(outcome=SimpleNamespace(value=outcome))
 
     outbox = Outbox()
     worker = SimpleNamespace(plans=outbox)
@@ -179,8 +251,11 @@ async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch):
     monkeypatch.setattr(automation_worker, "create_pull_request_lifecycle_reconciler", lambda _: lifecycle)
 
     assert await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
-    assert outbox.delivery.status == "processed"
+    assert outbox.delivery.status == expected_status
+    assert outbox.delivery.error_code == expected_error
+    assert outbox.delivery.processed_at is not None
     assert lifecycle.calls == 1
+    assert not await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
 
 
 @pytest.mark.asyncio
@@ -235,23 +310,39 @@ async def test_plan_worker_runtime_starts_and_cancels_pr_poller(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_plan_worker_surfaces_pr_poller_persistence_failures(monkeypatch):
+async def test_pr_poller_failures_are_restarted_without_stopping_the_queue(monkeypatch, caplog):
+    """D9: a failing PR poller is logged and restarted with backoff; the queue keeps running."""
     worker = cast(PlanWorker, object())
+    poller_runs = 0
+    processed = 0
 
     class Poller:
         async def run(self, _stop_event):
+            nonlocal poller_runs
+            poller_runs += 1
             raise RuntimeError("polling lease database unavailable")
 
     async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        nonlocal processed
         assert plan_worker is worker
-        assert worker_id
-        return False
+        processed += 1
+        if processed >= 50:
+            raise _StopLoop()
+        await asyncio.sleep(0)
+        return True
 
     monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
     monkeypatch.setattr(automation_worker, "process_once", process_once)
+    monkeypatch.setattr(automation_worker, "backoff_delay", lambda *args, **kwargs: 0.0)
 
-    with pytest.raises(RuntimeError, match="polling lease database unavailable"):
-        await automation_worker.run_worker(poll_seconds=10, queue="plans", plan_worker=worker)
+    with caplog.at_level("ERROR", logger="greenkube.cli.automation_worker"):
+        with pytest.raises(_StopLoop):
+            await automation_worker.run_worker(poll_seconds=10, queue="plans", plan_worker=worker)
+
+    assert processed == 50
+    assert poller_runs >= 2
+    assert "pull-request polling runtime stopped" in caplog.text
+    assert "error_code=RuntimeError" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,7 @@ from greenkube.storage.gitops_mapper import (
     datetime_value,
     json_text,
     json_value,
+    pruned_file_plan_summary_payload,
     row_to_automation_plan_record,
     row_to_gitops_provider,
     row_to_webhook_delivery,
@@ -56,6 +57,15 @@ from greenkube.storage.gitops_mapper import (
     row_to_workload_source,
 )
 from greenkube.storage.unit_of_work import UnitOfWork
+
+_PRUNE_BATCH_SIZE = 100
+_PLAN_HYDRATION_BATCH_SIZE = 500
+_MAX_PLAN_LIST_LIMIT = 10_000
+
+
+def _validate_list_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_PLAN_LIST_LIMIT:
+        raise ValueError(f"plan list limit must be an integer between 1 and {_MAX_PLAN_LIST_LIMIT}")
 
 
 class _BindingGenerationConflict(RuntimeError):
@@ -1268,11 +1278,14 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
     ) -> Plan:
         actor = _validated_audit_actor(actor)
         file_plan = plan.file_plan
+        file_summary = plan.file_plan_summary
         if file_plan is not None and plan.digest is not None and plan.digest != file_plan.digest:
             raise ValueError("plan digest must match its file plan digest")
-        digest = plan.digest if plan.digest is not None else (file_plan.digest if file_plan is not None else None)
-        validation = file_plan.validation.model_dump(mode="json") if file_plan is not None else {}
-        warnings = file_plan.warnings if file_plan is not None else []
+        rendered = file_plan if file_plan is not None else file_summary
+        digest = plan.digest if plan.digest is not None else (rendered.digest if rendered is not None else None)
+        validation = rendered.validation.model_dump(mode="json") if rendered is not None else {}
+        warnings = rendered.warnings if rendered is not None else []
+        summary_json = json_text(file_summary.model_dump(mode="json")) if file_summary is not None else None
         safe_source = plan.source.model_copy(update={"repo_url": sanitize_repository_url(plan.source.repo_url)})
         source_snapshot = safe_source.model_dump(mode="json")
         action_json = plan.action.model_dump(mode="json")
@@ -1297,6 +1310,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 validation = excluded.validation,
                 warnings = excluded.warnings,
                 policy_result = excluded.policy_result,
+                file_plan_summary = excluded.file_plan_summary,
+                committed_on_revision = excluded.committed_on_revision,
                 status = excluded.status,
                 expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at
@@ -1335,8 +1350,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 INSERT INTO automation_plans
                     (plan_id, source_id, provider_id, source_snapshot, action_json, change_set_id,
                      rollback_of_plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
-                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     digest, validation, warnings, policy_result, status, expires_at, created_at, updated_at,
+                     file_plan_summary, committed_on_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 {conflict_clause}
                 """,
                 (
@@ -1347,9 +1363,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     json_text(action_json),
                     plan.change_set_id,
                     plan.rollback_of_plan_id,
-                    file_plan.base_revision if file_plan is not None else None,
-                    file_plan.source_revision if file_plan is not None else None,
-                    file_plan.renderer.value if file_plan is not None else None,
+                    rendered.base_revision if rendered is not None else None,
+                    rendered.source_revision if rendered is not None else None,
+                    rendered.renderer.value if rendered is not None else None,
                     file_plan.diff if file_plan is not None else None,
                     file_plan.rendered_diff if file_plan is not None else None,
                     digest,
@@ -1360,8 +1376,10 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     self._db_datetime(plan.expires_at),
                     self._db_datetime(plan.created_at),
                     self._db_datetime(now),
+                    summary_json,
+                    plan.committed_on_revision,
                 ),
-                json_positions=(4, 5, 14, 15, 16),
+                json_positions=(4, 5, 14, 15, 16, 21),
             )
             if not insert_only or inserted:
                 await self._execute(
@@ -1471,6 +1489,37 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                     return record.plan if record is not None else None
         raise RuntimeError("could not persist the immutable pre-apply workload baseline after concurrent updates")
 
+    async def set_plan_committed_on_revision(
+        self,
+        plan_id: str,
+        revision: str,
+        *,
+        expected_digest: str | None,
+    ) -> Plan | None:
+        """Record the moved branch head a plan is committed on, separately from its base (D7)."""
+        if not isinstance(revision, str) or not revision.strip():
+            raise ValueError("committed_on_revision must be a non-blank revision")
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS NOT DISTINCT FROM ?
+                """
+                if self._postgres
+                else f"""
+                UPDATE automation_plans
+                SET committed_on_revision = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND digest IS ?
+                """,
+                (revision, plan_id, expected_digest),
+            )
+            if not updated:
+                return None
+            record = await self._get_plan_record_on_connection(connection, plan_id)
+            return record.plan if record is not None else None
+
     async def _get_plan_record_on_connection(self, connection: Any, plan_id: str) -> AutomationPlanRecord | None:
         row = await self._fetchrow(connection, "SELECT * FROM automation_plans WHERE plan_id = ?", (plan_id,))
         if row is None:
@@ -1502,7 +1551,49 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         record = await self.get_plan_record(plan_id)
         return record.plan if record is not None else None
 
-    async def list_plans(self, *, status: PlanStatus | None = None, source_id: str | None = None) -> list[Plan]:
+    async def _plan_records_from_rows(self, connection: Any, rows: Sequence[Any]) -> list[AutomationPlanRecord]:
+        """Hydrate plan rows with two batched queries instead of two per plan (D15, BUG-57)."""
+        if not rows:
+            return []
+        plan_ids = [str(row["plan_id"]) for row in rows]
+        files_by_plan: dict[str, list[Any]] = {}
+        recommendations_by_plan: dict[str, list[int]] = {}
+        for start in range(0, len(plan_ids), _PLAN_HYDRATION_BATCH_SIZE):
+            chunk = plan_ids[start : start + _PLAN_HYDRATION_BATCH_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            for file_row in await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({placeholders}) ORDER BY plan_id, id",
+                chunk,
+            ):
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for link_row in await self._fetch(
+                connection,
+                f"""
+                SELECT plan_id, recommendation_id FROM automation_plan_recommendations
+                WHERE plan_id IN ({placeholders}) ORDER BY plan_id, recommendation_id
+                """,
+                chunk,
+            ):
+                recommendations_by_plan.setdefault(str(link_row["plan_id"]), []).append(
+                    int(link_row["recommendation_id"])
+                )
+        return [
+            row_to_automation_plan_record(
+                row,
+                file_rows=files_by_plan.get(plan_id, []),
+                recommendation_ids=recommendations_by_plan.get(plan_id, []),
+            )
+            for row, plan_id in zip(rows, plan_ids, strict=True)
+        ]
+
+    async def list_plans(
+        self,
+        *,
+        status: PlanStatus | None = None,
+        source_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Plan]:
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
@@ -1511,18 +1602,17 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if source_id is not None:
             clauses.append("source_id = ?")
             params.append(source_id)
-        query = "SELECT plan_id FROM automation_plans"
+        query = "SELECT * FROM automation_plans"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def list_plans_for_workload(
         self,
@@ -1532,7 +1622,29 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         workload_kind: str,
         workload_name: str,
         statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
     ) -> list[Plan]:
+        records = await self.list_plan_records_for_workload(
+            cluster=cluster,
+            namespace=namespace,
+            workload_kind=workload_kind,
+            workload_name=workload_name,
+            statuses=statuses,
+            limit=limit,
+        )
+        return [record.plan for record in records]
+
+    async def list_plan_records_for_workload(
+        self,
+        *,
+        cluster: str,
+        namespace: str,
+        workload_kind: str,
+        workload_name: str,
+        statuses: Sequence[PlanStatus] | None = None,
+        limit: int | None = None,
+    ) -> list[AutomationPlanRecord]:
+        """Workload plan history with ``updated_at`` (policy cooldowns) via idx_automation_plans_workload."""
         if statuses is not None and not statuses:
             return []
         if self._postgres:
@@ -1554,18 +1666,49 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if statuses is not None:
             clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
             params.extend(status.value for status in statuses)
-        query = "SELECT plan_id FROM automation_plans WHERE " + " AND ".join(clauses)
+        query = "SELECT * FROM automation_plans WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, plan_id"
+        if limit is not None:
+            _validate_list_limit(limit)
+            query += " LIMIT ?"
+            params.append(limit)
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return await self._plan_records_from_rows(connection, rows)
+
+    async def list_expired_plans(
+        self,
+        *,
+        now: datetime,
+        statuses: Sequence[PlanStatus],
+        limit: int,
+    ) -> list[Plan]:
+        """Only the plans whose TTL elapsed, oldest expiry first (D15, BUG-57)."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("plan expiry time must be timezone-aware")
+        _validate_list_limit(limit)
+        if not statuses:
+            return []
+        expired = "expires_at <= ?" if self._postgres else "julianday(expires_at) <= julianday(?)"
+        placeholders = ", ".join("?" for _ in statuses)
+        query = f"""
+            SELECT * FROM automation_plans
+            WHERE status IN ({placeholders}) AND expires_at IS NOT NULL AND {expired}
+            ORDER BY expires_at, plan_id
+            LIMIT ?
+        """
+        params: list[Any] = [*(status.value for status in statuses), self._db_datetime(now), limit]
+        async with self.db_manager.connection_scope() as connection:
+            rows = await self._fetch(connection, query, params)
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
+        """Prune expired rendered file contents and terminal outbox rows.
+
+        Plan rows, their recommendation links and the ``recommendation_events`` audit
+        trail are never deleted. Pruned plans keep a content-free ``file_plan_summary``
+        so they remain valid ``Plan`` objects (D2, BUG-44).
+        """
         if cutoff.tzinfo is None or cutoff.utcoffset() is None:
             raise ValueError("automation history cutoff must be timezone-aware")
         terminal_statuses = (
@@ -1577,21 +1720,15 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             PlanStatus.SUPERSEDED.value,
             PlanStatus.SYNC_FAILED.value,
         )
-        placeholders = ", ".join("?" for _ in terminal_statuses)
         updated_before = "updated_at < ?" if self._postgres else "julianday(updated_at) < julianday(?)"
         processed_before = "processed_at < ?" if self._postgres else "julianday(processed_at) < julianday(?)"
         cutoff_value = self._db_datetime(cutoff)
         async with self._transaction() as connection:
-            plan_files = await self._execute(
+            plan_files = await self._summarize_and_prune_plan_files(
                 connection,
-                f"""
-                DELETE FROM automation_plan_files
-                WHERE plan_id IN (
-                    SELECT plan_id FROM automation_plans
-                    WHERE status IN ({placeholders}) AND {updated_before}
-                )
-                """,
-                (*terminal_statuses, cutoff_value),
+                terminal_statuses=terminal_statuses,
+                updated_before=updated_before,
+                cutoff_value=cutoff_value,
             )
             operations = await self._execute(
                 connection,
@@ -1605,14 +1742,9 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 connection,
                 f"""
                 DELETE FROM webhook_deliveries
-                WHERE status IN ('processed', 'rejected') AND processed_at IS NOT NULL
+                WHERE status IN ('processed', 'rejected', 'ignored') AND processed_at IS NOT NULL
                   AND {processed_before}
                 """,
-                (cutoff_value,),
-            )
-            recommendation_events = await self._execute(
-                connection,
-                f"DELETE FROM recommendation_events WHERE {updated_before.replace('updated_at', 'created_at')}",
                 (cutoff_value,),
             )
             binding_events = await self._execute(
@@ -1624,9 +1756,61 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             "plan_files": plan_files,
             "operations": operations,
             "webhooks": webhooks,
-            "recommendation_events": recommendation_events,
             "binding_events": binding_events,
         }
+
+    async def _summarize_and_prune_plan_files(
+        self,
+        connection: Any,
+        *,
+        terminal_statuses: Sequence[str],
+        updated_before: str,
+        cutoff_value: Any,
+    ) -> int:
+        placeholders = ", ".join("?" for _ in terminal_statuses)
+        plan_rows = await self._fetch(
+            connection,
+            f"""
+            SELECT plan_id, base_revision, source_revision, renderer, diff, rendered_diff,
+                   digest, validation, warnings
+            FROM automation_plans
+            WHERE status IN ({placeholders}) AND {updated_before}
+              AND EXISTS (SELECT 1 FROM automation_plan_files f WHERE f.plan_id = automation_plans.plan_id)
+            ORDER BY plan_id
+            """,
+            (*terminal_statuses, cutoff_value),
+        )
+        pruned_at = datetime.now(timezone.utc)
+        deleted = 0
+        for start in range(0, len(plan_rows), _PRUNE_BATCH_SIZE):
+            batch = plan_rows[start : start + _PRUNE_BATCH_SIZE]
+            plan_ids = [str(row["plan_id"]) for row in batch]
+            batch_placeholders = ", ".join("?" for _ in plan_ids)
+            file_rows = await self._fetch(
+                connection,
+                f"SELECT * FROM automation_plan_files WHERE plan_id IN ({batch_placeholders}) ORDER BY plan_id, id",
+                plan_ids,
+            )
+            files_by_plan: dict[str, list[Any]] = {}
+            for file_row in file_rows:
+                files_by_plan.setdefault(str(file_row["plan_id"]), []).append(file_row)
+            for row in batch:
+                plan_id = str(row["plan_id"])
+                summary = pruned_file_plan_summary_payload(row, files_by_plan.get(plan_id, []), pruned_at=pruned_at)
+                if summary is not None:
+                    # updated_at is deliberately preserved: it is the plan's last lifecycle activity.
+                    await self._execute(
+                        connection,
+                        "UPDATE automation_plans SET file_plan_summary = ? WHERE plan_id = ?",
+                        (json_text(summary), plan_id),
+                        json_positions=(1,),
+                    )
+            deleted += await self._execute(
+                connection,
+                f"DELETE FROM automation_plan_files WHERE plan_id IN ({batch_placeholders})",
+                plan_ids,
+            )
+        return deleted
 
     async def set_plan_status(
         self,
@@ -1728,17 +1912,13 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             rows = await self._fetch(
                 connection,
                 """
-                SELECT plan_id FROM automation_plan_recommendations
-                WHERE recommendation_id = ? ORDER BY plan_id
+                SELECT plan.* FROM automation_plan_recommendations link
+                JOIN automation_plans plan ON plan.plan_id = link.plan_id
+                WHERE link.recommendation_id = ? ORDER BY plan.plan_id
                 """,
                 (recommendation_id,),
             )
-            plans = []
-            for row in rows:
-                record = await self._get_plan_record_on_connection(connection, str(row["plan_id"]))
-                if record is not None:
-                    plans.append(record.plan)
-            return plans
+            return [record.plan for record in await self._plan_records_from_rows(connection, rows)]
 
     async def set_recommendation_action_status(
         self,

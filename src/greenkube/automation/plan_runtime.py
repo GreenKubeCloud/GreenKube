@@ -40,6 +40,7 @@ from greenkube.automation.plan_worker import (
     RegistryPlanProviderResolver,
 )
 from greenkube.automation.plans import (
+    SUPERSEDABLE_PREVIEW_STATUSES,
     AutomationPlanError,
     AutomationPlanService,
     GitBlobFile,
@@ -56,6 +57,7 @@ from greenkube.automation.rollback import (
     ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY,
     FluxHelmReleaseRollbackRenderer,
     HelmValuesRollbackRenderer,
+    KustomizeRollbackRenderer,
     RollbackConflictError,
     RollbackPlanError,
     RollbackRenderer,
@@ -88,6 +90,7 @@ from greenkube.gitops.contracts import (
 from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanner
+from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.snapshots import (
     RepositorySnapshot,
     SnapshotError,
@@ -401,7 +404,11 @@ class RuntimePlanService:
     ) -> Plan:
         """Create a plan from persisted actionable recommendations and a resolved DB binding."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
         if source.renderer not in {
             RendererKind.RAW,
@@ -481,7 +488,11 @@ class RuntimePlanService:
     async def preview_plan(self, recommendation_ids: Sequence[int]) -> Plan:
         """Render an eligibility preview without persisting plans or changing recommendation state."""
         action, source = await self._resolve_request(recommendation_ids)
-        policy_result = await self._evaluate_policy(action.recommendation_ids, source)
+        policy_result = await self._evaluate_policy(
+            action.recommendation_ids,
+            source,
+            exclude_plan_ids=await self._supersedable_preview_plan_ids(source),
+        )
         self._ensure_policy_allowed(policy_result)
         if source.renderer not in {
             RendererKind.RAW,
@@ -618,6 +629,43 @@ class RuntimePlanService:
             )
         return action, source
 
+    async def _supersedable_preview_plan_ids(self, source: WorkloadSource) -> tuple[str, ...]:
+        """Unapproved previews of this workload that a new request supersedes (D6, BUG-48).
+
+        Persisting the new plan transitions them to SUPERSEDED, so they must not count as a
+        competing active plan. A history read failure returns nothing: the policy history
+        gate then fails closed on its own read.
+        """
+        repository = getattr(self._plan_service, "repository", None)
+        reader = getattr(repository, "list_plans_for_workload", None)
+        statuses = sorted(SUPERSEDABLE_PREVIEW_STATUSES, key=lambda status: status.value)
+        try:
+            if callable(reader):
+                plans = await cast(Any, reader)(
+                    cluster=source.cluster,
+                    namespace=source.namespace,
+                    workload_kind=source.workload_kind,
+                    workload_name=source.workload_name,
+                    statuses=statuses,
+                )
+            elif callable(getattr(repository, "list_plans", None)):
+                plans = [plan for status in statuses for plan in await cast(Any, repository).list_plans(status=status)]
+            else:
+                return ()
+        except Exception:
+            return ()
+        return tuple(
+            plan.plan_id
+            for plan in plans
+            if plan.status in SUPERSEDABLE_PREVIEW_STATUSES
+            and (plan.source.cluster, plan.source.namespace, plan.source.workload_kind, plan.source.workload_name)
+            == (source.cluster, source.namespace, source.workload_kind, source.workload_name)
+        )
+
+    async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel an unapproved preview (DELETE /automation/plans/{id}); it becomes SUPERSEDED."""
+        return await self._plan_service.cancel_plan(plan_id, actor=actor)
+
     async def _evaluate_policy(
         self,
         recommendation_ids: Sequence[int],
@@ -723,6 +771,10 @@ class RuntimePlanService:
         rollback_renderer = self._rollback_renderer
         if source.renderer is RendererKind.RAW and getattr(rollback_renderer, "renderer", None) is not RendererKind.RAW:
             rollback_renderer = None
+        if source.renderer is RendererKind.KUSTOMIZE and getattr(rollback_renderer, "renderer", None) is not (
+            RendererKind.KUSTOMIZE
+        ):
+            rollback_renderer = kustomize_rollback_renderer(self._plan_service, snapshot_limits=self._snapshot_limits)
         if source.renderer is RendererKind.KUSTOMIZE and (
             rollback_renderer is None
             or getattr(rollback_renderer, "renderer", None) is not RendererKind.KUSTOMIZE
@@ -835,6 +887,12 @@ class RuntimePlanService:
         return rollback_plan
 
     async def _validate_rollback_source_plan(self, plan: Plan) -> None:
+        if plan.file_plan is None and plan.file_plan_summary is not None:
+            raise AutomationPlanError(
+                AutomationErrorCode.ROLLBACK_UNSUPPORTED,
+                "original plan's rendered file contents were removed by retention; preview a new change "
+                "with the desired resources instead of a rollback",
+            )
         if (
             plan.status not in {PlanStatus.SYNCED, PlanStatus.APPLIED}
             or plan.file_plan is None
@@ -1609,7 +1667,9 @@ async def create_plan_runtime(
         snapshot_resolver=snapshot_resolver,
         plan_service=plan_service,
         worker=worker,
-        rollback_renderer=rollback_renderer,
+        # Kustomize rollbacks render through the same isolated sandbox backend as planning (D14).
+        rollback_renderer=rollback_renderer
+        or kustomize_rollback_renderer(plan_service, snapshot_limits=snapshot_limits),
         snapshot_limits=snapshot_limits,
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
@@ -1628,6 +1688,24 @@ async def create_plan_runtime(
         plan_service=api_plan_service,
         worker=worker,
     )
+
+
+def kustomize_rollback_renderer(
+    plan_service: Any,
+    *,
+    snapshot_limits: SnapshotLimits | None = None,
+) -> KustomizeRollbackRenderer | None:
+    """Exact-target Kustomize rollback adapter over the plan service's own Kustomize renderer.
+
+    Reusing the planner's renderer keeps rollback renders on the same sandboxed backend and
+    pinned Kustomize version as forward plans (D14, BUG-54).
+    """
+    planners = getattr(plan_service, "planners", None)
+    planner = planners.get(RendererKind.KUSTOMIZE) if isinstance(planners, Mapping) else None
+    renderer = getattr(planner, "renderer", None)
+    if not isinstance(renderer, KustomizeRenderer):
+        return None
+    return KustomizeRollbackRenderer(renderer, snapshot_limits=snapshot_limits)
 
 
 async def get_plan_service(**runtime_options: Any) -> RuntimePlanService:

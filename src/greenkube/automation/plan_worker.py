@@ -7,7 +7,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 from greenkube.automation.git.base import (
     EMPTY_PULL_REQUEST_OPTIONS,
@@ -74,6 +74,8 @@ _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
 _ACTIVE_PLAN_STATUSES = frozenset({PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _OPEN_PULL_REQUEST_STATES = frozenset({"open", "opened"})
+# Plans a previous worker already started applying; a reclaim first adopts their open PR.
+_RECLAIMABLE_PLAN_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _RESULT = TypeVar("_RESULT")
 
 
@@ -381,6 +383,9 @@ class PlanWorker:
 
     async def _execute(self, execution: _Execution, plan: Plan) -> _PlanResult:
         operation = execution.lease.operation
+        adopted = await self._adopt_open_pull_request(execution, plan)
+        if adopted is not None:
+            return adopted
         now = _as_utc(self.clock())
         self._validate_operation_and_plan(operation, plan, now)
         await self._validate_current_binding(plan)
@@ -433,12 +438,12 @@ class PlanWorker:
                     plan_status=PlanStatus.STALE,
                     action_status=ActionStatus.NONE,
                 )
+            committed_on_revision: str | None = None
             if current_revision.lower() != file_plan.base_revision.lower():
-                raise PlanWorkerError(
-                    "Source revision changed after the plan was created; re-plan before applying.",
-                    plan_status=PlanStatus.STALE,
-                    action_status=ActionStatus.NONE,
-                )
+                # Unrelated commits must not stale an approved plan: a moved head is accepted
+                # when every file the plan touches is unchanged (D7, BUG-49).
+                await self._ensure_touched_files_unchanged(execution, target, plan, current_revision)
+                committed_on_revision = current_revision
 
             persisted_plan = await self.plans.get_plan(plan.plan_id)
             if persisted_plan is None:
@@ -465,12 +470,72 @@ class PlanWorker:
                     raise PlanWorkerError(f"Plan {operation.plan_id!r} changed before application.")
                 plan = updated_plan
 
-            return await self._apply_plan(execution, plan, target)
+            if committed_on_revision is not None:
+                plan = await self._record_committed_on_revision(plan, committed_on_revision)
+            return await self._apply_plan(execution, _plan_on_committed_revision(plan), target)
         finally:
             try:
                 await target.provider.close()
             except Exception:
                 pass
+
+    async def _ensure_touched_files_unchanged(
+        self,
+        execution: _Execution,
+        target: GitProviderTarget,
+        plan: Plan,
+        revision: str,
+    ) -> None:
+        """Fail with a re-plan error unless every planned file is unchanged at ``revision``."""
+        file_plan = plan.file_plan
+        assert file_plan is not None
+        for edit in file_plan.files:
+            git_file = await self._git_call(execution, target.provider.get_file, target.repository, edit.path, revision)
+            if edit.operation == "create":
+                if git_file is not None:
+                    raise _replan_error(f"{edit.path!r} was created after the plan was rendered; re-plan.")
+                continue
+            blob_sha = (git_file.blob_sha or git_file.sha) if git_file is not None else None
+            if (
+                git_file is None
+                or git_file.path != edit.path
+                or not isinstance(blob_sha, str)
+                or edit.original_sha is None
+                or blob_sha.lower() != edit.original_sha.lower()
+            ):
+                raise _replan_error(
+                    "Source revision changed a file this plan edits after the plan was created; "
+                    "re-plan before applying."
+                )
+
+    async def _record_committed_on_revision(self, plan: Plan, revision: str) -> Plan:
+        """Persist the moved branch head the plan is committed on, separately from its base (D7)."""
+        if plan.committed_on_revision != revision:
+            recorder = getattr(self.plans, "set_plan_committed_on_revision", None)
+            if callable(recorder):
+                updated = await cast(Any, recorder)(plan.plan_id, revision, expected_digest=plan.digest)
+                if updated is None:
+                    raise PlanWorkerError(f"Plan {plan.plan_id!r} changed while recording its commit revision.")
+                plan = updated
+        return plan.model_copy(update={"committed_on_revision": revision})
+
+    async def _planned_base_revision(self, plan: Plan) -> str | None:
+        """Return the revision the plan was rendered on, even for the in-memory moved-head view (D7).
+
+        ``_plan_on_committed_revision`` rewrites ``file_plan.base_revision`` to the moved head so the
+        branch and commit are created on it; identities derived from the base (rollback plan IDs)
+        and provenance must keep using the persisted planned base.
+        """
+        file_plan = plan.file_plan
+        if file_plan is None:
+            return None
+        committed = plan.committed_on_revision
+        if committed is None or committed.lower() != file_plan.base_revision.lower():
+            return file_plan.base_revision
+        persisted = await self.plans.get_plan(plan.plan_id)
+        if persisted is None or persisted.digest != plan.digest or persisted.file_plan is None:
+            return None
+        return persisted.file_plan.base_revision
 
     async def _validate_current_binding(self, plan: Plan) -> None:
         if self.binding_reader is None:
@@ -766,6 +831,7 @@ class PlanWorker:
                 plan_status=PlanStatus.STALE,
             )
         original = await self.plans.get_plan(rollback_of_plan_id)
+        planned_base_revision = await self._planned_base_revision(plan)
         if (
             original is None
             or original.plan_id != rollback_of_plan_id
@@ -778,7 +844,8 @@ class PlanWorker:
             or set(original.recommendation_ids) != set(plan.recommendation_ids)
             or original.action != plan.action
             or not same_rollback_source(original.source, plan.source)
-            or plan.plan_id != inverse_plan_id(original.plan_id, original.digest, plan.file_plan.base_revision)
+            or planned_base_revision is None
+            or plan.plan_id != inverse_plan_id(original.plan_id, original.digest, planned_base_revision)
         ):
             raise PlanWorkerError(
                 "Rollback link no longer matches a synced original plan.",
@@ -906,6 +973,7 @@ class PlanWorker:
         await self._heartbeat(execution, force=True)
         await self._validate_rollback_review(plan)
         recommendations, missing_recommendation_ids = await self._recommendation_records_for_pr(plan)
+        planned_base_revision = await self._planned_base_revision(plan)
         try:
             pull_request = await provider.create_pull_request(
                 target.repository,
@@ -918,6 +986,7 @@ class PlanWorker:
                     target.repository,
                     recommendations,
                     missing_recommendation_ids,
+                    planned_base_revision=planned_base_revision,
                 ),
                 options=self.pull_request_options,
             )
@@ -1317,17 +1386,71 @@ class PlanWorker:
         if force or execution.lease.lease_expires_at <= now + refresh_margin:
             execution.lease = await self.operations.heartbeat(execution.lease, lease_seconds=self.lease_seconds)
 
+    async def _adopt_open_pull_request(self, execution: _Execution, plan: Plan) -> _PlanResult | None:
+        """Adopt the open PR of a reclaimed operation before any staleness check (D10, BUG-52).
+
+        A worker can lose its lease after the PR was opened but before the operation was
+        marked succeeded. The reclaiming worker must track that PR (``PR_OPEN``) instead of
+        marking the plan stale because the binding, TTL or branch head moved meanwhile.
+        """
+        operation = execution.lease.operation
+        file_plan = plan.file_plan
+        if (
+            plan.status not in _RECLAIMABLE_PLAN_STATUSES
+            or operation.plan_id != plan.plan_id
+            or plan.digest is None
+            or operation.idempotency_key != f"plan:{plan.plan_id}:{plan.digest}"
+            or file_plan is None
+            or file_plan.digest != plan.digest
+        ):
+            return None
+        target = await self.provider_resolver.resolve(plan.source)
+        try:
+            self._validate_target(plan.source, target)
+            branch = plan_branch_name(plan)
+            pull_request = await self._git_call(
+                execution,
+                target.provider.find_pull_request,
+                target.repository,
+                branch,
+                plan.source.ref,
+            )
+            if pull_request is None:
+                return None
+            try:
+                self._validate_pull_request(pull_request, branch, plan.source.ref)
+                branch_state = await self._branch_state(execution, target, branch, _plan_on_committed_revision(plan))
+            except PlanWorkerError:
+                return None
+            if branch_state != "applied":
+                return None
+            await self._git_call(
+                execution,
+                target.provider.ensure_pull_request_options,
+                target.repository,
+                pull_request,
+                self.pull_request_options,
+            )
+            await self._record_open_pull_request(plan, target, branch, pull_request)
+            return _PlanResult(target, branch, _pull_request_head_sha(pull_request), pull_request)
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+
     async def _finish_success(self, execution: _Execution, plan: Plan, result: _PlanResult) -> None:
         await self._heartbeat(execution, force=True)
-        updated = await self.plans.set_plan_status(
-            plan.plan_id,
-            PlanStatus.PR_OPEN,
-            expected_statuses=(PlanStatus.APPLYING,),
-            expected_digest=plan.digest,
-            actor="automation-worker",
-        )
-        if updated is None:
-            raise PlanWorkerError(f"Plan {plan.plan_id!r} changed after its pull request was opened.")
+        if plan.status is not PlanStatus.PR_OPEN:
+            updated = await self.plans.set_plan_status(
+                plan.plan_id,
+                PlanStatus.PR_OPEN,
+                expected_statuses=(PlanStatus.APPLYING,),
+                expected_digest=plan.digest,
+                actor="automation-worker",
+            )
+            if updated is None:
+                raise PlanWorkerError(f"Plan {plan.plan_id!r} changed after its pull request was opened.")
         await self.plans.set_recommendation_action_status(
             plan.recommendation_ids,
             ActionStatus.PR_OPEN,
@@ -1450,6 +1573,19 @@ class PlanWorker:
                     )
 
 
+def _plan_on_committed_revision(plan: Plan) -> Plan:
+    """In-memory view of a plan applied on its recorded moved head instead of its base revision.
+
+    The touched files are byte-identical at both revisions, so the file edits and digest are
+    unchanged; only the branch/commit parent moves. Never persisted.
+    """
+    file_plan = plan.file_plan
+    revision = plan.committed_on_revision
+    if file_plan is None or revision is None or revision.lower() == file_plan.base_revision.lower():
+        return plan
+    return plan.model_copy(update={"file_plan": file_plan.model_copy(update={"base_revision": revision})})
+
+
 def plan_branch_name(plan: Plan) -> str:
     """Return a stable, collision-resistant branch for one plan digest."""
     if plan.digest is None:
@@ -1546,10 +1682,14 @@ def _pull_request_body(
     repository: GitRepository,
     recommendations: Sequence[RecommendationRecord],
     missing_recommendation_ids: Sequence[int] = (),
+    *,
+    planned_base_revision: str | None = None,
 ) -> str:
     file_plan = plan.file_plan
     if file_plan is None:
         raise PlanWorkerError("A pull request requires a persisted, render-validated file plan.")
+    base_revision = planned_base_revision or file_plan.base_revision
+    committed_on_revision = plan.committed_on_revision
 
     title = "Automated GitOps rollback" if plan.rollback_of_plan_id is not None else "Automated GitOps change"
     lines = [
@@ -1566,15 +1706,24 @@ def _pull_request_body(
         ),
         f"- Renderer: `{plan.source.renderer.value}`",
         f"- Source path: `{plan.source.path}`",
-        f"- Base branch/revision: `{plan.source.ref}` / `{file_plan.base_revision}`",
-        f"- Plan branch: `{branch}`",
-        f"- Validation: `{'passed' if file_plan.validation.passed else 'failed'}`",
+        f"- Base branch/revision: `{plan.source.ref}` / `{base_revision}`",
     ]
+    if committed_on_revision is not None and committed_on_revision.lower() != base_revision.lower():
+        lines.append(
+            f"- Committed on moved head: `{committed_on_revision}` (every file this plan touches is unchanged "
+            "since the planned base revision)"
+        )
+    lines.extend(
+        (
+            f"- Plan branch: `{branch}`",
+            f"- Validation: `{'passed' if file_plan.validation.passed else 'failed'}`",
+        )
+    )
     if plan.source.source_revision:
         lines.append(f"- Observed controller revision: `{plan.source.source_revision}`")
-        if _revision_identity(plan.source.source_revision) != _revision_identity(file_plan.base_revision):
+        if _revision_identity(plan.source.source_revision) != _revision_identity(base_revision):
             lines.append(
-                f"- Revision drift: this plan targets branch head `{file_plan.base_revision}`, while the controller "
+                f"- Revision drift: this plan targets branch head `{base_revision}`, while the controller "
                 f"reports `{plan.source.source_revision}`; refresh discovery or sync before approval if the live "
                 "revision is required."
             )

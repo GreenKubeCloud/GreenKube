@@ -52,9 +52,11 @@ from greenkube.api.routers import webhooks as webhooks_router
 from greenkube.api.startup import run_plan_expiry_loop, run_startup_recommendation_scan
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
+from greenkube.automation.supervision import SupervisedLoop
 from greenkube.automation.webhook_runtime import create_webhook_processing_service
 from greenkube.core.config import get_config
 from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
+from greenkube.core.observability import record_automation_failure
 
 logger = logging.getLogger(__name__)
 _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
@@ -214,6 +216,7 @@ async def lifespan(app: FastAPI):
 
     app.state.automation_plan_service = None
     app.state._plan_worker_task = None
+    app.state.automation_loop_supervisor = None
     app.state.webhook_processing_service = None
     app.state.pull_request_lifecycle_reconciler = None
     webhook_secret_dir = os.getenv("GITOPS_WEBHOOK_SECRET_DIR") or os.getenv("GITOPS_WEBHOOK_SECRET_FILE")
@@ -241,9 +244,15 @@ async def lifespan(app: FastAPI):
         if getattr(config, "AUTOMATION_ENABLED", False) and getattr(config, "AUTOMATION_MODE", "disabled") == "inline":
             worker = plan_service.worker
             if worker is not None:
-                from greenkube.cli.automation_worker import run_worker
-
-                app.state._plan_worker_task = asyncio.create_task(run_worker(queue="plans", plan_worker=worker))
+                # Supervised: a crashed or exited loop restarts with backoff and readiness
+                # reflects its heartbeat instead of the API staying ready over a dead queue (D9).
+                supervisor = SupervisedLoop(
+                    "inline-plan-worker",
+                    _inline_worker_factory(worker),
+                    on_failure=lambda _code: record_automation_failure("worker"),
+                )
+                app.state.automation_loop_supervisor = supervisor
+                app.state._plan_worker_task = supervisor.start()
 
     # Start tracked background startup tasks so we can cancel them on shutdown.
     app.state._startup_tasks = []
@@ -271,6 +280,10 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
+        # Stop the supervisor first: a loop it restarted after a crash is not in _startup_tasks.
+        loop_supervisor = getattr(app.state, "automation_loop_supervisor", None)
+        if loop_supervisor is not None:
+            await loop_supervisor.stop()
         for t in getattr(app.state, "_startup_tasks", []) or []:
             if not t.done():
                 t.cancel()
@@ -281,6 +294,7 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().close()
     app.state.automation_plan_service = None
+    app.state.automation_loop_supervisor = None
     app.state.webhook_processing_service = None
     app.state.pull_request_lifecycle_reconciler = None
     logger.info("Database connection closed.")
@@ -292,6 +306,15 @@ async def lifespan(app: FastAPI):
         logger.info("Kubernetes ApiClient closed.")
     except Exception:
         logger.exception("Failed to close Kubernetes ApiClient during shutdown.")
+
+
+def _inline_worker_factory(worker):
+    async def run_inline_worker(heartbeat) -> None:
+        from greenkube.cli.automation_worker import run_worker
+
+        await run_worker(queue="plans", plan_worker=worker, heartbeat=heartbeat)
+
+    return run_inline_worker
 
 
 def create_app(use_lifespan: bool = False) -> FastAPI:
@@ -373,9 +396,11 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)
     async def heartbeat():
         """Return a lightweight liveness response without probing dependencies."""
+        supervisor = getattr(app.state, "automation_loop_supervisor", None)
+        loops_ready = supervisor is None or supervisor.health.ready()
         return {
             "status": "ok",
-            "ready": bool(getattr(app.state, "ready", True)),
+            "ready": bool(getattr(app.state, "ready", True)) and loops_ready,
             "timestamp": datetime.now(timezone.utc),
         }
 

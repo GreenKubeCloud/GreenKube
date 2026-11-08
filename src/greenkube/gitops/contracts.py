@@ -474,6 +474,114 @@ class FilePlan(ContractModel):
         return self
 
 
+class FileSummaryEntry(ContractModel):
+    """Content-free record of one planned file edit, kept after retention prunes file contents."""
+
+    path: str = Field(min_length=1)
+    operation: Literal["create", "update", "delete"]
+    original_sha: str | None = None
+    content_digest: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _repository_path(value, allow_root=False)
+
+    @field_validator("content_digest")
+    @classmethod
+    def validate_content_digest(cls, value: str | None) -> str | None:
+        return _validate_digest(value) if value is not None else None
+
+
+class DiffStats(ContractModel):
+    files_changed: int = Field(ge=0)
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+
+
+class FilePlanSummary(ContractModel):
+    """Compact, content-free projection of a FilePlan (paths, digests, diff stats).
+
+    Retention keeps this summary when it prunes plan file contents so a terminal plan
+    remains a valid, readable ``Plan``. ``files`` is empty only for plans pruned by
+    releases that did not keep a summary.
+    """
+
+    plan_id: str = Field(min_length=1)
+    files: list[FileSummaryEntry] = Field(default_factory=list)
+    base_revision: str = Field(min_length=1)
+    source_revision: str | None = None
+    renderer: RendererKind
+    validation: ValidationResult
+    warnings: list[str] = Field(default_factory=list)
+    digest: str
+    diff_stats: DiffStats | None = None
+    pruned_at: datetime | None = None
+
+    @field_validator("digest")
+    @classmethod
+    def validate_digest(cls, value: str) -> str:
+        return _validate_digest(value)
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> FilePlanSummary:
+        paths = [entry.path for entry in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("file summary paths must be unique")
+        if self.validation.renderer is not self.renderer:
+            raise ValueError("file plan summary renderer must match its validation renderer")
+        return self
+
+    @classmethod
+    def from_file_plan(cls, file_plan: FilePlan, *, pruned_at: datetime | None = None) -> FilePlanSummary:
+        return cls(
+            plan_id=file_plan.plan_id,
+            files=[
+                FileSummaryEntry(
+                    path=edit.path,
+                    operation=edit.operation,
+                    original_sha=edit.original_sha,
+                    content_digest=(
+                        f"sha256:{hashlib.sha256(edit.content.encode('utf-8')).hexdigest()}"
+                        if edit.content is not None
+                        else None
+                    ),
+                    size_bytes=len(edit.content.encode("utf-8")) if edit.content is not None else None,
+                )
+                for edit in file_plan.files
+            ],
+            base_revision=file_plan.base_revision,
+            source_revision=file_plan.source_revision,
+            renderer=file_plan.renderer,
+            validation=file_plan.validation,
+            warnings=list(file_plan.warnings),
+            digest=file_plan.digest,
+            diff_stats=diff_stats(file_plan.diff, files_changed=len(file_plan.files)),
+            pruned_at=pruned_at,
+        )
+
+
+def diff_stats(diff: str | None, *, files_changed: int | None = None) -> DiffStats:
+    """Count unified-diff additions and deletions without keeping the diff text."""
+    additions = deletions = 0
+    changed_paths: set[str] = set()
+    for line in (diff or "").splitlines():
+        if line.startswith("+++ "):
+            changed_paths.add(line[4:].strip())
+        elif line.startswith("---"):
+            continue
+        elif line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return DiffStats(
+        files_changed=files_changed if files_changed is not None else len(changed_paths),
+        additions=additions,
+        deletions=deletions,
+    )
+
+
 class ContainerRequestBaseline(ContractModel):
     cpu_millicores: StrictInt | None = Field(default=None, ge=0)
     memory_bytes: StrictInt | None = Field(default=None, ge=0)
@@ -514,11 +622,15 @@ class Plan(ContractModel):
     action: ActionPlanV3
     policy_result: dict[str, Any] = Field(default_factory=dict)
     file_plan: FilePlan | None = None
+    # Set instead of ``file_plan`` once retention pruned the file contents (D2).
+    file_plan_summary: FilePlanSummary | None = None
     status: PlanStatus = PlanStatus.DRAFT
     digest: str | None = None
     change_set_id: str | None = None
     rollback_of_plan_id: str | None = None
     pre_apply_baseline: PreApplyWorkloadBaseline | None = None
+    # Branch head the worker committed on when it differs from the planned base revision (D7).
+    committed_on_revision: str | None = Field(default=None, min_length=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
 
@@ -526,6 +638,19 @@ class Plan(ContractModel):
     @classmethod
     def validate_digest(cls, value: str | None) -> str | None:
         return _validate_digest(value) if value is not None else None
+
+    @property
+    def file_summary(self) -> FilePlanSummary | None:
+        """Content-free file summary, available before and after retention pruning."""
+        if self.file_plan is not None:
+            return FilePlanSummary.from_file_plan(self.file_plan)
+        return self.file_plan_summary
+
+    @property
+    def base_revision(self) -> str | None:
+        if self.file_plan is not None:
+            return self.file_plan.base_revision
+        return self.file_plan_summary.base_revision if self.file_plan_summary is not None else None
 
     @model_validator(mode="after")
     def validate_plan(self) -> Plan:
@@ -538,10 +663,15 @@ class Plan(ContractModel):
                 raise ValueError("rollback_of_plan_id must not be blank")
             if self.rollback_of_plan_id == self.plan_id:
                 raise ValueError("a plan cannot roll back itself")
-            if self.file_plan is None or self.digest is None:
+            if (self.file_plan is None and self.file_plan_summary is None) or self.digest is None:
                 raise ValueError("rollback plans require a persisted file plan and digest")
         if self.file_plan is not None and self.file_plan.plan_id != self.plan_id:
             raise ValueError("file plan plan_id must match its plan")
+        if self.file_plan_summary is not None:
+            if self.file_plan is not None:
+                raise ValueError("a plan carries either its file plan or a pruned file plan summary, not both")
+            if self.file_plan_summary.plan_id != self.plan_id:
+                raise ValueError("file plan summary plan_id must match its plan")
         if self.status in {
             PlanStatus.VALIDATED,
             PlanStatus.APPROVED,
@@ -552,9 +682,10 @@ class Plan(ContractModel):
             PlanStatus.APPLIED,
             PlanStatus.SYNC_FAILED,
         }:
-            if self.file_plan is None or not self.file_plan.validation.passed:
+            validated = self.file_plan if self.file_plan is not None else self.file_plan_summary
+            if validated is None or not validated.validation.passed:
                 raise ValueError("validated plan status requires a successful render validation")
-            if self.digest != self.file_plan.digest:
+            if self.digest != validated.digest:
                 raise ValueError("validated plan digest must match the file plan digest")
         return self
 

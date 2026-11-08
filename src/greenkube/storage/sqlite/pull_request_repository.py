@@ -38,7 +38,7 @@ class SQLitePullRequestRepository(PullRequestRepository):
 
     async def save_pull_request(self, record: PullRequestRecord) -> PullRequestRecord:
         created = to_iso_z(record.created_at or datetime.now(timezone.utc))
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.transaction() as conn:
             cursor = await conn.execute(
                 """
                 INSERT INTO recommendation_pull_requests
@@ -72,10 +72,9 @@ class SQLitePullRequestRepository(PullRequestRepository):
                     to_iso_z(record.updated_at) if record.updated_at else created,
                 ),
             )
-            await conn.commit()
             cursor = await conn.execute("SELECT * FROM recommendation_pull_requests WHERE id = ?", (cursor.lastrowid,))
             row = await cursor.fetchone()
-            return row_to_pull_request(row)
+        return row_to_pull_request(row)
 
     async def update_pull_request(
         self,
@@ -104,8 +103,8 @@ class SQLitePullRequestRepository(PullRequestRepository):
             conditions.append("plan_id = ?")
             condition_params.append(expected_plan_id)
 
-        async with self.db_manager.connection_scope() as conn:
-            conn.row_factory = aiosqlite.Row
+        # The transaction always rolls back when the compare-and-set misses (BUG-50).
+        async with self.db_manager.transaction() as conn:
             cursor = await conn.execute(
                 f"UPDATE recommendation_pull_requests SET {set_clause} WHERE {' AND '.join(conditions)}",
                 (*params, *condition_params),
@@ -115,9 +114,9 @@ class SQLitePullRequestRepository(PullRequestRepository):
                 if not await cursor.fetchone():
                     raise ValueError(f"Pull request {pr_id} not found.")
                 raise PullRequestStateConflictError(f"Pull request {pr_id} changed before the update was applied.")
-            await conn.commit()
             cursor = await conn.execute("SELECT * FROM recommendation_pull_requests WHERE id = ?", (pr_id,))
-            return row_to_pull_request(await cursor.fetchone())
+            row = await cursor.fetchone()
+        return row_to_pull_request(row)
 
     async def get_pull_request_by_id(self, pr_id: int) -> Optional[PullRequestRecord]:
         async with self.db_manager.connection_scope() as conn:
@@ -273,7 +272,10 @@ class SQLitePullRequestRepository(PullRequestRepository):
             "LEFT JOIN automation_branch_cleanup_completed cleanup "
             "ON cleanup.plan_id = pr.plan_id AND cleanup.provider_id = pr.provider_id "
             "AND cleanup.repo = pr.repo AND cleanup.branch_name = pr.head_branch "
-            "WHERE cleanup.plan_id IS NULL "
+            # The branch_cleanup_completed_at predicate drives idx_reco_pr_branch_cleanup_pending,
+            # so each pass walks only rows whose plan branch is still pending cleanup (D15).
+            "WHERE pr.branch_cleanup_completed_at IS NULL "
+            "AND cleanup.plan_id IS NULL "
             "AND pr.plan_id IS NOT NULL AND pr.plan_id <> '' "
             "AND pr.head_branch IS NOT NULL AND pr.head_branch <> '' "
             f"AND (pr.status IN ('closed', 'merged') OR plan.status IN ({placeholders}))"
@@ -297,7 +299,7 @@ class SQLitePullRequestRepository(PullRequestRepository):
         repo: str,
         branch_name: str,
     ) -> None:
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.transaction() as conn:
             await conn.execute(
                 """
                 INSERT INTO automation_branch_cleanup_completed
@@ -311,13 +313,20 @@ class SQLitePullRequestRepository(PullRequestRepository):
                 """,
                 (plan_id, provider_id, repo, branch_name),
             )
-            await conn.commit()
+            await conn.execute(
+                """
+                UPDATE recommendation_pull_requests SET branch_cleanup_completed_at = ?
+                WHERE plan_id = ? AND provider_id = ? AND repo = ? AND head_branch = ?
+                  AND branch_cleanup_completed_at IS NULL
+                """,
+                (to_iso_z(datetime.now(timezone.utc)), plan_id, provider_id, repo, branch_name),
+            )
 
     async def reconcile_open_pull_requests(self, *, stale_before: datetime, limit: int) -> int:
         if not isinstance(stale_before, datetime) or stale_before.tzinfo is None or stale_before.utcoffset() is None:
             raise ValueError("stale_before must be a timezone-aware datetime.")
         self.validate_poll_page(limit, None)
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.transaction() as conn:
             cursor = await conn.execute(
                 """
                 UPDATE recommendation_pull_requests
@@ -344,5 +353,4 @@ class SQLitePullRequestRepository(PullRequestRepository):
                     limit,
                 ),
             )
-            await conn.commit()
             return cursor.rowcount

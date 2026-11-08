@@ -45,6 +45,10 @@ automation:
     cooldownMinutes: 60
     changeFreezeLabels: []
     changeFreezeWindows: []
+    # What rollout, controller-health and HPA/VPA/PDB gates do when discovery could
+    # not collect their live evidence: "fail" rejects the plan, "warn" allows it with
+    # a warning. Empty defaults to "fail" for profile=production, "warn" for standalone.
+    missingEvidence: ''
   pullRequests:
     draft: false
     labels: [] # Optional; each configured label must already exist in the target repository.
@@ -103,7 +107,7 @@ production:
           memory: 128Mi
       livenessProbe:
         enabled: true
-        path: /api/v1/health
+        path: /api/v1/health/heartbeat
         port: http-api
         initialDelaySeconds: 10
         periodSeconds: 30
@@ -357,7 +361,7 @@ config:
     # Liveness probe: restarts the container if the API becomes unresponsive.
     livenessProbe:
       enabled: true
-      path: /api/v1/health
+      path: /api/v1/health/heartbeat
       initialDelaySeconds: 10
       periodSeconds: 30
       timeoutSeconds: 5
