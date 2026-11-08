@@ -193,6 +193,35 @@ def test_body_never_exceeds_60k_characters_and_keeps_sections_one_to_seven():
             assert len(section) <= MAX_SECTION_CHARS + 2
 
 
+def test_a_long_custom_template_never_pushes_sections_one_to_seven_past_the_limit():
+    filler = "Operator checklist line.\n" * 200
+    template = validate_template(
+        "{{ title }}\n\n"
+        + filler
+        + "\n{{ summary }}\n\n{{ changes }}\n\n{{ why }}\n\n{{ risk }}\n\n{{ assumptions }}\n\n{{ rollback }}"
+        "\n\n{{ verification }}\n\n{{ provenance }}\n\n{{ diffs }}"
+    )
+    records = [
+        fx.recommendation(
+            41 + index,
+            risk_factors=[f"factor {index}-{item} " + "y" * 250 for item in range(40)],
+            reason="z" * 900,
+        )
+        for index in range(12)
+    ]
+    plan = fx.plan(diff="+" + "x" * 50_000)
+    settings = PullRequestRenderSettings(template=template, max_body_chars=16_000)
+    body = render_body(_context(plan, records), settings)
+    assert len(body) <= 16_000
+    assert "truncated to the provider limit._\n<!--" not in body
+    assert "description was truncated" not in body
+    for heading in ESSENTIAL_HEADINGS:
+        assert heading in body
+    assert filler in body
+    footer = parse_footer(body)
+    assert footer is not None and footer["plan_id"] == "pln-1"
+
+
 def test_diffs_are_omitted_when_the_essential_sections_fill_the_budget():
     plan = fx.plan(diff="+" + "x" * 50_000, rendered_diff="+" + "x" * 50_000)
     body = render_body(_context(plan, [fx.recommendation(41)]), PullRequestRenderSettings(max_body_chars=7_000))

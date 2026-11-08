@@ -29,7 +29,7 @@ from greenkube.automation.pr_content.model import (
     resource_changes,
     savings_totals,
 )
-from greenkube.automation.pr_content.template import ESSENTIAL_SECTIONS, render_template
+from greenkube.automation.pr_content.template import PLACEHOLDER, render_template
 from greenkube.gitops.contracts import (
     PLANNABLE_RENDERERS,
     AddHorizontalPodAutoscaler,
@@ -46,6 +46,9 @@ FOOTER_PREFIX = "<!-- greenkube:v1 "
 _FOOTER = re.compile(r"(?:\A|\n)<!-- greenkube:v1 (\{[^\n]*\}) -->\s*\Z")
 #: Hard cap of each essential section, so sections 1-7 always fit in the body.
 MAX_SECTION_CHARS = 6_000
+_MIN_SECTION_CHARS = 200
+#: Room kept for the truncation note so the hard cut never lands in a section.
+_BODY_MARGIN = 120
 _MIN_DIFF_CHARS = 400
 _CONTROLLER_NAMES = {
     ControllerKind.ARGOCD: "Argo CD Application",
@@ -216,9 +219,13 @@ def render_body(
         "verification": _verification(context, selected),
         "provenance": _provenance(context),
     }
-    for name in ESSENTIAL_SECTIONS:
-        sections[name] = _cap(sections[name], MAX_SECTION_CHARS)
     scalars = _scalars(context, selected, title or render_title(context, selected))
+    # The template's own text and the scalars are fixed; the sections share what is
+    # left, so a long operator template cannot push sections 1-7 past the hard cut.
+    literal = render_template(selected.template, {**scalars, **{name: "" for name in sections}, "diffs": ""})
+    referenced = [name for name in sections if name in _referenced_sections(selected.template)]
+    available = selected.max_body_chars - len(literal) - len(footer) - 2 * len(referenced) - _BODY_MARGIN
+    _fit_sections(sections, referenced, available)
     values = {**scalars, **sections, "diffs": ""}
     without_diffs = render_template(selected.template, values)
     budget = selected.max_body_chars - len(without_diffs) - len(footer) - 2
@@ -284,7 +291,26 @@ def _scalars(context: PullRequestContext, settings: PullRequestRenderSettings, t
 def _cap(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    return text[: limit - 60].rstrip() + "\n\n_… section truncated to fit the provider limit._"
+    note = "\n\n_… section truncated to fit the provider limit._"
+    return text[: max(limit - len(note), 0)].rstrip() + note
+
+
+def _referenced_sections(template: str) -> set[str]:
+    return {match.group(1) for match in PLACEHOLDER.finditer(template)}
+
+
+def _fit_sections(sections: dict[str, str], names: Sequence[str], budget: int) -> None:
+    """Cap ``names`` so together they fit ``budget``: short sections keep their text, long ones share the rest.
+
+    No section exceeds :data:`MAX_SECTION_CHARS`, and none is cut below
+    :data:`_MIN_SECTION_CHARS` (its heading and first lines always remain).
+    """
+    remaining = sorted(names, key=lambda name: len(sections[name]))
+    left = max(budget, 0)
+    for index, name in enumerate(remaining):
+        share = left // (len(remaining) - index)
+        sections[name] = _cap(sections[name], max(min(MAX_SECTION_CHARS, share), _MIN_SECTION_CHARS))
+        left -= len(sections[name])
 
 
 def _summary(context: PullRequestContext, settings: PullRequestRenderSettings) -> str:
