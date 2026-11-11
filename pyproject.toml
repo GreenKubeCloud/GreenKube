@@ -169,3 +169,4 @@ project-includes = [
 ]
 # scripts/leads is a local, gitignored commercial tool — not part of the project.
 project-excludes = ["scripts/leads/**"]
+search-path = ["src", "examples/greenkube-source-example/src"]
