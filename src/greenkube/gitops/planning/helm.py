@@ -21,6 +21,8 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import LiteralScalarString
 
+from greenkube.automation.actions import CONTAINER_RESOURCES, ActionKindError, PrimitiveOp, SetField, Support
+from greenkube.automation.actions.container_resources import container_operations, container_resource_field
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     AutomationErrorCode,
@@ -51,8 +53,8 @@ from greenkube.gitops.planning.kustomize import (
 )
 from greenkube.gitops.planning.raw_manifest import (
     _POD_SPEC_PATHS,
-    _WORKLOAD_API_VERSIONS,
     RawManifestPlanError,
+    _action_kind,
     _apply_operations,
     _containers,
     _find_container,
@@ -204,6 +206,32 @@ class _FluxHelmReleaseContext:
 class HelmValuesPlanner:
     """Plan an explicit values-file mapping after render validation."""
 
+    renderer_kind = RendererKind.HELM_VALUES
+
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Container resource fields only; a values path must be mapped for the container.
+
+        An explicit ``values_mapping`` on the binding names that path. Without one, ``plan``
+        infers it by a render probe and fails with ``needs_chart_mapping`` when it cannot.
+        """
+        support, container = _helm_primitive_support(op, "Helm values")
+        if not support.ok:
+            return support
+        config = binding.renderer_config if isinstance(binding, WorkloadSource) else {}
+        mapping = config.get("values_mapping")
+        if isinstance(mapping, HelmValuesMapping):
+            mapped_container = mapping.container
+        elif isinstance(mapping, Mapping):
+            mapped_container = mapping.get("container")
+        else:
+            return Support.needs_mapping(
+                f"no explicit values mapping for container {container!r}; "
+                "the values path is inferred by a render probe at plan time"
+            )
+        if mapped_container != container:
+            return Support.unsupported(f"the explicit values mapping does not name container {container!r}")
+        return Support.supported()
+
     def __init__(
         self,
         *,
@@ -325,6 +353,14 @@ class HelmValuesPlanner:
 
 class FluxHelmReleasePlanner:
     """Add one exact, managed post-renderer patch to a Git-owned Flux HelmRelease."""
+
+    renderer_kind = RendererKind.HELM_RELEASE
+
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Container resource fields only, written as a managed post-renderer patch."""
+        del binding
+        support, _ = _helm_primitive_support(op, "Flux HelmRelease")
+        return support
 
     def __init__(
         self,
@@ -596,6 +632,16 @@ def _prepare_flux_helm_release_context(
     )
 
 
+def _helm_primitive_support(op: PrimitiveOp, label: str) -> tuple[Support, str | None]:
+    """Helm planners express container resource ``SetField`` edits only (and name the container)."""
+    if not isinstance(op, SetField):
+        return Support.unsupported(f"{label} planning does not support {op.op!r} primitives"), None
+    field_ref = container_resource_field(op.ref.kind, op.segments)
+    if field_ref is None:
+        return Support.unsupported(f"{label} planning maps container resources only; {op.path} is not one"), None
+    return Support.supported(), field_ref.container
+
+
 def plan_helm_values(
     action: ActionPlanV3,
     source: WorkloadSource,
@@ -781,16 +827,16 @@ def _validate_common_request(
         or action.target.name != source.workload_name
     ):
         raise error_type("action target must match the resolved workload binding")
-    supported_versions = _WORKLOAD_API_VERSIONS.get(action.target.kind)
-    if supported_versions is None or action.target.api_version not in supported_versions:
-        raise error_type(f"unsupported workload kind or API version: {action.target.api_version}/{action.target.kind}")
-    if not action.operations or any(not isinstance(item, SetContainerResources) for item in action.operations):
-        raise error_type("only explicit per-container rightsizing operations are supported")
-    operations = [item for item in action.operations if isinstance(item, SetContainerResources)]
-    if len({item.container for item in operations}) != len(operations):
-        raise error_type("each container may have only one per-container rightsizing operation")
-    if any(not item.resources.requests and not item.resources.limits for item in operations):
-        raise error_type("each rightsizing operation must set at least one resource quantity")
+    spec, _ = _action_kind(action, error_type)
+    if spec is not CONTAINER_RESOURCES:
+        raise error_type(f"Helm planning maps container resources only; {spec.title} actions are unsupported")
+    try:
+        support = spec.renderer_support(expected_renderer, action.operations)
+        operations = container_operations(action.operations)
+    except ActionKindError as exc:
+        raise error_type(str(exc)) from exc
+    if not support.ok:
+        raise error_type(support.reason or f"{expected_renderer.value} planning cannot express this action")
     try:
         root = _snapshot_root(snapshot)
         snapshot_files = _snapshot_file_map(snapshot)

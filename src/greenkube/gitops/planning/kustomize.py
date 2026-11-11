@@ -19,6 +19,17 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
+from greenkube.automation.actions import ACTION_KINDS, ActionKindError, ActionKindSpec, Support
+from greenkube.automation.actions.primitives import (
+    ListSelector,
+    PathSegment,
+    PrimitiveOp,
+    SetField,
+    field_operations,
+    format_path,
+    read_field,
+)
+from greenkube.automation.actions.workloads import POD_SPEC_PATHS
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     BindingStatus,
@@ -27,16 +38,14 @@ from greenkube.gitops.contracts import (
     FilePlan,
     RendererKind,
     ResourceTarget,
-    SetContainerResources,
+    TypedOperation,
     ValidationResult,
     WorkloadSource,
 )
 from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.raw_manifest import (
-    _POD_SPEC_PATHS,
-    _WORKLOAD_API_VERSIONS,
     RawManifestPlanError,
-    _order_operations_by_target_container,
+    _action_kind,
     _plan_identifier,
     _rendered_json,
     _rendered_target_matches,
@@ -81,6 +90,8 @@ _REMOTE_HOST = re.compile(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::[0-9]+)?/")
 _PATCH_ENTRY_KEYS = frozenset({"path", "patch", "target", "options"})
 _PATCH_TARGET_KEYS = frozenset({"group", "version", "kind", "name", "namespace", "labelSelector", "annotationSelector"})
 _PATCH_METADATA_MARKERS = frozenset({"greenkube.cloud/managed", "greenkube.cloud/action-id"})
+#: The strategic-merge key GreenKube patches use to address list entries.
+_PATCH_LIST_KEY = "name"
 
 
 class KustomizePlanError(ValueError):
@@ -88,7 +99,18 @@ class KustomizePlanError(ValueError):
 
 
 class KustomizePlanner:
-    """Create deterministic, render-validated FilePlans for one resolved overlay."""
+    """Create deterministic, render-validated FilePlans for one resolved overlay.
+
+    This is the Kustomize ``PatchStrategy``: the action kind compiles its typed operations
+    to primitive ``SetField`` edits, which become one overlay-local, GreenKube-managed
+    strategic-merge patch (merged with the fields an earlier managed patch already sets).
+    """
+
+    renderer_kind = RendererKind.KUSTOMIZE
+
+    def supports(self, op: Any, binding: WorkloadSource) -> Support:
+        del binding
+        return _primitive_support(op)
 
     def __init__(
         self,
@@ -113,7 +135,7 @@ class KustomizePlanner:
         snapshot: RepositorySnapshot,
         base_revision: str,
     ) -> FilePlan:
-        operations = _validate_request(action, source, snapshot, base_revision)
+        spec, operations = _validate_request(action, source, snapshot, base_revision)
         root = _snapshot_root(snapshot)
         snapshot_files = _snapshot_file_map(snapshot)
         _validate_workspace_inventory(root, snapshot_files)
@@ -142,11 +164,9 @@ class KustomizePlanner:
             original_kustomization,
             overrides,
         )
-        # Only a controller that supplies a namespace to namespace-less resources (an Argo CD
-        # destination) may match one; Flux namespaces them through targetNamespace above.
-        allow_namespace_less = source.controller_kind is not ControllerKind.FLUX_KUSTOMIZATION
+        allow_namespace_less = controller_supplies_namespace(source)
         rendered_target = _require_target(before, action.target, allow_namespace_less=allow_namespace_less)
-        _reject_post_build_variables(before, rendered_target, overrides)
+        _reject_post_build_variables(before, rendered_target, overrides, _patch_fields(spec, action.target, operations))
         selector = _target_selector(
             _patch_selector_target(
                 self.renderer,
@@ -163,7 +183,7 @@ class KustomizePlanner:
         )
 
         expected_path = _managed_patch_path(overlay_path, action.target)
-        patch_path, preserved_labels, preserved_annotations, preserved_requests = _find_managed_patch(
+        patch_path, preserved_labels, preserved_annotations, preserved_fields = _find_managed_patch(
             root,
             snapshot_files,
             overlay_path,
@@ -175,11 +195,11 @@ class KustomizePlanner:
         )
         patch_content = _patch_content(
             action.target,
-            _order_operations_by_target_container(before, action.target, operations),
+            _patch_fields(spec, action.target, operations),
             preserved_labels=preserved_labels,
             preserved_annotations=preserved_annotations,
-            preserved_requests=preserved_requests,
-            container_order=_target_container_order(before, rendered_target),
+            preserved_fields=preserved_fields,
+            rendered_target=_rendered_manifest(before, rendered_target),
         )
         updated_kustomization = _add_patch_entry(
             config,
@@ -217,7 +237,7 @@ class KustomizePlanner:
         target_identity = _target_identity(rendered_target)
         target_changed = before_resources[target_identity] != after_resources[target_identity]
         if not target_changed:
-            raise KustomizePlanError("the requested container requests are already present in the rendered target")
+            raise KustomizePlanError(f"the requested {spec.description} are already present in the rendered target")
 
         edits: list[FileEdit] = []
         originals: dict[str, str] = {}
@@ -308,6 +328,15 @@ def plan_kustomize(
     return KustomizePlanner().plan(action, source, snapshot, base_revision)
 
 
+def controller_supplies_namespace(source: WorkloadSource) -> bool:
+    """Whether the GitOps controller namespaces the overlay's namespace-less resources itself.
+
+    Only such a controller (an Argo CD destination) lets a namespace-less rendered workload
+    match the live one; Flux namespaces them through ``targetNamespace`` in the build.
+    """
+    return source.controller_kind is not ControllerKind.FLUX_KUSTOMIZATION
+
+
 def render_as_deployed(
     renderer: KustomizeRenderer,
     snapshot: RepositorySnapshot,
@@ -342,7 +371,7 @@ def _validate_request(
     source: WorkloadSource,
     snapshot: RepositorySnapshot,
     base_revision: str,
-) -> list[SetContainerResources]:
+) -> tuple[ActionKindSpec, list[TypedOperation]]:
     if not isinstance(snapshot, RepositorySnapshot):
         raise KustomizePlanError("snapshot must be an archive RepositorySnapshot")
     if not isinstance(base_revision, str) or not GIT_OBJECT_SHA.fullmatch(base_revision):
@@ -361,26 +390,44 @@ def _validate_request(
         or action.target.name != source.workload_name
     ):
         raise KustomizePlanError("action target must match the resolved workload binding")
-    supported_versions = _WORKLOAD_API_VERSIONS.get(action.target.kind)
-    if supported_versions is None or action.target.api_version not in supported_versions:
-        raise KustomizePlanError(
-            f"unsupported workload kind or API version: {action.target.api_version}/{action.target.kind}"
-        )
-    if not action.operations or any(
-        not isinstance(operation, SetContainerResources) for operation in action.operations
-    ):
-        raise KustomizePlanError("only per-container rightsizing operations are supported")
-
-    operations = [operation for operation in action.operations if isinstance(operation, SetContainerResources)]
-    if len({operation.container for operation in operations}) != len(operations):
-        raise KustomizePlanError("each container may have only one per-container rightsizing operation")
-    for operation in operations:
-        if not operation.resources.requests:
-            raise KustomizePlanError("each operation must set at least one container request")
-        if operation.resources.limits:
-            raise KustomizePlanError("Kustomize v1 supports requests only; limits edits are unsupported")
+    spec, operations = _action_kind(action, KustomizePlanError)
+    try:
+        support = spec.renderer_support(RendererKind.KUSTOMIZE, operations)
+        if support.ok:
+            support = next(
+                (item for item in map(_primitive_support, spec.compile(action.target, operations)) if not item.ok),
+                support,
+            )
+    except ActionKindError as exc:
+        raise KustomizePlanError(str(exc)) from exc
+    if not support.ok:
+        raise KustomizePlanError(support.reason or "the action cannot be expressed as a Kustomize patch")
     _validate_renderer_config(source)
-    return operations
+    return spec, operations
+
+
+def _primitive_support(op: PrimitiveOp) -> Support:
+    """Kustomize v1 writes ``SetField`` edits under ``spec`` addressed by ``name`` list keys."""
+    if not isinstance(op, SetField):
+        return Support.unsupported(f"Kustomize planning does not support {op.op!r} primitives yet")
+    segments = op.segments
+    if segments[0] != "spec":
+        return Support.unsupported("Kustomize planning patches fields under spec only")
+    if any(isinstance(segment, ListSelector) and segment.key != _PATCH_LIST_KEY for segment in segments):
+        return Support.unsupported("Kustomize strategic-merge patches address list entries by name only")
+    return Support.supported()
+
+
+def _patch_fields(
+    spec: ActionKindSpec,
+    target: ResourceTarget,
+    operations: Sequence[TypedOperation],
+) -> dict[tuple[PathSegment, ...], Any]:
+    return {
+        primitive.segments: primitive.value
+        for primitive in field_operations(spec.compile(target, operations))
+        if isinstance(primitive, SetField)
+    }
 
 
 def _validate_renderer_config(source: WorkloadSource) -> None:
@@ -890,7 +937,7 @@ def _find_managed_patch(
     expected_path: str,
     target: ResourceTarget,
     expected_selector: Mapping[str, str],
-) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, dict[str, str]]]:
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[tuple[PathSegment, ...], Any]]:
     prefix = _managed_filename_prefix(target)
     patch_entries = config.get("patches", [])
     referenced: dict[str, Mapping[str, Any]] = {}
@@ -917,7 +964,7 @@ def _find_managed_patch(
                 raise KustomizePlanError("managed GreenKube patches must live inside the resolved overlay")
             candidate_paths.add(path)
 
-    matches: list[tuple[str, dict[str, Any], dict[str, Any], dict[str, dict[str, str]]]] = []
+    matches: list[tuple[str, dict[str, Any], dict[str, Any], dict[tuple[PathSegment, ...], Any]]] = []
     for path in sorted(candidate_paths):
         if path not in files:
             if path == expected_path:
@@ -929,12 +976,12 @@ def _find_managed_patch(
             if path == expected_path:
                 raise KustomizePlanError(f"{path}: deterministic GreenKube patch path collides with another resource")
             continue
-        labels, annotations, requests = _validate_managed_patch(parsed, path, target)
+        labels, annotations, fields = _validate_managed_patch(parsed, path, target)
         if path in referenced:
             entry = referenced[path]
             if entry.get("target") != expected_selector or set(entry) != {"path", "target"}:
                 raise KustomizePlanError(f"{kustomization_path}: managed patch requires an exact target selector")
-        matches.append((path, labels, annotations, requests))
+        matches.append((path, labels, annotations, fields))
 
     if len(matches) > 1:
         raise KustomizePlanError(f"{kustomization_path}: multiple GreenKube patches target the same workload")
@@ -997,7 +1044,13 @@ def _validate_managed_patch(
     document: Mapping[str, Any],
     path: str,
     target: ResourceTarget,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[tuple[PathSegment, ...], Any]]:
+    """Validate a GreenKube-managed patch; return its markers and the fields it sets.
+
+    Every field under ``spec`` must belong to a registered action kind (for container
+    resources: CPU/memory requests of named containers), so a hand-edited patch fails
+    closed instead of being rewritten.
+    """
     if set(document) - {"apiVersion", "kind", "metadata", "spec"}:
         raise KustomizePlanError(f"{path}: managed patch contains unsupported fields")
     metadata = document.get("metadata")
@@ -1015,39 +1068,49 @@ def _validate_managed_patch(
     spec = document.get("spec")
     if not isinstance(spec, Mapping):
         raise KustomizePlanError(f"{path}: managed patch spec must be a mapping")
-    current: Any = spec
-    pod_path = _POD_SPEC_PATHS[target.kind]
-    for field_name in pod_path[1:]:
-        if not isinstance(current, Mapping) or set(current) != {field_name}:
-            raise KustomizePlanError(f"{path}: managed patch must contain only container requests")
-        current = current[field_name]
-    if not isinstance(current, Mapping) or set(current) != {"containers"}:
-        raise KustomizePlanError(f"{path}: managed patch must contain only container requests")
-    containers = current["containers"]
-    if not isinstance(containers, list) or not containers:
-        raise KustomizePlanError(f"{path}: managed patch containers must be a non-empty list")
-    preserved_requests: dict[str, dict[str, str]] = {}
-    for container in containers:
-        if not isinstance(container, Mapping) or set(container) != {"name", "resources"}:
-            raise KustomizePlanError(f"{path}: managed patch containers may include requests only")
-        name = container.get("name")
-        resources = container.get("resources")
-        if not isinstance(name, str) or not name or name in preserved_requests or not isinstance(resources, Mapping):
-            raise KustomizePlanError(f"{path}: managed patch container names are invalid")
-        requests = resources.get("requests")
-        if set(resources) != {"requests"} or not isinstance(requests, Mapping):
-            raise KustomizePlanError(f"{path}: managed patch resources may include requests only")
-        if (
-            not requests
-            or set(requests) - {"cpu", "memory"}
-            or any(
-                not isinstance(quantity, str) or not quantity or quantity != quantity.strip()
-                for quantity in requests.values()
+    fields: dict[tuple[PathSegment, ...], Any] = {}
+    _collect_patch_fields(spec, ("spec",), path, fields)
+    for segments, value in fields.items():
+        if not ACTION_KINDS.owns_patch_field(target.kind, segments, value):
+            raise KustomizePlanError(
+                f"{path}: managed patch contains a field GreenKube does not manage: {format_path(segments)}"
             )
-        ):
-            raise KustomizePlanError(f"{path}: managed patch requests must contain valid CPU or memory values")
-        preserved_requests[name] = dict(requests)
-    return dict(labels), dict(annotations), preserved_requests
+    return dict(labels), dict(annotations), fields
+
+
+def _collect_patch_fields(
+    node: Any,
+    segments: tuple[PathSegment, ...],
+    path: str,
+    fields: dict[tuple[PathSegment, ...], Any],
+) -> None:
+    """Flatten a strategic-merge patch into ``segments -> value`` leaves (lists keyed by name)."""
+    if isinstance(node, Mapping):
+        if not node:
+            raise KustomizePlanError(f"{path}: managed patch contains an empty mapping")
+        for key, value in node.items():
+            if not isinstance(key, str) or not key:
+                raise KustomizePlanError(f"{path}: managed patch field names are invalid")
+            _collect_patch_fields(value, (*segments, key), path, fields)
+        return
+    if isinstance(node, list):
+        if not node:
+            raise KustomizePlanError(f"{path}: managed patch lists must not be empty")
+        names: set[str] = set()
+        for item in node:
+            name = item.get(_PATCH_LIST_KEY) if isinstance(item, Mapping) else None
+            if not isinstance(name, str) or not name or name in names or len(item) < 2:
+                raise KustomizePlanError(f"{path}: managed patch list entries need unique names and fields")
+            names.add(name)
+            selector = ListSelector(_PATCH_LIST_KEY, name)
+            for key, value in item.items():
+                if key == _PATCH_LIST_KEY:
+                    continue
+                if not isinstance(key, str) or not key:
+                    raise KustomizePlanError(f"{path}: managed patch field names are invalid")
+                _collect_patch_fields(value, (*segments, selector, key), path, fields)
+        return
+    fields[segments] = node
 
 
 def _target_selector(target: ResourceTarget) -> dict[str, str]:
@@ -1147,36 +1210,27 @@ def _validate_new_patch_path(
             raise KustomizePlanError(f"{existing}: snapshot file conflicts with the new patch directory")
 
 
-def _target_container_order(rendered: Any, target: ResourceTarget) -> tuple[str, ...]:
+def _rendered_manifest(rendered: Any, target: ResourceTarget) -> Mapping[str, Any]:
     resource = next((item for item in rendered.resources if item.target == target), None)
-    if resource is None:
+    if resource is None or not isinstance(resource.manifest, Mapping):
         raise KustomizePlanError("rendered target workload disappeared before patch generation")
-    current: Any = resource.manifest
-    for field_name in _POD_SPEC_PATHS[target.kind]:
-        if not isinstance(current, Mapping):
-            raise KustomizePlanError("rendered target workload has an invalid pod spec")
-        current = current.get(field_name)
-    if not isinstance(current, Mapping) or not isinstance(current.get("containers"), list):
-        raise KustomizePlanError("rendered target workload has an invalid container list")
-    names = tuple(
-        container["name"]
-        for container in current["containers"]
-        if isinstance(container, Mapping) and isinstance(container.get("name"), str)
-    )
-    if not names or len(names) != len(set(names)):
-        raise KustomizePlanError("rendered target workload has invalid container identities")
-    return names
+    return resource.manifest
 
 
 def _patch_content(
     target: ResourceTarget,
-    operations: list[SetContainerResources],
+    fields: Mapping[tuple[PathSegment, ...], Any],
     *,
     preserved_labels: Mapping[str, Any],
     preserved_annotations: Mapping[str, Any],
-    preserved_requests: Mapping[str, Mapping[str, str]],
-    container_order: Sequence[str],
+    preserved_fields: Mapping[tuple[PathSegment, ...], Any],
+    rendered_target: Mapping[str, Any],
 ) -> str:
+    """Render the managed strategic-merge patch for ``fields`` merged over ``preserved_fields``.
+
+    Mapping keys are sorted; list entries start with their ``name`` key and follow the
+    rendered target's list order (strategic merge keeps list order), unknown ones last.
+    """
     patch = CommentedMap()
     patch["apiVersion"] = target.api_version
     patch["kind"] = target.kind
@@ -1189,31 +1243,20 @@ def _patch_content(
         metadata["annotations"] = CommentedMap(sorted(preserved_annotations.items()))
     patch["metadata"] = metadata
 
-    current: MutableMapping[str, Any] = patch
-    for field_name in _POD_SPEC_PATHS[target.kind]:
-        nested = CommentedMap()
-        current[field_name] = nested
-        current = nested
-    containers = CommentedSeq()
-    current["containers"] = containers
-    operations_by_container = {operation.container: operation for operation in operations}
-    container_names = set(preserved_requests) | set(operations_by_container)
-    ordered_names = [name for name in container_order if name in container_names]
-    ordered_names.extend(sorted(container_names - set(ordered_names)))
-    for name in ordered_names:
-        operation = operations_by_container.get(name)
-        requests_data = dict(preserved_requests.get(name, {}))
-        if operation is not None:
-            requests_data.update(operation.resources.requests)
-        container = CommentedMap()
-        container["name"] = name
-        resources = CommentedMap()
-        requests = CommentedMap()
-        for resource_name, quantity in sorted(requests_data.items()):
-            requests[resource_name] = DoubleQuotedScalarString(quantity)
-        resources["requests"] = requests
-        container["resources"] = resources
-        containers.append(container)
+    tree: dict[PathSegment, Any] = {}
+    for segments, value in {**preserved_fields, **fields}.items():
+        node = tree
+        for segment in segments[:-1]:
+            node = node.setdefault(segment, {})
+            if not isinstance(node, dict):
+                raise KustomizePlanError(f"conflicting managed patch fields at {format_path(segments)}")
+        if isinstance(node.get(segments[-1]), dict):
+            raise KustomizePlanError(f"conflicting managed patch fields at {format_path(segments)}")
+        node[segments[-1]] = value
+    spec_tree = tree.pop("spec", None)
+    if tree or not isinstance(spec_tree, dict):
+        raise KustomizePlanError("managed patches may set fields under spec only")
+    patch["spec"] = _patch_node(spec_tree, rendered_target.get("spec"))
 
     yaml = YAML(typ="rt", pure=True)
     yaml.indent(mapping=2, sequence=4, offset=2)
@@ -1222,6 +1265,46 @@ def _patch_content(
     yaml.dump(patch, stream)
     content = stream.getvalue()
     return content if content.endswith("\n") else f"{content}\n"
+
+
+def _patch_node(tree: Mapping[PathSegment, Any], rendered: Any) -> CommentedMap:
+    node = CommentedMap()
+    keys = [key for key in tree if isinstance(key, str)]
+    selectors = [key for key in tree if isinstance(key, ListSelector)]
+    if keys and selectors:
+        raise KustomizePlanError("managed patch fields mix a mapping and a list at the same path")
+    if selectors:
+        raise KustomizePlanError("managed patch list entries must be under a named list field")
+    for key in sorted(keys):
+        value = tree[key]
+        rendered_child = rendered.get(key) if isinstance(rendered, Mapping) else None
+        if isinstance(value, dict) and value and all(isinstance(item, ListSelector) for item in value):
+            node[key] = _patch_list(value, rendered_child)
+        elif isinstance(value, dict):
+            node[key] = _patch_node(value, rendered_child)
+        else:
+            node[key] = DoubleQuotedScalarString(value) if isinstance(value, str) else value
+    return node
+
+
+def _patch_list(entries: Mapping[ListSelector, Any], rendered: Any) -> CommentedSeq:
+    rendered_items = [item for item in rendered if isinstance(item, Mapping)] if isinstance(rendered, list) else []
+    rendered_names = [item.get(_PATCH_LIST_KEY) for item in rendered_items]
+    if len(rendered_names) != len(set(map(str, rendered_names))):
+        raise KustomizePlanError("rendered target workload has invalid container identities")
+    by_name = {selector.value: (selector, value) for selector, value in entries.items()}
+    ordered = [name for name in rendered_names if isinstance(name, str) and name in by_name]
+    ordered.extend(sorted(set(by_name) - set(ordered)))
+    sequence = CommentedSeq()
+    for name in ordered:
+        selector, value = by_name[name]
+        rendered_item = next((item for item in rendered_items if item.get(_PATCH_LIST_KEY) == name), None)
+        item = CommentedMap()
+        item[selector.key] = name
+        for key, child in _patch_node(value, rendered_item).items():
+            item[key] = child
+        sequence.append(item)
+    return sequence
 
 
 def _render(renderer: KustomizeRenderer, snapshot: RepositorySnapshot, overlay_path: str) -> RawRenderResult:
@@ -1411,13 +1494,15 @@ def _reject_post_build_variables(
     result: RawRenderResult,
     rendered_target: ResourceTarget,
     overrides: _FluxBuildOverrides,
+    fields: Mapping[tuple[PathSegment, ...], Any],
 ) -> None:
     """Fail closed when Flux postBuild substitution can change what GreenKube validates.
 
     Flux substitutes variables in the built output, with values GreenKube cannot see
-    (``substituteFrom`` ConfigMaps and Secrets). The workload identity, container names
-    and container resources must therefore be literal. Other fields are substituted
-    identically before and after the patch and do not affect the plan.
+    (``substituteFrom`` ConfigMaps and Secrets). The workload identity, container names,
+    container resources and every field the action edits must therefore be literal.
+    Other fields are substituted identically before and after the patch and do not
+    affect the plan.
     """
     if not overrides.post_build:
         return
@@ -1428,8 +1513,9 @@ def _reject_post_build_variables(
         if isinstance(values, Mapping) and values.get(_SUBSTITUTE_SWITCH) == "disabled":
             return
     checked: list[Any] = [metadata.get("name"), metadata.get("namespace")]
+    checked.extend(read_field(manifest, format_path(segments))[1] for segments in fields)
     pod_spec: Any = manifest
-    for field_name in _POD_SPEC_PATHS[rendered_target.kind]:
+    for field_name in POD_SPEC_PATHS.get(rendered_target.kind, ("spec",)):
         pod_spec = pod_spec.get(field_name) if isinstance(pod_spec, Mapping) else None
     if isinstance(pod_spec, Mapping):
         for list_name in ("initContainers", "containers"):
@@ -1449,7 +1535,7 @@ def _validate_render_diff(
     after: RawRenderResult,
     target: ResourceTarget,
     workload_kind: str,
-    operations: list[SetContainerResources],
+    operations: Sequence[TypedOperation],
 ) -> None:
     try:
         _validate_rendered_change(before, after, target, workload_kind, operations)
