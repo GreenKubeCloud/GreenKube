@@ -2,10 +2,13 @@
 """Detects applied recommendations from the live cluster state (Phase 3).
 
 Apply detection uses the Kubernetes API: when a targeted container's live
-request matches the recommendation within the configured tolerance and an
-active recommendation existed for that target, the recommendation transitions
-to ``applied``. Ambiguous workload-level aggregates are never used to infer a
-multi-container target.
+request moved away from the recommendation's baseline (``current_*``) to the
+proposed value, within the configured tolerance, the recommendation
+transitions to ``applied``. A live value that still equals the baseline is
+never an applied change, even when the proposal lies within the tolerance of
+it, and neither is a rollout that completed before the recommendation existed.
+Ambiguous workload-level aggregates are never used to infer a multi-container
+target.
 
 A change counts as applied only once its rollout has completed (every replica
 updated and available, ``observedGeneration >= generation``); ``applied_at`` is
@@ -48,6 +51,9 @@ RIGHTSIZING_TYPES = {
 }
 
 _APPS_READ_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"}
+
+#: Action states of a recommendation with a typed action and no plan in flight.
+_NO_PLAN_IN_FLIGHT = frozenset({None, ActionStatus.NONE, ActionStatus.FAILED, ActionStatus.CLOSED})
 
 
 @dataclass
@@ -503,15 +509,20 @@ class AppliedDetector:
         """Returns True when the live value shows the change landed.
 
         A decrease alone is not evidence of this recommendation being applied;
-        the live request must match the proposed value within tolerance.
+        the live request must match the proposed value within tolerance and
+        must have moved from the baseline toward it. A live value still equal
+        to the baseline is not a change: a 20Mi -> 23Mi proposal is within 25%
+        of the untouched 20Mi request, which used to be recorded as an applied
+        change with identical before and after values.
         """
         # A missing request (0) is not an applied change: it means the workload
         # declares no requests, not that the recommendation was implemented.
         if observed is None or observed <= 0 or current is None or current <= 0:
             return False
-        if recommended is not None and recommended > 0:
-            return abs(observed - recommended) <= recommended * tolerance
-        return False
+        if recommended is None or recommended <= 0 or observed == current:
+            return False
+        distance = abs(observed - recommended)
+        return distance <= recommended * tolerance and distance < abs(current - recommended)
 
     async def detect(self) -> List[RecommendationRecord]:
         """Detects and records applied rightsizing recommendations."""
@@ -554,6 +565,7 @@ class AppliedDetector:
 
             action_status: ActionStatus | None = None
             synced_plan: SyncPlanStatus | None = None
+            out_of_band = False
             if record.action is not None:
                 if self.action_status_repository is None or record.id is None:
                     continue
@@ -565,11 +577,19 @@ class AppliedDetector:
                         "Apply detection skipped recommendation %s with an invalid action status.", record.id
                     )
                     continue
-                if action_status is not ActionStatus.SYNC_PENDING:
+                if action_status in _NO_PLAN_IN_FLIGHT and record.status is RecommendationStatus.ACTIVE:
+                    # No plan or pull request is in flight, yet the cluster may
+                    # already run the proposed request (applied by hand, or by a
+                    # plan that failed closed with no_effective_change): record it
+                    # as applied instead of offering the recommendation again.
+                    out_of_band = True
+                    action_status = None
+                elif action_status is not ActionStatus.SYNC_PENDING:
                     continue
-                synced_plan = await self._synced_forward_plan(record.id)
-                if synced_plan is None:
-                    continue
+                else:
+                    synced_plan = await self._synced_forward_plan(record.id)
+                    if synced_plan is None:
+                        continue
             elif self.action_status_repository is not None and record.id is not None:
                 try:
                     raw_status = await self.action_status_repository.get_recommendation_action_status(record.id)
@@ -607,10 +627,14 @@ class AppliedDetector:
             snapshot = snapshots.get(key)
             if snapshot is None:
                 continue
-            if record.action is not None and (
-                synced_plan is None
-                or not _workload_reconciled_after_baseline(snapshot, synced_plan.pre_apply_baseline)
-                or not self._matches_plan_target(record, synced_plan, snapshot, tolerance)
+            if (
+                record.action is not None
+                and not out_of_band
+                and (
+                    synced_plan is None
+                    or not _workload_reconciled_after_baseline(snapshot, synced_plan.pre_apply_baseline)
+                    or not self._matches_plan_target(record, synced_plan, snapshot, tolerance)
+                )
             ):
                 continue
 
@@ -639,6 +663,20 @@ class AppliedDetector:
                 )
                 continue
             applied_at, completion_source = rollout_completion_time(snapshot, datetime.now(timezone.utc))
+            if completion_source == "progressing_condition" and _completed_before_recommendation(record, applied_at):
+                # The live request predates the recommendation (for example a
+                # recommendation built from a lagging hourly rollup): it is the
+                # state the recommendation was made against, not its application.
+                logger.info(
+                    "Apply detection skipped recommendation %d: the rollout of %s/%s/%s completed at %s, "
+                    "before the recommendation was created.",
+                    record.id,
+                    snapshot.namespace,
+                    snapshot.kind,
+                    snapshot.name,
+                    applied_at.isoformat(),
+                )
+                continue
             change_id: Optional[str] = None
             if recorder is not None:
                 plan_id = synced_plan.plan_id if synced_plan is not None else None
@@ -929,6 +967,14 @@ class AppliedDetector:
                 )
                 if updated_plan is None or updated_plan.status is not PlanStatus.APPLIED:
                     raise RuntimeError("fully applied GitOps plan did not transition to applied")
+
+
+def _completed_before_recommendation(record: RecommendationRecord, completed_at: datetime) -> bool:
+    created_at = record.created_at
+    if created_at is None:
+        return False
+    created = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return completed_at < created
 
 
 def _observed_request(snapshot: WorkloadSnapshot, container_name: str | None, resource: str) -> int | None:

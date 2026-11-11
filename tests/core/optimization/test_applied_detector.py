@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -1027,5 +1027,145 @@ class TestAppliedDetector:
         await repo.save_recommendations([_cpu_record()])
         reader = FakeReader({("prod", "Deployment", "api"): WorkloadSnapshot("prod", "Deployment", "api", 0, 0)})
         detector = AppliedDetector(RecommendationLifecycle(repo), reader=reader, config=Config())
+
+        assert await detector.detect() == []
+
+
+class TestNoPhantomAppliedChanges:
+    """Bug 1: applied changes whose before and after values are identical."""
+
+    @pytest.mark.asyncio
+    async def test_unchanged_request_within_tolerance_of_a_small_increase_is_not_applied(self, repo):
+        """20Mi -> 23Mi lies within 25% of the untouched 20Mi request: nothing was applied.
+
+        Seen on Minikube: prometheus-operator/kube-rbac-proxy, coredns and
+        kube-state-metrics were recorded as applied ("detected") with
+        current == actual, minutes after the recommendation was created.
+        """
+        mib = 1024 * 1024
+        record = RecommendationRecord(
+            pod_name="prometheus-operator",
+            namespace="monitoring",
+            container_name="kube-rbac-proxy",
+            type=RecommendationType.RIGHTSIZING_MEMORY,
+            description="Memory p99 close to the request",
+            scope="workload",
+            owner_kind="Deployment",
+            owner_name="prometheus-operator",
+            current_memory_request_bytes=20 * mib,
+            recommended_memory_request_bytes=23 * mib,
+        )
+        await repo.save_recommendations([record])
+        snapshot = WorkloadSnapshot(
+            "monitoring",
+            "Deployment",
+            "prometheus-operator",
+            container_requests={"prometheus-operator": (100, 100 * mib), "kube-rbac-proxy": (10, 20 * mib)},
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("monitoring", "Deployment", "prometheus-operator"): snapshot}),
+            config=Config(),
+        )
+
+        assert await detector.detect() == []
+        assert [r.status for r in await repo.get_active_recommendations()] == [RecommendationStatus.ACTIVE]
+
+    @pytest.mark.asyncio
+    async def test_live_value_must_move_toward_the_proposal(self, repo):
+        # 100m -> 124m: the live 100m is within 25% of 124m but is the baseline itself.
+        await repo.save_recommendations([_cpu_record(current=100, recommended=124)])
+        reader = FakeReader({("prod", "Deployment", "api"): WorkloadSnapshot("prod", "Deployment", "api", 100, 0)})
+        detector = AppliedDetector(RecommendationLifecycle(repo), reader=reader, config=Config())
+
+        assert await detector.detect() == []
+
+        reader._snapshots = {("prod", "Deployment", "api"): WorkloadSnapshot("prod", "Deployment", "api", 124, 0)}
+        applied = await detector.detect()
+        assert [(r.current_cpu_request_millicores, r.actual_cpu_request_millicores) for r in applied] == [(100, 124)]
+
+    @pytest.mark.asyncio
+    async def test_rollout_completed_before_the_recommendation_existed_is_not_its_application(self, repo):
+        now = datetime.now(timezone.utc)
+        await repo.save_recommendations([_cpu_record().model_copy(update={"created_at": now - timedelta(minutes=5)})])
+        snapshot = WorkloadSnapshot(
+            "prod",
+            "Deployment",
+            "api",
+            300,
+            0,
+            generation=3,
+            observed_generation=3,
+            desired_replicas=1,
+            current_replicas=1,
+            updated_replicas=1,
+            available_replicas=1,
+            rollout_completed_at=now - timedelta(days=30),
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): snapshot}),
+            config=Config(),
+        )
+
+        assert await detector.detect() == []
+
+        snapshot.rollout_completed_at = now - timedelta(minutes=1)
+        applied = await detector.detect()
+        assert len(applied) == 1 and applied[0].applied_at == snapshot.rollout_completed_at
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action_status", [ActionStatus.NONE, ActionStatus.FAILED, ActionStatus.CLOSED])
+    async def test_gitops_recommendation_already_live_is_recorded_as_applied(self, repo, action_status):
+        """No plan in flight and the cluster already runs the proposal: applied, not offered again."""
+        await repo.save_recommendations([_plan_cpu_record()])
+        action_repository = FakeActionStatusRepository(action_status)
+        snapshot = WorkloadSnapshot(
+            "prod",
+            "Deployment",
+            "api",
+            300,
+            0,
+            container_requests={"api": (300, 0)},
+            uid="uid-api-1",
+            generation=11,
+            observed_generation=11,
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): snapshot}),
+            config=Config(),
+            action_status_repository=action_repository,
+        )
+
+        applied = await detector.detect()
+
+        assert [(r.status, r.application_method, r.actual_cpu_request_millicores) for r in applied] == [
+            (RecommendationStatus.APPLIED, "detected", 300)
+        ]
+        # The plan lifecycle is left alone: no plan carried this change.
+        assert action_repository.updates == [] and action_repository.plan_updates == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action_status", [ActionStatus.PLAN_READY, ActionStatus.PR_OPEN, ActionStatus.MERGED])
+    async def test_gitops_recommendation_with_a_plan_in_flight_waits_for_its_sync(self, repo, action_status):
+        await repo.save_recommendations([_plan_cpu_record()])
+        snapshot = WorkloadSnapshot(
+            "prod",
+            "Deployment",
+            "api",
+            300,
+            0,
+            container_requests={"api": (300, 0)},
+            uid="uid-api-1",
+            generation=11,
+            observed_generation=11,
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): snapshot}),
+            config=Config(),
+            action_status_repository=FakeActionStatusRepository(action_status),
+        )
 
         assert await detector.detect() == []
