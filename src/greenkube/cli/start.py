@@ -288,6 +288,26 @@ async def refresh_dashboard_summary() -> None:
     logger.info("--- Finished dashboard summary refresh task ---")
 
 
+async def _repair_phantom_changes(repo) -> None:
+    """Retire phantom detected changes left by the old apply detector (idempotent, evidence-based)."""
+    try:
+        from ..core.db import get_db_manager
+        from ..core.factory import get_savings_ledger_repository
+        from ..core.optimization.phantom_repair import PhantomChangeRepair
+        from ..storage.base_workload_usage_repository import create_workload_usage_repository
+        from ..storage.change_repository import get_change_repository
+
+        db = get_db_manager()
+        await PhantomChangeRepair(
+            repo,
+            usage=create_workload_usage_repository(db, db.db_type),
+            savings=get_savings_ledger_repository(),
+            changes=get_change_repository(),
+        ).run()
+    except Exception as exc:
+        logger.warning("Phantom change repair skipped: %s", exc)
+
+
 async def run_recommendation_lifecycle() -> None:
     """Run apply detection, outcome verification and TTL expiry (Phase 3).
 
@@ -315,6 +335,8 @@ async def run_recommendation_lifecycle() -> None:
         expired = await lifecycle.expire()
         if expired:
             logger.info("Expired %d recommendation(s) past their TTL.", len(expired))
+
+        await _repair_phantom_changes(repo)
 
         from ..collectors.workload_health_collector import WorkloadHealthCollector
         from ..core.factory import get_pull_request_repository as _pr_repo
@@ -840,6 +862,11 @@ async def _async_start(last: Optional[str]):
             plan_executor=plan_executor,
             session_purge=_create_session_purge(get_db_manager()),
         )
+        # Persist the loop states so the API reports them (automation status).
+        from ..core.loops import LoopHeartbeatPublisher
+        from ..storage.controller_heartbeat_repository import get_controller_heartbeat_repository
+
+        registry.register(LoopHeartbeatPublisher(registry, get_controller_heartbeat_repository()).spec())
         logger.info("📈 Starting %d controller loops: %s", len(registry.names), ", ".join(registry.names))
         registry.start()
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")

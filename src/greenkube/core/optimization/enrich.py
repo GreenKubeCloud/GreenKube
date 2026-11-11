@@ -6,18 +6,25 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
-from greenkube.core.optimization.evidence import build_evidence, build_patch, series_for
-from greenkube.core.optimization.risks import WorkloadRiskProfile, assess
+from greenkube.core.optimization.evidence import build_evidence, build_patch, series_for, usage_summary_for
+from greenkube.core.optimization.risks import JVM_MEMORY_DECREASE_CONFIDENCE, WorkloadRiskProfile, assess
 from greenkube.core.optimization.scoring import score_recommendations
 from greenkube.core.optimization.statistics import percentile
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
-from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2, RecommendationType
+from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "JVM_MEMORY_DECREASE_CONFIDENCE",
+    "build_risk_profile",
+    "enrich_recommendations",
+    "rescore_with_track_record",
+]
 
 
 def _replica_p95_max(series: Sequence[CombinedMetric], attr: str) -> Optional[float]:
@@ -66,7 +73,7 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
             hpa_resources = frozenset({"*"})
         else:
             hpa_resources = frozenset()
-    summary = _usage_summary(rec, context)
+    summary = usage_summary_for(rec, context)
     return WorkloadRiskProfile(
         replicas=_current_replicas(series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
@@ -78,28 +85,6 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
     )
 
 
-def _usage_summary(rec: Recommendation, context: "OptimizationContext") -> Optional[Any]:
-    """The usage summary of the recommendation's target container, with its reliability signals (E9)."""
-    if not rec.namespace or rec.target_node or context.usage is None:
-        return None
-    if rec.owner_kind and rec.owner_name:
-        target = (rec.namespace, rec.owner_kind, rec.owner_name)
-    elif rec.pod_name:
-        target = (rec.namespace, "Pod", rec.pod_name)
-    else:
-        return None
-    return context.usage.summaries.get(target, {}).get(rec.container_name or "")
-
-
-#: Confidence multiplier of a memory decrease on a container suspected to run a JVM.
-JVM_MEMORY_DECREASE_CONFIDENCE = 0.5
-
-
-def _memory_decrease(rec: Recommendation) -> bool:
-    current, proposed = rec.current_memory_request_bytes, rec.recommended_memory_request_bytes
-    return current is not None and proposed is not None and proposed < current
-
-
 def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Config") -> Recommendation:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=getattr(config, "RECOMMENDATION_TTL_DAYS", 14))
@@ -109,13 +94,6 @@ def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Co
     patch = RecommendationPatchV2.model_validate(patch_payload) if patch_payload is not None else None
     profile = build_risk_profile(rec, context)
     assessment = assess(rec, evidence, config, profile)
-    if profile.jvm and rec.type == RecommendationType.RIGHTSIZING_MEMORY and _memory_decrease(rec):
-        # The JVM sizes its heap itself: the working set does not show what it needs (E9).
-        assessment.confidence = round(assessment.confidence * JVM_MEMORY_DECREASE_CONFIDENCE, 4)
-        assessment.confidence_factors = {
-            **assessment.confidence_factors,
-            "jvm_suspected": JVM_MEMORY_DECREASE_CONFIDENCE,
-        }
 
     if evidence is not None:
         evidence = evidence.model_copy(

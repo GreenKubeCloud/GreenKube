@@ -339,7 +339,7 @@ The local Bubblewrap backend is used only when no remote renderer URL is configu
 
 #### Automation policy (`automation.policy`)
 
-Policy is evaluated on preview/plan creation and revalidated on approval. Risk, confidence, sample/coverage, open-PR budget, cooldown, change-freeze labels, and absolute freeze windows are configurable. Discovery also supplies live workload labels, rollout-in-progress state, controller health/suspend state, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads. Rollout, controller-health, HPA, VPA and PDB gates reject a plan when their evidence reports a conflict. An HPA blocks only the resource it scales on, and a VPA blocks only in an active update mode (`Auto`, `Recreate`, `InPlaceOrRecreate`, `InPlace`). See [GitOps automation](automation.md#approval-and-policy). The defaults align with the recommendation sample threshold and require medium-or-lower risk, at least 0.6 confidence, 36 samples, and 50% coverage.
+Policy is evaluated on preview/plan creation and revalidated on approval. Risk, confidence, sample/coverage, open-PR budget, cooldown, change-freeze labels, and absolute freeze windows are configurable. Discovery also supplies live workload labels, rollout-in-progress state, controller health/suspend state, and HPA, VPA and PDB evidence. A configured freeze label blocks only matching workloads. Rollout, controller-health, HPA, VPA and PDB gates reject a plan when their evidence reports a conflict. An HPA blocks only the resource it scales on with a `Utilization` target (a share of the request; `AverageValue` and `Value` targets compare raw usage, so they only warn), every HPA that targets the workload is checked, and a VPA blocks only in an active update mode (`Auto`, `Recreate`, `InPlaceOrRecreate`, `InPlace`). See [GitOps automation](automation.md#approval-and-policy). The defaults align with the recommendation sample threshold and require medium-or-lower risk, at least 0.6 confidence, 36 samples, and 50% coverage.
 
 `minCoverage` applies to the evidence attached to each recommendation: the observed CPU or memory samples divided by the expected observation points in that recommendation's window. `minSamples` is the minimum sample count for the recommendation. This is separate from GitOps discovery coverage (`GET /api/v1/gitops/status`), which measures resolved workload bindings. Lowering coverage or sample thresholds can make more PRs eligible but reduces the amount of observability backing each change.
 
@@ -413,6 +413,7 @@ The chart keeps the API key out of the controller (least privilege), so this end
 monitoring:
   prometheusRule:
     enabled: false       # Optional automation backlog/stuck-state alerts; requires the PrometheusRule CRD
+    controllerAlerts: true # Controller loop alerts (rendered only with the controller ServiceMonitor)
     namespace: monitoring
     additionalLabels: {}
   serviceMonitor:
@@ -428,7 +429,7 @@ monitoring:
 
 The controller's own metrics endpoint is configured with `collector.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-collectormetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
-`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
+`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
 When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
 

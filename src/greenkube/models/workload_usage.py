@@ -102,6 +102,9 @@ class WorkloadUsageHour:
     node_instance_type: Optional[str] = None
     #: ``raw`` when rolled up from raw rows, ``hourly`` from the compressed hourly tables.
     source: str = "raw"
+    #: Seconds from ``hour_bucket`` to the row's latest sample: among the node rows of
+    #: one hour, the newest one holds the current request (None for rows before 0076).
+    latest_sample_offset_seconds: Optional[float] = None
 
     @property
     def target(self) -> TargetKey:

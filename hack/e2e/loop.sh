@@ -81,23 +81,27 @@ evidence "${prefix}.binding" ok "$(jq -c '{status, binding: (.binding // {} | {c
 # merge when it is still open, from the controller sync when it is merged.
 # Recommendations are read from the history (any status: active, pr_open,
 # applied, verified...), so this does not depend on how the lifecycle labels a
-# recommendation while its PR is open.
+# recommendation while its PR is open. Old merged pull requests are ignored
+# (resumable-pr.jq): a merged PR is resumed only while its plan is merged or
+# synced (not yet applied) and it was merged at most E2E_RESUME_MAX_AGE seconds
+# ago; a completed loop never makes a later run wait on its old change.
+: "${E2E_RESUME_MAX_AGE:=21600}"
 find_previous_pull_request() {
-  local start end recs id prs candidate latest=""
+  local start end recs id prs all="[]" plans="{}" plan_id plan_status
   start="$(jq -rn 'now - 7 * 86400 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
   end="$(jq -rn 'now + 3600 | strftime("%Y-%m-%dT%H:%M:%SZ")')"
   recs="$(gk_api GET "/recommendations/history?namespace=${APPS_NAMESPACE}&start=${start}&end=${end}")" || return 1
   for id in $(jq -r --arg name "${workload}" '.[] | select(.owner_name == $name) | .id' <<<"${recs}"); do
     prs="$(gk_api GET "/recommendations/${id}/pull-requests")" || continue
-    candidate="$(jq -c '[.[] | select(.plan_id != null and (.status == "open" or .status == "merged"))]
-      | sort_by(.created_at) | last // empty' <<<"${prs}")"
-    [[ -n "${candidate}" ]] || continue
-    if [[ -z "${latest}" || "$(jq -r .created_at <<<"${candidate}")" > "$(jq -r .created_at <<<"${latest}")" ]]; then
-      latest="${candidate}"
-    fi
+    all="$(jq -c --argjson more "${prs}" '. + $more' <<<"${all}")"
   done
-  [[ -n "${latest}" ]] || return 1
-  printf '%s' "${latest}"
+  for plan_id in $(jq -r '[.[] | select(.status == "merged" and .plan_id != null) | .plan_id] | unique | .[]' <<<"${all}"); do
+    plan_status="$(gk_api GET "/automation/plans/${plan_id}" | jq -r '.status // empty')" || continue
+    plans="$(jq -c --arg id "${plan_id}" --arg status "${plan_status}" '. + {($id): $status}' <<<"${plans}")"
+  done
+  save_json "${prefix}-resume-candidates" "$(jq -cn --argjson prs "${all}" --argjson plans "${plans}" '{prs: $prs, plans: $plans}')"
+  jq -cn --argjson prs "${all}" --argjson plans "${plans}" --argjson max_age "${E2E_RESUME_MAX_AGE}" \
+    '{prs: $prs, plans: $plans, now: now, max_age: $max_age}' | jq -ce -f "${E2E_DIR}/resumable-pr.jq"
 }
 
 if pr_record="$(find_previous_pull_request)"; then

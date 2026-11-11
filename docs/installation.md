@@ -264,7 +264,8 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | Value | Default | Purpose |
 |---|---|---|
 | `monitoring.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor for `/prometheus/metrics`. |
-| `monitoring.prometheusRule.enabled` | `false` | Create alerts for stuck automation operations, sync failures, and stale workers. |
+| `monitoring.prometheusRule.enabled` | `false` | Create alerts for stuck automation operations, sync failures, stale workers and controller loops. |
+| `monitoring.prometheusRule.controllerAlerts` | `true` | Include the controller loop alerts (`GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale`, `GreenKubeNoActiveController`). They render only with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `collector.metricsPort` > 0). |
 | `monitoring.networkPolicy.enabled` | `false` | Restrict component ingress/egress. |
 | `automation.enabled` | `false` | Enable GitOps discovery, planning, pull requests, and apply tracking. |
 | `automation.mode` | profile-dependent | `inline` for standalone (the controller executes plan operations), `worker` for production (dedicated worker pods execute them as well). The API never runs a worker. |

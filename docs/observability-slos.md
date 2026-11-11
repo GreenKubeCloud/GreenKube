@@ -92,7 +92,8 @@ groups:
     annotations:
       summary: "Plan expiry, webhook outbox and PR polling have not completed for 10 minutes"
   - alert: GreenKubeNoActiveController
-    expr: sum(greenkube_controller_leader) < 1
+    # "or vector(0)": also fires when no controller is running or scraped at all.
+    expr: (max(greenkube_controller_leader) or vector(0)) < 1
     for: 5m
     labels: { severity: critical }
     annotations:
@@ -117,7 +118,7 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
 | `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
 
-`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor` and `session-purge`.
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
 
 The same listener serves three more endpoints:
 
@@ -126,6 +127,10 @@ The same listener serves three more endpoints:
 - `/loops`: a JSON snapshot with each loop's state (`idle`, `running`, `standby`, `failing` (the last tick failed), `crashed`), last success, last duration, consecutive failures and last error code. It requires the API key when the controller has one.
 
 Standby replicas report their leader-only loops as `standby`, which counts as healthy.
+
+**Persisted heartbeats.** Every controller replica (leader or standby) runs the `controller-heartbeat` loop: every 30 s it writes its `/loops` snapshot, whether it holds the Lease and whether all its loops are ready to the `controller_heartbeats` table (one row per replica, keyed by the pod name; rows of replicas silent for a day are pruned). `GET /api/v1/automation/status` reads them and returns `controller`: `healthy` (a leader with a heartbeat younger than `stale_after_seconds` (120 s) whose loops are all ready), `leader` (its instance id), `available` (`false` when the table could not be read) and `instances` (per replica: `leader`, `ready`, `stale`, `heartbeat_at`, `heartbeat_age_seconds`, `started_at` and the per-loop `loops` snapshot).
+
+**Chart alerts.** With `monitoring.prometheusRule.enabled`, the chart's PrometheusRule also installs `GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale` and `GreenKubeNoActiveController` as above (group `greenkube.controller`; `monitoring.prometheusRule.controllerAlerts: false` leaves them out). They read the controller metrics endpoint, so the chart renders them only together with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `collector.metricsPort` > 0).
 
 ## Collection telemetry
 

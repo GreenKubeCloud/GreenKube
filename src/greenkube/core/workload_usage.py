@@ -25,6 +25,7 @@ date one hour at a time, so its memory is bounded by one hour of cluster data.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -261,11 +262,15 @@ class _HourAccumulator:
         if gpu_watts is not None:
             self.gpu_watt_seconds = (self.gpu_watt_seconds or 0.0) + max(gpu_watts, 0.0) * seconds
 
+        # A compressed hourly row stands for many samples: its point is the hour's
+        # peak. When it covers a warm-up, its average stands for the hour instead
+        # (the peak is the warm-up's), and the peak only reaches the maximum.
+        hour_average = warm and weight > 1
         cpu = _number(getattr(row, "cpu_usage_millicores", None))
         if cpu is not None:
             peak = _number(getattr(row, "cpu_usage_max_millicores", None))
             point = max(cpu, peak) if peak is not None else cpu
-            (self.cpu_warm if warm else self.cpu).append((point, weight))
+            (self.cpu_warm if warm else self.cpu).append((cpu if hour_average else point, weight))
             self.cpu_peak = point if self.cpu_peak is None else max(self.cpu_peak, point)
             self.cpu_sum += cpu * weight
             self.cpu_sq_sum += cpu * cpu * weight
@@ -274,7 +279,7 @@ class _HourAccumulator:
         if memory is not None:
             peak = _number(getattr(row, "memory_usage_max_bytes", None))
             point = max(memory, peak) if peak is not None else memory
-            (self.memory_warm if warm else self.memory).append((point, weight))
+            (self.memory_warm if warm else self.memory).append((memory if hour_average else point, weight))
             self.memory_peak = point if self.memory_peak is None else max(self.memory_peak, point)
             self.memory_sum += memory * weight
             self.memory_weight += weight
@@ -379,6 +384,11 @@ class _HourAccumulator:
             emaps_zone=_mode(self.zones),
             node_instance_type=_mode(self.instance_types),
             source=source,
+            latest_sample_offset_seconds=(
+                max(self.latest - bucket.timestamp(), 0.0)
+                if bucket is not None and self.latest is not None and math.isfinite(self.latest)
+                else None
+            ),
         )
 
 
@@ -455,11 +465,15 @@ def rollup_rows(
     :func:`warmup_windows`) are left out of the usage percentiles;
     ``context_rows`` are the raw pod rows just before the rolled rows, so a
     restart shortly before the hour is still seen. Rows from the compressed
-    hourly tables have no per-step restart counts and keep every point.
+    hourly tables (one row per pod and hour, ``restart_count`` the hour's
+    maximum) take the previous hour's compressed rows as context: a pod whose
+    restart count rose since then, or that was absent from it, warmed up in the
+    hour, so its row leaves the percentiles when other points remain and
+    otherwise counts with its hourly average instead of its peak.
     """
     pod_rows = list(pod_rows)
     container_rows = list(container_rows)
-    warm = warmup_windows([*context_rows, *pod_rows], warmup_seconds) if source != "hourly" else {}
+    warm = warmup_windows([*context_rows, *pod_rows], warmup_seconds)
     pods_at: Dict[Tuple[str, str, Any], Any] = {}
     pods_in_hour: Dict[Tuple[str, str, Optional[datetime]], Any] = {}
     for row in pod_rows:
@@ -552,6 +566,8 @@ class _HourTotals:
     memory_request: int = 0
     cpu_limit: Optional[int] = None
     memory_limit: Optional[int] = None
+    #: Latest-sample offset of the node rows whose requests and limits are kept.
+    latest_offset: Optional[float] = None
     restart_count: Optional[int] = None
     total_cost: float = 0.0
     co2e_grams: float = 0.0
@@ -586,10 +602,20 @@ def _merge_hour(totals: _HourTotals, hour: WorkloadUsageHour) -> None:
         attr = "max" if p == 100 else f"p{p}"
         totals.cpu_p[p] = _max_optional(totals.cpu_p.get(p), getattr(hour, f"cpu_usage_{attr}"))
         totals.memory_p[p] = _max_optional(totals.memory_p.get(p), getattr(hour, f"memory_usage_{attr}"))
-    totals.cpu_request = max(totals.cpu_request, hour.cpu_request or 0)
-    totals.memory_request = max(totals.memory_request, hour.memory_request or 0)
-    totals.cpu_limit = _max_int(totals.cpu_limit, hour.cpu_limit)
-    totals.memory_limit = _max_int(totals.memory_limit, hour.memory_limit)
+    # Requests and limits come from the node row with the newest sample (a pod
+    # moved to another node by a rollout), the highest on a tie or without offsets.
+    offset = hour.latest_sample_offset_seconds if hour.latest_sample_offset_seconds is not None else -1.0
+    if totals.latest_offset is None or offset > totals.latest_offset:
+        totals.latest_offset = offset
+        totals.cpu_request = hour.cpu_request or 0
+        totals.memory_request = hour.memory_request or 0
+        totals.cpu_limit = hour.cpu_limit
+        totals.memory_limit = hour.memory_limit
+    elif offset == totals.latest_offset:
+        totals.cpu_request = max(totals.cpu_request, hour.cpu_request or 0)
+        totals.memory_request = max(totals.memory_request, hour.memory_request or 0)
+        totals.cpu_limit = _max_int(totals.cpu_limit, hour.cpu_limit)
+        totals.memory_limit = _max_int(totals.memory_limit, hour.memory_limit)
     totals.restart_count = _max_int(totals.restart_count, hour.restart_count)
     totals.total_cost += hour.total_cost or 0.0
     totals.co2e_grams += hour.co2e_grams or 0.0
@@ -841,11 +867,15 @@ class WorkloadUsageRollup:
         for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
             context: List[Any] = []
-            if self.warmup_seconds > 0 and source != "hourly" and pod_rows:
-                # A restart shortly before the hour still excludes the hour's first points.
-                context = await self.repository.read_restart_context(
-                    hour, self.warmup_seconds + max(self.step_seconds, 1.0)
-                )
+            if self.warmup_seconds > 0 and pod_rows:
+                if source == "hourly":
+                    # Re-rolled from the compressed tables: the previous hour's restart counts.
+                    context = await self.repository.read_hourly_restart_context(hour)
+                else:
+                    # A restart shortly before the hour still excludes the hour's first points.
+                    context = await self.repository.read_restart_context(
+                        hour, self.warmup_seconds + max(self.step_seconds, 1.0)
+                    )
             rows = (
                 rollup_rows(
                     pod_rows,

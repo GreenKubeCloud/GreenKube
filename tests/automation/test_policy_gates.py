@@ -185,7 +185,7 @@ async def test_container_resource_hpa_only_blocks_its_own_container():
     hpa = {
         "name": "sidecar-hpa",
         "metric_types": ["ContainerResource"],
-        "resource_metrics": [{"resource": "memory", "container": "sidecar", "target_type": "AverageValue"}],
+        "resource_metrics": [{"resource": "memory", "container": "sidecar", "target_type": "Utilization"}],
     }
     evidence = {**_HEALTHY, "hpa_targets": [hpa]}
 
@@ -194,6 +194,42 @@ async def test_container_resource_hpa_only_blocks_its_own_container():
 
     assert api_memory.allowed
     assert not sidecar_memory.allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("target_type", "allowed"), [("AverageValue", True), ("Value", True), (None, False)])
+async def test_only_utilization_targets_depend_on_requests(target_type, allowed):
+    """D13: an AverageValue target compares raw usage, so a request change does not move it."""
+    hpa = {
+        "name": "api-hpa",
+        "metric_types": ["Resource"],
+        "resource_metrics": [{"resource": "cpu", "container": None, "target_type": target_type}],
+    }
+    result = await _evaluate({**_HEALTHY, "hpa_targets": [hpa]}, _cpu_change())
+
+    assert result.allowed is allowed
+    if allowed:
+        assert _check(result, "hpa_interaction").state is PolicyCheckState.PASSED
+        assert [warning.code for warning in result.warnings] == [AutomationErrorCode.POLICY_INTERACTION_CONFLICT]
+
+
+@pytest.mark.asyncio
+async def test_a_cpu_utilization_hpa_next_to_a_memory_hpa_still_blocks_cpu_changes():
+    hpas = [
+        {
+            "name": "api-memory",
+            "metric_types": ["Resource"],
+            "resource_metrics": [{"resource": "memory", "container": None, "target_type": "Utilization"}],
+        },
+        {
+            "name": "api-cpu",
+            "metric_types": ["Resource"],
+            "resource_metrics": [{"resource": "cpu", "container": None, "target_type": "Utilization"}],
+        },
+    ]
+    result = await _evaluate({**_HEALTHY, "hpa_targets": hpas}, _cpu_change())
+    assert not result.allowed
+    assert _check(result, "hpa_interaction").observed["conflicts"] == [{"hpa": "api-cpu", "resources": ["cpu"]}]
 
 
 @pytest.mark.asyncio

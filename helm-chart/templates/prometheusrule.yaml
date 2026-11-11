@@ -66,4 +66,34 @@ spec:
           annotations:
             summary: GreenKube automation worker heartbeat is stale
             description: At least one persisted automation worker heartbeat is older than the stale threshold.
+    {{- if and .Values.monitoring.prometheusRule.controllerAlerts .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+    # Controller loops (M8). Rendered only with the controller ServiceMonitor
+    # (same condition), otherwise GreenKubeNoActiveController would always fire.
+    - name: greenkube.controller
+      rules:
+        - alert: GreenKubeControllerLoopFailing
+          expr: max by (loop) (greenkube_loop_consecutive_failures) >= 3
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube controller loop keeps failing
+            description: {{ `Controller loop {{ $labels.loop }} failed {{ $value }} times in a row; see GET /api/v1/automation/status (controller.instances[].loops) and the controller logs.` | quote }}
+        - alert: GreenKubeAutomationLoopStale
+          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="automation-controller"}) > 600
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube automation controller loop has not succeeded for 10 minutes
+            description: Webhook outbox, PR polling, plan expiry and retention are not advancing on the leader controller.
+        - alert: GreenKubeNoActiveController
+          expr: (max(greenkube_controller_leader) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No GreenKube controller holds the leader Lease
+            description: Collection, scans, apply detection, measurement and automation run only on the leader controller; none is running or scraped.
+    {{- end }}
 {{- end }}

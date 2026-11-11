@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
@@ -45,6 +47,10 @@ _PROVIDER_ADAPTERS: dict[str, type[GitProvider]] = {
     "gitea": GiteaProvider,
 }
 _RESULT = TypeVar("_RESULT")
+logger = logging.getLogger(__name__)
+
+#: An unchanged provider check is written again after this many seconds (``last_checked_at``).
+PROVIDER_CHECK_REFRESH_SECONDS = 300.0
 
 
 class GitProviderRegistryError(GitProviderError):
@@ -118,6 +124,7 @@ class GitProviderRegistry:
         self._credential_resolver = GitProviderCredentialResolver(secret_resolver)
         self._author_name = author_name
         self._author_email = author_email
+        self._checks = ProviderCheckRecorder(provider_repository)
 
     async def get_provider(self, provider_id: str, repository: GitRepository) -> _AuthorizedGitProvider:
         """Create a provider scoped to one allowlisted repository.
@@ -141,7 +148,7 @@ class GitProviderRegistry:
                 raise GitProviderConfigurationError("Git provider configuration changed; create a new provider.")
             await self._authorize_repository(current_config, current_type, target)
 
-        return _AuthorizedGitProvider(provider, repository, authorize)
+        return _AuthorizedGitProvider(provider, repository, authorize, checks=self._checks.bind(provider_id))
 
     async def preflight(
         self,
@@ -286,10 +293,12 @@ class _AuthorizedGitProvider(GitProvider):
         provider: GitProvider,
         repository: GitRepository,
         authorize: Callable[[GitRepository], Awaitable[None]],
+        checks: "_BoundProviderChecks | None" = None,
     ):
         self._provider = provider
         self._repository = repository
         self._authorize = authorize
+        self._checks = checks
         self.name = provider.name
         self.capabilities = provider.capabilities
         self.api_base_url = provider.api_base_url
@@ -312,9 +321,15 @@ class _AuthorizedGitProvider(GitProvider):
     ) -> _RESULT:
         await self._authorize(repository)
         try:
-            return await operation()
+            result = await operation()
         except GitProviderError as error:
+            if self._checks is not None:
+                await self._checks.failed(error)
             raise _redact_provider_error(error, self._provider.token) from None
+        if self._checks is not None:
+            # Any successful authenticated call (archive fetch, PR polling, ...) proves the credential.
+            await self._checks.succeeded()
+        return result
 
     async def get_default_branch(self, repo: GitRepository) -> str:
         return await self._call(repo, lambda: self._provider.get_default_branch(repo))
@@ -538,3 +553,61 @@ def _pull_request_write_permission(provider_type: str, repository_info: dict[str
     )
     flags = [permissions.get(name) for name in permission_names if isinstance(permissions.get(name), bool)]
     return any(flags) if flags else None
+
+
+class ProviderCheckRecorder:
+    """Records the provider state that real API calls prove (``verified`` or ``error``).
+
+    Every authenticated call made through the registry reports here: a success
+    marks the provider ``verified``, a 401 ``error``/``auth_failed`` and a 403
+    ``error``/``permission_denied``. An unchanged state is written at most once
+    per :data:`PROVIDER_CHECK_REFRESH_SECONDS` per provider; a change is written
+    at once. Best effort: a failed write never fails the provider call.
+    """
+
+    def __init__(
+        self,
+        repository: object,
+        *,
+        refresh_seconds: float = PROVIDER_CHECK_REFRESH_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._repository = repository
+        self._refresh_seconds = refresh_seconds
+        self._clock = clock
+        self._last: dict[str, tuple[tuple[str, str | None], float]] = {}
+
+    def bind(self, provider_id: str) -> "_BoundProviderChecks":
+        return _BoundProviderChecks(self, provider_id)
+
+    async def record(self, provider_id: str, status: str, *, error_code: str | None = None) -> None:
+        state = (status, error_code)
+        now = self._clock()
+        last = self._last.get(provider_id)
+        if last is not None and last[0] == state and now - last[1] < self._refresh_seconds:
+            return
+        record = getattr(self._repository, "record_provider_check", None)
+        if record is None:
+            return
+        try:
+            await record(provider_id, status, error_code=error_code)
+        except Exception as exc:
+            logger.warning("Could not record Git provider %s state %s: %s", provider_id, status, exc)
+            return
+        self._last[provider_id] = (state, now)
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundProviderChecks:
+    recorder: ProviderCheckRecorder
+    provider_id: str
+
+    async def succeeded(self) -> None:
+        await self.recorder.record(self.provider_id, "verified")
+
+    async def failed(self, error: GitProviderError) -> None:
+        if isinstance(error, GitProviderTransientError):
+            return
+        code = {401: "auth_failed", 403: "permission_denied"}.get(error.status_code or 0)
+        if code is not None:
+            await self.recorder.record(self.provider_id, "error", error_code=code)

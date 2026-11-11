@@ -107,10 +107,65 @@ def test_an_hour_that_is_all_warmup_keeps_its_percentiles():
     assert row.memory_usage_p99 == 700 * MIB
 
 
-def test_hourly_sources_keep_every_point():
-    rows = _hour_with_restart(restart_at=6, spike=1100)
-    (row,) = rollup_rows(rows, warmup_seconds=600, source="hourly")
-    assert row.memory_usage_p99 == 1100 * MIB
+def _hourly(ts: datetime, pod: str, restarts: int, avg: int, peak: int) -> CombinedMetric:
+    """A compressed hourly pod row: its hour's average, peak and highest restart count."""
+    return _metric(
+        ts,
+        pod_name=pod,
+        sample_count=12,
+        restart_count=restarts,
+        memory_usage_bytes=avg * MIB,
+        memory_usage_max_bytes=peak * MIB,
+    )
+
+
+def test_hours_rerolled_from_compressed_tables_apply_the_warmup():
+    hour = _hour()
+    previous = [_hourly(hour - timedelta(hours=1), pod, 3, 300, 320) for pod in ("api-a", "api-b")]
+    rows = [
+        _hourly(hour, "api-a", 4, 380, 1100),  # restarted during the hour: replay spike
+        _hourly(hour, "api-b", 3, 300, 320),
+    ]
+    (plain,) = rollup_rows(rows, source="hourly")
+    assert plain.memory_usage_p99 == 1100 * MIB
+    (warm,) = rollup_rows(rows, warmup_seconds=600, source="hourly", context_rows=previous)
+    # The restarted replica's hour leaves the percentiles; its peak stays the maximum.
+    assert warm.memory_usage_p99 == 320 * MIB
+    assert warm.memory_usage_max == 1100 * MIB
+
+
+def test_a_single_replica_warm_hour_counts_with_its_average():
+    hour = _hour()
+    previous = [_hourly(hour - timedelta(hours=1), "api-a", 3, 300, 320)]
+    (row,) = rollup_rows(
+        [_hourly(hour, "api-a", 4, 380, 1100)], warmup_seconds=600, source="hourly", context_rows=previous
+    )
+    assert row.memory_usage_p99 == 380 * MIB
+    assert row.memory_usage_max == 1100 * MIB
+
+
+def test_a_pod_restarting_every_compressed_hour_keeps_each_hour_peak_in_the_maximum():
+    """Chronic restarts: every hour is warm, so its percentiles fall back to the hourly
+    average (coarser than the raw path), while the maximum keeps every hour's peak so
+    the rightsizing bounds still see the startup spikes."""
+    start = _hour() - timedelta(hours=3)
+    rows = [_hourly(start + timedelta(hours=h), "api-a", 3 + h, 300 + 10 * h, 900 + 50 * h) for h in range(4)]
+    for h in range(1, 4):
+        (row,) = rollup_rows([rows[h]], warmup_seconds=600, source="hourly", context_rows=[rows[h - 1]])
+        assert row.memory_usage_p99 == (300 + 10 * h) * MIB
+        assert row.memory_usage_p95 == (300 + 10 * h) * MIB
+        assert row.memory_usage_max == (900 + 50 * h) * MIB
+
+
+def test_a_replica_new_in_a_compressed_hour_warms_up():
+    hour = _hour()
+    previous = [_hourly(hour - timedelta(hours=1), "api-a", 3, 300, 320)]
+    rows = [_hourly(hour, "api-a", 3, 300, 320), _hourly(hour, "api-new", 0, 400, 900)]
+    (row,) = rollup_rows(rows, warmup_seconds=600, source="hourly", context_rows=previous)
+    assert row.memory_usage_p99 == 320 * MIB and row.memory_usage_max == 900 * MIB
+    # Without the previous hour, nothing is known to be new or restarted.
+    (alone,) = rollup_rows(rows, warmup_seconds=600, source="hourly")
+    assert alone.memory_usage_p99 == 900 * MIB
 
 
 def test_summaries_from_rows_apply_the_warmup():

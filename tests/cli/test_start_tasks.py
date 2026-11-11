@@ -418,9 +418,11 @@ async def test_async_start_registers_every_controller_loop_and_runs_initial_task
         "dashboard-summary",
         "gitops-discovery",
         "session-purge",
+        "controller-heartbeat",
     )
     specs = registry.specs
-    assert all(spec.leader_only for spec in specs.values())
+    # Every replica publishes its loop states; every other job runs on the leader only.
+    assert [name for name, spec in specs.items() if not spec.leader_only] == ["controller-heartbeat"]
     # Collection fires on step boundaries plus the safety lag; scans poll every 15s.
     assert specs["collection"].interval_seconds == 300
     assert specs["collection"].align_offset_seconds == 60.0

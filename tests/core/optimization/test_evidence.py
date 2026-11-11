@@ -143,3 +143,33 @@ class TestBuildPatch:
     def test_no_patch_without_container_identity(self):
         rec = _cpu_rec().model_copy(update={"container_name": None})
         assert build_patch(rec) is None
+
+
+class TestReliabilitySignalsInEvidence:
+    """OOM kills and CPU throttling of the scan's usage summary reach the evidence block."""
+
+    def _context_with_summary(self, **signals):
+        from greenkube.models.workload_usage import UsageSnapshot, WorkloadUsageSummary
+
+        context = _context(_series())
+        summary = WorkloadUsageSummary(
+            namespace="prod", target_kind="Deployment", target_name="api", container_name="api", **signals
+        )
+        snapshot = UsageSnapshot(source="rollup")
+        snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
+        context.usage = snapshot
+        return context
+
+    def test_fills_oom_events_and_throttling_from_the_usage_summary(self):
+        context = self._context_with_summary(oom_kill_count=3, throttling_ratio=0.42)
+        evidence = build_evidence(_cpu_rec(), context)
+        assert evidence is not None
+        assert evidence.oom_events == 3
+        assert evidence.cpu_throttling_ratio == 0.42
+
+    def test_unknown_signals_stay_unknown(self):
+        evidence = build_evidence(_cpu_rec(), self._context_with_summary())
+        assert evidence is not None
+        assert evidence.oom_events is None and evidence.cpu_throttling_ratio is None
+        bare = build_evidence(_cpu_rec(), _context(_series()))
+        assert bare is not None and bare.oom_events is None

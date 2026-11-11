@@ -16,6 +16,11 @@ cannot know, from a :class:`WorkloadRiskProfile`:
   CPU manager is incompatible with CPU resizes);
 * the ``greenkube.io/criticality`` label.
 
+A suspected JVM also halves the confidence of a memory decrease
+(:data:`JVM_MEMORY_DECREASE_CONFIDENCE`). Deletions (zombie pods, idle
+namespaces, orphaned volumes and load balancers) cannot be undone by a revert,
+so they are never low risk and always carry ``irreversible_deletion``.
+
 Unknown profile facts (``None``) never change the risk level.
 """
 
@@ -40,6 +45,12 @@ CRITICALITY_LEVELS = ("critical", "high", "normal", "low")
 
 #: VPA update modes in which the VPA writes pod requests itself (a conflicting writer).
 CONFLICTING_VPA_UPDATE_MODES = frozenset({"Auto", "Recreate", "InPlace", "InPlaceOrRecreate"})
+
+#: Confidence multiplier of a memory decrease on a container suspected to run a JVM.
+JVM_MEMORY_DECREASE_CONFIDENCE = 0.5
+
+#: Risk factor of every recommendation that deletes something (no revert brings it back).
+IRREVERSIBLE_DELETION = "irreversible_deletion"
 
 #: CPU throttling ratio above which a CPU decrease is at least medium (high above the second value).
 THROTTLING_MEDIUM = 0.05
@@ -342,11 +353,19 @@ def assess(
         assessment.effort = EffortLevel.MEDIUM
         assessment.reversible = True
     elif rec.type == RecommendationType.ZOMBIE_POD:
-        assessment.risk_level, assessment.risk_factors = RiskLevel.LOW, ["no_observed_usage"]
+        # Deletions cannot be reverted from Git: a deleted pod, namespace, volume or
+        # load balancer address is gone (its data, its IP), so never low risk.
+        assessment.risk_level, assessment.risk_factors = RiskLevel.MEDIUM, ["no_observed_usage", IRREVERSIBLE_DELETION]
         assessment.effort = EffortLevel.LOW
         assessment.reversible = False
     elif rec.type == RecommendationType.IDLE_NAMESPACE:
-        assessment.risk_level, assessment.risk_factors = RiskLevel.MEDIUM, ["namespace_decommission"]
+        assessment.risk_level, assessment.risk_factors = (
+            RiskLevel.HIGH,
+            [
+                "namespace_decommission",
+                IRREVERSIBLE_DELETION,
+            ],
+        )
         assessment.effort = EffortLevel.MEDIUM
         assessment.reversible = False
     elif rec.type in (RecommendationType.OVERPROVISIONED_NODE, RecommendationType.UNDERUTILIZED_NODE):
@@ -354,11 +373,14 @@ def assess(
         assessment.effort = EffortLevel.HIGH
         assessment.reversible = True
         assessment.requires_restart = True
-    elif rec.type in (
-        RecommendationType.ORPHANED_PERSISTENT_VOLUME,
-        RecommendationType.ORPHANED_LOAD_BALANCER,
-    ):
-        assessment.risk_level, assessment.risk_factors = RiskLevel.LOW, ["no_bound_consumer"]
+    elif rec.type == RecommendationType.ORPHANED_PERSISTENT_VOLUME:
+        # Deleting a volume deletes its data (reclaim policy Delete) or strands it.
+        assessment.risk_level, assessment.risk_factors = RiskLevel.HIGH, ["no_bound_consumer", IRREVERSIBLE_DELETION]
+        assessment.effort = EffortLevel.LOW
+        assessment.reversible = False
+    elif rec.type == RecommendationType.ORPHANED_LOAD_BALANCER:
+        # Re-creating the Service rarely gets the same external address back.
+        assessment.risk_level, assessment.risk_factors = RiskLevel.MEDIUM, ["no_bound_consumer", IRREVERSIBLE_DELETION]
         assessment.effort = EffortLevel.LOW
         assessment.reversible = False
 
@@ -369,4 +391,12 @@ def assess(
         profile,
         requires_restart=assessment.requires_restart,
     )
+    if profile is not None and profile.jvm and rec.type == RecommendationType.RIGHTSIZING_MEMORY:
+        if _is_decrease(rec, "memory"):
+            # The JVM sizes its heap itself: the working set does not show what it needs (E9).
+            assessment.confidence = round(assessment.confidence * JVM_MEMORY_DECREASE_CONFIDENCE, 4)
+            assessment.confidence_factors = {
+                **assessment.confidence_factors,
+                "jvm_suspected": JVM_MEMORY_DECREASE_CONFIDENCE,
+            }
     return assessment

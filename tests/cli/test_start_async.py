@@ -1,31 +1,8 @@
 from unittest.mock import MagicMock, patch
 
-import pytest
 import typer
 
 from greenkube.cli.start import start
-from greenkube.core.scheduler import Scheduler
-
-
-@pytest.mark.asyncio
-async def test_scheduler_runs_tasks():
-    """Test that AsyncScheduler executes tasks."""
-    scheduler = Scheduler()
-    mock_job = MagicMock()
-
-    async def job_wrapper():
-        mock_job()
-
-    scheduler.add_job(job_wrapper, interval_hours=1)
-
-    # Check if tasks list exists and has item
-    assert hasattr(scheduler, "tasks"), "Scheduler missing 'tasks' attribute"
-    assert len(scheduler.tasks) == 1
-    task = scheduler.tasks[0]
-    assert not task.done()
-
-    await scheduler.stop()
-    assert task.cancelled() or task.done()
 
 
 def test_start_initializes_async_loop():

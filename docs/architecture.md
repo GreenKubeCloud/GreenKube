@@ -200,6 +200,7 @@ flowchart LR
 | `automation-controller` | 5 s tick; steps keep their own cadence | yes | 10 min |
 | `plan-executor` | 5 s, at most 10 operations per tick | yes | — (operation leases) |
 | `session-purge` | daily | yes | 10 min |
+| `controller-heartbeat` | 30 s | no (every replica) | 20 s |
 
 `gitops-sync` and `automation-controller` are registered when the GitOps plan runtime is configured (`GITOPS_PROVIDERS_JSON`). The delivery part, meaning `plan-executor` plus the webhook outbox, PR polling, branch cleanup and pending-PR recovery steps, runs when `AUTOMATION_ENABLED` is true and `AUTOMATION_MODE` is not `disabled`. Plan expiry and retention run whenever the plan runtime exists, as the former API sweep did.
 
@@ -208,6 +209,7 @@ The registry guarantees:
 - **Leader gating.** A leader-only tick runs only while the process holds the Lease. It runs inside a `LeaderFence` scope, so a job can re-check the Lease generation before it commits (A14). Loops that must react quickly to a takeover (`gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`) re-check the Lease every 2 s while on standby; the others keep their former cadence.
 - **Isolation.** Each loop has its own task. An exception or a timeout fails only that tick. A loop task that dies unexpectedly is restarted after 5 s. After ticks that raised or timed out, a loop backs off exponentially, up to 8× its interval. Aligned loops do not back off; they retry at the next boundary. Jobs that log and swallow their own errors call `report_loop_failure()`: the tick counts as failed in the metrics and the loop status, but it does not back off, so the job keeps its cadence (a single failing Electricity Maps zone, for example, does not slow down the hourly refresh of the healthy zones). A `CancelledError` raised from inside a job while the registry is not stopping fails that tick; it does not end the loop.
 - **Health.** On `CONTROLLER_METRICS_PORT` the controller serves `/healthz` (process alive), `/readyz` (every loop alive with a fresh heartbeat, otherwise `503`) and `/loops` (a per-loop JSON snapshot with state, last success, duration, consecutive failures and last error code; it requires the API key when the controller has one). Metrics are listed in [Observability and SLOs](observability-slos.md#controller-loops).
+- **Persisted heartbeats.** The `controller-heartbeat` loop writes each replica's loop snapshot to `controller_heartbeats`, so `GET /api/v1/automation/status` (served by the API, which runs no loop) reports the controller loop state (`controller`).
 
 **The automation controller loop** (`src/greenkube/automation/controller.py`) holds the database lease (the singleton `gitops_pr_polling_lease` row) for its whole tick. At most one process does automation housekeeping, even without Kubernetes leader election (standalone replicas, or old and new pods during a rollout). The tick runs these steps in order, renewing the lease and re-checking the Lease fence between steps:
 

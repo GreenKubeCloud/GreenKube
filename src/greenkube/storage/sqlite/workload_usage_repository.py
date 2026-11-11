@@ -133,6 +133,17 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
             for row in rows
         ]
 
+    async def read_hourly_restart_context(self, hour: datetime) -> List[UsageInputRow]:
+        previous = ensure_utc(hour) - timedelta(hours=1)
+        rows = await self._fetch(
+            "SELECT namespace, pod_name, hour_bucket, restart_count FROM combined_metrics_hourly WHERE hour_bucket = ?",
+            (_encode(previous),),
+        )
+        return [
+            UsageInputRow(namespace=row[0], pod_name=row[1], timestamp=_decode(row[2]), restart_count=_count(row[3]))
+            for row in rows
+        ]
+
     async def read_hour_inputs(self, hour: datetime) -> Tuple[List[UsageInputRow], List[UsageInputRow], str]:
         hour = ensure_utc(hour)
         sources = set()
