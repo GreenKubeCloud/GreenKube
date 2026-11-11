@@ -13,6 +13,7 @@ from greenkube.signals.connectors.inbox import InboxBatch
 from greenkube.signals.connectors.push import (
     BATCH_SCHEMA_FILE,
     SIGNAL_SCHEMA_FILE,
+    PushSignal,
     batch_schema,
     json_pointer,
     parse_batch,
@@ -73,6 +74,11 @@ class TestSchemaFiles:
             assert computed not in properties
         assert {"target", "capability", "kind", "proposal", "algorithm"} <= set(signal_schema()["required"])
         assert signal_schema()["$id"].endswith("signal.v1alpha1.json")
+
+    def test_push_signal_mirrors_source_signal_minus_server_fields(self):
+        """A new SourceSignal field must be added to the push schema too (or declared server-computed)."""
+        server_computed = {"schema_version", "signal_id", "source_id", "provenance", "fetched_at"}
+        assert set(PushSignal.model_fields) == set(SourceSignal.model_fields) - server_computed
 
 
 class TestParseBatch:
