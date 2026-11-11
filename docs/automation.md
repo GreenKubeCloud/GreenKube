@@ -146,9 +146,19 @@ A single-provider installation may instead use the top-level `automation.webhook
 
 Only `POST /api/v1/webhooks/<provider_id>` is exempt from the GreenKube bearer key. The request still must carry the provider-native signature/token. Provider schemes do not include signed timestamps, so delivery IDs are deduplicated and provider state is re-fetched before lifecycle changes.
 
+## Supported action kinds
+
+What a pull request can change is defined by a registry of action kinds (see [Architecture: action framework](architecture.md#action-framework)). Each kind defines its operations, the resources it touches, its invariants, its pre-apply baseline, how apply detection reads it, its rollback and its PR section. A recommendation becomes a PR only when a registered kind can express it.
+
+| Kind | Operation | What it changes | Renderers | Rollback | Apply detection |
+|---|---|---|---|---|---|
+| `container_resources` | `set_container_resources` | CPU/memory requests (and, on raw manifests and Helm, limits) of named containers of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize (requests only), Helm values, Flux HelmRelease post-renderer | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+
+Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.
+
 ## Supported source layouts
 
-Only CPU and memory rightsizing recommendations currently have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
+Only CPU and memory rightsizing recommendations (the `container_resources` kind) currently have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
 
 | Source | Supported | Notes |
 |---|---|---|

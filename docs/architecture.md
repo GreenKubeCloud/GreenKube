@@ -720,6 +720,33 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 
 Only CPU and memory rightsizing recommendations have action planners. Unsupported sources and renderers fail closed with typed reasons. See [GitOps automation](automation.md) for the supported matrix and security model.
 
+## Action framework
+
+What GreenKube can turn into a pull request is a registry of **action kinds** (`src/greenkube/automation/actions/`). Planners, render validation, the plan worker, rollback, apply detection and policy gates never test operation types; they ask the kind.
+
+```
+Recommendation ──ops_for──► ActionPlanV3(target, typed operations)
+                               │  ACTION_KINDS.spec_for_action()
+                               ▼
+                          ActionKindSpec ──compile──► primitive ops (SetField / RemoveField / CreateResource / DeleteResource)
+                               │                          │
+                               │                          ▼
+                               │                    PatchStrategy (raw, Kustomize, Helm values, Flux post-renderer)
+                               │                          │ source edit → render before/after
+                               ▼                          ▼
+     baseline, apply detection, inverse,        expected-delta validation + kind invariants
+     PR section, policy fields                  → digest-bound FilePlan
+```
+
+- **`ActionKindSpec`** (`actions/base.py`) declares `kind`, its typed operation model, `capability`, `risk_class` and `measurement_strategy`, and implements: `ops_for` (recommendations → actions), `validate_operations`, `targets` (resources that need a binding), `compile` (typed → primitive ops), `validate_target` and `check_invariants`, `renderer_support`, `owns_patch_field` (which fields of a GreenKube-managed Kustomize patch belong to the kind), `subjects`/`changed_fields` (container names, policy gates), `baseline_covers`, `effective_change` (no-op detection against the live baseline), `is_applied`, `validate_inverse_scope`/`inverse` (rollback from the persisted baseline) and `pr_section`.
+- **Registry** (`actions/registry.py`): `register_action_kind(spec)` also registers the kind's operation model with `ActionPlanV3`, so persisted plans and recommendations parse it without changing `gitops/contracts.py`. One action holds operations of a single kind; unknown or mixed operations fail closed with the list of supported kinds.
+- **Primitive ops** (`actions/primitives.py`) are the only edits patch strategies know about. A field path is a JSON-pointer-like path in which `[name=api]` selects the unique list entry with that name (the strategic-merge identity); a selector never creates a list entry.
+- **Patch strategies.** `RawManifestPlanner` applies the field ops to the round-trip YAML/JSON document. `KustomizePlanner` turns them into one overlay-local, GreenKube-managed strategic-merge patch, merged with the fields an earlier managed patch already sets (every field of a managed patch must be owned by a registered kind, or planning fails closed). The Helm values and Flux HelmRelease planners map container resources only and reject other kinds with an explanation. Each strategy exposes `renderer_kind`, `supports(primitive, binding)` and `plan(...)`.
+- **Expected-delta validation** (`actions/validation.py`): the rendered resource set after the edit must equal the set before it, minus the deleted and plus the created resources, with exactly the compiled field changes on the changed resources; recomputed `checksum/*` pod-template annotations are the only tolerated side effect, and the kind's invariants must hold on the expected and the rendered result.
+- **Resource bindings** (`gitops/discovery/inventory.py`): `ResourceBindingIndex` maps the Argo CD `status.resources` and Flux `status.inventory` of every controller to `resource_bindings(gvk, namespace, name)`, so a kind that targets a non-workload resource (an HPA, a PersistentVolume, a NodePool) can find the controller and Git location that manage it. A resource listed by several controllers is ambiguous and an unlisted one is unmanaged; `bind_resources` fails closed on both.
+
+Built-in kind: `container_resources` (`set_container_resources`). Adding a kind is one `ActionKindSpec` subclass registered in the actions package; `tests/automation/actions/noop_kind.py` defines a test-only kind outside `src/` and plans it end to end through the raw and Kustomize strategies.
+
 ## Configuration & Deployment
 
 ### Environment Variables (12-Factor App)
