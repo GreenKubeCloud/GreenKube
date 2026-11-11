@@ -78,6 +78,7 @@ dependencies = [
     "packaging>=23.0", # Required by limits on Python 3.14+
     "structlog>=24.1.0",
     "ruamel.yaml>=0.18.0", # Round-trip YAML editing for the GitOps PR bot
+    "cryptography>=43.0.0", # RS256 JSON Web Tokens for GitHub App authentication
 ]
 
 [project.urls]

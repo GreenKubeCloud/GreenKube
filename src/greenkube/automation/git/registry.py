@@ -38,6 +38,7 @@ from greenkube.automation.git.credentials import (
 )
 from greenkube.automation.git.gitea import GiteaProvider
 from greenkube.automation.git.github import GitHubProvider
+from greenkube.automation.git.github_app import DEFAULT_TOKEN_ISSUER, GitHubAppCredentials, GitHubAppTokenIssuer
 from greenkube.automation.git.gitlab import GitLabProvider
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsProviderRepository
 
@@ -119,9 +120,11 @@ class GitProviderRegistry:
         *,
         author_name: str = "GreenKube Bot",
         author_email: str = "bot@greenkube.cloud",
+        app_tokens: GitHubAppTokenIssuer | None = None,
     ):
         self._provider_repository = provider_repository
         self._credential_resolver = GitProviderCredentialResolver(secret_resolver)
+        self._app_tokens = app_tokens or DEFAULT_TOKEN_ISSUER
         self._author_name = author_name
         self._author_email = author_email
         self._checks = ProviderCheckRecorder(provider_repository)
@@ -134,12 +137,26 @@ class GitProviderRegistry:
         """
         config, provider_type, adapter = await self._load_provider_config(provider_id)
         await self._authorize_repository(config, provider_type, repository)
-        token = await self._credential_resolver.resolve(config)
+        credentials = await self._credential_resolver.resolve_credentials(config)
+        author_name, author_email = self._author_name, self._author_email
+        if isinstance(credentials, GitHubAppCredentials):
+            # GitHub App (F3): an installation token scoped to this one repository, and the
+            # App's bot identity as commit author. The issuer caches it until it nearly expires.
+            installation = await self._app_tokens.token_for(
+                credentials,
+                api_base_url=config.api_base_url or None,
+                owner=repository.owner,
+                name=repository.name,
+            )
+            token = installation.token
+            author_name, author_email = installation.bot_name, installation.bot_email
+        else:
+            token = credentials
         provider = adapter(
             token,
             api_base_url=config.api_base_url or None,
-            author_name=self._author_name,
-            author_email=self._author_email,
+            author_name=author_name,
+            author_email=author_email,
         )
 
         async def authorize(target: GitRepository) -> None:

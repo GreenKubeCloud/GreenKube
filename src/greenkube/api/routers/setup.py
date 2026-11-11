@@ -401,17 +401,29 @@ def _credentials_check(
             snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n"
             "  --set automation.policy.pauseDelivery=false",
         )
-    if reason in {"credentials_missing", "github_app_not_supported"}:
+    if reason == "credentials_missing":
+        external = (delivery.payload or {}).get("mode") in ("patch", "ci")
         return _check(
             "git_credentials",
             "credentials",
             title,
             "action_needed",
             "No Git credentials are mounted: previews and pull requests wait for them."
-            if reason == "credentials_missing"
-            else "GitHub App credentials were found; use a token until GitHub App delivery is available.",
-            "Create one Secret; delivery activates within one to two minutes, without upgrade or restart.",
+            + (" In patch and ci delivery modes a read-only token is enough." if external else ""),
+            "Create one Secret (a token, or appId + privateKey for a GitHub App); delivery activates within one "
+            "to two minutes, without upgrade or restart.",
             docs,
+            snippet=secret_snippet,
+        )
+    if reason == "github_app_host_unsupported":
+        return _check(
+            "git_credentials",
+            "credentials",
+            title,
+            "action_needed",
+            "GitHub App credentials were found, but the discovered repositories are not on GitHub.",
+            "Use a token for GitLab or Gitea repositories, or configure automation.providers for them.",
+            "automation.md#github-app",
             snippet=secret_snippet,
         )
     if reason in {"credentials_host_ambiguous", "credentials_host_mismatch"}:
