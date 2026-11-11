@@ -17,6 +17,7 @@ from greenkube.automation.pr_content import (
     PullRequestContext,
     PullRequestRenderSettings,
     PullRequestTemplateError,
+    derive_metadata,
     load_template,
     parse_footer,
     render_body,
@@ -27,7 +28,13 @@ from greenkube.automation.pr_content import (
 )
 from greenkube.automation.pr_content.formatting import co2e_compact, cpu, memory, money_compact
 from greenkube.automation.pr_content.render import MAX_SECTION_CHARS
-from greenkube.models.metrics import RecommendationType
+from greenkube.models.metrics import (
+    EffortLevel,
+    RecommendationSource,
+    RecommendationStatus,
+    RecommendationType,
+    RiskLevel,
+)
 from tests.automation import pr_fixtures as fx  # pyrefly: ignore[missing-import]
 
 SNAPSHOTS = Path(__file__).parent / "snapshots" / "pr_bodies"
@@ -479,3 +486,28 @@ def test_assumptions_name_the_carbon_intensity_source_and_co2e_basis():
     assert "- CO₂e basis: `allocated_share_released`" in body
     default = render_body(SCENARIOS["rightsize"](), SETTINGS)
     assert "(source: stored grid intensity of the observed samples" in default
+
+
+def test_enum_fields_render_as_their_values_never_as_python_reprs():
+    """The Minikube PRs printed ``RiskLevel.LOW``: enums must render as ``low``."""
+    records = [
+        fx.recommendation(
+            41,
+            risk_level=RiskLevel.LOW,
+            effort=EffortLevel.LOW,
+            source=RecommendationSource.GREENKUBE,
+            status=RecommendationStatus.ACTIVE,
+        ),
+        fx.recommendation(42, rec_type=RecommendationType.RIGHTSIZING_MEMORY, risk_level=RiskLevel.MEDIUM),
+    ]
+    context = _context(fx.rightsize_plan(), records)
+    content = render_pull_request(context, SETTINGS)
+    metadata = derive_metadata(context)
+    rendered = "\n".join((content.title, content.body, content.commit_message, *metadata.labels))
+
+    assert "Risk: **medium**." in content.body
+    assert "risk/medium" in metadata.labels
+    leaked = re.findall(
+        r"\b(?:RiskLevel|EffortLevel|RecommendationSource|RecommendationStatus|RecommendationType)\.", rendered
+    )
+    assert leaked == []
