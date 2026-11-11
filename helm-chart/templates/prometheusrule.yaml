@@ -66,9 +66,9 @@ spec:
           annotations:
             summary: GreenKube automation worker heartbeat is stale
             description: At least one persisted automation worker heartbeat is older than the stale threshold.
-    {{- if .Values.monitoring.prometheusRule.controllerAlerts }}
-    # Controller loops (M8). Needs the controller metrics endpoint scraped
-    # (collector.metricsPort with the controller ServiceMonitor).
+    {{- if and .Values.monitoring.prometheusRule.controllerAlerts .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+    # Controller loops (M8). Rendered only with the controller ServiceMonitor
+    # (same condition), otherwise GreenKubeNoActiveController would always fire.
     - name: greenkube.controller
       rules:
         - alert: GreenKubeControllerLoopFailing

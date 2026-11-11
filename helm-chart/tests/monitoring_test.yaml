@@ -47,6 +47,17 @@ tests:
       - matchRegex:
           path: spec.groups[0].rules[0].expr
           pattern: 'queue="operations",state="stuck"'
+      - lengthEqual:
+          path: spec.groups
+          count: 1
+
+  - it: should render the controller loop alerts when the controller is scraped
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
       - equal:
           path: spec.groups[1].name
           value: greenkube.controller
@@ -67,6 +78,19 @@ tests:
     set:
       monitoring.prometheusRule.enabled: true
       monitoring.prometheusRule.controllerAlerts: false
+      monitoring.serviceMonitor.enabled: true
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 1
+
+  - it: should leave the controller loop alerts out when the controller metrics port is off
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      collector.metricsPort: 0
     templates:
       - templates/prometheusrule.yaml
     asserts:
