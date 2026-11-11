@@ -105,6 +105,7 @@ The most useful ones:
 | `E2E_ADOPT` | `0` | `1` takes over objects with the harness's names that lack its ownership marker |
 | `E2E_FLUX` | `1` | `0` skips the Flux path |
 | `E2E_FRESH` | `1` | `1` deletes the previous run's release, data, repository and namespaces first; `0` keeps them |
+| `E2E_RESUME_MAX_AGE` | `21600` | With `E2E_FRESH=0`, the age in seconds beyond which a merged pull request is not resumed |
 | `E2E_WAIT_VERDICT` | `1` | `0` stops once the measurement has started |
 | `E2E_ALLOW_REGRESSION` | `0` | `1` records a verdict other than `verified`/`passed` without failing the run |
 | `E2E_STATE_DIR` | `$TMPDIR/greenkube-e2e` | Port-forward logs and the evidence of each step |
@@ -211,11 +212,15 @@ The Flux pull request does not edit the workload manifest: it adds a strategic
 merge patch under `flux/oversized-worker/greenkube-patches/` and references it
 from `kustomization.yaml`.
 
-With `E2E_FRESH=0`, `loop.sh` resumes from the workload's latest GreenKube pull
-request instead of opening a second one: from the merge when it is still open,
-from the GitOps sync when it is already merged. It finds the pull request
-through `api '/recommendations/history?namespace=greenkube-e2e-apps&start=…&end=…'`,
-whatever status the recommendations have. The sync check accepts the merge
+With `E2E_FRESH=0`, `loop.sh` resumes from the workload's latest unfinished
+GreenKube pull request instead of opening a second one: from the merge when it
+is still open, from the GitOps sync when it is merged but its plan is not
+`applied` yet. It finds the pull request through
+`api '/recommendations/history?namespace=greenkube-e2e-apps&start=…&end=…'`,
+whatever status the recommendations have. A merged pull request whose plan is
+already `applied` (a loop that went through apply detection), or that was merged
+more than `E2E_RESUME_MAX_AGE` seconds ago, is ignored: the run starts a new loop
+instead of waiting on an old change (`hack/e2e/resumable-pr.jq`). The sync check accepts the merge
 commit or any later commit that contains it. The merge retries only while Gitea
 answers 405 (mergeability not computed yet); a closed pull request or any other
 error stops the run at once.
