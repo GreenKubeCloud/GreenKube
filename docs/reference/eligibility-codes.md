@@ -47,7 +47,8 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `action_kind_unsupported` | GreenKube cannot write this kind of change yet. The message names the planned kind: `hpa` (H3), `schedule` (H4), `deletion` (H6), `node_pool` (H7) or `advisory`. | Apply the change manually, then mark it applied so it is measured. |
+| `action_kind_unsupported` | GreenKube cannot write this kind of change yet. The message names the planned kind: `hpa` (H3), `schedule` (H4), `node_pool` (H7) or `advisory`. | Apply the change manually, then mark it applied so it is measured. |
+| `deletion_requires_review` | A deletion (`ZOMBIE_POD`, `IDLE_NAMESPACE`, `ORPHANED_PERSISTENT_VOLUME`, `ORPHANED_LOAD_BALANCER`) is never automated: GreenKube shows why the resource appears unused, it cannot prove that nothing depends on it. See [Why GreenKube thinks a resource is unused](../recommendation.md#why-greenkube-thinks-a-resource-is-unused). | Check the evidence, confirm with the owners, delete the resource from Git (or with `kubectl` outside GitOps) and mark the recommendation applied. Annotate the resource with `greenkube.io/ignore="true"` if it is still needed. |
 | `action_unavailable` | A container rightsizing recommendation has no typed action: the workload owner or container is unknown, or the proposal does not lower the current request. | The next scan rebuilds the action once these are known; otherwise apply manually. |
 | `requires_container_target` | The action does not target exactly one named container of the workload. | Rescan once container metrics are collected; GreenKube never patches a whole pod spec. |
 

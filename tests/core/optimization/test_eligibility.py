@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from greenkube.automation.policy import AutomationPolicyConfig
 from greenkube.core.optimization.eligibility import (
     CODES,
@@ -153,10 +155,29 @@ class TestEligibility:
         assert set(_codes(result)) >= {"not_active", "automation_disabled", "policy_risk_exceeded"}
 
     def test_unsupported_action_kind_names_the_planned_kind(self):
-        zombie = _record(type=RecommendationType.ZOMBIE_POD, action=None, scope="pod")
-        result = assess_eligibility(zombie, _ctx())
+        offpeak = _record(type=RecommendationType.OFF_PEAK_SCALING, action=None, scope="workload")
+        result = assess_eligibility(offpeak, _ctx())
         assert _codes(result) == ["action_kind_unsupported"]
-        assert "deletion" in result["blockers"][0]["message"] and "H6" in result["blockers"][0]["message"]
+        assert "schedule" in result["blockers"][0]["message"] and "H4" in result["blockers"][0]["message"]
+        assert result["delivery_modes"] == ["manual"]
+
+    @pytest.mark.parametrize(
+        "rec_type",
+        [
+            RecommendationType.ZOMBIE_POD,
+            RecommendationType.IDLE_NAMESPACE,
+            RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+            RecommendationType.ORPHANED_LOAD_BALANCER,
+        ],
+    )
+    def test_deletions_always_require_review(self, rec_type):
+        """No deletion is automated: every deletion kind is blocked with an explanation and a fix."""
+        record = _record(type=rec_type, action=None, scope="cluster")
+        result = assess_eligibility(record, _ctx())
+        assert result["can_open_pr"] is False
+        assert _codes(result) == ["deletion_requires_review"]
+        blocker = result["blockers"][0]
+        assert "unused" in blocker["message"] and "greenkube.io/ignore" in blocker["fix"]
         assert result["delivery_modes"] == ["manual"]
 
     def test_missing_action_and_unsafe_targets(self):

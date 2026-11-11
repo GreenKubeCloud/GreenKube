@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.automation.policy import AutomationPolicyConfig, AutomationPolicyEvaluator, AutomationPolicyResult
+from greenkube.core.deletion_safety import DELETION_TYPES
 from greenkube.core.optimization.risks import profile_from_binding_evidence
 from greenkube.gitops.contracts import BindingStatus
 from greenkube.storage.base_gitops_repository import WorkloadBinding, freshen_workload_binding
@@ -77,6 +78,13 @@ CODES: Dict[str, Tuple[str, str]] = {
     "pull_request_open": (
         "A pull request is already open for this recommendation.",
         "Review and merge or close the open pull request.",
+    ),
+    "deletion_requires_review": (
+        "Deleting a resource is never automated: GreenKube can show why it appears unused, not prove that "
+        "nothing depends on it.",
+        "Check the evidence in the recommendation, confirm with the owners, then delete the resource from Git "
+        "(or with kubectl for resources outside GitOps) and mark the recommendation as applied. Annotate the "
+        'resource with greenkube.io/ignore="true" if it is still needed.',
     ),
     "action_kind_unsupported": (
         "GreenKube cannot open pull requests for this kind of change yet.",
@@ -450,7 +458,10 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
 
     action_kind = SUPPORTED_ACTION_KINDS.get(rec_type)
     recommendation_ids: Optional[List[int]] = None
-    if action_kind is None:
+    if action_kind is None and rec_type in DELETION_TYPES:
+        # Deletions stay manual (no deletion PR is automated in this release, roadmap H6).
+        blockers.append(_entry("deletion_requires_review"))
+    elif action_kind is None:
         planned = PLANNED_ACTION_KINDS.get(rec_type)
         message = CODES["action_kind_unsupported"][0]
         if planned:
