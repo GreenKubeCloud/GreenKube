@@ -246,6 +246,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The automation controller loop takes the database lease only when one of its steps is due, and a standby controller resets `greenkube_automation_worker_up` to 0.
 - The session purge (F14) moved from every API replica to the controller's `session-purge` loop.
 - GitOps discovery and sync runtimes expose `run_once()`, which the registry schedules; their `run_periodic()`/`run()` loops are kept for embedders.
+- **Automation page layout:** workload coverage is one panel with a coverage bar and a compact count per binding status instead of seven separate cards; plan automation readiness metrics share one panel; the header, page gutter and section padding fit phone widths; each section is a labelled region.
 
 ### Fixed
 - **Automation worker heartbeat recovery:** Idle workers refresh their heartbeat and clear expired lease state without overwriting an active lease.
@@ -337,6 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The kube-state-metrics OOM-kill count only counts restarts whose termination reason at that restart is `OOMKilled`; a liveness-probe restart after an older OOM kill in the lookback no longer lifts the increase cap.
 - The Kubernetes Metrics API collector accepts Go duration windows (`1m30s`, `1h0m0s`, `500ms`) instead of rejecting everything but plain seconds.
 - Memory targets rounded up to whole MiB no longer gain a MiB from float noise (900 MiB × 1.1 is 990 MiB, not 991 MiB).
+- **One card per GitOps controller (USER BUG 3):** the Automation & GitOps page rendered one card per discovered CRD (one for Argo CD, six for Flux), so Flux filled the discovery section. It now shows exactly one card each for Argo CD and Flux, with the same visual weight, an overall status (`Detected`, `Not detected`, `Degraded` naming the unreadable kinds, or `Unknown` when the status is missing) and, inside the Flux card, the Kustomizations, HelmReleases and Git/OCI/Helm repository and Bucket kinds with their individual status. Grouping happens in the browser; the `/api/v1/gitops/status` contract is unchanged.
 
 ### Removed
 - **CI: the dead README-badge step** and its `contents: write` permission (O6).
