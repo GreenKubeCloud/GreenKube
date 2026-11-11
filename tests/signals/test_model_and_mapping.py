@@ -119,6 +119,26 @@ class TestSourceSignal:
         assert changed.signal_id != first.signal_id
         assert self._signal(source_id="krr").signal_id != first.signal_id
 
+    def test_signal_id_ignores_observed_state_and_free_text(self):
+        # Drifting observations or explanations do not create a new signal per scan.
+        first = self._signal()
+        drifted = self._signal(
+            proposal=ContainerResourcesProposal(
+                container="web", current=ResourceSpec(cpu_request_m=480), proposed=ResourceSpec(cpu_request_m=300)
+            )
+        )
+        assert drifted.signal_id == first.signal_id
+
+        def deletion(reason: str, kind: str = "ZOMBIE_POD") -> SourceSignal:
+            return self._signal(
+                capability=Capability.CLEANUP,
+                kind=kind,
+                proposal=DeletionProposal(reason=reason),
+            )
+
+        assert deletion("idle for 7 days (0.0012 cores)").signal_id == deletion("idle for 8 days").signal_id
+        assert deletion("idle").signal_id != deletion("idle", kind="IDLE_NAMESPACE").signal_id
+
     def test_signal_id_cannot_be_forged(self):
         assert self._signal(signal_id="forged").signal_id == self._signal().signal_id
 

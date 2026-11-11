@@ -146,12 +146,15 @@ async def test_signals_are_stored_once_and_their_sighting_moves_forward(db):
     [only] = await repo.list_signals("greenkube.orphaned_pv", target_key="c1/PersistentVolume/_/pv-2")
     assert only.signal.target.name == "pv-2"
 
-    # A changed proposal is a new row, so the proposal history survives.
+    # A reworded reason is the same advice: the row is updated, not duplicated.
     await repo.record_run(
         _run("greenkube.orphaned_pv", first_at + timedelta(hours=2)),
         [_signal("greenkube.orphaned_pv", "pv-1", reason="Released for 30 days")],
     )
-    assert len(await repo.list_signals("greenkube.orphaned_pv", target_key="c1/PersistentVolume/_/pv-1")) == 2
+    [reworded] = await repo.list_signals("greenkube.orphaned_pv", target_key="c1/PersistentVolume/_/pv-1")
+    assert reworded.first_seen_at == first.finished_at
+    proposal = reworded.signal.proposal
+    assert isinstance(proposal, DeletionProposal) and proposal.reason == "Released for 30 days"
 
 
 async def test_latest_runs_and_last_success_per_source(db):

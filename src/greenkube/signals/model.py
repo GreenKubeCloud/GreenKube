@@ -13,9 +13,13 @@ source emits signals in this schema, GreenKube's own analyzers included:
 * ``provenance`` records where the signal came from (native analyzer, adapter
   over a v1 connector, third-party plugin).
 
-``signal_id`` is derived: ``sha256(source_id, target.key(), capability,
-proposal)``. The same proposal from the same source on the same target keeps
-the same id across scans, so storage keeps one row per distinct proposal.
+``signal_id`` is derived: ``sha256(source_id, target.key(), capability, kind,
+proposal identity)``. The proposal identity is the proposal without the fields
+that describe the observed state or explain the change (``current``,
+``direction``, ``reason``): they drift between scans without changing the
+advice. The same proposal from the same source on the same target keeps the
+same id across scans, so storage keeps one row per distinct proposal (holding
+its latest observed state and reason) instead of one row per scan.
 """
 
 from __future__ import annotations
@@ -278,10 +282,21 @@ def resource_direction(current: ResourceSpec, proposed: ResourceSpec) -> str:
     return directions.pop() if len(directions) == 1 else "mixed"
 
 
-def compute_signal_id(source_id: str, target: TargetRef, capability: str, proposal: BaseModel) -> str:
+#: Proposal fields outside a signal's identity: the observed state (``current``
+#: and the ``direction`` derived from it) and free-text explanations (``reason``).
+NON_IDENTITY_PROPOSAL_FIELDS = frozenset({"current", "direction", "reason"})
+
+
+def proposal_identity(proposal: BaseModel) -> Dict[str, Any]:
+    """The part of a proposal that identifies the advice (what to change, to what)."""
+    data = proposal.model_dump(mode="json")
+    return {key: value for key, value in data.items() if key not in NON_IDENTITY_PROPOSAL_FIELDS}
+
+
+def compute_signal_id(source_id: str, target: TargetRef, capability: str, proposal: BaseModel, kind: str = "") -> str:
     """Deterministic identity of one source's proposal on one target and capability."""
     payload = json.dumps(
-        [source_id, target.key(), str(capability), proposal.model_dump(mode="json")],
+        [source_id, target.key(), str(capability), kind, proposal_identity(proposal)],
         sort_keys=True,
         separators=(",", ":"),
         default=str,
@@ -337,7 +352,7 @@ class SourceSignal(BaseModel):
 
     @model_validator(mode="after")
     def _derive_id(self) -> "SourceSignal":
-        self.signal_id = compute_signal_id(self.source_id, self.target, self.capability, self.proposal)
+        self.signal_id = compute_signal_id(self.source_id, self.target, self.capability, self.proposal, self.kind)
         return self
 
     @property
