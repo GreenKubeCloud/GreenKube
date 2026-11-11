@@ -637,6 +637,38 @@ async def test_workload_inventory_collects_hpa_and_pdb_interaction_evidence():
     assert evidence["vpa_checked"] is False
 
 
+@pytest.mark.asyncio
+async def test_every_hpa_of_a_workload_is_kept():
+    """D13: two HPAs on one workload kept only the last one listed, so a CPU HPA could be missed."""
+    api = _AppsV1Api(
+        {
+            "Deployment": [_list_page([_api_workload("Deployment", "api")])],
+            "StatefulSet": [_list_page([])],
+            "DaemonSet": [_list_page([])],
+        }
+    )
+
+    def hpa(name: str, resource: str) -> dict:
+        return {
+            "metadata": {"name": name, "namespace": "apps"},
+            "spec": {
+                "scaleTargetRef": {"kind": "Deployment", "name": "api"},
+                "metrics": [{"type": "Resource", "resource": {"name": resource, "target": {"type": "Utilization"}}}],
+            },
+        }
+
+    reader = KubernetesWorkloadInventoryReader(
+        api,
+        autoscaling_v2_api=_AutoscalingApi([hpa("api-cpu", "cpu"), hpa("api-memory", "memory")]),
+        policy_v1_api=_PolicyApi([]),
+    )
+
+    resources = await reader.list_workloads()
+
+    evidence = resources[0]["_greenkube_policy_evidence"]
+    assert sorted(item["name"] for item in evidence["hpa_targets"]) == ["api-cpu", "api-memory"]
+
+
 class _VpaCustomObjectsApi:
     def __init__(self, items=None, error: Exception | None = None) -> None:
         self.items = items or []

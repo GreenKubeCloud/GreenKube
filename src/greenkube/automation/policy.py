@@ -38,6 +38,8 @@ _COOLDOWN_STATUSES = frozenset(
 _HISTORY_STATUSES = tuple(sorted(_ACTIVE_PLAN_STATUSES | _COOLDOWN_STATUSES, key=lambda status: status.value))
 # VPA update modes in which the VPA itself writes pod requests: a conflicting writer (D13).
 _CONFLICTING_VPA_UPDATE_MODES = frozenset({"Auto", "Recreate", "InPlace", "InPlaceOrRecreate"})
+# HPA metric targets that do not depend on the pod requests (absolute usage), D13.
+_REQUEST_INDEPENDENT_HPA_TARGETS = frozenset({"AverageValue", "Value"})
 MissingEvidenceMode = Literal["fail", "warn"]
 
 
@@ -735,7 +737,13 @@ class AutomationPolicyEvaluator:
             if adds_hpa:
                 conflicts.append({"hpa": name, "reason": "the plan adds a second autoscaler"})
                 continue
-            scaled = [metric for metric in hpa.get("resource_metrics") or () if isinstance(metric, Mapping)]
+            # Only a Utilization target is a share of the request: changing the request moves it.
+            # AverageValue/Value targets compare raw usage; an unknown type fails closed.
+            scaled = [
+                metric
+                for metric in hpa.get("resource_metrics") or ()
+                if isinstance(metric, Mapping) and metric.get("target_type") not in _REQUEST_INDEPENDENT_HPA_TARGETS
+            ]
             matched = sorted(
                 {
                     str(metric.get("resource"))
@@ -774,8 +782,8 @@ class AutomationPolicyEvaluator:
         )
         add_warning(
             AutomationErrorCode.POLICY_INTERACTION_CONFLICT,
-            f"HPA {', '.join(sorted(unaffected))} also manages this workload; it does not scale on the changed "
-            "resources, but review the replica range after the change.",
+            f"HPA {', '.join(sorted(unaffected))} also manages this workload; it does not scale on a share of the "
+            "changed requests, but review the replica range after the change.",
         )
 
     def _evaluate_vpa_gate(self, evidence: Mapping[str, Any], add_check, add_missing_evidence, add_warning) -> None:

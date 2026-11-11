@@ -548,7 +548,8 @@ def _is_missing_crd(error: Exception) -> bool:
 @dataclass(frozen=True, slots=True)
 class _PolicySnapshot:
     checked: bool
-    hpa_targets: Mapping[tuple[str, str, str], Mapping[str, Any]]
+    #: Every HPA, several may target one workload (D13: keeping one per target missed the others).
+    hpa_targets: tuple[Mapping[str, Any], ...]
     pod_disruption_budgets: tuple[Mapping[str, Any], ...]
     reason: str | None = None
     vpa_checked: bool = False
@@ -560,7 +561,7 @@ async def _read_policy_snapshot(
     policy_v1_api: Any | None,
     custom_objects_api: Any | None = None,
 ) -> _PolicySnapshot:
-    hpa_targets: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    hpa_targets: list[Mapping[str, Any]] = []
     pdbs: list[Mapping[str, Any]] = []
     vpas: list[Mapping[str, Any]] = []
     errors: list[str] = []
@@ -591,7 +592,7 @@ async def _read_policy_snapshot(
             for item in _listed_objects(response, "HorizontalPodAutoscaler"):
                 normalized = _normalize_hpa(item)
                 if normalized is not None:
-                    hpa_targets[normalized[0]] = normalized[1]
+                    hpa_targets.append(normalized[1])
         except Exception:
             errors.append("hpa-read-failed")
 
@@ -609,7 +610,7 @@ async def _read_policy_snapshot(
     checked = autoscaling_v2_api is not None and policy_v1_api is not None and not hpa_pdb_errors
     return _PolicySnapshot(
         checked=checked,
-        hpa_targets=hpa_targets,
+        hpa_targets=tuple(hpa_targets),
         pod_disruption_budgets=tuple(pdbs),
         reason=",".join(errors) if errors else None,
         vpa_checked=vpa_checked,
@@ -754,7 +755,7 @@ def _with_policy_snapshot(workload: Mapping[str, Any], snapshot: _PolicySnapshot
         "reason": snapshot.reason,
         "hpa_targets": [
             dict(hpa)
-            for hpa in snapshot.hpa_targets.values()
+            for hpa in snapshot.hpa_targets
             if hpa.get("namespace") == (workload.get("metadata") or {}).get("namespace")
             and hpa.get("target_kind") == workload.get("kind")
             and hpa.get("target_name") == (workload.get("metadata") or {}).get("name")

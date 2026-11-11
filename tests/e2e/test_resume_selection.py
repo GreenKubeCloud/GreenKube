@@ -59,7 +59,8 @@ def test_a_recent_merge_not_yet_applied_is_resumed():
         _pr(3, "merged", "plan-old", timedelta(days=2), merged=timedelta(days=2)),
         _pr(4, "merged", "plan-new", timedelta(hours=1), merged=timedelta(minutes=30)),
     ]
-    assert _select(prs, {"plan-old": "applied", "plan-new": "synced"})["pr_number"] == 4
+    resumed = _select(prs, {"plan-old": "applied", "plan-new": "synced"})
+    assert resumed is not None and resumed["pr_number"] == 4
     assert _select(prs, {"plan-old": "applied", "plan-new": "applied"}) is None
 
 
@@ -71,7 +72,8 @@ def test_an_open_pull_request_is_resumed_and_the_newest_wins():
         _pr(2, "closed", "plan-c", timedelta(minutes=1)),
         {"pr_number": 9, "status": "open", "plan_id": None, "created_at": _iso(timedelta(minutes=1))},
     ]
-    assert _select(prs, {"plan-a": "merged"})["pr_number"] == 5
+    resumed = _select(prs, {"plan-a": "merged"})
+    assert resumed is not None and resumed["pr_number"] == 5
 
 
 def test_loop_uses_the_filter():
