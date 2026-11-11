@@ -110,9 +110,9 @@ The `request_rightsizing` strategy measures, per hour:
 | `allocated_cost` | currency | yes | Decides the outcome. |
 | `cost_cpu`, `cost_ram` | currency | no | Split the saving between the change's recommendations. |
 | `core_hours`, `gib_hours` | core-hours, GiB-hours | no | Requested capacity freed. |
-| `co2e_g` | gCO₂e | no | Reported, never claimed. |
+| `co2e_g` | gCO₂e | yes | Operational CO₂e as the Impact Model allocates it (idle and memory power follow the reservation). Claimed when the change is realized and its own interval shows a saving; compared with the projected operational components only, never with embodied emissions ([component matching](impact-model.md#co2e-components-and-component-matched-comparison)). Split between the change's recommendations by projected measurable CO₂e. |
 
-The carbon model is usage-based: changing a request changes what a workload reserves, not what it uses, so a rightsizing does not claim a CO₂e saving. Allocated CO₂e (idle and embodied share) will be claimed once the Impact Model's allocation is wired into collection.
+Stored rows are allocated by the Impact Model: idle CPU power follows the CPU reservation and memory power the memory reservation, so a request change moves the measured operational CO₂e. Embodied emissions are stored apart and not read here: they stay a projection and are never claimed as measured. Before Impact Model 2.0.0, `co2e_g` was reported only and recommendations stored a measured CO₂e of 0.
 
 ## 6. Uncertainty and outcome (C4)
 

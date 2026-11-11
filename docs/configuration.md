@@ -65,7 +65,7 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.metricsCompressionAgeHours` | `24` | Age in hours after which 5-min raw metrics are compressed into hourly aggregates. Only closed hours are compressed, each from its complete raw set, behind a per-table compression watermark. Compressed hours are never re-read, so keep it at `24` or more: the carbon-intensity recompute refreshes only the last 24 hours of raw rows (a lower value logs a warning). |
-| `config.metricsRawRetentionDays` | `7` | Days to retain raw metrics. Pruning removes whole hours only, and never rows that are not compressed yet, whatever the retention (even `0`). |
+| `config.metricsRawRetentionDays` | `7` | Days to retain raw metrics. Pruning removes whole hours only, and never rows that are not compressed yet, whatever the retention (even `0`). The `__idle__` rows of `node_idle_metrics` are pruned with the pod rows (same retention and compression watermark). |
 | `config.metricsAggregatedRetentionDays` | `-1` | Days to retain hourly aggregates. `-1` means indefinite (useful for multi-year trend analysis) |
 
 ### Database (`config.db`)
