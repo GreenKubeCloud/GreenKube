@@ -62,6 +62,12 @@ rules:
   verbs:
   - get
   - list
+  # Karpenter DisruptionBlocked/Unconsolidatable events feed the realization factor. Read-only.
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
+  - list
   # Apply detection reads live workload requests to detect landed changes
   # (manual edits, PR merges, ArgoCD syncs). Read-only.
 - apiGroups: ["apps"]

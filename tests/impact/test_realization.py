@@ -348,6 +348,7 @@ class TestCollector:
             list_node=AsyncMock(return_value=SimpleNamespace(items=[node])),
             read_namespaced_config_map=AsyncMock(side_effect=type("NotFound", (Exception,), {"status": 404})()),
             list_pod_for_all_namespaces=AsyncMock(return_value=SimpleNamespace(items=[pod])),
+            list_event_for_all_namespaces=AsyncMock(return_value=SimpleNamespace(items=[])),
         )
         policy = SimpleNamespace(
             list_pod_disruption_budget_for_all_namespaces=AsyncMock(return_value=SimpleNamespace(items=[]))

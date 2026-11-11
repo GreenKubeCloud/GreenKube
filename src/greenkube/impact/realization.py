@@ -20,8 +20,9 @@ Blockers are ``karpenter.sh/do-not-disrupt`` (or the legacy
 ``karpenter.sh/do-not-evict``) and ``cluster-autoscaler.kubernetes.io/safe-to-evict: "false"``
 on pods, ``karpenter.sh/do-not-disrupt`` and
 ``cluster-autoscaler.kubernetes.io/scale-down-disabled`` on nodes,
-PodDisruptionBudgets that allow no disruption, scheduled zero budgets and an
-unhealthy Cluster Autoscaler.
+PodDisruptionBudgets that allow no disruption, scheduled zero budgets, Karpenter
+``DisruptionBlocked`` events and an unhealthy Cluster Autoscaler. Karpenter
+``Unconsolidatable`` events are reported as reasons without changing the factor.
 
 Everything here is pure except :func:`refresh_realization_context`, which
 reads the cluster (through :class:`~greenkube.collectors.autoscaler_collector.AutoscalerCollector`)
@@ -147,6 +148,27 @@ class KarpenterPoolObservation:
 
 
 @dataclass(frozen=True)
+class KarpenterEventObservation:
+    """A Karpenter disruption event (``DisruptionBlocked``, ``Unconsolidatable``) on a NodePool, NodeClaim or Node.
+
+    ``pool`` is resolved by the collector for NodePools and NodeClaims; events
+    on a Node are mapped through the node's pool label.
+    """
+
+    reason: str
+    kind: str
+    name: str
+    pool: Optional[str] = None
+    message: str = ""
+
+
+#: Karpenter events that block consolidation of their pool (a blocker, factor × 0.5).
+BLOCKING_KARPENTER_EVENTS = frozenset({"DisruptionBlocked"})
+#: Karpenter events reported as reasons only (nodes Karpenter cannot consolidate right now).
+NOTED_KARPENTER_EVENTS = frozenset({"Unconsolidatable"})
+
+
+@dataclass(frozen=True)
 class ClusterAutoscalerObservation:
     """The ``kube-system/cluster-autoscaler-status`` ConfigMap (loosely structured text or YAML)."""
 
@@ -171,6 +193,8 @@ class RealizationInputs:
     pdbs: Optional[Sequence[PdbObservation]] = ()
     karpenter_pools: Optional[Sequence[KarpenterPoolObservation]] = ()
     cluster_autoscaler: Optional[ClusterAutoscalerObservation] = None
+    #: Karpenter disruption events (roadmap G5); None when they could not be read.
+    karpenter_events: Optional[Sequence[KarpenterEventObservation]] = ()
     #: Inputs that could not be read; reported as reasons, never silently ignored.
     unavailable: Tuple[str, ...] = ()
 
@@ -321,6 +345,18 @@ def resolve_realization(
         for pool in pools_hit:
             _block(pool, f"PodDisruptionBudget {pdb.namespace}/{pdb.name} allows no disruption")
 
+    # Karpenter events (G5): DisruptionBlocked blocks the pool, Unconsolidatable is reported.
+    unconsolidatable: Dict[str, set] = {}
+    for event in inputs.karpenter_events or ():
+        pool_name = event.pool or (node_pools.get(event.name) if event.kind == "Node" else None)
+        if not pool_name:
+            continue
+        if event.reason in BLOCKING_KARPENTER_EVENTS:
+            detail = f": {event.message[:120]}" if event.message else ""
+            _block(pool_name, f"Karpenter reports {event.reason} on {event.kind} {event.name}{detail}")
+        elif event.reason in NOTED_KARPENTER_EVENTS:
+            unconsolidatable.setdefault(pool_name, set()).add(f"{event.kind}/{event.name}")
+
     notes = tuple(f"{name} could not be read" for name in inputs.unavailable)
     ca = inputs.cluster_autoscaler
     pools: Dict[str, PoolRealization] = {}
@@ -337,6 +373,10 @@ def resolve_realization(
         else:
             factor = FACTOR_KARPENTER_WHEN_EMPTY
             reasons.append(f"Karpenter NodePool {name} has an unknown consolidation policy {policy!r}")
+        if unconsolidatable.get(name):
+            reasons.append(
+                f"Karpenter reports {len(unconsolidatable[name])} object(s) of NodePool {name} as Unconsolidatable"
+            )
         budget_states = {_budget_blocks(budget) for budget in pool.budgets}
         blocked = False
         if "always" in budget_states:

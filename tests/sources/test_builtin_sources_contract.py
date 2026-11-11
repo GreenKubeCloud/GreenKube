@@ -196,7 +196,8 @@ class TestNodePoolContract(SourceContract):
 
         assert type(source).id == "greenkube.nodepool"
         assert type(source).tier == SourceTier.NATIVE
-        [signal] = batch.signals
+        # The consolidation signal; NodePool policy advice (G5) comes as signal-only advisories.
+        [signal] = [s for s in batch.signals if s.kind == "OVERPROVISIONED_NODE"]
         assert signal.provenance.origin == SignalOrigin.NATIVE
         assert signal.target.kind == "NodePool" and signal.target.name == "default"
         assert signal.target.key() == "contract-cluster/karpenter.sh.NodePool/_/default"
