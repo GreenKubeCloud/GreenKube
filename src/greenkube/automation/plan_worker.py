@@ -1906,6 +1906,55 @@ class PlanWorker:
             except Exception:
                 pass
 
+    async def link_external_deliveries(self, *, limit: int = 20) -> int:
+        """Link pull requests opened from the plan branch of approved patch/ci plans (F4).
+
+        Nobody has to report a pull request opened from the deterministic plan branch:
+        the automation controller finds it by branch name and records it through the
+        same verification as a report. Returns the number of plans linked.
+        """
+        lister = getattr(self.plans, "list_plans", None)
+        if not callable(lister):
+            return 0
+        plans = await cast(Any, lister)(status=PlanStatus.APPROVED)
+        linked = 0
+        for plan in [plan for plan in plans if plan.delivery_mode in ("patch", "ci") and plan.digest][:limit]:
+            pull_request: PullRequestInfo | None = None
+            try:
+                target = await self.provider_resolver.resolve(plan.source)
+            except Exception as exc:
+                logger.info(
+                    "Plan %s: provider unavailable for delivery linkage (%s).", plan.plan_id, type(exc).__name__
+                )
+                continue
+            try:
+                self._validate_target(plan.source, target)
+                found = await target.provider.find_pull_request(
+                    target.repository, plan_branch_name(plan), plan.source.ref
+                )
+                pull_request = found if isinstance(found, PullRequestInfo) else None
+            except Exception as exc:
+                logger.info("Plan %s: pull-request lookup failed (%s).", plan.plan_id, type(exc).__name__)
+            finally:
+                try:
+                    await target.provider.close()
+                except Exception:
+                    pass
+            if pull_request is None or not pull_request.url:
+                continue
+            try:
+                await self.record_external_delivery(
+                    plan.plan_id,
+                    pr_url=pull_request.url,
+                    head_sha=_pull_request_head_sha(pull_request),
+                    actor="automation-controller",
+                )
+            except ExternalDeliveryError as exc:
+                logger.info("Plan %s: pull request #%s not linked (%s).", plan.plan_id, pull_request.number, exc.code)
+                continue
+            linked += 1
+        return linked
+
     async def _repeated_delivery(self, plan: Plan, number: int, head_sha: str | None) -> ExternalDeliveryResult:
         """Idempotent answer to a report of the request already recorded for ``plan``."""
         records = await self._plan_pull_request_records(plan)

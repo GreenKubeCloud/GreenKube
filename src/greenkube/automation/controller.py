@@ -85,6 +85,8 @@ STEP_WEBHOOKS = "webhooks"
 STEP_PR_POLLING = "pr_polling"
 STEP_RECOVERY = "recovery"
 STEP_RETENTION = "retention"
+#: Links pull requests opened from the plan branch of approved patch/ci plans (F4).
+STEP_EXTERNAL_DELIVERY = "external_delivery"
 _FAILURE_REASONS = {STEP_WEBHOOKS: "webhook", STEP_PR_POLLING: "polling", STEP_RECOVERY: "worker"}
 
 
@@ -185,6 +187,7 @@ class AutomationController:
             ),
             STEP_RETENTION: float(retention_interval_seconds),
         }
+        self.intervals[STEP_EXTERNAL_DELIVERY] = self.intervals[STEP_PR_POLLING]
         self._clock = clock
         self._monotonic = monotonic
         self._last_run: dict[str, float] = {}
@@ -254,6 +257,8 @@ class AutomationController:
                 steps.append((STEP_PR_POLLING, self._poll_pull_requests))
             if not self._recovered:
                 steps.append((STEP_RECOVERY, self._recover_pending_pull_requests))
+            if callable(getattr(self.plan_worker, "link_external_deliveries", None)):
+                steps.append((STEP_EXTERNAL_DELIVERY, self._link_external_deliveries))
         steps.append((STEP_RETENTION, self._retention))
         return steps
 
@@ -287,6 +292,12 @@ class AutomationController:
     async def _poll_pull_requests(self, lease: PullRequestPollingLease) -> bool:
         assert self.pull_request_polling is not None
         await self.pull_request_polling.poll_with_lease(lease)
+        return True
+
+    async def _link_external_deliveries(self, _lease: PullRequestPollingLease) -> bool:
+        linked = await cast(Any, self.plan_worker).link_external_deliveries()
+        if linked:
+            logger.info("Linked %d externally delivered pull requests by their plan branch.", linked)
         return True
 
     async def _recover_pending_pull_requests(self, _lease: PullRequestPollingLease) -> bool:

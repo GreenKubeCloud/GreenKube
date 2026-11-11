@@ -573,3 +573,57 @@ async def test_approval_records_the_delivery_mode_and_queues_only_direct_plans(m
     again = await service.approve_plan(plan.plan_id, plan.digest)
     assert again.delivery_mode == mode
     assert len(queue.operations) == enqueued
+
+
+# --------------------------------------------------------------------------- linkage by branch name
+
+
+class _ListingPlans:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def list_plans(self, *, status: PlanStatus | None = None, **_: Any) -> list[Plan]:
+        return [plan for plan in self.inner.plans.values() if status is None or plan.status is status]
+
+
+class _BranchLookupProvider(ExternalProvider):
+    async def find_pull_request(self, repo: GitRepository, head: str, base: str) -> PullRequestInfo | None:
+        info = self.pull_request_info
+        if info is None or info.raw.get("head", {}).get("ref") != head or info.raw.get("base", {}).get("ref") != base:
+            return None
+        return info
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["patch", "ci"])
+async def test_a_pull_request_opened_from_the_plan_branch_is_linked_without_a_report(mode):
+    worker, _, plans, pull_requests, provider = _external_worker(mode, _BranchLookupProvider())
+    worker.plans = _ListingPlans(plans)
+
+    assert await worker.link_external_deliveries() == 0  # nothing opened yet
+
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    assert await worker.link_external_deliveries() == 1
+
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert {record.pr_number for record in pull_requests.records} == {PR_NUMBER}
+    assert await worker.link_external_deliveries() == 0  # no longer approved
+
+
+@pytest.mark.asyncio
+async def test_branch_linkage_ignores_direct_plans_and_unverified_pull_requests():
+    direct, _, direct_plans, _, direct_provider = _external_worker("direct", _BranchLookupProvider())
+    direct.plans = _ListingPlans(direct_plans)
+    direct_provider.open_pull_request(head_ref=plan_branch_name(direct_plans.plans["plan-1"]))
+    assert await direct.link_external_deliveries() == 0
+
+    provider = _BranchLookupProvider()
+    provider.commits[HEAD_SHA] = dict(provider.base_tree)  # the branch does not hold the plan
+    worker, _, plans, pull_requests, _ = _external_worker("ci", provider)
+    worker.plans = _ListingPlans(plans)
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    assert await worker.link_external_deliveries() == 0
+    assert plans.plans["plan-1"].status is PlanStatus.APPROVED and pull_requests.records == []
