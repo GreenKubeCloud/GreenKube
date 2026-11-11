@@ -12,6 +12,12 @@ Two pure functions define the rollup semantics:
   database (``read_usage_snapshot``); this function is the reference used for
   scans built from in-memory rows (CLI ``--live``, tests).
 
+Usage percentiles are per container and per replica: every pod row (or
+container row) is one point, never a sum across replicas. Points in the
+warm-up after a container (re)start (``RIGHTSIZING_WARMUP_MINUTES``) are left
+out of the percentiles, so a startup spike (WAL replay, JIT, cache fill) does
+not size a request; the hourly maximum keeps every point (USER BUG 2).
+
 :class:`WorkloadUsageRollup` keeps the ``workload_usage_hourly`` table up to
 date one hour at a time, so its memory is bounded by one hour of cluster data.
 """
@@ -208,10 +214,15 @@ class _HourAccumulator:
     sample_count: int = 0
     duration_seconds: float = 0.0
     cpu: List[Tuple[float, int]] = field(default_factory=list)
+    #: Points of the warm-up after a (re)start: out of the percentiles, kept in the maximum.
+    cpu_warm: List[Tuple[float, int]] = field(default_factory=list)
+    cpu_peak: Optional[float] = None
     cpu_sum: float = 0.0
     cpu_sq_sum: float = 0.0
     cpu_weight: int = 0
     memory: List[Tuple[float, int]] = field(default_factory=list)
+    memory_warm: List[Tuple[float, int]] = field(default_factory=list)
+    memory_peak: Optional[float] = None
     memory_sum: float = 0.0
     memory_weight: int = 0
     cpu_request_sum: float = 0.0
@@ -237,7 +248,7 @@ class _HourAccumulator:
     zones: List[Optional[str]] = field(default_factory=list)
     instance_types: List[Optional[str]] = field(default_factory=list)
 
-    def add(self, row: Any, step_seconds: float) -> None:
+    def add(self, row: Any, step_seconds: float, warm: bool = False) -> None:
         weight = _weight(row)
         timestamp = getattr(row, "timestamp", None)
         self.pods.add(getattr(row, "pod_name", None))
@@ -253,14 +264,18 @@ class _HourAccumulator:
         cpu = _number(getattr(row, "cpu_usage_millicores", None))
         if cpu is not None:
             peak = _number(getattr(row, "cpu_usage_max_millicores", None))
-            self.cpu.append((max(cpu, peak) if peak is not None else cpu, weight))
+            point = max(cpu, peak) if peak is not None else cpu
+            (self.cpu_warm if warm else self.cpu).append((point, weight))
+            self.cpu_peak = point if self.cpu_peak is None else max(self.cpu_peak, point)
             self.cpu_sum += cpu * weight
             self.cpu_sq_sum += cpu * cpu * weight
             self.cpu_weight += weight
         memory = _number(getattr(row, "memory_usage_bytes", None))
         if memory is not None:
             peak = _number(getattr(row, "memory_usage_max_bytes", None))
-            self.memory.append((max(memory, peak) if peak is not None else memory, weight))
+            point = max(memory, peak) if peak is not None else memory
+            (self.memory_warm if warm else self.memory).append((point, weight))
+            self.memory_peak = point if self.memory_peak is None else max(self.memory_peak, point)
             self.memory_sum += memory * weight
             self.memory_weight += weight
 
@@ -304,8 +319,15 @@ class _HourAccumulator:
 
     def build(self, bucket: Optional[datetime], key: Tuple[str, str, str, str, str], source: str) -> WorkloadUsageHour:
         namespace, kind, name, container, node = key
-        cpu_values = {p: weighted_nearest_rank(self.cpu, p) for p in (*USAGE_PERCENTILES, 100)}
-        memory_values = {p: weighted_nearest_rank(self.memory, p) for p in (*USAGE_PERCENTILES, 100)}
+        # An hour that is all warm-up keeps its points rather than having no percentile.
+        cpu_points = self.cpu or self.cpu_warm
+        memory_points = self.memory or self.memory_warm
+        cpu_values: Dict[int, Optional[float]] = {p: weighted_nearest_rank(cpu_points, p) for p in USAGE_PERCENTILES}
+        memory_values: Dict[int, Optional[float]] = {
+            p: weighted_nearest_rank(memory_points, p) for p in USAGE_PERCENTILES
+        }
+        cpu_values[100] = self.cpu_peak
+        memory_values[100] = self.memory_peak
         return WorkloadUsageHour(
             hour_bucket=bucket,
             namespace=namespace,
@@ -365,12 +387,61 @@ def _bucket(row: Any) -> Optional[datetime]:
     return floor_hour(timestamp) if isinstance(timestamp, datetime) else None
 
 
+WarmupWindows = Dict[Tuple[str, str], List[Tuple[datetime, datetime]]]
+
+
+def warmup_windows(rows: Iterable[Any], warmup_seconds: float) -> WarmupWindows:
+    """Warm-up windows ``[start, start + warmup)`` of each pod, from its pod rows.
+
+    A window opens at the first sample of a pod whose restart count changed
+    since its previous sample (a container restarted, or a pod was recreated
+    under the same name), and at the first sample of a pod that appears after
+    collection had started (a new replica). Rows only need ``namespace``,
+    ``pod_name``, ``timestamp`` and ``restart_count``.
+    """
+    if warmup_seconds <= 0:
+        return {}
+    samples: Dict[Tuple[str, str], List[Tuple[datetime, Optional[int]]]] = defaultdict(list)
+    first: Optional[datetime] = None
+    for row in rows:
+        timestamp = getattr(row, "timestamp", None)
+        if not isinstance(timestamp, datetime):
+            continue
+        restarts = getattr(row, "restart_count", None)
+        count = restarts if isinstance(restarts, int) and not isinstance(restarts, bool) else None
+        samples[(row.namespace, row.pod_name)].append((timestamp, count))
+        first = timestamp if first is None or timestamp < first else first
+    span = timedelta(seconds=warmup_seconds)
+    windows: WarmupWindows = {}
+    for pod, points in samples.items():
+        points.sort(key=lambda point: point[0])
+        previous: Optional[int] = None
+        for index, (timestamp, count) in enumerate(points):
+            appeared = index == 0 and first is not None and timestamp > first
+            restarted = count is not None and previous is not None and count != previous
+            if appeared or restarted:
+                windows.setdefault(pod, []).append((timestamp, timestamp + span))
+            if count is not None:
+                previous = count
+    return windows
+
+
+def _in_warmup(windows: WarmupWindows, row: Any) -> bool:
+    spans = windows.get((row.namespace, row.pod_name))
+    timestamp = getattr(row, "timestamp", None)
+    if not spans or not isinstance(timestamp, datetime):
+        return False
+    return any(start <= timestamp < end for start, end in spans)
+
+
 def rollup_rows(
     pod_rows: Iterable[Any],
     container_rows: Iterable[Any] = (),
     *,
     step_seconds: float = 300.0,
     source: str = "raw",
+    warmup_seconds: float = 0.0,
+    context_rows: Iterable[Any] = (),
 ) -> List[WorkloadUsageHour]:
     """Aggregates metric rows into hourly rows per target, container and node.
 
@@ -379,9 +450,16 @@ def rollup_rows(
     object with the ``CombinedMetric`` attribute names works. A pod that has
     container rows but no pod row at a timestamp gets a pod-level row rebuilt
     from its containers, so every pod has a pod-level aggregate.
+
+    With ``warmup_seconds``, the points of a pod's warm-up (see
+    :func:`warmup_windows`) are left out of the usage percentiles;
+    ``context_rows`` are the raw pod rows just before the rolled rows, so a
+    restart shortly before the hour is still seen. Rows from the compressed
+    hourly tables have no per-step restart counts and keep every point.
     """
     pod_rows = list(pod_rows)
     container_rows = list(container_rows)
+    warm = warmup_windows([*context_rows, *pod_rows], warmup_seconds) if source != "hourly" else {}
     pods_at: Dict[Tuple[str, str, Any], Any] = {}
     pods_in_hour: Dict[Tuple[str, str, Optional[datetime]], Any] = {}
     for row in pod_rows:
@@ -431,7 +509,7 @@ def rollup_rows(
     for row in [*pod_rows, *synthetic.values()]:
         namespace, kind, name = _target(row)
         node = getattr(row, "node", None) or ""
-        _group(_bucket(row), (namespace, kind, name, POD_LEVEL, node)).add(row, step_seconds)
+        _group(_bucket(row), (namespace, kind, name, POD_LEVEL, node)).add(row, step_seconds, _in_warmup(warm, row))
 
     for row in container_rows:
         container = getattr(row, "container_name", None)
@@ -444,7 +522,7 @@ def rollup_rows(
         )
         namespace, kind, name = _target(row)
         node = (getattr(pod, "node", None) if pod is not None else None) or getattr(row, "node", None) or ""
-        _group(bucket, (namespace, kind, name, container, node)).add(row, step_seconds)
+        _group(bucket, (namespace, kind, name, container, node)).add(row, step_seconds, _in_warmup(warm, row))
 
     return [accumulator.build(bucket, key, source) for (bucket, key), accumulator in groups.items()]
 
@@ -677,9 +755,11 @@ def summarize_rows(
     container_rows: Iterable[Any] = (),
     *,
     step_seconds: float = 300.0,
+    warmup_seconds: float = 0.0,
 ) -> UsageSnapshot:
     """Usage snapshot of in-memory metric rows (CLI ``--live`` and contexts built from rows)."""
-    return summarize(rollup_rows(pod_rows, container_rows, step_seconds=step_seconds), source="rows")
+    hours = rollup_rows(pod_rows, container_rows, step_seconds=step_seconds, warmup_seconds=warmup_seconds)
+    return summarize(hours, source="rows")
 
 
 # --------------------------------------------------------------------------- #
@@ -718,10 +798,12 @@ class WorkloadUsageRollup:
         *,
         step_seconds: float = 300.0,
         backfill_hours: int = 14 * 24,
+        warmup_seconds: float = 0.0,
     ):
         self.repository = repository
         self.step_seconds = step_seconds
         self.backfill_hours = max(int(backfill_hours), 1)
+        self.warmup_seconds = max(float(warmup_seconds or 0.0), 0.0)
 
     async def refresh(
         self, now: Optional[datetime] = None, *, refresh_hours: int = DEFAULT_REFRESH_HOURS
@@ -758,8 +840,21 @@ class WorkloadUsageRollup:
             logger.info("Workload usage rollup: re-rolling %d hours that received late rows.", len(late))
         for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
+            context: List[Any] = []
+            if self.warmup_seconds > 0 and source != "hourly" and pod_rows:
+                # A restart shortly before the hour still excludes the hour's first points.
+                context = await self.repository.read_restart_context(
+                    hour, self.warmup_seconds + max(self.step_seconds, 1.0)
+                )
             rows = (
-                rollup_rows(pod_rows, container_rows, step_seconds=self.step_seconds, source=source)
+                rollup_rows(
+                    pod_rows,
+                    container_rows,
+                    step_seconds=self.step_seconds,
+                    source=source,
+                    warmup_seconds=self.warmup_seconds,
+                    context_rows=context,
+                )
                 if pod_rows or container_rows
                 else []
             )

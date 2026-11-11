@@ -119,6 +119,14 @@ class WorkloadUsageRepository(ABC):
     # Rollup maintenance                                                  #
     # ------------------------------------------------------------------ #
 
+    async def read_restart_context(self, hour: datetime, seconds: float) -> List[UsageInputRow]:
+        """Raw pod rows of ``[hour - seconds, hour)`` with their restart counts (warm-up detection).
+
+        Only ``namespace``, ``pod_name``, ``timestamp`` and ``restart_count``
+        are filled. Backends without raw rows return none.
+        """
+        return []
+
     @abstractmethod
     async def read_hour_inputs(self, hour: datetime) -> Tuple[List[UsageInputRow], List[UsageInputRow], str]:
         """Return ``(pod_rows, container_rows, source)`` of one hour.

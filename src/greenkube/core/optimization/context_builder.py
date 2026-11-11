@@ -121,6 +121,7 @@ class ContextBuilder:
             usage_repo,
             step_seconds=parse_query_step_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP),
             backfill_hours=lookback_days * 24,
+            warmup_seconds=int(getattr(cfg, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60,
         ).refresh(end, refresh_hours=1)
 
         # Namespaces that no longer exist are left out in SQL: their targets
