@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Collection, List, Optional
+from typing import Collection, Dict, List, Mapping, Optional
 
 import aiosqlite
 
@@ -30,6 +30,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from greenkube.models.recommendation_v2 import RecommendationRevision
 from greenkube.storage.base_repository import RecommendationRepository
 from greenkube.storage.recommendation_mapper import (
     ACTIVE_UPSERT_COLUMNS,
@@ -37,6 +38,16 @@ from greenkube.storage.recommendation_mapper import (
     record_values,
     row_to_record,
     sources_from_json,
+    to_json,
+)
+from greenkube.storage.recommendation_revisions import (
+    QUEUED,
+    SUPERSEDED,
+    backfill_update,
+    decide,
+    is_frozen,
+    revision_from_row,
+    revision_values,
 )
 from greenkube.utils.date_utils import to_iso_z
 
@@ -256,7 +267,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             return 0
 
         now = to_iso_z(datetime.now(timezone.utc))
-        set_columns = ACTIVE_UPSERT_COLUMNS + ("updated_at",)
+        set_columns = ACTIVE_UPSERT_COLUMNS + ("revision", "updated_at")
         update_query = "UPDATE recommendation_history SET {} WHERE id = ?".format(
             ", ".join(f"{column} = ?" for column in set_columns)
         )
@@ -270,23 +281,41 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 status_val = _status_value(r)
                 identity_where, identity_params = _identity_where_clause(r)
                 row = await conn.execute(
-                    f"SELECT id, status FROM recommendation_history WHERE {identity_where}",
+                    f"SELECT * FROM recommendation_history WHERE {identity_where}",
                     identity_params,
                 )
                 existing = await row.fetchone()
                 if existing:
+                    stored = row_to_record(existing)
+                    decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
+                    if decision.action == "queue":
+                        # A record never changes under an open plan (E7).
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                        continue
+                    await self._settle_revision(conn, stored, decision.action == "revise", now)
                     values = record_values(r, encode_datetime=to_iso_z)
-                    params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [now, existing["id"]]
+                    params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                        decision.revision,
+                        now,
+                        existing["id"],
+                    ]
                     await conn.execute(update_query, params)
                     continue
 
                 pr_open_where, pr_open_params = _identity_where_clause(r, status=RecommendationStatus.PR_OPEN.value)
                 cursor = await conn.execute(
-                    f"SELECT id FROM recommendation_history WHERE {pr_open_where} LIMIT 1",
+                    f"SELECT * FROM recommendation_history WHERE {pr_open_where} LIMIT 1",
                     pr_open_params,
                 )
-                if await cursor.fetchone():
-                    # Frozen while its pull request is open (or merged and syncing).
+                pr_open_row = await cursor.fetchone()
+                if pr_open_row:
+                    # Frozen while its pull request is open (or merged and syncing): newer advice is queued.
+                    stored = row_to_record(pr_open_row)
+                    decision = decide(stored, r, frozen=True)
+                    if decision.action == "queue":
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                    else:
+                        await self._settle_revision(conn, stored, False, now)
                     continue
 
                 recorded_where, recorded_params = _identity_where_clause(r, status=RECORDED_CHANGE_STATUSES)
@@ -334,6 +363,151 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             await conn.commit()
             logger.info("Upserted %d recommendation records in SQLite.", len(records))
             return len(records)
+
+    @staticmethod
+    async def _queue_revision(
+        conn, stored: RecommendationRecord, incoming: RecommendationRecord, revision: int, now: str
+    ) -> None:
+        """Keep newer advice behind an open plan as the (single) queued revision."""
+        values = revision_values(incoming)
+        await conn.execute(
+            "DELETE FROM recommendation_revisions WHERE recommendation_id = ? AND state = ? AND revision <> ?",
+            (stored.id, QUEUED, revision),
+        )
+        await conn.execute(
+            """
+            INSERT INTO recommendation_revisions
+                (recommendation_id, revision, state, proposal, consensus, snapshot, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (recommendation_id, revision) DO UPDATE SET
+                state = excluded.state,
+                proposal = excluded.proposal,
+                consensus = excluded.consensus,
+                snapshot = excluded.snapshot,
+                updated_at = excluded.updated_at
+            """,
+            (
+                stored.id,
+                revision,
+                QUEUED,
+                to_json(values["proposal"]),
+                to_json(values["consensus"]),
+                to_json(values["snapshot"]),
+                now,
+                now,
+            ),
+        )
+
+    @staticmethod
+    async def _settle_revision(conn, stored: RecommendationRecord, revise: bool, now: str) -> None:
+        """Drop queued advice; on a new revision keep the replaced proposal as ``superseded``."""
+        await conn.execute(
+            "DELETE FROM recommendation_revisions WHERE recommendation_id = ? AND state = ?",
+            (stored.id, QUEUED),
+        )
+        if not revise:
+            return
+        values = revision_values(stored)
+        await conn.execute(
+            """
+            INSERT INTO recommendation_revisions
+                (recommendation_id, revision, state, proposal, consensus, snapshot, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (recommendation_id, revision) DO NOTHING
+            """,
+            (
+                stored.id,
+                max(1, stored.revision),
+                SUPERSEDED,
+                to_json(values["proposal"]),
+                to_json(values["consensus"]),
+                to_json(values["snapshot"]),
+                to_iso_z(stored.updated_at or stored.created_at) if (stored.updated_at or stored.created_at) else now,
+                now,
+            ),
+        )
+
+    async def get_revisions(self, rec_id: int) -> List[RecommendationRevision]:
+        """Revisions the record no longer carries (superseded and queued), newest first (E7)."""
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT * FROM recommendation_revisions WHERE recommendation_id = ? ORDER BY revision DESC",
+                (rec_id,),
+            )
+            rows = await cursor.fetchall()
+        return [revision_from_row(row) for row in rows]
+
+    async def get_queued_revisions(self, rec_ids: Collection[int]) -> Dict[int, RecommendationRevision]:
+        """The queued revision of each record, when one waits behind an open plan."""
+        ids = sorted({int(rec_id) for rec_id in rec_ids})
+        if not ids:
+            return {}
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT * FROM recommendation_revisions WHERE state = ? AND recommendation_id IN ({})".format(
+                    ", ".join("?" for _ in ids)
+                ),
+                (QUEUED, *ids),
+            )
+            rows = await cursor.fetchall()
+        return {revision.recommendation_id: revision for revision in map(revision_from_row, rows)}
+
+    async def pin_plan_revisions(self, plan_id: str, pins: Mapping[int, int]) -> Dict[int, int]:
+        """Record the revision a plan implements per recommendation; the first pin wins (E7)."""
+        if pins:
+            now = to_iso_z(datetime.now(timezone.utc))
+            async with self.db_manager.connection_scope() as conn:
+                await conn.executemany(
+                    "INSERT INTO recommendation_plan_pins (plan_id, recommendation_id, revision, pinned_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT (plan_id, recommendation_id) DO NOTHING",
+                    [(plan_id, int(rec_id), max(1, int(revision)), now) for rec_id, revision in pins.items()],
+                )
+                await conn.commit()
+        return await self.get_plan_pins(plan_id)
+
+    async def get_plan_pins(self, plan_id: str) -> Dict[int, int]:
+        """``{recommendation_id: revision}`` pinned by a plan."""
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT recommendation_id, revision FROM recommendation_plan_pins WHERE plan_id = ?",
+                (plan_id,),
+            )
+            rows = await cursor.fetchall()
+        return {int(row["recommendation_id"]): int(row["revision"]) for row in rows}
+
+    async def backfill_v2_fields(self, cluster_uid: str, batch_size: int = 500) -> int:
+        """Fill the v2 columns of rows written before them from their flat columns (E4).
+
+        Lossless: only NULL v2 columns are written, the flat columns are kept.
+        Returns the number of rows filled.
+        """
+        filled = 0
+        after_id = 0
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            while True:
+                cursor = await conn.execute(
+                    "SELECT * FROM recommendation_history WHERE fingerprint_v4 IS NULL AND id > ? ORDER BY id LIMIT ?",
+                    (after_id, max(1, int(batch_size))),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    break
+                after_id = int(rows[-1]["id"])
+                updates = [update for update in (backfill_update(row, cluster_uid) for row in rows) if update]
+                if updates:
+                    await conn.executemany(
+                        "UPDATE recommendation_history SET target = COALESCE(target, ?), "
+                        "proposal = COALESCE(proposal, ?), fingerprint_v4 = ? "
+                        "WHERE id = ? AND fingerprint_v4 IS NULL",
+                        updates,
+                    )
+                    await conn.commit()
+                    filled += len(updates)
+        return filled
 
     async def reconcile_active_recommendations(
         self,

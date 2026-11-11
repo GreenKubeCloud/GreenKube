@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Collection, List, Optional
+from typing import Collection, Dict, List, Mapping, Optional
 
 from ...core.recommendation_ranking import normalize_savings_metric
 from ...core.recommendation_realization import (
@@ -28,6 +28,7 @@ from ...models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
+from ...models.recommendation_v2 import RecommendationRevision
 from ..base_repository import RecommendationRepository
 from ..recommendation_mapper import (
     ACTIVE_UPSERT_COLUMNS,
@@ -35,6 +36,16 @@ from ..recommendation_mapper import (
     record_values,
     row_to_record,
     sources_from_json,
+    to_json,
+)
+from ..recommendation_revisions import (
+    QUEUED,
+    SUPERSEDED,
+    backfill_update,
+    decide,
+    is_frozen,
+    revision_from_row,
+    revision_values,
 )
 from ..sqlite.recommendation_repository import MUTABLE_COLUMNS
 
@@ -163,27 +174,22 @@ class PostgresRecommendationRepository(RecommendationRepository):
             return 0
 
         now = datetime.now(timezone.utc)
-        set_columns = ACTIVE_UPSERT_COLUMNS + ("updated_at",)
-        where_offset = len(set_columns)
-        update_query = (
-            "UPDATE recommendation_history SET {} "
-            "WHERE fingerprint = ${} "
-            "AND COALESCE(scope, 'pod') = ${} "
-            "AND namespace IS NOT DISTINCT FROM ${} "
-            "AND pod_name IS NOT DISTINCT FROM ${} "
-            "AND container_name IS NOT DISTINCT FROM ${} "
-            "AND target_node IS NOT DISTINCT FROM ${} "
-            "AND type = ${} "
-            "AND status = 'active'"
-        ).format(
+        set_columns = ACTIVE_UPSERT_COLUMNS + ("revision", "updated_at")
+        update_query = "UPDATE recommendation_history SET {} WHERE id = ${} AND status = 'active'".format(
             ", ".join(f"{column} = ${index}" for index, column in enumerate(set_columns, start=1)),
-            where_offset + 1,
-            where_offset + 2,
-            where_offset + 3,
-            where_offset + 4,
-            where_offset + 5,
-            where_offset + 6,
-            where_offset + 7,
+            len(set_columns) + 1,
+        )
+        active_select_query = (
+            "SELECT * FROM recommendation_history "
+            "WHERE fingerprint = $1 "
+            "AND COALESCE(scope, 'pod') = $2 "
+            "AND namespace IS NOT DISTINCT FROM $3 "
+            "AND pod_name IS NOT DISTINCT FROM $4 "
+            "AND container_name IS NOT DISTINCT FROM $5 "
+            "AND target_node IS NOT DISTINCT FROM $6 "
+            "AND type = $7 "
+            "AND status = 'active' "
+            "ORDER BY id LIMIT 1"
         )
         insert_query = ("INSERT INTO recommendation_history ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
             ", ".join(RECORD_COLUMNS),
@@ -216,8 +222,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 status_val = _status_value(r)
 
                 values = record_values(r)
-                update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
-                    now,
+                existing = await conn.fetchrow(
+                    active_select_query,
                     r.fingerprint,
                     r.scope or "pod",
                     r.namespace,
@@ -225,9 +231,23 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.container_name,
                     r.target_node,
                     type_val,
-                ]
-                result = await conn.execute(update_query, *update_params)
-                if result != "UPDATE 0":
+                )
+                if existing is not None:
+                    stored = row_to_record(existing)
+                    decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
+                    if decision.action == "queue":
+                        # A record never changes under an open plan (E7).
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                        count += 1
+                        continue
+                    async with conn.transaction():
+                        await self._settle_revision(conn, stored, decision.action == "revise", now)
+                        update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                            decision.revision,
+                            now,
+                            existing["id"],
+                        ]
+                        await conn.execute(update_query, *update_params)
                     count += 1
                     continue
 
@@ -242,7 +262,13 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     list(RECORDED_CHANGE_STATUSES),
                 )
                 if applied_row and applied_row["status"] == RecommendationStatus.PR_OPEN.value:
-                    # Frozen while its pull request is open (or merged and syncing).
+                    # Frozen while its pull request is open (or merged and syncing): newer advice is queued.
+                    stored = row_to_record(applied_row)
+                    decision = decide(stored, r, frozen=True)
+                    if decision.action == "queue":
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                    else:
+                        await self._settle_revision(conn, stored, False, now)
                     count += 1
                     continue
                 if applied_row and applied_row["status"] != RecommendationStatus.APPLIED.value:
@@ -274,6 +300,141 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
             logger.info("Upserted %d recommendation records in PostgreSQL.", count)
             return count
+
+    @staticmethod
+    async def _queue_revision(
+        conn, stored: RecommendationRecord, incoming: RecommendationRecord, revision: int, now: datetime
+    ) -> None:
+        """Keep newer advice behind an open plan as the (single) queued revision."""
+        values = revision_values(incoming)
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM recommendation_revisions WHERE recommendation_id = $1 AND state = $2 AND revision <> $3",
+                stored.id,
+                QUEUED,
+                revision,
+            )
+            await conn.execute(
+                """
+                INSERT INTO recommendation_revisions
+                    (recommendation_id, revision, state, proposal, consensus, snapshot, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                ON CONFLICT (recommendation_id, revision) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    proposal = EXCLUDED.proposal,
+                    consensus = EXCLUDED.consensus,
+                    snapshot = EXCLUDED.snapshot,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                stored.id,
+                revision,
+                QUEUED,
+                to_json(values["proposal"]),
+                to_json(values["consensus"]),
+                to_json(values["snapshot"]),
+                now,
+            )
+
+    @staticmethod
+    async def _settle_revision(conn, stored: RecommendationRecord, revise: bool, now: datetime) -> None:
+        """Drop queued advice; on a new revision keep the replaced proposal as ``superseded``."""
+        await conn.execute(
+            "DELETE FROM recommendation_revisions WHERE recommendation_id = $1 AND state = $2",
+            stored.id,
+            QUEUED,
+        )
+        if not revise:
+            return
+        values = revision_values(stored)
+        await conn.execute(
+            """
+            INSERT INTO recommendation_revisions
+                (recommendation_id, revision, state, proposal, consensus, snapshot, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (recommendation_id, revision) DO NOTHING
+            """,
+            stored.id,
+            max(1, stored.revision),
+            SUPERSEDED,
+            to_json(values["proposal"]),
+            to_json(values["consensus"]),
+            to_json(values["snapshot"]),
+            stored.updated_at or stored.created_at or now,
+            now,
+        )
+
+    async def get_revisions(self, rec_id: int) -> List[RecommendationRevision]:
+        """Revisions the record no longer carries (superseded and queued), newest first (E7)."""
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM recommendation_revisions WHERE recommendation_id = $1 ORDER BY revision DESC",
+                rec_id,
+            )
+        return [revision_from_row(row) for row in rows]
+
+    async def get_queued_revisions(self, rec_ids: Collection[int]) -> Dict[int, RecommendationRevision]:
+        """The queued revision of each record, when one waits behind an open plan."""
+        ids = sorted({int(rec_id) for rec_id in rec_ids})
+        if not ids:
+            return {}
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM recommendation_revisions WHERE state = $1 AND recommendation_id = ANY($2::bigint[])",
+                QUEUED,
+                ids,
+            )
+        return {revision.recommendation_id: revision for revision in map(revision_from_row, rows)}
+
+    async def pin_plan_revisions(self, plan_id: str, pins: Mapping[int, int]) -> Dict[int, int]:
+        """Record the revision a plan implements per recommendation; the first pin wins (E7)."""
+        if pins:
+            now = datetime.now(timezone.utc)
+            async with self.db_manager.connection_scope() as conn:
+                await conn.executemany(
+                    "INSERT INTO recommendation_plan_pins (plan_id, recommendation_id, revision, pinned_at) "
+                    "VALUES ($1, $2, $3, $4) ON CONFLICT (plan_id, recommendation_id) DO NOTHING",
+                    [(plan_id, int(rec_id), max(1, int(revision)), now) for rec_id, revision in pins.items()],
+                )
+        return await self.get_plan_pins(plan_id)
+
+    async def get_plan_pins(self, plan_id: str) -> Dict[int, int]:
+        """``{recommendation_id: revision}`` pinned by a plan."""
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT recommendation_id, revision FROM recommendation_plan_pins WHERE plan_id = $1",
+                plan_id,
+            )
+        return {int(row["recommendation_id"]): int(row["revision"]) for row in rows}
+
+    async def backfill_v2_fields(self, cluster_uid: str, batch_size: int = 500) -> int:
+        """Fill the v2 columns of rows written before them from their flat columns (E4).
+
+        Lossless: only NULL v2 columns are written, the flat columns are kept.
+        Returns the number of rows filled.
+        """
+        filled = 0
+        after_id = 0
+        async with self.db_manager.connection_scope() as conn:
+            while True:
+                rows = await conn.fetch(
+                    "SELECT * FROM recommendation_history WHERE fingerprint_v4 IS NULL AND id > $1 "
+                    "ORDER BY id LIMIT $2",
+                    after_id,
+                    max(1, int(batch_size)),
+                )
+                if not rows:
+                    break
+                after_id = int(rows[-1]["id"])
+                updates = [update for update in (backfill_update(row, cluster_uid) for row in rows) if update]
+                if updates:
+                    await conn.executemany(
+                        "UPDATE recommendation_history SET target = COALESCE(target, $1), "
+                        "proposal = COALESCE(proposal, $2), fingerprint_v4 = $3 "
+                        "WHERE id = $4 AND fingerprint_v4 IS NULL",
+                        updates,
+                    )
+                    filled += len(updates)
+        return filled
 
     async def reconcile_active_recommendations(
         self,
