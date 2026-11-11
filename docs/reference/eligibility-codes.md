@@ -24,7 +24,7 @@ Every recommendation returned by `GET /api/v1/recommendations`, `/recommendation
 | Field | Meaning |
 |---|---|
 | `can_open_pr` | `true` when there is no blocker: a plan can be previewed and a pull request opened. |
-| `delivery_modes` | `direct` (GreenKube opens the pull request) when `can_open_pr`; `manual` (apply the change yourself, then mark it applied so it is measured) for every active recommendation. |
+| `delivery_modes` | The configured [delivery mode](../automation.md#delivery-modes) when `can_open_pr`: `direct` (GreenKube opens the pull request), `patch` (you apply the downloaded patch and open it) or `ci` (a CI job opens it); `manual` (apply the change yourself, then mark it applied so it is measured) for every active recommendation. |
 | `blockers` | Why a pull request cannot be opened, each with a `code`, a `message` and a `fix`. |
 | `warnings` | Non-blocking findings with the same shape. |
 | `eligible_at` | When a warming-up recommendation is expected to have enough evidence (F7), otherwise `null`. |
@@ -90,7 +90,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `singleton_workload` | One replica: the rollout restarts the only pod. | Merge in a maintenance window or add a replica first. |
 | `memory_decrease_best_effort` | Memory decreases take effect when the pod restarts. | Expect the saving after the next rollout. |
 | `reliability_change` | The change increases resources (reliability lane) and costs money. | Weigh the incident risk it avoids against its cost. |
-| `consensus_contested` | Sources disagree on the change: their agreement is below 0.5 or they propose opposite directions. The message lists the reasons. A contested recommendation is never approved automatically. | Review the per-source spread (`consensus.spread`, evidence) before opening the pull request. |
+| `consensus_contested` | Sources disagree on the change: their agreement is below 0.5 or they propose opposite directions. The message lists the reasons. A contested recommendation is never approved automatically ([auto-approval](../automation.md#auto-approval) treats it as a hard stop). | Review the per-source spread (`consensus.spread`, evidence) before opening the pull request. |
 | `policy_evidence_missing` | Live evidence is missing and `automation.policy.missingEvidence` is `warn`. | Refresh GitOps discovery. |
 | `policy_interaction_conflict` | An HPA scales on another resource than the one changed, or on an absolute (`AverageValue`/`Value`) target. | Review the HPA after the change. |
 | `workload_plan_already_exists` | Another plan for the workload is still active. Not a blocker: preparing a preview reuses or replaces an unapproved one; an approved plan makes the preview fail with this code. | Finish or cancel the approved plan. |
