@@ -215,7 +215,7 @@ class TestKrrSourceContract(SourceContract):
 
 
 async def test_scan_persists_krr_source_runs_and_signals(tmp_path, monkeypatch):
-    """End to end: a stored report is replayed by a scan and recorded in source_runs/source_signals."""
+    """End to end: a stored report is replayed by a scan, recorded in source_runs/source_signals and consolidated."""
     from greenkube.core.config import config
 
     monkeypatch.setenv("DB_TYPE", "sqlite")
@@ -230,7 +230,10 @@ async def test_scan_persists_krr_source_runs_and_signals(tmp_path, monkeypatch):
         result = await engine.collect(OptimizationContext(config=Config()))
         await engine.record_source_runs(result.source_reports, None)
 
-        assert result.recommendations == []
+        # KRR signals become recommendations only through consensus, under the krr source id.
+        assert result.recommendations
+        assert {rec.source for rec in result.recommendations} == {"krr"}
+        assert all(rec.consensus and rec.consensus.get("votes") for rec in result.recommendations)
         runs = await repository.list_runs("krr")
         assert [run.status for run in runs] == [SourceRunStatus.SUCCEEDED]
         assert runs[0].signal_count == 6
