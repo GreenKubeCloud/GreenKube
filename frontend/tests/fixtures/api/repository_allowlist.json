@@ -1,0 +1,7 @@
+{
+  "added": 1,
+  "allowlisted": [
+    "https://gitea.example.com/platform/apps.git"
+  ],
+  "values_snippet": "automation:\n  repositoryAllowlist:\n    - platform/apps\n"
+}

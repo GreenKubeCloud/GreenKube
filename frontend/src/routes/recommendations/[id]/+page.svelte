@@ -4,7 +4,8 @@
 		ApiError,
 		getRecommendation,
 		getRecommendationEvents,
-		getRecommendationPullRequests
+		getRecommendationPullRequests,
+		getRecommendationV2
 	} from '$lib/api.js';
 	import { formatCO2, formatDate } from '$lib/utils/format.js';
 	import { describeExpectedValue, eligibilityOf, formatMoney } from '$lib/utils/decision.js';
@@ -19,7 +20,9 @@
 		measuredOf,
 		recommendationStatus,
 		requestRows,
+		revisionsOf,
 		safeHttpUrl,
+		uncountedReason,
 		valueOf
 	} from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
@@ -28,6 +31,8 @@
 	export let data;
 
 	let rec = null;
+	/** The v2 view (consensus, revisions); null on a server without /api/v2. */
+	let v2 = null;
 	let events = [];
 	let pullRequests = [];
 	let loading = true;
@@ -51,6 +56,7 @@
 		notFound = false;
 		error = '';
 		rec = null;
+		v2 = null;
 		events = [];
 		pullRequests = [];
 		if (!/^\d+$/.test(String(id ?? ''))) {
@@ -58,10 +64,11 @@
 			loading = false;
 			return;
 		}
-		const [recResult, eventsResult, prsResult] = await Promise.allSettled([
+		const [recResult, eventsResult, prsResult, v2Result] = await Promise.allSettled([
 			getRecommendation(id, { signal }),
 			getRecommendationEvents(id, { signal }),
-			getRecommendationPullRequests(id, { signal })
+			getRecommendationPullRequests(id, { signal }),
+			getRecommendationV2(id, { signal })
 		]);
 		if (signal.aborted) return;
 		if (recResult.status === 'rejected') {
@@ -70,6 +77,8 @@
 			else error = reason?.message || 'The recommendation could not be loaded.';
 		} else {
 			rec = recResult.value;
+			// The v2 view is optional: an older server answers 404 and the page keeps the v1 fields.
+			v2 = v2Result.status === 'fulfilled' && v2Result.value && typeof v2Result.value === 'object' ? v2Result.value : null;
 		}
 		events = eventsResult.status === 'fulfilled' && Array.isArray(eventsResult.value) ? eventsResult.value : [];
 		eventsError = eventsResult.status === 'rejected' ? 'The lifecycle events could not be loaded.' : '';
@@ -83,7 +92,9 @@
 	$: impact = impactOf(rec);
 	$: value = valueOf(rec);
 	$: evidence = evidenceOf(rec);
-	$: consensus = consensusOf(rec);
+	$: consensus = consensusOf(rec, v2);
+	$: revisions = revisionsOf(v2);
+	$: sourceIds = consensus?.sourceIds?.length ? consensus.sourceIds : Array.isArray(v2?.source_ids) ? v2.source_ids : [];
 	$: measured = measuredOf(rec);
 	$: requests = requestRows(rec);
 	$: timeline = groupConsecutiveEvents(events);
@@ -134,12 +145,32 @@
 			<div class="flex flex-wrap items-center gap-2">
 				<h1 class="text-2xl font-bold text-dark-100 break-all">{targetName(rec)}</h1>
 				<StatusPill label={status.label} tone={status.tone} />
-				{#if consensus?.revision !== null && consensus?.revision !== undefined}
+				{#if revisions?.revision !== null && revisions?.revision !== undefined}
+					<StatusPill label="Revision {revisions.revision}" tone="dark" />
+				{:else if consensus?.revision !== null && consensus?.revision !== undefined}
 					<StatusPill label="Revision {consensus.revision}" tone="dark" />
 				{:else if typeof rec.revision === 'number'}
 					<StatusPill label="Revision {rec.revision}" tone="dark" />
 				{/if}
+				{#if revisions?.queuedRevision !== null && revisions?.queuedRevision !== undefined}
+					<StatusPill label="Newer advice: revision {revisions.queuedRevision}" tone="blue" icon="↻" />
+				{/if}
 			</div>
+			{#if sourceIds.length}
+				<ul class="flex flex-wrap items-center gap-1" aria-label="Sources behind this recommendation" data-testid="source-badges">
+					{#each sourceIds as id (id)}
+						<li class="rounded-full border border-dark-600 bg-dark-800 px-2 py-0.5 text-[11px] text-dark-200">{id}</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if revisions?.queuedRevision !== null && revisions?.queuedRevision !== undefined}
+				<p class="rounded-lg border border-blue-700/40 bg-blue-900/20 px-3 py-2 text-xs text-blue-200" role="status" data-testid="queued-revision">
+					Newer advice is queued as revision {revisions.queuedRevision}{#if revisions.queued?.cpuRequest !== null && revisions.queued?.cpuRequest !== undefined}
+						(CPU request {cores(revisions.queued.cpuRequest)}){:else if revisions.queued?.memoryRequest !== null && revisions.queued?.memoryRequest !== undefined}
+						(memory request {mib(revisions.queued.memoryRequest)}){/if}: an open plan implements revision {revisions.revision}. It
+					replaces the current advice once that plan is closed; open a new preview to apply it.
+				</p>
+			{/if}
 			<p class="text-sm text-dark-400">
 				{rec.type?.replaceAll('_', ' ').toLowerCase()}
 				{#if rec.namespace}· namespace <span class="text-dark-200">{rec.namespace}</span>{/if}
@@ -336,7 +367,7 @@
 											{item.value === null ? '—' : formatConsensusValue(consensus.resource, item.value)}{#if item.direction} <span class="text-dark-500">{item.direction}</span>{/if}
 										</td>
 										<td class="py-1 text-dark-300">
-											{item.counted ? 'Counted' : 'Same engine as another source, not counted'}{#if item.supportsChosen} · supports the choice{/if}
+											{item.counted ? 'Counted' : uncountedReason(item, consensus.votes)}{#if item.supportsChosen} · supports the choice{/if}
 										</td>
 									</tr>
 								{/each}
@@ -348,6 +379,21 @@
 					<ul class="list-disc pl-4 text-xs text-yellow-200" aria-label="Why the consensus is contested">
 						{#each consensus.reasons as reason}<li>{reason}</li>{/each}
 					</ul>
+				{/if}
+				{#if revisions?.history.length}
+					<details class="text-xs" data-testid="revisions">
+						<summary class="cursor-pointer text-dark-400 hover:text-dark-200">Revisions ({revisions.history.length})</summary>
+						<ul class="mt-2 space-y-1">
+							{#each revisions.history as item (item.revision + item.state)}
+								<li class="text-dark-300">
+									Revision {item.revision} · {item.state === 'queued' ? 'queued behind an open plan' : item.state}
+									{#if item.cpuRequest !== null}· CPU request {cores(item.cpuRequest)}{/if}
+									{#if item.memoryRequest !== null}· memory request {mib(item.memoryRequest)}{/if}
+									{#if item.createdAt}<span class="text-dark-500">· {formatDate(item.createdAt)}</span>{/if}
+								</li>
+							{/each}
+						</ul>
+					</details>
 				{/if}
 			</section>
 		{/if}

@@ -7,6 +7,8 @@ import { render, screen, within } from '@testing-library/svelte';
 import DetailPage from '../../src/routes/recommendations/[id]/+page.svelte';
 import { load } from '../../src/routes/recommendations/[id]/+page.js';
 import * as api from '$lib/api.js';
+// GET /api/v2/recommendations/12 generated from the FastAPI app (tests/api/test_ui_contract_fixtures.py).
+import V2_DETAIL from '../fixtures/api/recommendation_v2_detail.json';
 
 vi.mock('$lib/api.js', () => {
 	class ApiError extends Error {
@@ -20,7 +22,8 @@ vi.mock('$lib/api.js', () => {
 		ApiError,
 		getRecommendation: vi.fn(),
 		getRecommendationEvents: vi.fn(),
-		getRecommendationPullRequests: vi.fn()
+		getRecommendationPullRequests: vi.fn(),
+		getRecommendationV2: vi.fn()
 	};
 });
 
@@ -83,6 +86,8 @@ describe('recommendation detail page', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		api.getRecommendation.mockResolvedValue(record);
+		// A server without /api/v2 (or a v1-only record): the page keeps the v1 fields.
+		api.getRecommendationV2.mockRejectedValue(new api.ApiError('Not Found', 404));
 		api.getRecommendationEvents.mockResolvedValue([
 			{ event_type: 'created', actor: 'system', created_at: iso(-48) },
 			{ event_type: 'refreshed', actor: 'system', created_at: iso(-24) },
@@ -179,6 +184,33 @@ describe('recommendation detail page', () => {
 		expect(consensus).toHaveTextContent('agreement below 0.5');
 		expect(within(screen.getByTestId('consensus-votes')).getByText(/not counted/)).toBeInTheDocument();
 		expect(screen.getByText('Revision 2')).toBeInTheDocument();
+	});
+
+	it('shows the v2 consensus, provenance, revision and queued newer advice from /api/v2 (E6, E7)', async () => {
+		api.getRecommendationV2.mockResolvedValue(V2_DETAIL);
+		render(DetailPage, { props: { data: { id: '12' } } });
+
+		const consensus = await screen.findByTestId('consensus');
+		expect(api.getRecommendationV2).toHaveBeenCalledWith('12', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+		// Contested: the reasons the server gave.
+		expect(consensus).toHaveTextContent('Contested');
+		expect(consensus).toHaveTextContent('agreement 0.40 is below 0.5');
+		expect(consensus).toHaveTextContent('sources disagree on the direction');
+		expect(consensus).toHaveTextContent('chose 300m');
+		expect(consensus).toHaveTextContent('3 independent votes');
+		// Every vote, with why a Goldilocks/VPA duplicate is not counted.
+		const votes = within(screen.getByTestId('consensus-votes'));
+		expect(votes.getAllByRole('row')).toHaveLength(5);
+		expect(votes.getByText(/Same engine as another source, not counted/)).toBeInTheDocument();
+		expect(votes.getByText('push:ci')).toBeInTheDocument();
+		// Provenance badges in the server's order (chosen source first).
+		const badges = within(screen.getByTestId('source-badges')).getAllByRole('listitem').map((item) => item.textContent);
+		expect(badges).toEqual(['goldilocks', 'vpa', 'krr', 'push:ci']);
+		// Revision 3 is current; revision 4 waits behind the open plan.
+		expect(screen.getByText('Revision 3')).toBeInTheDocument();
+		expect(screen.getByText('Newer advice: revision 4')).toBeInTheDocument();
+		expect(screen.getByTestId('queued-revision')).toHaveTextContent('CPU request 260m');
+		expect(screen.getByTestId('revisions')).toHaveTextContent('Revision 2 · superseded');
 	});
 
 	it('shows a not-found state for an unknown or malformed id', async () => {

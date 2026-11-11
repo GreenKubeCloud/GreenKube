@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import V2_DETAIL from '../fixtures/api/recommendation_v2_detail.json';
 import {
 	consensusOf,
+	revisionsOf,
+	uncountedReason,
 	eventLabel,
 	evidenceOf,
 	formatConsensusValue,
@@ -98,6 +101,43 @@ describe('evidenceOf', () => {
 		expect(evidence.riskFactors).toEqual(['bursty']);
 		expect(evidence.diff).toContain('+ cpu: 250m');
 		expect(evidenceOf({ evidence: null })).toBeNull();
+	});
+});
+
+describe('the generated GET /api/v2/recommendations/{id} response', () => {
+	it('maps the consensus, provenance and revisions the server returns', () => {
+		const consensus = consensusOf({ id: 12 }, V2_DETAIL);
+		expect(consensus.contested).toBe(true);
+		expect(consensus.agreement).toBe(0.4);
+		expect(consensus.reasons).toHaveLength(2);
+		expect(consensus.sourceIds).toEqual(['goldilocks', 'vpa', 'krr', 'push:ci']);
+		expect(consensus.revision).toBe(3);
+		expect(consensus.votes.map((item) => [item.sourceId, item.counted])).toEqual([
+			['goldilocks', true],
+			['vpa', false],
+			['krr', true],
+			['push:ci', true]
+		]);
+		expect(uncountedReason(consensus.votes[1], consensus.votes)).toBe('Same engine as another source, not counted');
+
+		const revisions = revisionsOf(V2_DETAIL);
+		expect(revisions.revision).toBe(3);
+		expect(revisions.queuedRevision).toBe(4);
+		expect(revisions.queued.cpuRequest).toBe(260);
+		expect(revisions.history.map((item) => [item.revision, item.state])).toEqual([
+			[4, 'queued'],
+			[2, 'superseded']
+		]);
+		expect(revisionsOf(null)).toBeNull();
+	});
+
+	it('explains a capped push vote', () => {
+		const votes = [
+			{ sourceId: 'push:ci', family: 'a', counted: true },
+			{ sourceId: 'push:ci', family: 'b', counted: false }
+		];
+		expect(uncountedReason(votes[1], votes)).toBe('This push client already voted, not counted');
+		expect(uncountedReason(votes[0], votes)).toBe('');
 	});
 });
 

@@ -1,6 +1,7 @@
 /**
  * Setup checklist (F1, K6), repository suggestions (F2) and the Sources view
- * (E5, K6), built against the wave 3b API contracts (mocked here).
+ * (E5, K6). The setup tests answer with JSON generated from the FastAPI app
+ * (tests/fixtures/api, written by tests/api/test_ui_contract_fixtures.py).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
@@ -10,6 +11,12 @@ import SourcesPage from '../../src/routes/sources/+page.svelte';
 import * as api from '$lib/api.js';
 import { currentUser } from '$lib/stores.js';
 import { setupStatus } from '$lib/setup.js';
+import INCOMPLETE_FIXTURE from '../fixtures/api/setup_status_incomplete.json';
+import HOST_MISMATCH_FIXTURE from '../fixtures/api/setup_status_host_mismatch.json';
+import PAUSED_FIXTURE from '../fixtures/api/setup_status_paused.json';
+import COMPLETE_FIXTURE from '../fixtures/api/setup_status_complete.json';
+import SUGGESTIONS_FIXTURE from '../fixtures/api/repository_suggestions.json';
+import ALLOWLIST_FIXTURE from '../fixtures/api/repository_allowlist.json';
 
 vi.mock('$lib/api.js', () => {
 	class ApiError extends Error {
@@ -30,40 +37,10 @@ vi.mock('$lib/api.js', () => {
 	};
 });
 
-const STATUS = {
-	complete: false,
-	checks: [
-		{ id: 'prometheus', category: 'data_sources', title: 'Prometheus', status: 'ok', reason: 'Found at prometheus:9090.', fix: { text: 'Nothing to do.' }, docs_url: 'https://greenkube.cloud/docs/prometheus' },
-		{
-			id: 'git-credentials',
-			category: 'credentials',
-			title: 'Git credentials for github.com',
-			status: 'action_needed',
-			reason: 'No write token for github.com.',
-			fix: {
-				text: 'Create the credentials Secret.',
-				snippet: 'kubectl create secret generic greenkube-git-credentials --from-literal=token=...',
-				ui_action: 'allowlist_repositories'
-			},
-			docs_url: 'javascript:alert(1)'
-		},
-		{ id: 'evidence', category: 'evidence', title: 'Evidence warm-up', status: 'pending', reason: '31h of history needed.', fix: null, docs_url: '' }
-	],
-	capabilities: {
-		discovery: { state: 'active', reason: 'Argo CD found.' },
-		delivery: { state: 'dormant', reason: 'No write credentials.' },
-		sync_tracking: { state: 'active', reason: '' },
-		measurement: { state: 'active', reason: '' }
-	}
-};
-
-const SUGGESTIONS = {
-	suggestions: [
-		{ repo_url: 'https://github.com/acme/deploy', provider_type: 'github', api_base_url: 'https://api.github.com', inferred_from: 'argocd/shop', allowlisted: false },
-		{ repo_url: 'https://gitlab.com/acme/infra', provider_type: 'gitlab', api_base_url: 'https://gitlab.com/api/v4', inferred_from: 'flux/infra', allowlisted: false },
-		{ repo_url: 'https://github.com/acme/old', provider_type: 'github', api_base_url: '', inferred_from: 'argocd/old', allowlisted: true }
-	]
-};
+// Responses generated from the FastAPI app (tests/api/test_ui_contract_fixtures.py).
+const STATUS = INCOMPLETE_FIXTURE;
+const SUGGESTIONS = SUGGESTIONS_FIXTURE;
+const OTHER_REPO = 'https://gitea.example.com/platform/apps.git';
 
 const ADMIN = { scopes: ['admin', 'read', 'write'] };
 const READER = { scopes: ['read'] };
@@ -75,39 +52,73 @@ describe('/setup', () => {
 		setupStatus.set(null);
 		api.getSetupStatus.mockResolvedValue(STATUS);
 		api.getRepositorySuggestions.mockResolvedValue(SUGGESTIONS);
-		api.allowlistRepositories.mockResolvedValue({ allowlisted: ['https://github.com/acme/deploy'] });
+		api.allowlistRepositories.mockResolvedValue(ALLOWLIST_FIXTURE);
 	});
 
-	it('groups the checks by category with status words, fixes and safe documentation links', async () => {
+	it('groups the server checks by category with status words, fixes and safe documentation links', async () => {
 		render(SetupPage);
 
-		expect(await screen.findByTestId('setup-summary')).toHaveTextContent('1 check needs attention');
-		expect(within(screen.getByTestId('check-group-data_sources')).getByText('OK')).toBeInTheDocument();
-		const credentials = screen.getByTestId('check-git-credentials');
+		// recommendation_sources, repositories, git_credentials and renderer need attention.
+		expect(await screen.findByTestId('setup-summary')).toHaveTextContent('4 checks need attention');
+		expect(within(screen.getByTestId('check-group-data_sources')).getAllByText('OK')).toHaveLength(1);
+		const credentials = screen.getByTestId('check-git_credentials');
 		expect(credentials).toHaveTextContent('Action needed');
-		expect(credentials).toHaveTextContent('Fix: Create the credentials Secret.');
-		expect(credentials).toHaveTextContent('kubectl create secret generic');
-		expect(within(credentials).getByRole('link', { name: /Review repository suggestions/ })).toHaveAttribute(
+		expect(credentials).toHaveTextContent('not bound to a host');
+		expect(credentials).toHaveTextContent('Fix: Add the host key to the Secret');
+		expect(credentials).toHaveTextContent('kubectl -n greenkube patch secret greenkube-git-credentials');
+		expect(within(credentials).getByRole('link', { name: /Documentation/ })).toHaveAttribute(
 			'href',
-			'/setup#repository-suggestions'
+			'https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/installation.md#optional-connect-git'
 		);
-		// A non-https documentation URL is never linked.
-		expect(within(credentials).queryByRole('link', { name: /Documentation/ })).not.toBeInTheDocument();
 		// A passing check shows no fix.
 		const prometheus = screen.getByTestId('check-prometheus');
-		expect(prometheus).not.toHaveTextContent('Nothing to do.');
-		expect(within(prometheus).getByRole('link', { name: /Documentation/ })).toHaveAttribute('href', 'https://greenkube.cloud/docs/prometheus');
-		expect(screen.getByTestId('check-evidence')).toHaveTextContent('Pending');
+		expect(prometheus).not.toHaveTextContent('Fix:');
+		expect(screen.getByTestId('check-opencost')).toHaveTextContent('Not applicable');
+		expect(screen.getByTestId('check-renderer')).toHaveTextContent('renderer_egress_unenforced');
 		// The layout banner reads the refreshed status.
 		expect(get(setupStatus)?.complete).toBe(false);
 	});
 
-	it('shows the capability states from the contract', async () => {
+	it('routes every ui_action the server emits to an in-app link', async () => {
+		render(SetupPage);
+
+		const repositories = await screen.findByTestId('check-repositories');
+		expect(within(repositories).getByRole('link', { name: /Review repository suggestions/ })).toHaveAttribute(
+			'href',
+			'/setup#repository-suggestions'
+		);
+		const sources = screen.getByTestId('check-recommendation_sources');
+		expect(within(sources).getByRole('link', { name: /Open recommendation sources/ })).toHaveAttribute('href', '/sources');
+		expect(sources).not.toHaveTextContent('open_sources');
+	});
+
+	it('shows the capability states and readable reasons from the contract', async () => {
 		render(SetupPage);
 
 		expect(await screen.findByTestId('capability-discovery')).toHaveTextContent('active');
-		expect(screen.getByTestId('capability-delivery')).toHaveTextContent('dormant');
-		expect(screen.getByTestId('capability-delivery')).toHaveTextContent('No write credentials.');
+		const delivery = screen.getByTestId('capability-delivery');
+		expect(delivery).toHaveTextContent('dormant');
+		expect(delivery).toHaveTextContent('The Git token is not bound to a host');
+		expect(screen.queryByTestId('delivery-paused')).not.toBeInTheDocument();
+	});
+
+	it('explains a token bound to another host', async () => {
+		api.getSetupStatus.mockResolvedValue(HOST_MISMATCH_FIXTURE);
+		render(SetupPage);
+
+		const credentials = await screen.findByTestId('check-git_credentials');
+		expect(credentials).toHaveTextContent('none of the discovered repositories use');
+		expect(screen.getByTestId('capability-delivery')).toHaveTextContent("The Git token's host matches no discovered repository.");
+	});
+
+	it('shows delivery paused by policy, not as a failure of the controller', async () => {
+		api.getSetupStatus.mockResolvedValue(PAUSED_FIXTURE);
+		render(SetupPage);
+
+		expect(await screen.findByTestId('delivery-paused')).toHaveTextContent('automation.policy.pauseDelivery');
+		expect(screen.getByTestId('capability-delivery')).toHaveTextContent('paused');
+		expect(screen.getByTestId('check-git_credentials')).toHaveTextContent('Blocked');
+		expect(screen.getByTestId('check-git_credentials')).toHaveTextContent('pauseDelivery=false');
 	});
 
 	it('copies a fix snippet', async () => {
@@ -115,39 +126,28 @@ describe('/setup', () => {
 		Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
 		render(SetupPage);
 
-		await fireEvent.click(await screen.findByRole('button', { name: 'Copy the fix for Git credentials for github.com' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Copy the fix for Git credentials' }));
 
 		expect(writeText).toHaveBeenCalledWith(expect.stringContaining('greenkube-git-credentials'));
 		expect(await screen.findByText('Copied')).toBeInTheDocument();
 	});
 
-	it('allows the selected discovered repositories (F2)', async () => {
+	it('allows the selected discovered repositories and shows the values snippet the server returns (F2)', async () => {
 		render(SetupPage);
 
 		const button = await screen.findByTestId('allow-repositories');
-		expect(button).toHaveTextContent('Allow these 2 repositories');
-		await fireEvent.click(screen.getByRole('checkbox', { name: /gitlab\.com\/acme\/infra/ }));
+		// The suggestions list one repository to allow and one already allowlisted.
 		expect(button).toHaveTextContent('Allow this repository');
 
 		await fireEvent.click(button);
 
-		await waitFor(() => expect(api.allowlistRepositories).toHaveBeenCalledWith(['https://github.com/acme/deploy']));
+		await waitFor(() => expect(api.allowlistRepositories).toHaveBeenCalledWith([OTHER_REPO]));
 		expect(await screen.findByText('1 repository was added to the allowlist.')).toBeInTheDocument();
+		// values_snippet: the automation.repositoryAllowlist values a GitOps-managed install commits.
+		expect(screen.getByTestId('allowlist-snippet')).toHaveTextContent('repositoryAllowlist:');
+		expect(screen.getByTestId('allowlist-snippet')).toHaveTextContent('- platform/apps');
 		expect(api.getSetupStatus).toHaveBeenCalledTimes(2);
 		expect(screen.getByText(/Already allowlisted \(1\)/)).toBeInTheDocument();
-	});
-
-	it('shows the values snippet a GitOps-managed install must commit', async () => {
-		api.allowlistRepositories.mockResolvedValue({
-			message: 'Commit this snippet to your Helm values.',
-			snippet: 'automation:\n  providers:\n    - allowlist: [acme/deploy]'
-		});
-		render(SetupPage);
-
-		await fireEvent.click(await screen.findByTestId('allow-repositories'));
-
-		expect(await screen.findByTestId('allowlist-snippet')).toHaveTextContent('allowlist: [acme/deploy]');
-		expect(screen.getByText('Commit this snippet to your Helm values.')).toBeInTheDocument();
 	});
 
 	it('explains a refused allowlist change', async () => {
@@ -169,15 +169,12 @@ describe('/setup', () => {
 	});
 
 	it('reports a complete setup', async () => {
-		api.getSetupStatus.mockResolvedValue({
-			...STATUS,
-			complete: true,
-			checks: STATUS.checks.map((check) => ({ ...check, status: 'ok' }))
-		});
+		api.getSetupStatus.mockResolvedValue(COMPLETE_FIXTURE);
 		api.getRepositorySuggestions.mockResolvedValue({ suggestions: [] });
 		render(SetupPage);
 
 		expect(await screen.findByTestId('setup-summary')).toHaveTextContent('Setup is complete');
+		expect(screen.getByTestId('capability-delivery')).toHaveTextContent('active');
 		expect(screen.getByTestId('suggestions-empty')).toBeInTheDocument();
 	});
 

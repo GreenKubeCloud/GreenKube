@@ -1,0 +1,296 @@
+{
+  "capability": "container_requests",
+  "confidence": null,
+  "consensus": {
+    "agreement": 0.4,
+    "chosen_from": [
+      "goldilocks"
+    ],
+    "contested": true,
+    "independent_votes": 3,
+    "last_known": {},
+    "policy": "safest",
+    "reasons": [
+      "agreement 0.40 is below 0.5",
+      "sources disagree on the direction: decrease (goldilocks, krr); increase (push:ci)"
+    ],
+    "resource": "cpu_request_m",
+    "source_ids": [
+      "goldilocks",
+      "vpa",
+      "krr",
+      "push:ci"
+    ],
+    "spread": {
+      "cpu_request_m": {
+        "goldilocks": 300,
+        "krr": 250,
+        "push:ci": 750,
+        "vpa": 250
+      }
+    },
+    "value": 300,
+    "votes": [
+      {
+        "counted": true,
+        "direction": "decrease",
+        "family": "vpa",
+        "signal_id": "sig-goldilocks",
+        "source": "vpa",
+        "source_id": "goldilocks",
+        "supports_chosen": true,
+        "value": 300
+      },
+      {
+        "counted": false,
+        "direction": "decrease",
+        "family": "vpa",
+        "signal_id": "sig-vpa",
+        "source": "vpa",
+        "source_id": "vpa",
+        "supports_chosen": false,
+        "value": 250
+      },
+      {
+        "counted": true,
+        "direction": "decrease",
+        "family": "krr",
+        "signal_id": "sig-krr",
+        "source": "krr",
+        "source_id": "krr",
+        "supports_chosen": false,
+        "value": 250
+      },
+      {
+        "counted": true,
+        "direction": "increase",
+        "family": "push:ci",
+        "signal_id": "sig-push",
+        "source": "push:ci",
+        "source_id": "push:ci",
+        "supports_chosen": false,
+        "value": 750
+      }
+    ]
+  },
+  "description": "Deployment 'api' container 'web' CPU request 500m → 300m: safest consensus of 3 sources.",
+  "eligibility": {
+    "action_kind": "container_resources",
+    "blockers": [
+      {
+        "code": "action_unavailable",
+        "fix": "The next scan rebuilds the action once the workload owner, the container and a request decrease are known; otherwise apply the change manually.",
+        "message": "No typed container-resources change could be built for this recommendation."
+      },
+      {
+        "code": "automation_not_configured",
+        "fix": "Open the setup checklist (GET /api/v1/setup/status) and check the API logs.",
+        "message": "The automation plan service is not available, so no pull request can be prepared."
+      },
+      {
+        "code": "policy_evidence_missing",
+        "fix": "Wait for the next scan; evidence is collected for workloads with container metrics.",
+        "message": "This recommendation has no usage evidence (sample count and coverage)."
+      },
+      {
+        "code": "policy_evidence_missing",
+        "fix": "Rescan the recommendation and refresh GitOps discovery so the policy can check it.",
+        "message": "The recommendation has no risk level."
+      },
+      {
+        "code": "policy_evidence_missing",
+        "fix": "Rescan the recommendation and refresh GitOps discovery so the policy can check it.",
+        "message": "The recommendation has no confidence score."
+      }
+    ],
+    "can_open_pr": false,
+    "delivery_modes": [
+      "manual"
+    ],
+    "eligible_at": null,
+    "evaluated_at": "2026-01-05T09:30:00+00:00",
+    "recommendation_ids": null,
+    "warnings": [
+      {
+        "code": "consensus_contested",
+        "fix": "Review the per-source spread in the evidence before opening the pull request.",
+        "message": "Sources disagree on this change (agreement 0.40 is below 0.5; sources disagree on the direction: decrease (goldilocks, krr); increase (push:ci)): it is never approved automatically."
+      }
+    ]
+  },
+  "evidence": null,
+  "fingerprint": "f9af15553ea3d90396f7eb33f066c8866103728163bec69f4743359c968ef130",
+  "id": 12,
+  "impact": null,
+  "kind": "RIGHTSIZING_CPU",
+  "legacy_fields": {},
+  "legacy_fingerprint": "legacy-fp",
+  "lifecycle": {
+    "application_method": null,
+    "applied_at": null,
+    "created_at": "2026-01-05T09:30:00Z",
+    "expires_at": null,
+    "ignored_at": null,
+    "ignored_reason": null,
+    "updated_at": "2026-01-05T09:30:00Z",
+    "verification_status": null,
+    "verified_at": null
+  },
+  "priority": "medium",
+  "proposal": {
+    "container": "web",
+    "current": {
+      "cpu_limit_m": null,
+      "cpu_request_m": 500,
+      "memory_limit_bytes": null,
+      "memory_request_bytes": null
+    },
+    "direction": "decrease",
+    "kind": "container_resources",
+    "proposed": {
+      "cpu_limit_m": null,
+      "cpu_request_m": 300,
+      "memory_limit_bytes": null,
+      "memory_request_bytes": null
+    }
+  },
+  "queued_revision": 4,
+  "reason": "Consensus across sources.",
+  "revision": 3,
+  "revisions": [
+    {
+      "consensus": null,
+      "created_at": "2026-01-07T09:30:00Z",
+      "proposal": null,
+      "recommendation_id": 12,
+      "revision": 4,
+      "snapshot": {
+        "recommended_cpu_request_millicores": 260
+      },
+      "state": "queued",
+      "updated_at": null
+    },
+    {
+      "consensus": null,
+      "created_at": "2026-01-06T09:30:00Z",
+      "proposal": null,
+      "recommendation_id": 12,
+      "revision": 2,
+      "snapshot": {
+        "recommended_cpu_request_millicores": 320
+      },
+      "state": "superseded",
+      "updated_at": null
+    }
+  ],
+  "risk": {
+    "effort": null,
+    "factors": [],
+    "level": null,
+    "requires_restart": null,
+    "reversible": null
+  },
+  "signals": [
+    {
+      "counted": true,
+      "direction": "decrease",
+      "family": "vpa",
+      "signal_id": "sig-goldilocks",
+      "source": "vpa",
+      "source_id": "goldilocks",
+      "supports_chosen": true,
+      "value": 300
+    },
+    {
+      "counted": false,
+      "direction": "decrease",
+      "family": "vpa",
+      "signal_id": "sig-vpa",
+      "source": "vpa",
+      "source_id": "vpa",
+      "supports_chosen": false,
+      "value": 250
+    },
+    {
+      "counted": true,
+      "direction": "decrease",
+      "family": "krr",
+      "signal_id": "sig-krr",
+      "source": "krr",
+      "source_id": "krr",
+      "supports_chosen": false,
+      "value": 250
+    },
+    {
+      "counted": true,
+      "direction": "increase",
+      "family": "push:ci",
+      "signal_id": "sig-push",
+      "source": "push:ci",
+      "source_id": "push:ci",
+      "supports_chosen": false,
+      "value": 750
+    }
+  ],
+  "source": "vpa",
+  "source_ids": [
+    "goldilocks",
+    "vpa",
+    "krr",
+    "push:ci"
+  ],
+  "sources": [
+    "vpa",
+    "krr",
+    "push:ci"
+  ],
+  "status": "active",
+  "target": {
+    "api_version": "apps/v1",
+    "cluster_uid": "default",
+    "container": "web",
+    "kind": "Deployment",
+    "name": "api",
+    "namespace": "shop"
+  },
+  "value": {
+    "components": {
+      "blast_radius": 1.0,
+      "carbon_price_per_tonne": 100.0,
+      "carbon_value_annual": 0.0,
+      "co2e_annual_g": 0.0,
+      "confidence": null,
+      "cost_annual": 0.0,
+      "criticality": null,
+      "delivery_mode": "manual",
+      "effort": "low",
+      "effort_hours": 0.5,
+      "effort_weight": 1.0,
+      "engineer_hour_cost": 0.0,
+      "incident_severity": 0.25,
+      "p_incident_now": null,
+      "posterior_alpha": 2.0,
+      "posterior_beta": 2.0,
+      "risk_aversion": 1.0,
+      "risk_level": "medium",
+      "risk_success_factor": 0.95,
+      "track_record": {
+        "capability": "cpu_rightsizing",
+        "failed": 0,
+        "realized": 0,
+        "source_family": "vpa"
+      }
+    },
+    "currency": "USD",
+    "effort_cost": 0.0,
+    "ev": -13.12,
+    "incident_cost": 25.0,
+    "incident_cost_avoided": 0.0,
+    "lane": "savings",
+    "method": "projected",
+    "model": "ev/1",
+    "p_success": 0.475,
+    "profile": "balanced",
+    "value_annual": 0.0
+  }
+}

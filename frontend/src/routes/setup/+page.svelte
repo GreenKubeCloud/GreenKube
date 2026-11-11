@@ -5,8 +5,9 @@
 	import {
 		CHECK_STATUS,
 		allowLabel,
+		capabilityDisplay,
 		groupChecks,
-		isCapabilityActive,
+		normalizeAllowlistResult,
 		normalizeSetupStatus,
 		normalizeSuggestions,
 		setupStatus
@@ -82,14 +83,11 @@
 		allowMessage = '';
 		allowSnippet = '';
 		try {
-			const result = await allowlistRepositories(urls);
-			// GitOps-managed installs persist the allowlist in Helm values: the server
-			// then answers with the values snippet to commit instead of a DB update.
-			allowSnippet = typeof result?.snippet === 'string' ? result.snippet : '';
-			allowMessage =
-				typeof result?.message === 'string' && result.message
-					? result.message
-					: `${urls.length} ${urls.length === 1 ? 'repository was' : 'repositories were'} added to the allowlist.`;
+			// The server allows them in its database and returns the equivalent
+			// automation.repositoryAllowlist values snippet for GitOps-managed installs.
+			const result = normalizeAllowlistResult(await allowlistRepositories(urls), urls.length);
+			allowSnippet = result.snippet;
+			allowMessage = result.message;
 			await load();
 		} catch (error) {
 			allowError =
@@ -154,21 +152,25 @@
 			{/if}
 		</section>
 
+		{#if status.deliveryPaused}
+			<p class="card-compact text-sm text-yellow-200" role="status" data-testid="delivery-paused">
+				⏸ Delivery is paused by <code>automation.policy.pauseDelivery</code>: discovery, previews, pull-request
+				tracking and measurement keep running, but no pull request is opened.
+			</p>
+		{/if}
+
 		<!-- Capabilities -->
 		<section aria-labelledby="capabilities-heading" class="space-y-2">
 			<h2 id="capabilities-heading" class="text-sm font-semibold uppercase tracking-wider text-dark-300">Capabilities</h2>
 			<ul class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
 				{#each status.capabilities as cap (cap.id)}
+					{@const display = capabilityDisplay(cap)}
 					<li class="card-compact space-y-1" data-testid="capability-{cap.id}">
 						<div class="flex items-center justify-between gap-2">
 							<h3 class="text-sm font-medium text-dark-100">{cap.label}</h3>
-							<StatusPill
-								label={cap.state.replaceAll('_', ' ')}
-								tone={isCapabilityActive(cap.state) ? 'green' : cap.state === 'unknown' ? 'dark' : 'yellow'}
-								icon={isCapabilityActive(cap.state) ? '✓' : '!'}
-							/>
+							<StatusPill label={display.label} tone={display.tone} icon={display.icon} />
 						</div>
-						{#if cap.reason}<p class="text-xs text-dark-400">{cap.reason}</p>{/if}
+						{#if cap.reason}<p class="text-xs text-dark-400" title={cap.reason}>{cap.reasonText}</p>{/if}
 					</li>
 				{/each}
 			</ul>

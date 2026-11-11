@@ -1,0 +1,153 @@
+{
+  "capabilities": {
+    "delivery": {
+      "reason": "credentials_host_mismatch",
+      "state": "dormant"
+    },
+    "discovery": {
+      "reason": null,
+      "state": "active"
+    },
+    "measurement": {
+      "reason": null,
+      "state": "active"
+    },
+    "sync_tracking": {
+      "reason": null,
+      "state": "active"
+    }
+  },
+  "checks": [
+    {
+      "category": "data_sources",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/configuration.md#prometheus--opencost-integration-configprometheus-configopencost",
+      "fix": {
+        "snippet": "helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n  --set config.prometheus.url=http://prometheus-server.monitoring.svc:80",
+        "text": "GreenKube discovers Prometheus in the cluster. If discovery fails, set its URL.",
+        "ui_action": null
+      },
+      "id": "prometheus",
+      "reason": "Prometheus answers.",
+      "status": "ok",
+      "title": "Prometheus"
+    },
+    {
+      "category": "data_sources",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/configuration.md#prometheus--opencost-integration-configprometheus-configopencost",
+      "fix": {
+        "snippet": null,
+        "text": "Install OpenCost, or set config.opencost.url, for observed costs.",
+        "ui_action": null
+      },
+      "id": "opencost",
+      "reason": "OpenCost answers: observed costs are used.",
+      "status": "ok",
+      "title": "OpenCost"
+    },
+    {
+      "category": "data_sources",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/configuration.md#general-configuration-config",
+      "fix": {
+        "snippet": "helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n  --set secrets.electricityMapsToken=<token>",
+        "text": "Set an Electricity Maps token (or Wattnet credentials) for live grid intensity.",
+        "ui_action": null
+      },
+      "id": "carbon_intensity",
+      "reason": "Live grid intensity is collected.",
+      "status": "ok",
+      "title": "Grid carbon intensity"
+    },
+    {
+      "category": "recommendation_sources",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/sources.md",
+      "fix": {
+        "snippet": null,
+        "text": "Optional sources (VPA, Karpenter, plugins) activate when they are detected.",
+        "ui_action": null
+      },
+      "id": "recommendation_sources",
+      "reason": "1 source(s) produced signals.",
+      "status": "ok",
+      "title": "Recommendation sources"
+    },
+    {
+      "category": "gitops",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/automation.md#capability-activation",
+      "fix": {
+        "snippet": null,
+        "text": "Nothing to do.",
+        "ui_action": null
+      },
+      "id": "gitops_controllers",
+      "reason": "Discovered: argocd.",
+      "status": "ok",
+      "title": "GitOps controller (Argo CD or Flux)"
+    },
+    {
+      "category": "repositories",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/automation.md#repository-allowlist",
+      "fix": {
+        "snippet": null,
+        "text": "Nothing to do.",
+        "ui_action": null
+      },
+      "id": "repositories",
+      "reason": "1 repository(ies) discovered and allowlisted.",
+      "status": "ok",
+      "title": "Repositories"
+    },
+    {
+      "category": "credentials",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/installation.md#optional-connect-git",
+      "fix": {
+        "snippet": "kubectl -n greenkube patch secret greenkube-git-credentials --type merge \\\n  -p '{\"stringData\":{\"host\":\"<git host, e.g. github.com>\"}}'",
+        "text": "Add the host key to the Secret, naming the one Git host the token belongs to; configure automation.providers for any other host.",
+        "ui_action": null
+      },
+      "id": "git_credentials",
+      "reason": "The Git token is bound (key 'host') to a host that none of the discovered repositories use.",
+      "status": "action_needed",
+      "title": "Git credentials"
+    },
+    {
+      "category": "renderer",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/configuration.md#isolated-renderer-renderer",
+      "fix": {
+        "snippet": null,
+        "text": "Nothing.",
+        "ui_action": null
+      },
+      "id": "renderer",
+      "reason": "The renderer answers and its egress is denied.",
+      "status": "ok",
+      "title": "Isolated renderer"
+    },
+    {
+      "category": "executor",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/architecture.md#process-topology",
+      "fix": {
+        "snippet": null,
+        "text": "Nothing to do until delivery activates.",
+        "ui_action": null
+      },
+      "id": "executor",
+      "reason": "Plans execute in the controller once delivery is active.",
+      "status": "not_applicable",
+      "title": "Plan executor"
+    },
+    {
+      "category": "evidence",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/recommendation.md#sources-evidence-and-ranking",
+      "fix": {
+        "snippet": null,
+        "text": "Nothing to do.",
+        "ui_action": null
+      },
+      "id": "evidence",
+      "reason": "Enough history to recommend and open PRs.",
+      "status": "ok",
+      "title": "Evidence warm-up"
+    }
+  ],
+  "complete": false
+}

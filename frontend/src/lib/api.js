@@ -410,6 +410,16 @@ export function getRecommendation(id, { signal } = {}) {
 }
 
 /**
+ * One recommendation in the v2 shape (E4, E6, E7): typed proposal, consensus
+ * with every vote, `source_ids`, `revision`, `queued_revision` and `revisions`.
+ * @param {number|string} id
+ * @returns {Promise<Object>}
+ */
+export function getRecommendationV2(id, { signal } = {}) {
+	return request(`${BASE_V2}/recommendations/${encodeURIComponent(id)}`, {}, { signal });
+}
+
+/**
  * @param {Object} [opts]
  * @param {string} [opts.namespace]
  * @param {AbortSignal} [opts.signal]
