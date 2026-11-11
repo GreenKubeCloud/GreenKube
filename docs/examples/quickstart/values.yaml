@@ -44,6 +44,10 @@ config:
       # Measure a merged change over 6 minutes (default 72 hours).
       windowHours: 0.1
       lifecycleInterval: 30s
+    # Change measurement (counterfactual, roadmap C3) needs a 7-day baseline and
+    # a 7-day post-window; the quickstart decides with the verifier above.
+    changeMeasurement:
+      enabled: false
 
 # Automation is always on; delivery activates once the Gitea token Secret exists.
 automation:
