@@ -14,7 +14,7 @@ The controller's `automation-readiness` loop reconciles every 60 seconds:
 |---|---|---|
 | Discover | Argo CD or Flux CRDs are present (re-probed every discovery interval) | Dormant (`no_gitops_controller`) |
 | Preview | A discovered repository on a known provider host, allowlisted, with credentials and a resolved binding | Dormant with the blocker (`provider_unknown`, `not_allowlisted`, `credentials_missing`, `binding_unresolved`) |
-| Deliver | Preview + `pauseDelivery: false` | Dormant (`delivery_paused`, or the preview blocker) |
+| Deliver | Preview + `pauseDelivery: false`. The capability details name the [delivery mode](#delivery-modes) and whether it needs write credentials (`direct` only) | Dormant (`delivery_paused`, or the preview blocker) |
 | Sync tracking | A provider has credentials (PR polling) or webhooks are configured | Dormant; changes are still detected from the live state and measured |
 | Webhooks | A provider webhook Secret is configured | Polling only |
 | Renderer | The isolated renderer answers (warning `renderer_egress_unenforced` when its egress policy is not enforced) | Helm/Kustomize previews blocked |
@@ -37,13 +37,16 @@ serves, the reconciler infers a provider named `inferred-<host>`:
 - an unidentified host stays dormant with `provider_unknown`: declare it explicitly.
 
 Inferred providers read the Secret `automation.credentialsSecret` (default `greenkube-git-credentials`), key
-`token`. One token belongs to one Git host, and the reconciler binds it to at most one inferred provider:
+`token`, or keys `appId` + `privateKey` for a [GitHub App](#github-app). One credential belongs to one Git host, and
+the reconciler binds it to at most one inferred provider:
 
 - the host named by the Secret's optional `host` key (or `apiBaseUrl`, reduced to its host);
 - without that key, `github.com` or `gitlab.com` when it is the only inferred host.
 
 Every other inferred provider keeps no Secret reference and stays disabled, with `credentials_host_mismatch` (the
-key names another host) or `credentials_host_ambiguous` (no key, and several hosts or a self-hosted one). The token
+key names another host) or `credentials_host_ambiguous` (no key, and several hosts or a self-hosted one). GitHub App
+credentials follow the same rules and are only ever bound to a host inferred as GitHub (otherwise
+`github_app_host_unsupported`). The token
 is therefore never sent to a host it was not issued for, even when someone who can create an Argo CD Application or
 a Flux GitRepository points it at a server they control. The bound provider is enabled only while `token` is
 mounted. `GET /api/v1/automation/repositories/suggestions` lists
@@ -111,7 +114,7 @@ Components:
 - A CNI that enforces NetworkPolicy, for Kustomize and Helm sources. The renderer relies on an egress-deny policy and checks it with a canary at startup and daily. If it is not enforced, previews still work and the setup checklist reports `renderer_egress_unenforced`; set `renderer.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN`, or use an enforcing CNI. Raw-manifest repositories never call the renderer.
 - `renderer.egressFirewall.privilegedInitContainer` grants `NET_ADMIN` to a short-lived init container. Leave it disabled in production and enable it only after reviewing the cluster security model and validating the resulting egress boundary.
 - Metrics Server or another source of per-container CPU/memory for evidence, apply detection, and verification.
-- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus a token with read/write repository and pull-request permissions in the Secret `greenkube-git-credentials` (key `token`).
+- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus credentials in the Secret `greenkube-git-credentials`: a token (key `token`) or a [GitHub App](#github-app) (`appId` + `privateKey`). The `direct` [delivery mode](#delivery-modes) needs read/write repository and pull-request permissions; `patch` and `ci` need read access only.
 
 GreenKube needs read access to the GitOps APIs it discovers:
 
@@ -159,14 +162,140 @@ Rules:
 - Set `webBaseUrl` when GreenKube must reach Gitea through an in-cluster API URL but users open pull requests through a different browser-reachable URL. It must be an HTTP(S) origin (no repository path or `/api/v1`); it is used only for pull-request links.
 - `pullRequests.draft`, `labels`, `reviewers`, and `teamReviewers` are preflighted against provider capabilities. Unsupported options fail the operation instead of being silently dropped. Derived labels, drafts and CODEOWNERS reviewers are best effort (see [Pull-request content](#pull-request-content)).
 
+## GitHub App
+
+A GitHub App is the recommended credential for GitHub: no personal account, a bot identity on commits and pull
+requests, per-installation rate limits, and tokens that expire after an hour. GreenKube needs no hosted service.
+
+1. Create the App in your organization from the manifest
+   [`docs/examples/github-app-manifest.json`](examples/github-app-manifest.json) (GitHub > Settings > Developer
+   settings > GitHub Apps > New GitHub App, or `POST /settings/apps/new` with the manifest). It requests only
+   **Contents: read and write**, **Pull requests: read and write**, **Commit statuses: read and write** and
+   **Metadata: read**; with the `patch` or `ci` [delivery mode](#delivery-modes), set Contents and Pull requests to
+   read-only.
+2. Install it on the GitOps repositories (the installation's repository selection limits what GreenKube can reach,
+   in addition to `automation.repositoryAllowlist`).
+3. Put its id and private key in the default Secret:
+
+```bash
+kubectl -n greenkube create secret generic greenkube-git-credentials \
+  --from-literal=appId=123456 \
+  --from-file=privateKey=./greenkube.private-key.pem \
+  --from-literal=host=github.com
+```
+
+For each repository GreenKube signs a 9-minute JSON Web Token with the private key, discovers the installation that
+covers the repository (`GET /repos/{owner}/{repo}/installation`, so one App installed in several organizations needs
+no installation id), and requests an installation token scoped to that single repository. Tokens are cached in the
+process until five minutes before they expire. Commits and pull requests are authored by the App's bot
+(`<app-slug>[bot]`). The private key, the JSON Web Token and installation tokens are never logged, returned by the API
+or put in a ConfigMap. An explicit provider authenticates as a GitHub App when its `secretKey` is `privateKey`; the
+App id is read from the `appId` key of the same Secret (both keys are projected):
+
+```yaml
+automation:
+  providers:
+    - id: github-app
+      type: github
+      apiBaseUrl: https://github.example.com/api/v3   # GitHub Enterprise Server; omit for github.com
+      secretName: greenkube-github-app
+      secretKey: privateKey
+```
+
+### GitLab project and group access tokens
+
+For GitLab, prefer a [project access token](https://docs.gitlab.com/user/project/settings/project_access_tokens/)
+(one repository) or a group access token (every project of a group) over a personal token:
+
+| Delivery mode | Role | Scopes |
+|---|---|---|
+| `direct` | Developer (Maintainer when the target branch is protected against Developer merges) | `api` (merge requests, branches, commits, statuses) |
+| `patch`, `ci` | Reporter | `read_api`, `read_repository` |
+
+Give the token an expiry date and rotate it by updating the Secret (`kubectl -n greenkube create secret generic
+greenkube-git-credentials --from-literal=token=... --from-literal=host=gitlab.example.com --dry-run=client -o yaml |
+kubectl apply -f -`); it is picked up within one to two minutes. For Gitea, create an access token with the
+`write:repository` scope (`read:repository` for `patch` and `ci`).
+
+## Delivery modes
+
+`automation.delivery.mode` decides who opens the pull request of an approved plan. The mode is recorded on each plan
+when it is approved, so a later change of the setting never re-routes an approval.
+
+| Mode | What happens | Credentials in the cluster |
+|---|---|---|
+| `direct` (default) | GreenKube commits on the deterministic plan branch `greenkube/plan/<hash>` and opens the PR. | Read and write |
+| `patch` | Approval queues nothing. The approved plan downloads as a `git format-patch` (`GET /api/v1/automation/plans/{id}/patch`, or **Download the patch** in the plan dialog); `greenkube plan apply-patch <id>` applies it on the plan branch. You push and open the PR. | Read only |
+| `ci` | Approval queues nothing. A CI job lists `GET /api/v1/automation/plans?status=approved&delivery=ci`, applies each patch with the CI's own token, opens the PR and reports it (`POST /api/v1/automation/plans/{id}/delivery`). | Read only |
+
+All three modes then follow the same lifecycle: `pr_open` → `merged` → `synced` → `applied`, tracked by PR polling or
+webhooks, then the controller sync and apply detection. GreenKube never deletes the branch of an externally delivered
+plan.
+
+**Patch.** With `GREENKUBE_API_URL` and a `GREENKUBE_API_KEY` (`read` scope; never passed on the command line):
+
+```bash
+cd my-gitops-repo
+greenkube plan apply-patch pln-0123abcd --push   # branch greenkube/plan/<hash> on the plan's base revision
+# open the PR from that branch; GreenKube links it by the branch name
+greenkube plan report-delivery pln-0123abcd --pr-url https://github.com/acme/gitops/pull/42   # optional link-back
+```
+
+`apply-patch` refuses a dirty working tree or an existing branch, creates the branch on the plan's base revision and
+runs `git am --3way`; the commit keeps the `GreenKube-Plan: <plan id>` trailer. A pull request opened from another
+branch is linked when its description carries the same trailer (or the GreenKube footer), through the link-back (the
+**I opened PR** field of the plan dialog, or `report-delivery`). The patch is served only when the stored diff
+reproduces the original file blobs exactly; otherwise the API answers `409 patch_unavailable`.
+
+**CI.** Create an API key with only `read` and `plans:deliver`. The example GitHub Actions workflow
+[`docs/examples/github-actions-greenkube-delivery.yaml`](examples/github-actions-greenkube-delivery.yaml) polls the
+approved plans, applies each patch on its plan branch, opens the PR with the workflow's `GITHUB_TOKEN` and reports
+`{pr_url, head_sha}`. The same calls work from GitLab CI.
+
+**Verification.** A delivery report is accepted only when the provider (read access) confirms it: the request
+belongs to the plan's repository (its URL is the one the provider returns), targets the plan's base branch, comes from
+the plan branch (in `patch` mode, or carries the trailer), is open or merged, has `head_sha` as its head, and that head
+holds exactly the planned file changes compared with the plan's base revision (or with the request's base commit when
+the planned files are unchanged there). Otherwise the API answers `409 delivery_not_verified` with the reason and
+the plan stays approved. The pre-apply workload baseline is captured when the report is accepted. Reporting the same
+request again returns `200` with `created: false`; another request for the same plan is `409 delivery_conflict`.
+
+## Auto-approval
+
+```yaml
+automation:
+  autoApprove:
+    enabled: true
+    maxRisk: low
+    minConfidence: 0.8
+    contested: false
+```
+
+Off by default. When enabled, **Open PR** (`POST /api/v1/automation/plans`) approves the fresh preview in the same
+request, so eligible plans skip the extra click; the change is still a pull request reviewed in Git. The approval goes
+through the normal path (`pauseDelivery`, binding, policy and digest checks) with the actor `autoapprove:<requester>`.
+A preview is auto-approved only when:
+
+- the requester holds the `approve` scope (an API key with only `write` never triggers it);
+- it is not a rollback;
+- every recommendation of the plan is active, at or below `maxRisk` and at or above `minConfidence`;
+- no recommendation has a contested consensus (`consensus.contested` or the `consensus_contested` warning): a hard
+  stop, whatever the settings (`contested` accepts only `false`);
+- every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
+  votes.
+
+Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
+`rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
+`consensus_contested`, `decrease_without_native_evidence`, or the approval's error code (for example `delivery_paused`).
+
 ## Create and validate a pull request
 
 After configuring a Git provider, repository allowlist, and secure renderer boundary:
 
 1. Check the setup checklist (`/setup`, or `GET /api/v1/setup/status`): delivery must be active.
 2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
-3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Preview plan**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`). Review its **Evidence** before previewing.
-4. Select **Preview plan**. Review every policy check, source and rendered diff, validation result, and digest. Approve only the exact plan you intend to propose.
+3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Open PR**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`); cards still collecting evidence show "Collecting evidence — eligible in ~31h". Review its **Evidence** before opening the PR.
+4. Select **Open PR**. The dialog previews every policy check, source and rendered diff, validation result, and digest inline; one more click (**Approve and open PR**, or **Approve and get the patch** / **Approve for CI delivery** in the other [delivery modes](#delivery-modes)) submits that exact digest. With [auto-approval](#auto-approval), eligible previews are approved without that click.
 5. Follow the queued operation in the plan dialog, then use the **Pull requests** tab and **View PR** to review the provider PR. A PR does not change the cluster until a reviewer merges it and the GitOps controller syncs the merged revision.
 
 ### Pull-request eligibility and observability coverage
@@ -184,7 +313,7 @@ curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
   jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}, eligibility}'
 ```
 
-While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at`. **Preview plan** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at` (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 
