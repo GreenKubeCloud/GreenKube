@@ -54,16 +54,34 @@ class RenderRequest(BaseModel):
 #: The egress canary runs at startup and then daily (F6).
 EGRESS_PROBE_INTERVAL_SECONDS = 86_400.0
 EGRESS_PROBE_TIMEOUT_SECONDS = 3.0
+#: Lets the network plugin program the policy of a new pod before the first probe.
+EGRESS_PROBE_INITIAL_DELAY_SECONDS = 15.0
 _egress_state: dict[str, Any] = {"enforced": None, "checked_at": None, "target": None}
 
 
-def egress_probe_target() -> tuple[str, int] | None:
-    """Where the canary connects: ``RENDERER_EGRESS_PROBE_TARGET`` (``host:port``), else the
-    Kubernetes API Service address, which every pod receives without DNS."""
+RESOLV_CONF = Path("/etc/resolv.conf")
+
+
+def egress_probe_target(resolv_conf: Path = RESOLV_CONF) -> tuple[str, int] | None:
+    """Where the canary connects.
+
+    ``RENDERER_EGRESS_PROBE_TARGET`` (``host:port``) when set; otherwise the cluster DNS
+    Service on TCP 53 (the first ``nameserver`` of ``/etc/resolv.conf``), served by
+    ordinary pods so every NetworkPolicy implementation applies to it; otherwise the
+    Kubernetes API Service address. Some CNIs (kindnet) always allow traffic to the API
+    server, so it is only the last resort.
+    """
     override = os.getenv("RENDERER_EGRESS_PROBE_TARGET", "").strip()
     if override:
         host, _, port = override.rpartition(":")
         return (host.strip("[]"), int(port)) if host and port.isdecimal() else None
+    try:
+        for line in resolv_conf.read_text(encoding="utf-8").splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "nameserver":
+                return (fields[1], 53)
+    except OSError:
+        pass
     host = os.getenv("KUBERNETES_SERVICE_HOST", "").strip()
     port = os.getenv("KUBERNETES_SERVICE_PORT", "443").strip()
     return (host, int(port)) if host and port.isdecimal() else None
@@ -101,6 +119,7 @@ async def refresh_egress_state() -> dict[str, Any]:
 
 
 async def _egress_canary_loop() -> None:
+    await asyncio.sleep(EGRESS_PROBE_INITIAL_DELAY_SECONDS)
     while True:
         try:
             await refresh_egress_state()
