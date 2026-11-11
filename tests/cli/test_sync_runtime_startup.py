@@ -17,7 +17,8 @@ async def test_controller_plan_runtime_is_built_once_without_reconnecting(monkey
     runtime = object()
 
     async def create_plan_runtime(**kwargs):
-        assert kwargs == {"db_manager": manager, "connect_db": False}
+        # F12: composed without explicit providers (inferred at run time).
+        assert kwargs == {"db_manager": manager, "connect_db": False, "allow_empty": True}
         return runtime
 
     monkeypatch.setattr(plan_runtime_module, "create_plan_runtime", create_plan_runtime)

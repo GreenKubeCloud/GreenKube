@@ -37,9 +37,12 @@ async def test_plans_queue_builds_production_runtime_without_injected_worker(mon
 
     runtime_calls = 0
 
-    async def create_runtime():
+    async def create_runtime(**options):
         nonlocal runtime_calls
         runtime_calls += 1
+        # Always-on automation (F12): the worker composes without explicit providers and
+        # leaves the provider rows to the controller.
+        assert options == {"allow_empty": True, "reconcile_providers": False}
         return SimpleNamespace(worker=PlanQueue())
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)
@@ -164,7 +167,7 @@ def test_deprecated_queue_flag_accepts_only_plans(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_plans_queue_safely_idles_when_provider_json_is_absent(monkeypatch):
-    async def create_runtime():
+    async def create_runtime(**_options):
         raise PlanProvidersNotConfiguredError("GITOPS_PROVIDERS_JSON is required.")
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)

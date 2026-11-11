@@ -484,7 +484,8 @@ class TestApplyPrEndpoint:
         body = response.json()
         assert "token_configured" in body
         assert "provider" in body
-        assert body["mode"] in {"disabled", "inline", "worker"}
+        assert body["mode"] in {"paused", "controller"}
+        assert body["delivery_paused"] is False
         assert "ready" in body
         assert "worker" in body
         assert "queue" in body

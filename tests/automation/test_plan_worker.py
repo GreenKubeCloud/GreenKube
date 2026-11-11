@@ -1445,7 +1445,7 @@ async def test_worker_entry_point_defaults_to_the_plan_queue(monkeypatch: pytest
 
     plan_worker = EmptyPlanWorker()
 
-    async def create_runtime():
+    async def create_runtime(**_options):
         return SimpleNamespace(worker=plan_worker)
 
     monkeypatch.setattr(automation_worker, "create_plan_runtime", create_runtime)

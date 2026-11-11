@@ -518,7 +518,9 @@ async def _create_controller_plan_runtime(db_manager):
     )
 
     try:
-        return await create_plan_runtime(db_manager=db_manager, connect_db=False)
+        # Automation is always on (F12): the runtime is composed even without explicit
+        # providers; the readiness reconciler infers them from discovered repositories.
+        return await create_plan_runtime(db_manager=db_manager, connect_db=False, allow_empty=True)
     except PlanProvidersNotConfiguredError as error:
         logger.info("GitOps sync observation and automation loops are idle: %s", error)
     except PlanRuntimeConfigurationError as error:
@@ -553,10 +555,49 @@ def _create_gitops_sync_runtime(plan_runtime, db_manager):
     )
 
 
-def automation_delivery_enabled(cfg) -> bool:
-    """GitOps delivery (plan execution, webhook outbox, PR polling) runs in this controller (F8)."""
-    mode = str(getattr(cfg, "AUTOMATION_MODE", "disabled") or "disabled")
-    return bool(getattr(cfg, "AUTOMATION_ENABLED", False)) and mode != "disabled"
+class _DiscoveryTracker:
+    """Serializes discovery runs (loop and readiness-triggered) and keeps the CRD availability."""
+
+    def __init__(self, runtime) -> None:
+        self.runtime = runtime
+        self.interval_seconds = float(getattr(runtime, "interval_seconds", 300.0))
+        self.availability: Optional[dict] = None
+        self._lock = asyncio.Lock()
+
+    async def run_once(self):
+        async with self._lock:
+            result = await self.runtime.run_once()
+        availability = getattr(result, "availability", None)
+        if availability is not None:
+            self.availability = dict(availability)
+        return result
+
+
+def _create_automation_readiness(cfg, db_manager, plan_runtime, discovery: "_DiscoveryTracker"):
+    """The AutomationReadiness reconciler (F12): capability activation without a restart."""
+    import os
+
+    from ..automation.readiness import AutomationReadiness, renderer_status_reader
+    from ..storage.automation_capability_repository import AutomationCapabilityRepository
+
+    try:
+        repository = getattr(plan_runtime, "gitops_repository", None)
+        if repository is None:
+            from ..automation.plan_runtime import _make_gitops_repository
+
+            repository = _make_gitops_repository(db_manager, cfg.DB_TYPE)
+        return AutomationReadiness(
+            gitops_repository=repository,
+            capability_store=AutomationCapabilityRepository(db_manager),
+            cluster=cfg.CLUSTER_NAME or "default",
+            config=cfg,
+            discovery_status=lambda: discovery.availability,
+            request_discovery=discovery.run_once,
+            renderer_status=renderer_status_reader(os.getenv("GITOPS_RENDERER_URL", "")),
+        )
+    except Exception as error:
+        logger.warning("Automation readiness is unavailable (%s).", type(error).__name__)
+        return None
 
 
 def _create_session_purge(db_manager):
@@ -594,6 +635,7 @@ def _register_controller_loops(
     automation_controller=None,
     plan_executor=None,
     session_purge=None,
+    readiness=None,
 ) -> None:
     """Declare every periodic controller job in the loop registry (M8).
 
@@ -682,6 +724,22 @@ def _register_controller_loops(
             description="Argo CD/Flux discovery and workload bindings.",
         ),
     ]
+    if readiness is not None:
+        from ..automation.readiness import READINESS_INTERVAL_SECONDS
+
+        specs.append(
+            LoopSpec(
+                "automation-readiness",
+                readiness.run_once,
+                READINESS_INTERVAL_SECONDS,
+                run_immediately=True,
+                jitter=0.0,
+                max_backoff_multiplier=2,
+                standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+                timeout_seconds=_TIMEOUT_SHORT,
+                description="Capability activation: provider inference, credentials, allowlist, delivery (F12).",
+            )
+        )
     if sync_runtime is not None:
         specs.append(
             LoopSpec(
@@ -766,7 +824,7 @@ async def _async_start(last: Optional[str]):
 
     from ..gitops.discovery.runtime import create_gitops_discovery_runtime
 
-    discovery_runtime = await create_gitops_discovery_runtime(db_manager=get_db_manager())
+    discovery_runtime = _DiscoveryTracker(await create_gitops_discovery_runtime(db_manager=get_db_manager()))
     from ..core.loops import LoopRegistry
 
     controller_stop_event = asyncio.Event()
@@ -801,20 +859,20 @@ async def _async_start(last: Optional[str]):
         registry.set_leader(should_run)
 
         plan_runtime = await _create_controller_plan_runtime(get_db_manager())
+        readiness = _create_automation_readiness(cfg, get_db_manager(), plan_runtime, discovery_runtime)
         sync_runtime = None
         automation_controller = None
         if plan_runtime is not None:
             from ..automation.controller import PlanExecutor, create_automation_controller
 
             sync_runtime = _create_gitops_sync_runtime(plan_runtime, get_db_manager())
-            delivery = automation_delivery_enabled(cfg)
-            automation_controller = create_automation_controller(plan_runtime, delivery_enabled=delivery)
-            if delivery:
-                plan_executor = PlanExecutor(plan_runtime.worker)
-            logger.info(
-                "Automation controller loop enabled (delivery %s).",
-                "on: plan execution, webhook outbox, PR polling" if delivery else "off: expiry and retention only",
-            )
+            # Always on (F12): the readiness reconciler switches delivery and PR tracking
+            # on and off every minute, without a restart.
+            delivery_active = (lambda: readiness.delivery_active) if readiness is not None else (lambda: False)
+            tracking_active = (lambda: readiness.tracking_active) if readiness is not None else (lambda: False)
+            automation_controller = create_automation_controller(plan_runtime, delivery_enabled=tracking_active)
+            plan_executor = PlanExecutor(plan_runtime.worker, active=delivery_active)
+            logger.info("Automation controller loop enabled; delivery activates with its prerequisites (F12).")
 
         # Resolve the processor at the composition root before workers are
         # scheduled. This makes collector/repository wiring fail fast and keeps
@@ -839,6 +897,7 @@ async def _async_start(last: Optional[str]):
             automation_controller=automation_controller,
             plan_executor=plan_executor,
             session_purge=_create_session_purge(get_db_manager()),
+            readiness=readiness,
         )
         logger.info("📈 Starting %d controller loops: %s", len(registry.names), ", ".join(registry.names))
         registry.start()

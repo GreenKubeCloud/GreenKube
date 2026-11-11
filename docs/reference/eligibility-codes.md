@@ -57,8 +57,8 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `automation_not_configured` | No plan service is configured in this process. | Enable automation and configure a Git provider ([GitOps automation](../automation.md)). |
-| `automation_disabled` | `automation.enabled` is false or `automation.mode` is `disabled`. | Enable automation. |
+| `automation_not_configured` | No plan service is available in this process (the database schema is not ready, or the automation configuration is invalid). | Check the setup checklist (`GET /api/v1/setup/status`) and the API logs. |
+| `automation_disabled` | Pull-request delivery is paused (`automation.policy.pauseDelivery: true`). | Set `automation.policy.pauseDelivery: false` once the change freeze is over. |
 | `binding_unavailable` | The GitOps bindings could not be read. | Check the database and `GET /api/v1/gitops/status`. |
 | `binding_missing` | Discovery has no source for this workload. | Make sure Argo CD or Flux manages it, then `POST /api/v1/gitops/refresh`. |
 | `ambiguous_binding` | Several sources could manage the workload. | `POST /api/v1/gitops/bindings/{namespace}/{kind}/{name}/resolve`. |

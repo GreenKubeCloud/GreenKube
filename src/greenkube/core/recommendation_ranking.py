@@ -221,9 +221,8 @@ async def decide_records(
     params = resolve_parameters(config, request.profile, request.carbon_price)
     book = await load_track_record(reco_repo)
 
-    automation_enabled = bool(getattr(config, "AUTOMATION_ENABLED", False)) and (
-        str(getattr(config, "AUTOMATION_MODE", "disabled")) != "disabled"
-    )
+    # Automation is always on (F12); only automation.policy.pauseDelivery turns PRs off.
+    automation_enabled = not bool(getattr(config, "automation_delivery_paused", False))
     policy, policy_error = elig.load_policy(os.getenv("GITOPS_POLICY_JSON"))
     bindings = None
     open_prs: Optional[frozenset] = frozenset()

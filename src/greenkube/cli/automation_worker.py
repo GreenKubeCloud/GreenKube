@@ -40,7 +40,7 @@ async def process_once(
 ) -> bool:
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             return False
@@ -123,7 +123,7 @@ async def _run_worker_loop(
     beat = heartbeat or _no_heartbeat
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             if once:
