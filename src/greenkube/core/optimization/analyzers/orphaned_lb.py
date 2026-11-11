@@ -5,6 +5,10 @@ The collector (``greenkube.collectors.lb_collector``) only reports Services
 it can prove unused, with the evidence; this analyzer additionally requires
 the condition to have persisted for ``DELETION_MIN_UNUSED_DAYS`` and words
 the recommendation as a review ("appears unused"), never as a certainty.
+
+An address from a bare-metal allocator (MetalLB, Cilium LB-IPAM, kube-vip)
+has no cloud bill: unless OpenCost reports a cost for it, the recommendation
+projects no saving and says why.
 """
 
 from datetime import datetime, timezone
@@ -64,16 +68,28 @@ class OrphanedLBAnalyzer(Analyzer):
             description_savings = ""
             cost_source = CostSource.OPENCOST
             cost_detail = "opencost_lb_cost"
+            allocator = getattr(lb, "bare_metal_allocator", None)
+            releases = "releases the LoadBalancer and stops its billing"
             if annual_cost is not None:
                 description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
+            elif allocator:
+                # A bare-metal allocator hands out addresses from a local pool: deleting
+                # the Service frees an address, not a billed cloud load balancer.
+                annual_cost = 0.0
+                releases = f"returns its address to the {allocator} pool"
+                cost_source = CostSource.NONE
+                cost_detail = f"bare_metal_load_balancer:{allocator}"
+                description_savings = (
+                    f" No cost saving: its address comes from {allocator}, a bare-metal allocator "
+                    "with no cloud load-balancer billing."
+                )
             else:
                 annual_cost = cfg.LOAD_BALANCER_COST_PER_MONTH * 12
                 cost_source = CostSource.CUSTOM_RATE
                 cost_detail = "LOAD_BALANCER_COST_PER_MONTH"
                 description_savings = (
                     f" Estimated cost savings: ${annual_cost:.2f}/year "
-                    f"(at ${cfg.LOAD_BALANCER_COST_PER_MONTH:.2f}/month; a LoadBalancer IP from MetalLB or "
-                    f"another bare-metal allocator is usually not billed)."
+                    f"(at ${cfg.LOAD_BALANCER_COST_PER_MONTH:.2f}/month)."
                 )
             delta = ImpactProjector.for_context(context).asset_deletion(
                 asset_kind="load_balancer",
@@ -94,7 +110,7 @@ class OrphanedLBAnalyzer(Analyzer):
                     description=(
                         f"LoadBalancer Service '{name}' in namespace '{namespace or 'unknown'}'{external_label} "
                         f"appears unused for {format_days(unused_for)}. Review it before deleting: deleting it "
-                        f"releases the LoadBalancer and stops its billing.{ports_label}{description_savings}"
+                        f"{releases}.{ports_label}{description_savings}"
                     ),
                     reason=(
                         f"Evidence that it is unused: {evidence_text}. Add the annotation "

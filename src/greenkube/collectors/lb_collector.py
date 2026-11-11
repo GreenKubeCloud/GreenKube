@@ -27,6 +27,10 @@ A Service is never reported when it:
 The recommendation is emitted only once the condition has persisted for
 ``DELETION_MIN_UNUSED_DAYS`` (first-seen persistence,
 ``greenkube.collectors.deletion_candidates``).
+
+Addresses handed out by a bare-metal allocator (MetalLB, Cilium LB-IPAM,
+kube-vip) carry no cloud load-balancer bill: :func:`bare_metal_allocator`
+names the allocator so the analyzer reports no cost saving for them.
 """
 
 import logging
@@ -87,6 +91,16 @@ _GATEWAY_LABEL_VALUES = frozenset(
 )
 _GATEWAY_LABEL_KEYS = ("app", "app.kubernetes.io/component", "app.kubernetes.io/name")
 
+#: Bare-metal LoadBalancer allocators: (allocator, label/annotation key prefixes, loadBalancerClass fragments).
+#: They assign addresses from a local pool, so a LoadBalancer Service has no cloud bill.
+BARE_METAL_ALLOCATORS: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
+    ("MetalLB", ("metallb.universe.tf/", "metallb.io/"), ("metallb",)),
+    ("Cilium LB-IPAM", ("lbipam.cilium.io/", "io.cilium/lb-ipam"), ("io.cilium/", "cilium.io/")),
+    ("kube-vip", ("kube-vip.io/",), ("kube-vip",)),
+)
+#: Service status conditions that Cilium LB-IPAM sets on the Services it serves.
+_CILIUM_LB_IPAM_CONDITIONS = frozenset({"cilium.io/IPAMRequestSatisfied", "io.cilium/IPAMRequestSatisfied"})
+
 #: Workload kinds whose pod template can match a Service selector while scaled to zero.
 _WORKLOAD_KINDS: Tuple[Tuple[str, str], ...] = (
     ("deployments", "Deployment"),
@@ -115,6 +129,8 @@ class OrphanedLoadBalancer:
     evidence: List[str] = field(default_factory=list)
     #: When GreenKube first saw it unused (None: not persisted, never recommended).
     first_seen_at: Optional[datetime] = None
+    #: Bare-metal allocator of its address (MetalLB, Cilium LB-IPAM, kube-vip): no cloud bill.
+    bare_metal_allocator: Optional[str] = None
 
 
 @dataclass
@@ -148,6 +164,31 @@ def controller_marker(metadata: Mapping[str, Any]) -> Optional[str]:
         value = str(labels.get(key, "")).lower()
         if value in _GATEWAY_LABEL_VALUES:
             return f"label {key}={labels[key]}"
+    return None
+
+
+def bare_metal_allocator(service: Mapping[str, Any]) -> Optional[str]:
+    """The bare-metal allocator (MetalLB, Cilium LB-IPAM, kube-vip) of a LoadBalancer Service, if any.
+
+    Read from its ``loadBalancerClass``, the labels and annotations the allocator
+    writes (``metallb.io/ip-allocated-from-pool``, ``kube-vip.io/vipHost``...) and
+    Cilium's ``IPAMRequestSatisfied`` status condition.
+    """
+    metadata = _metadata(service)
+    spec = service.get("spec") or {}
+    load_balancer_class = str(spec.get("loadBalancerClass") or "").lower()
+    keys = [*(metadata.get("labels") or {}), *(metadata.get("annotations") or {})]
+    labels = metadata.get("labels") or {}
+    for allocator, prefixes, classes in BARE_METAL_ALLOCATORS:
+        if load_balancer_class and any(fragment in load_balancer_class for fragment in classes):
+            return allocator
+        if any(str(key).startswith(prefixes) for key in keys):
+            return allocator
+    if str(labels.get("implementation", "")).lower() == "kube-vip":
+        return "kube-vip"
+    conditions = (service.get("status") or {}).get("conditions") or []
+    if any(isinstance(item, Mapping) and item.get("type") in _CILIUM_LB_IPAM_CONDITIONS for item in conditions):
+        return "Cilium LB-IPAM"
     return None
 
 
@@ -411,6 +452,7 @@ class LoadBalancerCollector:
                 uid=metadata.get("uid") or "",
                 selector=selector,
                 evidence=evidence,
+                bare_metal_allocator=bare_metal_allocator(service),
             ),
             "",
         )
