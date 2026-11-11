@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -1179,3 +1179,50 @@ def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Policy-based auto-approval hook (roadmap F5)                                 #
+# --------------------------------------------------------------------------- #
+
+
+class PlanApprover(Protocol):
+    async def approve_plan(self, plan_id: str, digest: str, *, actor: str = "system") -> Plan: ...
+
+
+async def maybe_auto_approve(
+    approver: PlanApprover,
+    plan: Plan,
+    recommendations: Sequence[Any],
+    *,
+    actor: str,
+    policy: Any,
+    may_approve: bool,
+) -> tuple[Plan, list[str]]:
+    """Approve a fresh preview on behalf of ``actor`` when ``automation.autoApprove`` allows it.
+
+    Returns the (possibly approved) plan and why it was not approved. The approval goes
+    through the same path as the human click (pauseDelivery, binding, policy and digest
+    checks); any refusal leaves the preview waiting for that click. Only a requester
+    who may approve plans (``approve`` scope) can trigger it, rollbacks never are, and
+    the rules of :func:`auto_approve_blockers` (contested consensus is a hard stop)
+    apply to every recommendation of the plan.
+    """
+    from greenkube.core.optimization.eligibility import auto_approve_blockers
+
+    if not getattr(policy, "enabled", False):
+        return plan, ["auto_approve_disabled"]
+    if not may_approve:
+        return plan, ["approve_scope_missing"]
+    if plan.status is not PlanStatus.VALIDATED or plan.digest is None:
+        return plan, ["plan_not_validated"]
+    if plan.rollback_of_plan_id is not None:
+        return plan, ["rollback_plan"]
+    blockers = auto_approve_blockers(recommendations, policy, expected=len(plan.recommendation_ids))
+    if blockers:
+        return plan, blockers
+    try:
+        approved = await approver.approve_plan(plan.plan_id, plan.digest, actor=f"autoapprove:{actor}"[:128])
+    except AutomationPlanError as error:
+        return plan, [error.code.value]
+    return approved, []
