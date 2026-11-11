@@ -2,12 +2,25 @@
 """Tests for cross-source arbitration and provenance."""
 
 from greenkube.core.config import Config
-from greenkube.core.optimization.dedup import finalize_recommendations
+from greenkube.core.optimization.dedup import (
+    SignalEntry,
+    entries_for_recommendations,
+    finalize_entries,
+    finalize_recommendations,
+)
 from greenkube.models.metrics import (
     Recommendation,
     RecommendationCapability,
     RecommendationSource,
     RecommendationType,
+)
+from greenkube.signals.model import (
+    AlgorithmInfo,
+    Capability,
+    ContainerResourcesProposal,
+    ResourceSpec,
+    SourceSignal,
+    TargetRef,
 )
 
 
@@ -121,3 +134,46 @@ def test_node_recommendations_do_not_collide():
 def test_capability_is_derived_from_type():
     recs = finalize_recommendations([_workload_rec()], Config())
     assert recs[0].capability == RecommendationCapability.CPU_RIGHTSIZING
+
+
+def _krr_entry(cpu: int, current: int = 500) -> SignalEntry:
+    signal = SourceSignal(
+        source_id="krr",
+        target=TargetRef.for_kind("default", "Deployment", "api", namespace="prod"),
+        capability=Capability.CONTAINER_REQUESTS,
+        kind="RIGHTSIZING_CPU",
+        proposal=ContainerResourcesProposal(
+            current=ResourceSpec(cpu_request_m=current), proposed=ResourceSpec(cpu_request_m=cpu)
+        ),
+        algorithm=AlgorithmInfo(name="krr.simple"),
+    )
+    return (signal, "krr", None)
+
+
+def test_a_consensus_that_keeps_the_current_request_is_no_recommendation():
+    """KRR reports a value for every container: 'keep 500m' wins under safest, so nothing changes."""
+    native = _workload_rec(cpu=280).model_copy(update={"current_cpu_request_millicores": 500})
+    entries = entries_for_recommendations([native]) + [_krr_entry(500)]
+
+    assert finalize_entries(entries, Config()) == []
+
+
+def test_a_signal_only_source_alone_at_the_current_request_is_no_recommendation():
+    assert finalize_entries([_krr_entry(500)], Config()) == []
+
+
+def test_a_signal_only_source_below_the_current_request_still_counts():
+    native = _workload_rec(cpu=280).model_copy(update={"current_cpu_request_millicores": 500})
+    entries = entries_for_recommendations([native]) + [_krr_entry(300)]
+
+    [rec] = finalize_entries(entries, Config())
+
+    assert (rec.recommended_cpu_request_millicores, rec.current_cpu_request_millicores) == (300, 500)
+
+
+def test_a_floored_value_equal_to_the_current_request_is_no_recommendation():
+    cfg = Config()
+    floor = cfg.RECOMMENDATION_MIN_CPU_MILLICORES
+    native = _workload_rec(cpu=max(1, floor - 5)).model_copy(update={"current_cpu_request_millicores": floor})
+
+    assert finalize_recommendations([native], cfg) == []

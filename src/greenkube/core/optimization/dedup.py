@@ -323,6 +323,21 @@ def _describe(rec: Recommendation, outcome: ConsensusOutcome) -> Recommendation:
     return rec.model_copy(update={"description": description, "reason": reason})
 
 
+def proposes_no_change(rec: Recommendation) -> bool:
+    """True when a request recommendation proposes its current value (an empty change).
+
+    Built-in analyzers only emit strict changes; a third-party source can report
+    a value for every container, and a value floored to the minimum can land on
+    the current request. Neither is advice.
+    """
+    resource = KIND_REQUEST_RESOURCES.get(_type_value(rec))
+    if resource is None:
+        return False
+    current_field, proposed_field = RESOURCE_FIELDS[resource]
+    current, proposed = getattr(rec, current_field), getattr(rec, proposed_field)
+    return current is not None and proposed is not None and int(current) == int(proposed)
+
+
 def materialize(outcome: ConsensusOutcome, refine: Optional[Refine] = None) -> Optional[Recommendation]:
     """The v1 recommendation of one consensus, or None when it has no v1 form."""
     chosen = outcome.chosen
@@ -341,6 +356,10 @@ def materialize(outcome: ConsensusOutcome, refine: Optional[Refine] = None) -> O
         return None
 
     rec, value_changed = _with_value(rec, consensus.resource, consensus.value, chosen.current)
+    if proposes_no_change(rec):
+        # A source that says "keep the current request" wins under safest: nothing to change.
+        logger.debug("Consensus for %s keeps the current request; no recommendation.", outcome.key)
+        return None
     restated = value_changed or base_ballot is not chosen
     if restated and refine is not None:
         try:
@@ -419,7 +438,8 @@ def finalize_entries(
 ) -> List[Recommendation]:
     """Consolidates by consensus, deduplicates and clamps values."""
     consolidated = consolidate_entries(entries, config, refine=refine, weight_for=weight_for)
-    return [apply_minimum_thresholds(rec, config) for rec in deduplicate(consolidated)]
+    clamped = [apply_minimum_thresholds(rec, config) for rec in deduplicate(consolidated)]
+    return [rec for rec in clamped if not proposes_no_change(rec)]
 
 
 def finalize_recommendations(recs: List[Recommendation], config: "Config") -> List[Recommendation]:
@@ -445,4 +465,5 @@ __all__ = [
     "finalize_recommendations",
     "legacy_fingerprint",
     "materialize",
+    "proposes_no_change",
 ]
