@@ -8,7 +8,7 @@ to the hour-of-week MVP, with the reason recorded, when its diagnostics fail).
 
 import math
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict
 
 import pytest
@@ -24,12 +24,15 @@ from greenkube.verify.regression import (
 )
 from greenkube.verify.series import floor_hour, hourly_buckets, window_hours
 from greenkube.verify.strategy import MVP_METHOD, MeasurementSettings, RequestRightsizingStrategy
-from tests.verify.fixtures import change_event, hour_now, workload_rows  # pyrefly: ignore[missing-import]
+from tests.verify.fixtures import change_event, workload_rows  # pyrefly: ignore[missing-import]
 
 STEP = 300
 SETTINGS = MeasurementSettings(bootstrap_samples=400)
 STRATEGY = RequestRightsizingStrategy()
 INFO = LoadDriverInfo(key="istio_rps", label="Istio requests/s", coverage_pre=1.0, coverage_post=1.0)
+#: Fixed rollout time (a Monday noon): the seasonal alignment of every scenario, and with it the
+#: stochastic outcome of each seed, must not depend on when the suite runs. The estimator reads no clock.
+COMPLETED = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
 
 
 def _seasonal(moment: datetime) -> float:
@@ -62,7 +65,7 @@ def _scenario(
     """Per-pod hourly cost = 0.02 + slope x load + AR(1) noise, minus ``effect`` per pod after the change."""
     rng = random.Random(seed)
     settings = MeasurementSettings(bootstrap_samples=400, pre_window_days=pre_days)
-    change = change_event(hour_now() - timedelta(days=9))
+    change = change_event(COMPLETED)
     plan = STRATEGY.required_windows(change, settings)
     pre_load = _load_series(plan.pre, rng)
     post_load = _load_series(plan.post, rng, scale=post_scale)
@@ -157,7 +160,7 @@ def test_negative_load_slope_falls_back():
 
 
 def test_without_a_load_driver_the_mvp_is_used_without_diagnostics():
-    change = change_event(hour_now() - timedelta(days=9))
+    change = change_event(COMPLETED)
     plan = STRATEGY.required_windows(change, SETTINGS)
     pre = hourly_buckets(workload_rows(plan.pre), plan.pre, 300)
     post = hourly_buckets(workload_rows(plan.post, cpu_request=300), plan.post, 300)
@@ -179,7 +182,7 @@ def test_without_a_load_driver_the_mvp_is_used_without_diagnostics():
 
 
 def test_load_without_within_slot_variation_is_not_identifiable():
-    start = hour_now() - timedelta(days=20)
+    start = COMPLETED - timedelta(days=20)
     hours = [start + timedelta(hours=index) for index in range(168)]
     load = {hour: _seasonal(hour) for hour in hours}
     values = {hour: 1.0 + 0.01 * load[hour] for hour in hours}
