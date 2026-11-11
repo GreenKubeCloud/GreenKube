@@ -1,0 +1,39 @@
+{
+  "_comment": "Kubecost 3.x answers (finops-agent): the version probe reports 3.x, request sizing is wrapped in {\"Recommendations\": [...]}, node-group sizing replaced cluster sizing and several clusters report through one aggregator.",
+  "clusterInfo": {
+    "code": 200,
+    "data": {"id": "prod-eu", "name": "prod-eu", "provider": "GCP", "version": "v3.1.0"}
+  },
+  "requestSizingV2": {
+    "Recommendations": [
+      {
+        "clusterID": "prod-eu",
+        "namespace": "shop",
+        "controllerKind": "deployment",
+        "controllerName": "api",
+        "containerName": "web",
+        "recommendedRequest": {"cpu": "300m", "memory": "512Mi"},
+        "monthlySavings": {"cpu": 16.0, "memory": 2.1},
+        "latestKnownRequest": {"cpu": "1000m", "memory": "1Gi"},
+        "currentEfficiency": {"cpu": 0.2, "memory": 0.41, "total": 0.25}
+      },
+      {
+        "clusterID": "prod-us",
+        "namespace": "shop",
+        "controllerKind": "deployment",
+        "controllerName": "api",
+        "containerName": "web",
+        "recommendedRequest": {"cpu": "400m", "memory": "512Mi"},
+        "monthlySavings": {"cpu": 12.0, "memory": 2.1},
+        "latestKnownRequest": {"cpu": "1000m", "memory": "1Gi"},
+        "currentEfficiency": {"cpu": 0.3, "memory": 0.41, "total": 0.3}
+      }
+    ],
+    "TotalMonthlySavings": 32.2
+  },
+  "abandonedWorkloads": {"code": 200, "data": []},
+  "nodeGroupSizing": {
+    "code": 200,
+    "data": {"monthlySavings": 120.0, "nodeGroups": [{"name": "default", "recommendedNodeType": "n2-standard-4"}]}
+  }
+}

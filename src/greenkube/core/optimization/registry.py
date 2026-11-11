@@ -67,10 +67,11 @@ def build_sources(config: "Config") -> List[RecommendationSource]:
 
 
 def builtin_source_classes() -> List[type[Source]]:
-    """Built-in sources, in execution order (VPA, NodePool, then the native analyzers)."""
+    """Built-in sources, in execution order (VPA, NodePool, the native analyzers, then the signal-only connectors)."""
     from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
     from greenkube.signals.adapters import analyzer_source_class
     from greenkube.signals.connectors.krr import KrrSource
+    from greenkube.signals.connectors.kubecost import KubecostSource
     from greenkube.signals.connectors.replay import PushSignalSource
 
     return [
@@ -78,6 +79,7 @@ def builtin_source_classes() -> List[type[Source]]:
         NodePoolSignalSource,
         *(analyzer_source_class(cls) for cls in DEFAULT_ANALYZERS),
         KrrSource,
+        KubecostSource,
         PushSignalSource,
     ]
 
