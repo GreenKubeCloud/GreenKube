@@ -1,6 +1,7 @@
 """Collects per-container usage from the Kubernetes Metrics API."""
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -23,15 +24,44 @@ def _parse_timestamp(value: Any, *, namespace: str, pod_name: str) -> datetime |
         return None
 
 
+#: One ``<number><unit>`` term of a Go ``time.Duration`` string (``1h0m0s``, ``1m30s``, ``59.999s``, ``500ms``).
+_GO_DURATION_TERM = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)")
+_GO_DURATION_UNITS = {
+    "ns": 1e-9,
+    "us": 1e-6,
+    "µs": 1e-6,
+    "μs": 1e-6,
+    "ms": 1e-3,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+
+
+def parse_go_duration(value: str) -> float | None:
+    """Seconds of a Go ``time.Duration`` string as the Metrics API renders it, or None when invalid."""
+    text = value.strip()
+    if text in ("", "0"):
+        return 0.0 if text == "0" else None
+    position = 0
+    total = 0.0
+    for match in _GO_DURATION_TERM.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * _GO_DURATION_UNITS[match.group(2)]
+        position = match.end()
+    return total if position == len(text) else None
+
+
 def _parse_duration_seconds(value: Any, *, namespace: str, pod_name: str) -> int | None:
-    if not isinstance(value, str) or not value.endswith("s"):
+    if not isinstance(value, str):
         return None
-    try:
-        seconds = int(float(value[:-1]))
-    except ValueError:
+    seconds = parse_go_duration(value)
+    if seconds is None:
         logger.warning("PodMetrics returned an invalid sample window for %s/%s.", namespace, pod_name)
         return None
-    return seconds if seconds > 0 else None
+    whole = int(seconds)
+    return whole if whole > 0 else None
 
 
 class MetricsServerCollector:
