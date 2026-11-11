@@ -70,8 +70,16 @@ def builtin_source_classes() -> List[type[Source]]:
     """Built-in sources, in execution order (VPA, NodePool, then the native analyzers)."""
     from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
     from greenkube.signals.adapters import analyzer_source_class
+    from greenkube.signals.connectors.krr import KrrSource
+    from greenkube.signals.connectors.replay import PushSignalSource
 
-    return [VpaSignalSource, NodePoolSignalSource, *(analyzer_source_class(cls) for cls in DEFAULT_ANALYZERS)]
+    return [
+        VpaSignalSource,
+        NodePoolSignalSource,
+        *(analyzer_source_class(cls) for cls in DEFAULT_ANALYZERS),
+        KrrSource,
+        PushSignalSource,
+    ]
 
 
 def legacy_enablement(config: "Config") -> Dict[str, EnabledMode]:
