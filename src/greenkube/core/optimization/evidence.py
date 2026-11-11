@@ -2,7 +2,7 @@
 """Builds review-grade evidence blocks for generated recommendations."""
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 
 from greenkube.core.optimization.statistics import latest_request_value, percentile, usage_stats
 from greenkube.models.evidence import (
@@ -258,6 +258,19 @@ def build_patch(rec: Recommendation, action=None) -> Optional[dict]:
     return patch
 
 
+def usage_summary_for(rec: Recommendation, context: "OptimizationContext") -> Optional[Any]:
+    """The usage summary of the recommendation's target container, with its reliability signals (E9)."""
+    if not rec.namespace or rec.target_node or context.usage is None:
+        return None
+    if rec.owner_kind and rec.owner_name:
+        target = (rec.namespace, rec.owner_kind, rec.owner_name)
+    elif rec.pod_name:
+        target = (rec.namespace, "Pod", rec.pod_name)
+    else:
+        return None
+    return context.usage.summaries.get(target, {}).get(rec.container_name or "")
+
+
 def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optional[RecommendationEvidence]:
     """Builds the evidence block for a recommendation, or None when no metrics exist."""
     series = series_for(rec, context)
@@ -286,6 +299,12 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
     cost_per_hour = max(total_cost / window * 3600, 0.0) if window else None
     co2e_per_hour = (total_co2e / window * 3600) if window else None
 
+    # OOM kills and CPU throttling over the lookback, from the scan's usage summary
+    # (kube-state-metrics / cAdvisor); None when no source reported them.
+    summary = usage_summary_for(rec, context)
+    oom_events = getattr(summary, "oom_kill_count", None)
+    throttling = getattr(summary, "throttling_ratio", None)
+
     sample_count = max((cpu_usage.sample_count if cpu_usage else 0), (memory_usage.sample_count if memory_usage else 0))
     coverage = max(
         cpu_usage.coverage_ratio if cpu_usage else 0.0,
@@ -304,7 +323,8 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
         cpu_usage=cpu_usage,
         memory_usage=memory_usage,
         restart_count=restart_count,
-        oom_events=None,
+        oom_events=oom_events if isinstance(oom_events, int) and not isinstance(oom_events, bool) else None,
+        cpu_throttling_ratio=float(throttling) if isinstance(throttling, (int, float)) else None,
         cost_per_hour_before=cost_per_hour,
         co2e_grams_per_hour_before=co2e_per_hour,
         proposed_patch=build_patch(rec),

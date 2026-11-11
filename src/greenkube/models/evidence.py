@@ -105,7 +105,10 @@ class RecommendationEvidence(BaseModel):
     cpu_usage: Optional[UtilizationStats] = None
     memory_usage: Optional[UtilizationStats] = None
     restart_count: Optional[int] = None
+    #: OOM kills of the target container over the observation window (None: not observed).
     oom_events: Optional[int] = None
+    #: Share of CPU periods throttled over the observation window (None: not observed).
+    cpu_throttling_ratio: Optional[float] = None
     cost_per_hour_before: Optional[float] = None
     co2e_grams_per_hour_before: Optional[float] = None
     proposed_patch: Optional[PatchV2] = None

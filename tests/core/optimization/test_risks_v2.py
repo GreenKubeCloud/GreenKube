@@ -8,7 +8,12 @@ import pytest
 from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.enrich import build_risk_profile, enrich_recommendations
-from greenkube.core.optimization.risks import WorkloadRiskProfile, assess, profile_from_binding_evidence
+from greenkube.core.optimization.risks import (
+    JVM_MEMORY_DECREASE_CONFIDENCE,
+    WorkloadRiskProfile,
+    assess,
+    profile_from_binding_evidence,
+)
 from greenkube.models.evidence import RecommendationEvidence, ResourceSnapshot, UtilizationStats
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType, RiskLevel
 
@@ -148,6 +153,16 @@ class TestRiskModelV2:
         assert memory.risk_level == RiskLevel.HIGH and "jvm_heap_not_observable" in memory.risk_factors
         assert cpu.risk_level == RiskLevel.MEDIUM and "jvm_startup_cpu" in cpu.risk_factors
 
+    def test_jvm_halves_the_confidence_of_a_memory_decrease_in_assess(self):
+        plain = _risk(_memory_rec(), _memory_evidence(), replicas=3)
+        jvm = _risk(_memory_rec(), _memory_evidence(), replicas=3, jvm=True)
+        increase = _risk(_memory_rec(proposed=2 * 1024**3), _memory_evidence(), replicas=3, jvm=True)
+        cpu = _risk(_cpu_rec(), _cpu_evidence(), replicas=3, jvm=True)
+        assert jvm.confidence == pytest.approx(plain.confidence * JVM_MEMORY_DECREASE_CONFIDENCE)
+        assert jvm.confidence_factors["jvm_suspected"] == JVM_MEMORY_DECREASE_CONFIDENCE
+        assert "jvm_suspected" not in increase.confidence_factors
+        assert "jvm_suspected" not in cpu.confidence_factors
+
     def test_in_place_resize_constraints(self):
         memory = _risk(_memory_rec(), _memory_evidence(), replicas=3)
         static = _risk(_cpu_rec(), _cpu_evidence(), replicas=3, static_cpu_manager=True)
@@ -172,7 +187,9 @@ class TestRiskModelV2:
             pod_name="old", namespace="prod", type=RecommendationType.ZOMBIE_POD, description="delete"
         )
         result = assess(zombie, None, Config(), WorkloadRiskProfile(replicas=1, pdb_conflict=True))
-        assert result.risk_level == RiskLevel.LOW
+        # Medium because the deletion is irreversible, not raised further by restart facts.
+        assert result.risk_level == RiskLevel.MEDIUM
+        assert "singleton_workload" not in result.risk_factors
 
 
 class TestBindingEvidenceProfile:
