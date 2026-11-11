@@ -207,15 +207,24 @@ async def push_krr_report(
         description="True when the report covers every workload KRR sizes (replaces earlier reports); "
         "false for a partial report (for example one namespace), which only adds or refreshes advice.",
     ),
+    cluster: Optional[str] = Query(
+        None,
+        max_length=253,
+        description="The kubeconfig context KRR scanned this GreenKube's cluster in. Required when the report "
+        "covers several clusters (krr --all-clusters or several -c); entries of other clusters are skipped.",
+    ),
     inbox: SignalInboxRepository = Depends(get_signal_inbox),
 ):
     """Push a Robusta KRR report (``krr simple -f json``); its signals are used by the next scans."""
     document = await _json_body(request, MAX_KRR_REPORT_BYTES)
     received_at = datetime.now(timezone.utc)
     try:
-        parsed = parse_krr_report(document, cluster_uid=_cluster_uid(), received_at=received_at)
+        parsed = parse_krr_report(
+            document, cluster_uid=_cluster_uid(), received_at=received_at, cluster_context=cluster
+        )
     except KrrReportError as exc:
-        return _invalid([PointerError(pointer="", message=str(exc), type="krr_report")], "Not a KRR JSON report.")
+        detail = "Not a KRR JSON report." if exc.type == "krr_report" else "The KRR report cannot be attributed."
+        return _invalid([PointerError(pointer=exc.pointer, message=str(exc), type=exc.type)], detail)
     return await _store(
         inbox,
         source_id=KRR_SOURCE_ID,

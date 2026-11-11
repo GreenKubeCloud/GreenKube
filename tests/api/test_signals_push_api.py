@@ -115,6 +115,28 @@ def test_krr_report_is_parsed_and_stored(tmp_path, monkeypatch):
     assert invalid.status_code == 422 and invalid.json()["errors"][0]["type"] == "krr_report"
 
 
+def test_krr_report_of_several_clusters_needs_a_cluster(tmp_path, monkeypatch):
+    report = json.loads(KRR_FIXTURE.read_text())
+    staging = json.loads(json.dumps(report["scans"][0]))
+    staging["object"]["cluster"] = "staging"
+    report["scans"].append(staging)
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        headers = _key(h, "signals:write")
+        mixed = h.client.post("/api/v1/sources/krr/reports", json=report, headers=headers)
+        assert inbox.signals == {}
+        selected = h.client.post("/api/v1/sources/krr/reports?cluster=prod-eu", json=report, headers=headers)
+
+    assert mixed.status_code == 422
+    error = mixed.json()["errors"][0]
+    assert error["pointer"] == "/scans" and error["type"] == "multiple_clusters"
+    assert selected.status_code == 200, selected.text
+    payload = selected.json()
+    assert payload["accepted"] == 6
+    assert {d["code"]: d["count"] for d in payload["diagnostics"]}["other_cluster"] == 1
+
+
 def test_push_reaches_the_database_inbox(tmp_path, monkeypatch):
     """Without overrides the endpoint writes the migrated inbox tables (migration 0070)."""
     with auth_harness(tmp_path, monkeypatch) as h:

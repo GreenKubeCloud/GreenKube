@@ -35,7 +35,7 @@ curl -sS -X POST "$GREENKUBE_URL/api/v1/sources/krr/reports" \
   --data-binary @krr.json
 ```
 
-The key needs scope `signals:write`. Reports up to 64 MiB are accepted.
+The key needs scope `signals:write`. Reports up to 64 MiB are accepted. When the run covers several clusters, push it to each GreenKube with `?cluster=<kubeconfig context>` (see [Limitations](#limitations)).
 
 ## Job mode (optional CronJob)
 
@@ -72,4 +72,4 @@ The CronJob runs the KRR image pinned by digest (`sources.krr.job.image.digest`,
 
 - The parser is pinned against the KRR 1.x report shape (`tests/sources/fixtures/krr_report.json`); newer fields are ignored.
 - Pods without a controller are not targets KRR reports; KRR's own savings estimate is not part of its JSON report, so `source_estimate` stays empty (GreenKube recomputes the impact anyway).
-- The report is attributed to this GreenKube's cluster; push reports of one cluster to the GreenKube of that cluster.
+- The report is attributed to this GreenKube's cluster; push reports of one cluster to the GreenKube of that cluster. KRR's `object.cluster` is a kubeconfig context name, which GreenKube cannot map to a cluster, so a report covering several clusters (`krr simple --all-clusters`, several `-c`) is refused with `422` (pointer `/scans`, type `multiple_clusters`) rather than guessed. Pass `?cluster=<context>` to keep the entries of the context this GreenKube runs in: the other clusters' entries are skipped and reported in a `other_cluster` warning diagnostic; a context the report does not contain is refused (`cluster_not_in_report`). A report from inside the cluster (the CronJob) names no cluster and needs no parameter.

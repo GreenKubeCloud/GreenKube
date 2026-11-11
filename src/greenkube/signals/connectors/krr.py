@@ -10,7 +10,10 @@ Mapping, pinned against the report shape of KRR 1.x (``Result`` →
 
 * ``object`` (cluster, namespace, kind, name, container) → :class:`TargetRef`
   in this GreenKube's cluster (KRR's ``cluster`` is a kubeconfig context name;
-  it is kept in ``raw``);
+  it is kept in ``raw``). A report that names several clusters
+  (``--all-clusters``, several ``-c``) is refused unless ``cluster_context``
+  selects one: another cluster's advice is never attributed to same-named
+  workloads here;
 * ``recommended.requests``/``limits`` per resource → one
   ``ContainerResourcesProposal`` per resource (``RIGHTSIZING_CPU``,
   ``RIGHTSIZING_MEMORY``, the kinds of every container-request source),
@@ -67,14 +70,19 @@ _MIB = 1024 * 1024
 
 
 class KrrReportError(ValueError):
-    """The document is not a KRR JSON report (422)."""
+    """The document is not a usable KRR JSON report (422, located by a JSON pointer)."""
+
+    def __init__(self, message: str, *, pointer: str = "", type: str = "krr_report") -> None:
+        super().__init__(message)
+        self.pointer = pointer
+        self.type = type
 
 
 @dataclass
 class KrrParseResult:
     signals: List[SourceSignal] = field(default_factory=list)
     diagnostics: List[Diagnostic] = field(default_factory=list)
-    #: Scan entries in the report.
+    #: Scan entries read (those of the selected cluster).
     entries: int = 0
     strategy: Optional[str] = None
 
@@ -138,13 +146,58 @@ def _entry_raw(entry: Mapping[str, Any]) -> Dict[str, Any]:
     return trim_raw({"object": obj, "recommended": entry.get("recommended"), "severity": entry.get("severity")})
 
 
-def parse_krr_report(document: Any, *, cluster_uid: str, received_at: datetime) -> KrrParseResult:
-    """Signals of a KRR JSON report; raises :class:`KrrReportError` when it is not one."""
+def _entry_cluster(entry: Any) -> Optional[str]:
+    """The kubeconfig context KRR scanned an entry in (``None`` when unnamed, e.g. in-cluster)."""
+    if not isinstance(entry, Mapping) or not isinstance(entry.get("object"), Mapping):
+        return None
+    value = entry["object"].get("cluster")
+    return value if isinstance(value, str) and value else None
+
+
+def _select_cluster(scans: List[Any], cluster_context: Optional[str]) -> Tuple[List[Any], int]:
+    """Scan entries of one cluster and the count of entries of other clusters.
+
+    KRR's ``cluster`` is a kubeconfig context name, which GreenKube cannot map
+    to its own cluster: a report naming several clusters is refused rather
+    than guessed, unless ``cluster_context`` names the one to keep.
+    """
+    named = sorted({name for name in map(_entry_cluster, scans) if name})
+    if cluster_context:
+        if not named:
+            # An unnamed (in-cluster) report is about one cluster: nothing to select.
+            return scans, 0
+        if cluster_context not in named:
+            raise KrrReportError(
+                f"the report has no scan of cluster {cluster_context!r} (it covers {', '.join(named)})",
+                pointer="/scans",
+                type="cluster_not_in_report",
+            )
+        kept = [entry for entry in scans if _entry_cluster(entry) in (cluster_context, None)]
+        return kept, len(scans) - len(kept)
+    if len(named) > 1:
+        raise KrrReportError(
+            f"the report covers several clusters ({', '.join(named)}); push one cluster's report "
+            "or select the one GreenKube runs in with ?cluster=<context>",
+            pointer="/scans",
+            type="multiple_clusters",
+        )
+    return scans, 0
+
+
+def parse_krr_report(
+    document: Any, *, cluster_uid: str, received_at: datetime, cluster_context: Optional[str] = None
+) -> KrrParseResult:
+    """Signals of a KRR JSON report; raises :class:`KrrReportError` when it is not one.
+
+    ``cluster_context`` keeps the entries of that kubeconfig context only; it
+    is required when the report names several clusters.
+    """
     if not isinstance(document, Mapping):
         raise KrrReportError("a KRR report is a JSON object with a 'scans' array (krr simple -f json)")
     scans = document.get("scans")
     if not isinstance(scans, list):
         raise KrrReportError("the report has no 'scans' array; run krr with '-f json'")
+    scans, other_cluster = _select_cluster(scans, cluster_context)
     strategy = _mapping(document.get("strategy"))
     strategy_name = str(strategy.get("name") or "simple")
     params = dict(_mapping(strategy.get("settings")))
@@ -154,6 +207,8 @@ def parse_krr_report(document: Any, *, cluster_uid: str, received_at: datetime) 
 
     result = KrrParseResult(entries=len(scans), strategy=strategy_name)
     skipped: Dict[str, int] = {}
+    if other_cluster:
+        skipped["other_cluster"] = other_cluster
 
     def skip(code: str) -> None:
         skipped[code] = skipped.get(code, 0) + 1
@@ -245,9 +300,10 @@ def parse_krr_report(document: Any, *, cluster_uid: str, received_at: datetime) 
         "no_recommendation": "resources without a recommended request were skipped",
         "unchanged": "resources whose recommendation equals the current request were skipped",
         "duplicate": "duplicate scan entries were merged",
+        "other_cluster": f"scan entries of other clusters than {cluster_context!r} were skipped",
     }
     for code, count in sorted(skipped.items()):
-        level = "warning" if code == "invalid_entry" else "info"
+        level = "warning" if code in ("invalid_entry", "other_cluster") else "info"
         result.diagnostics.append(Diagnostic(level=level, code=code, message=messages[code], count=count))
     errors = document.get("errors")
     if isinstance(errors, list) and errors:

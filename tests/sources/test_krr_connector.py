@@ -147,6 +147,53 @@ class TestParse:
         assert first == second
 
 
+def _two_cluster_report() -> dict:
+    """The fixture plus a staging copy of shop/api (``krr simple --all-clusters``)."""
+    report = _report()
+    staging = copy.deepcopy(report["scans"][0])
+    staging["object"]["cluster"] = "staging"
+    staging["recommended"]["requests"]["cpu"] = {"value": 4.0, "severity": "CRITICAL"}
+    report["scans"].append(staging)
+    return report
+
+
+class TestClusters:
+    """KRR's cluster is a kubeconfig context: several clusters are never mixed into this one."""
+
+    def test_a_report_of_several_clusters_is_refused(self):
+        with pytest.raises(KrrReportError) as raised:
+            _parse(_two_cluster_report())
+        assert raised.value.type == "multiple_clusters"
+        assert raised.value.pointer == "/scans"
+        assert "prod-eu" in str(raised.value) and "staging" in str(raised.value)
+
+    def test_cluster_context_keeps_one_cluster_and_reports_the_rest(self):
+        result = parse_krr_report(
+            _two_cluster_report(), cluster_uid=CLUSTER, received_at=_now(), cluster_context="prod-eu"
+        )
+
+        cpu = [s for s in result.signals if (s.target.name, s.kind) == ("api", "RIGHTSIZING_CPU")]
+        assert len(cpu) == 1 and _resources(cpu[0]).proposed.cpu_request_m == 250
+        assert all(s.raw["object"]["cluster"] == "prod-eu" for s in result.signals)
+        assert result.entries == 4
+        other = next(d for d in result.diagnostics if d.code == "other_cluster")
+        assert other.level == "warning" and other.count == 1
+
+    def test_cluster_context_absent_from_the_report_is_refused(self):
+        with pytest.raises(KrrReportError) as raised:
+            parse_krr_report(_two_cluster_report(), cluster_uid=CLUSTER, received_at=_now(), cluster_context="dev")
+        assert raised.value.type == "cluster_not_in_report"
+
+    def test_unnamed_in_cluster_report_needs_no_context(self):
+        report = _report()
+        for entry in report["scans"]:
+            entry["object"]["cluster"] = None
+        assert len(_parse(report).signals) == 6
+        selected = parse_krr_report(report, cluster_uid=CLUSTER, received_at=_now(), cluster_context="prod-eu")
+        assert len(selected.signals) == 6
+        assert "other_cluster" not in {d.code for d in selected.diagnostics}
+
+
 def _stored_inbox(received_at=None) -> MemoryInbox:
     inbox = MemoryInbox()
     received = received_at or _now()
