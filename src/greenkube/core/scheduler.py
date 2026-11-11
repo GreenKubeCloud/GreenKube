@@ -9,11 +9,28 @@ logger = logging.getLogger(__name__)
 
 # Maximum consecutive failures before capping the backoff delay
 _MAX_BACKOFF_MULTIPLIER = 8
+_INTERVAL_PATTERN = re.compile(r"^(\d+)([smh])$")
+_INTERVAL_MULTIPLIERS = {"s": 1, "m": 60, "h": 3600}
+
+
+def parse_interval_seconds(interval_str: str) -> int:
+    """Parse a Prometheus-style duration such as ``'30s'``, ``'5m'`` or ``'1h'`` into seconds."""
+    match = _INTERVAL_PATTERN.match(str(interval_str).lower())
+    if not match:
+        raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
+    value, unit = int(match.group(1)), match.group(2)
+    if value <= 0:
+        raise ValueError(f"Interval must be greater than zero: '{interval_str}'.")
+    return value * _INTERVAL_MULTIPLIERS[unit]
 
 
 class Scheduler:
     """
     Manages the scheduling and execution of periodic async tasks using asyncio.
+
+    The controller schedules its loops with :class:`greenkube.core.loops.LoopRegistry`
+    (leader gating, timeouts, per-loop metrics and health; roadmap M8). This class
+    remains a minimal helper for embedders and owns the shared boundary arithmetic.
     """
 
     def __init__(self):
@@ -150,15 +167,7 @@ class Scheduler:
         ``align_offset_seconds`` runs the job on wall-clock boundaries of the
         interval shifted by the offset (see :meth:`_run_periodically`).
         """
-        match = re.match(r"^(\d+)([smh])$", interval_str.lower())
-        if not match:
-            raise ValueError(f"Invalid interval format: '{interval_str}'. Use 's', 'm', or 'h'.")
-
-        value, unit = int(match.group(1)), match.group(2)
-        if value <= 0:
-            raise ValueError(f"Interval must be greater than zero: '{interval_str}'.")
-        multipliers = {"s": 1, "m": 60, "h": 3600}
-        interval_seconds = value * multipliers[unit]
+        interval_seconds = parse_interval_seconds(interval_str)
 
         task = asyncio.create_task(
             self._run_periodically(

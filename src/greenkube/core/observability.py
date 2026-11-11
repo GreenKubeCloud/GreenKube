@@ -8,6 +8,7 @@ append them to its scrape without importing the composition root.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from math import isfinite
 from time import monotonic, time
@@ -262,6 +263,39 @@ METRIC_ROWS_BY_PROVENANCE = Counter(
     registry=REGISTRY,
 )
 
+# Controller loop registry (roadmap M8): one series per registered loop. Loop names
+# are fixed in code and validated by ``greenkube.core.loops``, so cardinality is bounded.
+LOOP_RUNS = Counter(
+    "greenkube_loop_runs_total",
+    "Controller loop ticks by outcome (success, failure, timeout, skipped while not the leader).",
+    ["loop", "outcome"],
+    registry=REGISTRY,
+)
+LOOP_DURATION = Histogram(
+    "greenkube_loop_duration_seconds",
+    "Duration of executed controller loop ticks.",
+    ["loop"],
+    buckets=(0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800),
+    registry=REGISTRY,
+)
+LOOP_LAST_SUCCESS = Gauge(
+    "greenkube_loop_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful tick of each controller loop.",
+    ["loop"],
+    registry=REGISTRY,
+)
+LOOP_CONSECUTIVE_FAILURES = Gauge(
+    "greenkube_loop_consecutive_failures",
+    "Consecutive failed or timed-out ticks of each controller loop (0 after a success).",
+    ["loop"],
+    registry=REGISTRY,
+)
+CONTROLLER_LEADER = Gauge(
+    "greenkube_controller_leader",
+    "1 when this controller process runs leader-only loops (Lease holder or no leader election).",
+    registry=REGISTRY,
+)
+
 _PLAN_STATUSES = frozenset(
     {
         "draft",
@@ -341,6 +375,7 @@ for _binding_status in _BINDING_STATUSES:
 
 
 _AUDIT_LOG = logging.getLogger("greenkube.audit")
+_LOOP_NAME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 
 
 def record_analyzer_failure(source: str) -> None:
@@ -584,6 +619,31 @@ def record_sync_timeout() -> None:
 
 def record_sync_lag(lag_seconds: float) -> None:
     GITOPS_SYNC_LAG.observe(_nonnegative_seconds(lag_seconds))
+
+
+_LOOP_OUTCOMES = frozenset({"success", "failure", "timeout", "skipped"})
+
+
+def record_loop_run(
+    loop: str,
+    outcome: str,
+    *,
+    duration_seconds: float | None = None,
+    consecutive_failures: int = 0,
+    success_timestamp: float | None = None,
+) -> None:
+    """Record one controller loop tick (M8). ``duration_seconds`` is None for skipped ticks."""
+    name = loop if isinstance(loop, str) and _LOOP_NAME.fullmatch(loop) else "other"
+    LOOP_RUNS.labels(loop=name, outcome=_bounded_label(outcome, _LOOP_OUTCOMES, "failure")).inc()
+    if duration_seconds is not None:
+        LOOP_DURATION.labels(loop=name).observe(_nonnegative_seconds(duration_seconds))
+    LOOP_CONSECUTIVE_FAILURES.labels(loop=name).set(_nonnegative_count(consecutive_failures))
+    if success_timestamp is not None:
+        LOOP_LAST_SUCCESS.labels(loop=name).set(_nonnegative_seconds(success_timestamp))
+
+
+def set_controller_leader(leader: bool) -> None:
+    CONTROLLER_LEADER.set(1 if leader else 0)
 
 
 def _bounded_label(value: object, allowed: frozenset[str], fallback: str) -> str:
