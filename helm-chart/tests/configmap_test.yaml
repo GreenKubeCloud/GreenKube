@@ -36,16 +36,6 @@ tests:
           path: data.LOG_LEVEL
           value: "DEBUG"
 
-  - it: exposes the exact service host allowlist to the API
-    set:
-      config.serviceUrlAllowlist:
-        - prometheus.monitoring.svc
-        - api.example.test
-    asserts:
-      - equal:
-          path: data.SERVICE_URL_ALLOWLIST
-          value: prometheus.monitoring.svc,api.example.test
-
   - it: passes the Helm render capabilities of the installed cluster
     asserts:
       - isNotEmpty:

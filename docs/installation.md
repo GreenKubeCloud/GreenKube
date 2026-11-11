@@ -233,7 +233,6 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `config.collection.maxBackfill` | `24h` | How far back the controller backfills missing windows after downtime. |
 | `config.opencost.url` | `""` | Empty attempts in-cluster discovery. |
 | `config.kubernetesMetricsApiEnabled` | `true` | Read per-container usage from `metrics.k8s.io` when available. |
-| `config.serviceUrlAllowlist` | `[]` | Exact service hosts accepted in addition to the configured Prometheus, OpenCost and Boavizta hosts. |
 | `config.externalUrl` | `""` | Public URL of the GreenKube UI, for deep links in pull requests. |
 
 #### Database and retention

@@ -61,13 +61,6 @@ def _mock_health_response():
     )
 
 
-def _allow_service_hosts(monkeypatch, *hosts: str) -> None:
-    from greenkube.core.config import config
-
-    monkeypatch.setenv("SERVICE_URL_ALLOWLIST", ",".join(hosts))
-    config.reload()
-
-
 class TestGetServicesHealth:
     """Tests for GET /api/v1/health/services."""
 
