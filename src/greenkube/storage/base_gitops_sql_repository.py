@@ -64,6 +64,9 @@ _PRUNE_BATCH_SIZE = 100
 _PLAN_HYDRATION_BATCH_SIZE = 500
 _MAX_PLAN_LIST_LIMIT = 10_000
 
+#: Provider states written after a real provider call (``unverified`` until the first one).
+PROVIDER_CHECK_STATUSES = frozenset({"verified", "error"})
+
 #: Action states in which a pull request for the recommendation is open, or
 #: merged and not yet observed in the cluster: the recommendation is ``pr_open``.
 _PR_IN_FLIGHT_ACTION_STATUSES = frozenset({ActionStatus.PR_OPEN, ActionStatus.MERGED, ActionStatus.SYNC_PENDING})
@@ -323,6 +326,42 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             row = await self._fetchrow(connection, "SELECT * FROM gitops_providers WHERE id = ?", (provider.id,))
             assert row is not None
             return row_to_gitops_provider(row)
+
+    async def record_provider_check(
+        self,
+        provider_id: str,
+        status: str,
+        *,
+        error_code: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record the outcome of a real provider call without touching its configuration.
+
+        ``status`` is ``verified`` after a successful authenticated call and
+        ``error`` (with ``error_code``) after an authentication or permission
+        failure. Returns whether an enabled provider row was updated.
+        """
+        if status not in PROVIDER_CHECK_STATUSES:
+            raise ValueError(f"unsupported provider check status {status!r}")
+        checked = ensure_utc(checked_at) if checked_at is not None else datetime.now(timezone.utc)
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                """
+                UPDATE gitops_providers
+                SET status = ?, last_checked_at = ?, last_error_code = ?, updated_at = ?
+                WHERE id = ? AND enabled = ?
+                """,
+                (
+                    status,
+                    self._db_datetime(checked),
+                    error_code if status != "verified" else None,
+                    self._db_datetime(checked),
+                    provider_id,
+                    True,
+                ),
+            )
+        return bool(updated)
 
     async def get_provider_config(self, provider_id: str) -> GitOpsProviderConfig | None:
         async with self.db_manager.connection_scope() as connection:

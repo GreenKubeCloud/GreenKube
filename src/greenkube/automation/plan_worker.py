@@ -309,6 +309,12 @@ class RegistryPlanProviderResolver:
         provider = await self.registry.get_provider(source.provider_id, repository)
         return GitProviderTarget(provider=provider, repository=repository)
 
+    async def record_check(self, provider_id: str, status: str, *, error_code: str | None = None) -> None:
+        """Persist the provider state observed by a real call (``verified`` or ``error``)."""
+        record = getattr(self.provider_repository, "record_provider_check", None)
+        if record is not None:
+            await record(provider_id, status, error_code=error_code)
+
 
 @dataclass(slots=True)
 class _Execution:
@@ -1730,6 +1736,18 @@ class PlanWorker:
         completed_status = getattr(completed_status, "value", completed_status)
         if isinstance(completed_status, str):
             record_plan_operation(completed_status, _plan_operation_type(plan))
+        # The provider authenticated and wrote a branch, a commit and a pull request.
+        await self._record_provider_check(plan.source.provider_id, "verified")
+
+    async def _record_provider_check(self, provider_id: str, status: str, *, error_code: str | None = None) -> None:
+        """Best effort: a provider state write never fails or retries the operation."""
+        record = getattr(self.provider_resolver, "record_check", None)
+        if record is None:
+            return
+        try:
+            await record(provider_id, status, error_code=error_code)
+        except Exception as exc:
+            logger.warning("Could not record Git provider %s state %s: %s", provider_id, status, exc)
 
     async def _finish_failure(self, execution: _Execution, plan: Plan | None, error: Exception) -> None:
         retryable = _is_retryable(error)
@@ -1798,6 +1816,9 @@ class PlanWorker:
                         retryable=True,
                     )
 
+        provider_error_code = _provider_access_error_code(error)
+        if plan is not None and provider_error_code is not None:
+            await self._record_provider_check(plan.source.provider_id, "error", error_code=provider_error_code)
         failed_operation = await self.operations.mark_failed(
             execution.lease,
             _error_message(error),
@@ -1836,6 +1857,21 @@ class PlanWorker:
                         actor="automation-worker",
                         plan_id=plan.plan_id,
                     )
+
+
+def _provider_access_error_code(error: BaseException) -> str | None:
+    """``auth_failed`` or ``permission_denied`` when the provider refused the token, else None."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, GitProviderError) and not isinstance(current, GitProviderTransientError):
+            if current.status_code == 401:
+                return "auth_failed"
+            if current.status_code == 403:
+                return "permission_denied"
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _parse_request_quantity(resource: str, value: object) -> int | None:

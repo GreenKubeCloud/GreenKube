@@ -568,12 +568,16 @@ class FakeProviderResolver:
         self.provider = provider
         self.error = error
         self.calls: list[WorkloadSource] = []
+        self.checks: list[tuple[str, str, str | None]] = []
 
     async def resolve(self, source: WorkloadSource) -> GitProviderTarget:
         self.calls.append(source)
         if self.error is not None:
             raise self.error
         return GitProviderTarget(self.provider, self.provider.repo)
+
+    async def record_check(self, provider_id: str, status: str, *, error_code: str | None = None) -> None:
+        self.checks.append((provider_id, status, error_code))
 
 
 class FakeRevisionResolver:
@@ -1735,3 +1739,29 @@ def test_effective_change_compares_normalized_quantities(requests, live, no_op):
         assert error.value.plan_status is PlanStatus.FAILED and not error.value.retryable
     else:
         PlanWorker._ensure_effective_change(candidate, baseline)
+
+
+@pytest.mark.asyncio
+async def test_successful_pull_request_marks_the_provider_verified():
+    """The provider status left "unverified" forever after successful PRs (e2e defect)."""
+    worker, _, _, _, _ = _worker()
+
+    assert await worker.process_once("worker-1")
+
+    resolver = cast(FakeProviderResolver, worker.provider_resolver)
+    assert resolver.checks == [("github-main", "verified", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [(401, "auth_failed"), (403, "permission_denied"), (500, None)],
+)
+async def test_rejected_credentials_mark_the_provider_in_error(status_code, error_code):
+    worker, _, _, _, _ = _worker(provider_error=GitProviderError("provider refused the token", status_code=status_code))
+
+    assert await worker.process_once("worker-1")
+
+    resolver = cast(FakeProviderResolver, worker.provider_resolver)
+    expected = [("github-main", "error", error_code)] if error_code else []
+    assert resolver.checks == expected
