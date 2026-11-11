@@ -144,6 +144,19 @@ def test_a_single_replica_warm_hour_counts_with_its_average():
     assert row.memory_usage_max == 1100 * MIB
 
 
+def test_a_pod_restarting_every_compressed_hour_keeps_each_hour_peak_in_the_maximum():
+    """Chronic restarts: every hour is warm, so its percentiles fall back to the hourly
+    average (coarser than the raw path), while the maximum keeps every hour's peak so
+    the rightsizing bounds still see the startup spikes."""
+    start = _hour() - timedelta(hours=3)
+    rows = [_hourly(start + timedelta(hours=h), "api-a", 3 + h, 300 + 10 * h, 900 + 50 * h) for h in range(4)]
+    for h in range(1, 4):
+        (row,) = rollup_rows([rows[h]], warmup_seconds=600, source="hourly", context_rows=[rows[h - 1]])
+        assert row.memory_usage_p99 == (300 + 10 * h) * MIB
+        assert row.memory_usage_p95 == (300 + 10 * h) * MIB
+        assert row.memory_usage_max == (900 + 50 * h) * MIB
+
+
 def test_a_replica_new_in_a_compressed_hour_warms_up():
     hour = _hour()
     previous = [_hourly(hour - timedelta(hours=1), "api-a", 3, 300, 320)]
