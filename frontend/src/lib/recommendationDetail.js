@@ -122,27 +122,60 @@ export function evidenceOf(rec) {
 	};
 }
 
+/** A consensus value in its resource unit: `cpu_request_m` → "250m", `memory_request_bytes` → "512Mi". */
+export function formatConsensusValue(resource, value) {
+	const number = finite(value);
+	if (number === null) return value === null || value === undefined ? '—' : String(value);
+	const name = String(resource ?? '');
+	if (name.startsWith('cpu')) return formatResource('cpu', number);
+	if (name.startsWith('memory')) return formatResource('memory', number);
+	return String(number);
+}
+
+function vote(item) {
+	if (!item || typeof item !== 'object' || typeof item.source_id !== 'string') return null;
+	return {
+		sourceId: item.source_id,
+		family: typeof item.family === 'string' ? item.family : null,
+		value: item.value ?? null,
+		direction: typeof item.direction === 'string' ? item.direction : null,
+		counted: item.counted !== false,
+		supportsChosen: item.supports_chosen === true
+	};
+}
+
 /**
- * Consensus across sources (Recommendation v2, E6/E7). Returns null for a v1
- * record so the page hides the section entirely.
+ * Consensus across sources (Recommendation v2, E6/E7): `{policy, resource,
+ * value, chosen_from, agreement, contested, reasons, spread, independent_votes,
+ * votes}`. Returns null for a v1 record so the page hides the section entirely.
  */
 export function consensusOf(rec) {
 	const consensus = rec?.consensus;
 	if (!consensus || typeof consensus !== 'object') return null;
 	const spread = consensus.spread && typeof consensus.spread === 'object' ? consensus.spread : {};
+	const resource = typeof consensus.resource === 'string' ? consensus.resource : null;
+	const votes = Array.isArray(consensus.votes) ? consensus.votes : Array.isArray(rec.signals) ? rec.signals : [];
 	return {
 		policy: typeof consensus.policy === 'string' ? consensus.policy : null,
+		resource,
+		value: consensus.value ?? null,
 		chosenFrom: Array.isArray(consensus.chosen_from) ? consensus.chosen_from.map(String) : [],
 		agreement: finite(consensus.agreement),
 		contested: consensus.contested === true,
+		reasons: Array.isArray(consensus.reasons) ? consensus.reasons.filter((item) => typeof item === 'string') : [],
+		independentVotes: finite(consensus.independent_votes),
 		revision: finite(rec.revision),
 		spread: Object.entries(spread)
 			.filter(([, values]) => values && typeof values === 'object')
-			.map(([resource, values]) => ({
-				resource,
-				values: Object.entries(values).map(([source, value]) => ({ source, value }))
+			.map(([name, values]) => ({
+				resource: name,
+				values: Object.entries(values).map(([source, value]) => ({
+					source,
+					value,
+					display: formatConsensusValue(name, value)
+				}))
 			})),
-		signals: Array.isArray(rec.signals) ? rec.signals : []
+		votes: votes.map(vote).filter(Boolean)
 	};
 }
 

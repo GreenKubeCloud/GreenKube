@@ -3,6 +3,7 @@ import {
 	consensusOf,
 	eventLabel,
 	evidenceOf,
+	formatConsensusValue,
 	formatResource,
 	impactOf,
 	measuredOf,
@@ -110,22 +111,52 @@ describe('consensusOf', () => {
 			revision: 3,
 			consensus: {
 				policy: 'safest',
+				resource: 'cpu_request_m',
+				value: 300,
 				chosen_from: ['vpa', 'greenkube'],
 				agreement: 0.75,
 				contested: false,
-				spread: { cpu_request: { vpa: '250m', greenkube: '300m' }, bogus: 'x' }
+				reasons: ['directions disagree', 7],
+				independent_votes: 2,
+				spread: { cpu_request_m: { vpa: 250, greenkube: 300 }, bogus: 'x' },
+				votes: [
+					{ source_id: 'vpa', family: 'vpa', value: 250, direction: 'decrease', counted: true, supports_chosen: false },
+					{ source_id: 'goldilocks', family: 'vpa', value: 250, counted: false },
+					{ value: 1 }
+				]
 			}
 		});
-		expect(consensus).toMatchObject({ policy: 'safest', chosenFrom: ['vpa', 'greenkube'], agreement: 0.75, revision: 3 });
+		expect(consensus).toMatchObject({
+			policy: 'safest',
+			resource: 'cpu_request_m',
+			value: 300,
+			chosenFrom: ['vpa', 'greenkube'],
+			agreement: 0.75,
+			independentVotes: 2,
+			reasons: ['directions disagree'],
+			revision: 3
+		});
 		expect(consensus.spread).toEqual([
 			{
-				resource: 'cpu_request',
+				resource: 'cpu_request_m',
 				values: [
-					{ source: 'vpa', value: '250m' },
-					{ source: 'greenkube', value: '300m' }
+					{ source: 'vpa', value: 250, display: '250m' },
+					{ source: 'greenkube', value: 300, display: '300m' }
 				]
 			}
 		]);
+		expect(consensus.votes).toEqual([
+			{ sourceId: 'vpa', family: 'vpa', value: 250, direction: 'decrease', counted: true, supportsChosen: false },
+			{ sourceId: 'goldilocks', family: 'vpa', value: 250, direction: null, counted: false, supportsChosen: false }
+		]);
+	});
+
+	it('formats consensus values in their resource unit', () => {
+		expect(formatConsensusValue('memory_request_bytes', 512 * 1024 * 1024)).toBe('512Mi');
+		expect(formatConsensusValue('cpu_request_m', 250)).toBe('250m');
+		expect(formatConsensusValue('replicas', 3)).toBe('3');
+		expect(formatConsensusValue('schedule', '0 8 * * 1-5')).toBe('0 8 * * 1-5');
+		expect(formatConsensusValue('cpu_request_m', null)).toBe('—');
 	});
 });
 

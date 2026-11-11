@@ -1881,6 +1881,12 @@
 												<span class="text-sm font-semibold text-dark-100">
 													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
 												</span>
+												<a
+													href="/recommendations/{rec.id}"
+													class="text-[10px] text-green-400 hover:text-green-300"
+													aria-label="Details of recommendation {rec.id}"
+													on:click|stopPropagation
+												>Details</a>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if rec.status === 'verified'}
 													<span class="text-[10px] px-2 py-0.5 rounded-sm bg-green-600/20 text-green-400">✓ verified</span>
@@ -2166,7 +2172,9 @@
 										<div class="min-w-0">
 											<div class="flex items-center gap-2 flex-wrap">
 												<h3 class="text-sm font-semibold text-dark-100">
-													{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
+													<a href="/recommendations/{rec.id}" class="hover:text-green-300" data-testid="recommendation-detail-link">
+														{rec.pod_name ?? rec.target_node ?? rec.namespace ?? 'Cluster-wide'}
+													</a>
 												</h3>
 												<span class="badge-{cfg.color} text-[10px]">{cfg.label}</span>
 												{#if hasSafePerContainerAction(rec) && automationStatus?.enabled === true && automationStatus?.ready === true}
