@@ -125,13 +125,15 @@ class TestLimitsPolicy:
         summary = _summary(cpu_limit=1000, cpu=_stats(avg=900, p95=980, p99=990, peak=1000))
         proposal = cpu_proposal(Config(), summary)
         assert proposal is not None and proposal.proposed > 1000
-        assert proposal.limit_advice and "below the proposed request" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "below the proposed request" in proposal.limit_advice[0].text
+        assert (proposal.limit_advice[0].action, proposal.limit_advice[0].reason) == ("raise", "below_request")
 
     def test_keep_flags_cpu_throttling(self):
         summary = _summary(days=14, cpu_limit=2000, throttling_ratio=0.12)
         proposal = cpu_proposal(Config(), summary)
         assert proposal is not None and proposal.direction == "decrease"
-        assert proposal.limit_advice and "throttled in 12%" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "throttled in 12%" in proposal.limit_advice[0].text
+        assert proposal.limit_advice[0].reason == "throttling"
 
     def test_keep_leaves_healthy_limits_alone(self):
         proposal = cpu_proposal(Config(), _summary(cpu_limit=2000))
@@ -139,9 +141,10 @@ class TestLimitsPolicy:
 
     def test_remove_cpu_policy(self):
         proposal = cpu_proposal(_config(RECOMMENDATION_LIMITS_POLICY="remove_cpu"), _summary(cpu_limit=2000))
-        assert proposal is not None and proposal.limit_advice == [
+        assert proposal is not None and [advice.text for advice in proposal.limit_advice] == [
             "Remove the CPU limit (2000m) (limits policy remove_cpu)."
         ]
+        assert (proposal.limit_advice[0].action, proposal.limit_advice[0].current) == ("remove", 2000)
 
     def test_memory_equals_request_keeps_the_observed_maximum_covered(self):
         summary = _summary(memory=_stats(avg=50 * MIB, p95=60 * MIB, p99=70 * MIB, peak=500 * MIB))
@@ -150,7 +153,8 @@ class TestLimitsPolicy:
         assert keep is not None and equal is not None
         # Under memory_equals_request the request becomes the limit: never below max x 1.1.
         assert equal.proposed >= 500 * MIB * 1.1 > keep.proposed
-        assert "equal to the request" in equal.limit_advice[0]
+        assert "equal to the request" in equal.limit_advice[0].text
+        assert equal.limit_advice[0].minimum == equal.proposed
 
     def test_keep_asks_to_raise_a_memory_limit_below_the_new_floor(self):
         summary = _summary(
@@ -161,7 +165,10 @@ class TestLimitsPolicy:
         proposal = memory_proposal(Config(), summary)
         assert proposal is not None and proposal.direction == "increase"
         assert "working_set_near_limit" in proposal.triggers
-        assert proposal.limit_advice and "Raise the memory limit (1100MiB)" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "Raise the memory limit (1100MiB)" in proposal.limit_advice[0].text
+        advice = proposal.limit_advice[0]
+        assert (advice.resource, advice.action, advice.current) == ("memory", "raise", 1100 * MIB)
+        assert advice.minimum is not None and advice.minimum >= 1050 * MIB * 1.1
 
     def test_invalid_policy_is_rejected(self):
         with pytest.raises(ValueError):

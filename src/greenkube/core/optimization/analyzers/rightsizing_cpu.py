@@ -4,12 +4,14 @@ import logging
 from typing import TYPE_CHECKING, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal
+from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, skipped_increase
+from greenkube.core.optimization.analyzers.rightsizing_memory import Skip, _pod_level_note, increase_sizing_text
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 
 if TYPE_CHECKING:
+    from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
 
 LOG = logging.getLogger(__name__)
@@ -20,13 +22,30 @@ class CpuRightsizingAnalyzer(Analyzer):
 
     capability = "cpu_rightsizing"
 
+    def __init__(self, config: "Config"):
+        super().__init__(config)
+        #: Targets whose usage calls for a change that was not proposed, with the reason.
+        self.skipped: List[Skip] = []
+
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
         projector = ImpactProjector.for_context(context)
+        self.skipped = []
 
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
+            skip = skipped_increase(cfg, summary, "cpu")
+            if skip is not None:
+                self.skipped.append((target, container_name, "cpu", skip))
+                LOG.info(
+                    "CPU increase for %s/%s/%s not proposed (%s): usage is only known for the whole pod.",
+                    ns,
+                    target_kind,
+                    target_name,
+                    skip,
+                )
+                continue
             proposal = cpu_proposal(cfg, summary)
             stats = summary.cpu
             if proposal is None or stats is None:
@@ -43,17 +62,18 @@ class CpuRightsizingAnalyzer(Analyzer):
             if container_name:
                 label = f"{label} container '{container_name}'"
             usage_ratio = stats.avg / proposal.current
-            limit_text = "".join(f" {advice}" for advice in proposal.limit_advice)
+            limit_text = proposal.limit_text
 
             if proposal.direction == "increase":
                 description = (
-                    f"{label} uses p99 {stats.p99:.0f}m and max {stats.max:.0f}m of {proposal.current}m CPU "
-                    f"requested. Recommend increasing to {proposal.proposed}m.{limit_text}"
+                    f"{label} uses p99 {stats.p99:.0f}m and max {stats.max:.0f}m per replica of "
+                    f"{proposal.current}m CPU requested. Recommend increasing to {proposal.proposed}m.{limit_text}"
                 )
                 reason = (
                     f"Reliability: p99 CPU usage ({stats.p99:.0f}m) is above "
                     f"{cfg.RIGHTSIZING_INCREASE_THRESHOLD:.0%} of the request; the workload competes for CPU "
-                    f"under contention. Average usage is {usage_ratio:.0%} of the request."
+                    f"under contention. Average usage is {usage_ratio:.0%} of the request. "
+                    f"{increase_sizing_text(cfg, proposal, stats, 'm')}"
                 )
                 priority = "high" if stats.p99 > proposal.current else "medium"
             else:
@@ -74,7 +94,7 @@ class CpuRightsizingAnalyzer(Analyzer):
                 reason = (
                     f"Average CPU usage is {usage_ratio:.0%} of the request. "
                     f"P95 usage is {stats.p95:.0f}m and observed max is {stats.max:.0f}m."
-                    f"{floor_reason}"
+                    f"{floor_reason}{_pod_level_note(container_name)}"
                 )
                 priority = "medium"
 

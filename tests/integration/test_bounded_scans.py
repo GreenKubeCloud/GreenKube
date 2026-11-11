@@ -138,24 +138,26 @@ def _rows(start: datetime, hours: int) -> list[CombinedMetric]:
                     co2e_grams=0.2,
                 )
             )
-        rows.append(
-            CombinedMetric(
-                pod_name="hot-0",
-                namespace="shop",
-                owner_kind="StatefulSet",
-                owner_name="hot",
-                timestamp=ts,
-                duration_seconds=300,
-                node="node-a",
-                cpu_request=200,
-                memory_request=512 * MIB,
-                cpu_usage_millicores=190 + (step % 3) * 10,
-                memory_usage_bytes=100 * MIB,
-                total_cost=0.002,
-                cost_source="opencost",
-                joules=2000.0,
-            )
-        )
+        hot: dict[str, Any] = {
+            "pod_name": "hot-0",
+            "namespace": "shop",
+            "owner_kind": "StatefulSet",
+            "owner_name": "hot",
+            "timestamp": ts,
+            "duration_seconds": 300,
+            "cpu_request": 200,
+            "memory_request": 512 * MIB,
+            "cpu_usage_millicores": 190 + (step % 3) * 10,
+            "memory_usage_bytes": 100 * MIB,
+            "total_cost": 0.002,
+            "cost_cpu": 0.0015,
+            "cost_ram": 0.0005,
+            "cost_source": "opencost",
+            "joules": 2000.0,
+        }
+        rows.append(CombinedMetric(**hot, node="node-a"))
+        # Increases need container-level usage (pod-level usage never sizes a container).
+        rows.append(CombinedMetric(**hot, container_name="db"))
         rows.append(
             CombinedMetric(
                 pod_name="forgotten",
@@ -204,7 +206,7 @@ async def test_scan_never_materializes_raw_rows(db):
     assert all(isinstance(row, BaselineMetric) for row in (*context.metrics, *context.container_metrics))
     # Pod-level rows: at most one per target, node and hour of day (here 3 targets, 2 nodes for api).
     assert len(context.metrics) <= 4 * 24
-    assert len(context.container_metrics) <= 2
+    assert len(context.container_metrics) <= 3
     # The window is annualized over the observed span (first hour to now), not the 14-day lookback.
     assert context.analysis_window_seconds is not None
     observed = (datetime.now(timezone.utc) - start).total_seconds()
@@ -218,7 +220,7 @@ async def test_scan_never_materializes_raw_rows(db):
     assert cpu.potential_savings_cost is not None and cpu.potential_savings_cost > 0
     assert cpu.evidence is not None and cpu.evidence.current.cpu_request_millicores == 1000
     assert cpu.patch is not None
-    hot = by_key[(RecommendationType.RIGHTSIZING_CPU, "shop", "hot", None)]
+    hot = by_key[(RecommendationType.RIGHTSIZING_CPU, "shop", "hot", "db")]
     assert hot.recommended_cpu_request_millicores is not None and hot.recommended_cpu_request_millicores > 200
     assert hot.potential_savings_cost is not None and hot.potential_savings_cost < 0
     assert (RecommendationType.ZOMBIE_POD, "idle-ns", "forgotten", None) in by_key

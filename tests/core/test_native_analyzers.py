@@ -44,10 +44,12 @@ def _make_metric(
     emaps_zone: str = "FR",
     owner_kind: str | None = None,
     owner_name: str | None = None,
+    container_name: str | None = None,
 ) -> CombinedMetric:
     """Create a CombinedMetric for testing."""
     return CombinedMetric(
         pod_name=pod_name,
+        container_name=container_name,
         namespace=namespace,
         cpu_request=cpu_request,
         memory_request=memory_request,
@@ -308,6 +310,7 @@ class TestRightsizingCPU:
         metrics = [
             _make_metric(
                 pod_name="bursty-api",
+                container_name="api",
                 cpu_request=500,
                 cpu_usage_millicores=25,
                 cpu_usage_max_millicores=819,
@@ -326,6 +329,16 @@ class TestRightsizingCPU:
         assert rec.recommended_cpu_request_millicores > 819
         # An increase costs money: the Impact Model projects a negative saving.
         assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
+
+    def test_pod_level_usage_never_yields_a_cpu_increase(self, recommender):
+        """Usage known only for the whole pod cannot size one container (USER BUG 2)."""
+        metrics = [
+            _make_metric(pod_name="bursty-api", cpu_request=500, cpu_usage_millicores=25, cpu_usage_max_millicores=819)
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+
+        assert [r for r in recs if r.type == RecommendationType.RIGHTSIZING_CPU] == []
 
     def test_no_cpu_rightsizing_when_minimum_floor_removes_savings(self, recommender):
         """Minimum CPU floors must not turn an equal request into a savings recommendation."""
@@ -510,6 +523,7 @@ class TestRightsizingMemory:
         metrics = [
             _make_metric(
                 pod_name="bursty-cache",
+                container_name="cache",
                 memory_request=500 * mib,
                 memory_usage_bytes=25 * mib,
                 memory_usage_max_bytes=819 * mib,
@@ -528,6 +542,22 @@ class TestRightsizingMemory:
         assert rec.recommended_memory_request_bytes >= 819 * mib * 1.1
         assert rec.priority == "high"
         assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
+
+    def test_pod_level_usage_never_yields_a_memory_increase(self, recommender):
+        """Usage known only for the whole pod cannot size one container (USER BUG 2)."""
+        mib = 1024 * 1024
+        metrics = [
+            _make_metric(
+                pod_name="bursty-cache",
+                memory_request=500 * mib,
+                memory_usage_bytes=25 * mib,
+                memory_usage_max_bytes=819 * mib,
+            )
+        ]
+
+        recs = recommender.generate_recommendations(metrics)
+
+        assert [r for r in recs if r.type == RecommendationType.RIGHTSIZING_MEMORY] == []
 
     def test_memory_rightsizing_uses_latest_request_not_historical_maximum(self, recommender):
         """A workload already reduced during the lookback should use its current memory request."""
