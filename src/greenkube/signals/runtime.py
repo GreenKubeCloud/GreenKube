@@ -27,6 +27,7 @@ from greenkube.signals.sdk import (
     SourceBatch,
     SourceHealth,
     SourceHealthStatus,
+    accepts_v1_recommendations,
 )
 
 if TYPE_CHECKING:
@@ -154,6 +155,8 @@ class SourceRunner:
         limits = cls.limits
         started_at = self.clock()
         started = time.monotonic()
+        # Only built-in sources feed the v1 pipeline and join a v1 source group.
+        trusted_v1 = accepts_v1_recommendations(source)
         previous_failures = previous.consecutive_failures if previous is not None else 0
         last_collected_at = _aware(previous.last_collected_at) if previous is not None else None
 
@@ -195,7 +198,7 @@ class SourceRunner:
             )
             return SourceReport(
                 run=record,
-                legacy_source=cls.legacy_source,
+                legacy_source=cls.legacy_source if trusted_v1 else None,
                 signals=list(signals or []),
                 recommendations=list(recommendations or []),
             )
@@ -256,13 +259,31 @@ class SourceRunner:
             return finish(SourceRunStatus.FAILED, error_code="invalid_batch", error="invalid batch", health=health)
 
         signals, diagnostics, rejected = self._validate(source, batch)
+        recommendations = list(batch.recommendations or [])
+        if recommendations and not trusted_v1:
+            # FAIL CLOSED: third-party advice never bypasses signals, consensus and
+            # risk review to reach the v1 pipeline (persistence, pull requests).
+            logger.warning(
+                "Source '%s' returned %d v1 recommendations; ignored (only signals are accepted).",
+                source_id,
+                len(recommendations),
+            )
+            diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="recommendations_ignored",
+                    message="v1 recommendations are accepted from built-in sources only; emit signals instead",
+                    count=len(recommendations),
+                )
+            )
+            recommendations = []
         complete = batch.complete and not rejected
         if complete:
             return finish(
                 SourceRunStatus.SUCCEEDED,
                 health=health,
                 signals=signals,
-                recommendations=batch.recommendations,
+                recommendations=recommendations,
                 diagnostics=diagnostics,
                 collected=True,
             )
@@ -273,7 +294,7 @@ class SourceRunner:
             error="incomplete result",
             health=health,
             signals=signals,
-            recommendations=batch.recommendations,
+            recommendations=recommendations,
             diagnostics=diagnostics,
             collected=True,
         )

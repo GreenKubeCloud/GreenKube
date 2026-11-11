@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from greenkube.signals.sdk import (
     ENTRY_POINT_GROUP,
+    PLUGIN_ORIGIN,
     EnabledMode,
     Source,
     SourceDeps,
@@ -152,7 +153,7 @@ class SourceRegistry:
             try:
                 classes = _entry_point_sources(point.load())
                 for source_class in classes:
-                    self.register(source_class, origin="plugin", entry_point=name, distribution=dist)
+                    self.register(source_class, origin=PLUGIN_ORIGIN, entry_point=name, distribution=dist)
             except Exception as exc:
                 logger.error("Could not load source plugin %s: %s", name, _message(exc))
                 self.problems.append(
@@ -218,7 +219,10 @@ def instantiate(configured: Sequence[ConfiguredSource], deps: SourceDeps) -> Tup
         if item.enabled == EnabledMode.FALSE or item.error is not None or item.settings is None:
             continue
         try:
-            sources.append(item.descriptor.source_class(item.settings, deps))
+            source = item.descriptor.source_class(item.settings, deps)
+            # Set after construction so the source cannot choose its own origin.
+            source.registry_origin = item.descriptor.origin
+            sources.append(source)
         except Exception as exc:
             logger.exception("Could not create source '%s'; continuing without it.", item.id)
             errors[item.id] = _message(exc)

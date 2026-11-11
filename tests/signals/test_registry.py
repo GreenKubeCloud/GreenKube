@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import ClassVar, FrozenSet
+from typing import ClassVar, FrozenSet, Optional
 
 import pytest
 from pydantic import ValidationError
 
 from greenkube.core.config import Config
+from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.optimization.registry import build_signal_sources, build_source_registry
+from greenkube.models.metrics import Recommendation, RecommendationType
 from greenkube.signals.model import Capability
 from greenkube.signals.registry import parse_sources_config
 from greenkube.signals.sdk import EnabledMode, Source, SourceBatch, SourceSettings, SourceTier
@@ -165,6 +167,82 @@ class TestPlugins:
         sources = build_signal_sources(Config(), entry_points=lambda: [_entry_point("x", lambda: Exploding)])
         assert "acme" not in [s.source_id for s in sources]
         assert "greenkube.rightsizing_cpu" in [s.source_id for s in sources]
+
+
+class _CleanupPlugin(Source):
+    """A plugin that tries to push v1 deletion advice around signals and consensus."""
+
+    id: ClassVar[str] = "acme.cleanup"
+    display_name: ClassVar[str] = "Acme cleanup"
+    capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.CLEANUP})
+
+    async def collect(self, ctx):
+        return SourceBatch(
+            recommendations=[
+                Recommendation(
+                    pod_name="cilium-gateway",
+                    namespace="kube-system",
+                    type=RecommendationType.ORPHANED_LOAD_BALANCER,
+                    scope="workload",
+                    description="delete it",
+                    potential_savings_cost=10.0,
+                )
+            ]
+        )
+
+
+class TestPluginTrust:
+    """FAIL CLOSED: third-party sources never feed the v1 pipeline directly."""
+
+    def test_a_plugin_declaring_a_legacy_source_is_rejected(self):
+        class Impostor(AcmeSource):
+            id: ClassVar[str] = "acme.impostor"
+            legacy_source: ClassVar[Optional[str]] = "greenkube"
+
+        registry, configured = build_source_registry(
+            Config(), entry_points=lambda: [_entry_point("impostor", lambda: Impostor)]
+        )
+        assert "acme.impostor" not in {item.id for item in configured}
+        [problem] = registry.problems
+        assert problem.code == "plugin_load_failed"
+        assert "legacy_source" in problem.message
+
+    def test_a_plugin_subclassing_a_builtin_adapter_is_rejected(self):
+        from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
+        from greenkube.signals.adapters import analyzer_source_class
+
+        base = analyzer_source_class(DEFAULT_ANALYZERS[0])
+        fake = type("FakeNative", (base,), {"id": "acme.native", "legacy_source": None})
+        registry, configured = build_source_registry(
+            Config(), entry_points=lambda: [_entry_point("fake", lambda: fake)]
+        )
+        assert "acme.native" not in {item.id for item in configured}
+        assert "built-in adapter" in registry.problems[0].message
+
+    def test_instances_carry_their_registry_origin(self):
+        sources = build_signal_sources(Config(), entry_points=lambda: [_entry_point("acme", lambda: AcmeSource)])
+        origins = {source.source_id: source.registry_origin for source in sources}
+        assert origins["acme"] == "plugin"
+        assert origins["vpa"] == "builtin" and origins["greenkube.orphaned_lb"] == "builtin"
+
+    async def test_plugin_recommendations_never_reach_the_engine_output(self):
+        sources = [
+            source
+            for source in build_signal_sources(
+                Config(), entry_points=lambda: [_entry_point("cleanup", lambda: _CleanupPlugin)]
+            )
+            if source.source_id == "acme.cleanup"
+        ]
+        engine = OptimizationEngine(config=Config(), sources=sources)
+        result = await engine.collect(OptimizationContext(config=Config(), metrics=[]))
+        assert result.recommendations == []
+        [report] = result.source_reports
+        assert report.recommendations == [] and report.legacy_source is None
+        assert report.run.recommendation_count == 0
+        [diagnostic] = [d for d in report.run.diagnostics if d.code == "recommendations_ignored"]
+        assert diagnostic.count == 1
+        # The plugin forms its own v1 outcome: it never joins (or completes) the built-in 'greenkube' group.
+        assert [outcome.source for outcome in result.source_outcomes] == ["acme.cleanup"]
 
 
 class TestSourcesConfigSetting:

@@ -18,7 +18,7 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 | **Proposal** | The typed change: `container_resources`, `replicas`, `hpa`, `schedule`, `deletion`, `node_pool`, `advisory` (not PR-able). |
 | **Source run** | One execution of one source in one scan, with its status, health and counts. |
 
-Signals are not recommendations. Today, signals of built-in sources map one-to-one to the v1 recommendations the API and UI show. The consensus engine (roadmap E6) will build one recommendation per target and capability from the signals of every source; until then, signals of third-party sources are recorded and visible in the API but do not create recommendations.
+Signals are not recommendations. Today, signals of built-in sources map one-to-one to the v1 recommendations the API and UI show. The consensus engine (roadmap E6) will build one recommendation per target and capability from the signals of every source; until then, signals of third-party sources are recorded and visible in the API but do not create recommendations. This is enforced, not a convention: the runner passes `SourceBatch.recommendations` to the recommendation pipeline only for built-in sources, and drops them for any plugin with a `recommendations_ignored` diagnostic on its run. The registry also rejects a plugin that sets `legacy_source` or subclasses a built-in adapter (`AnalyzerSource`, `RecommendationSourceAdapter`). Third-party advice can therefore never reach a pull request without going through consensus and risk review (FAIL CLOSED).
 
 ## The signal model
 
@@ -100,6 +100,7 @@ Rules:
 - **Read only.** A source never writes to the cluster or to Git.
 - **Partial results:** return `complete=False` when part of your input could not be read (a failed page, unreadable entries). GreenKube then keeps your previous advice instead of treating it as resolved.
 - **Diagnostics** explain what you skipped (`Diagnostic(code="skipped_vpas", message="updateMode=Auto", count=12)`); they are stored with the run and shown by `GET /api/v1/sources/{id}/runs`.
+- **Signals only.** Do not set `SourceBatch.recommendations` or `legacy_source`: they are reserved for built-in sources (see above).
 - Raise on unexpected errors: the runner records the exception type (never its message, which may contain credentials) and the scan continues.
 
 ## How sources run

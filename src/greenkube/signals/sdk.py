@@ -176,8 +176,12 @@ class SourceBatch:
     #: recommendations are kept and never marked stale by this run.
     complete: bool = True
     diagnostics: List[Diagnostic] = field(default_factory=list)
-    #: v1 recommendations, set only by adapters over v1 connectors and native
-    #: analyzers: they feed the current recommendation pipeline unchanged.
+    #: v1 recommendations, honoured only for built-in adapters (native analyzers,
+    #: VPA, NodePool) and v1 connectors passed by GreenKube itself: they feed the
+    #: current recommendation pipeline unchanged. The runner drops them for every
+    #: other source (see :func:`accepts_v1_recommendations`): third-party advice
+    #: reaches pull requests only through signals and consensus (E6), never
+    #: around them.
     recommendations: List["Recommendation"] = field(default_factory=list)
 
 
@@ -193,10 +197,15 @@ class Source(ABC):
     limits: ClassVar[SourceLimits] = SourceLimits()
     default_enabled: ClassVar[EnabledMode] = EnabledMode.AUTO
     #: v1 ``Recommendation.source`` value this source's recommendations carry,
-    #: for sources that feed the v1 pipeline (``greenkube``, ``vpa``, ``karpenter``).
+    #: for built-in sources that feed the v1 pipeline (``greenkube``, ``vpa``,
+    #: ``karpenter``). Plugins must leave it None: the registry rejects them otherwise.
     legacy_source: ClassVar[Optional[str]] = None
     #: One-line description shown by ``GET /api/v1/sources``.
     description: ClassVar[str] = ""
+
+    #: Set by the registry on every instance it creates (``builtin`` or
+    #: ``plugin``); None for sources a caller builds directly. Not a plugin API.
+    registry_origin: Optional[str] = None
 
     def __init__(self, settings: SourceSettings, deps: SourceDeps):
         self.settings = settings
@@ -220,6 +229,20 @@ class Source(ABC):
         return type(self).id
 
 
+#: ``registry_origin`` of sources loaded from the ``greenkube.sources`` entry points.
+PLUGIN_ORIGIN = "plugin"
+
+
+def accepts_v1_recommendations(source: Source) -> bool:
+    """Whether the runner passes ``SourceBatch.recommendations`` of ``source`` to the v1 pipeline.
+
+    Only built-in sources (which declare a ``legacy_source``) do; a plugin never
+    does, whatever it declares, because its advice has had no consensus or risk
+    review (FAIL CLOSED).
+    """
+    return type(source).legacy_source is not None and getattr(source, "registry_origin", None) != PLUGIN_ORIGIN
+
+
 def validate_source_class(cls: Any, *, builtin: bool = False) -> None:
     """Raise ``ValueError`` when a class does not satisfy the SDK metadata contract."""
     if not isinstance(cls, type) or not issubclass(cls, Source):
@@ -229,6 +252,15 @@ def validate_source_class(cls: Any, *, builtin: bool = False) -> None:
         raise ValueError(f"invalid source id {source_id!r}: lowercase dotted segments expected")
     if not builtin and (source_id.startswith(RESERVED_PREFIXES) or source_id == "greenkube"):
         raise ValueError(f"source id {source_id!r} uses a prefix reserved for built-in sources")
+    if not builtin:
+        from greenkube.signals.adapters import AnalyzerSource, RecommendationSourceAdapter
+
+        # Fail closed: only built-in sources feed the v1 pipeline or join a v1
+        # source group (whose completeness drives stale reconciliation).
+        if getattr(cls, "legacy_source", None) is not None:
+            raise ValueError(f"source {source_id!r} must not set legacy_source: it is reserved for built-in sources")
+        if issubclass(cls, (AnalyzerSource, RecommendationSourceAdapter)):
+            raise ValueError(f"source {source_id!r} must subclass Source, not a built-in adapter")
     if not isinstance(getattr(cls, "display_name", None), str) or not cls.display_name.strip():
         raise ValueError(f"source {source_id!r} must declare a display_name")
     if not isinstance(cls.tier, SourceTier):

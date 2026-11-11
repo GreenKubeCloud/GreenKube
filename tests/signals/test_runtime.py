@@ -198,6 +198,55 @@ class TestSignalValidation:
         assert report.run.signal_count == 1
 
 
+class TestV1RecommendationTrust:
+    """Only built-in sources feed the v1 pipeline; the runner drops anything else (FAIL CLOSED)."""
+
+    @staticmethod
+    def _recommendation():
+        from greenkube.models.metrics import Recommendation, RecommendationType
+
+        return Recommendation(
+            pod_name="gw",
+            namespace="prod",
+            type=RecommendationType.ZOMBIE_POD,
+            scope="workload",
+            description="delete it",
+        )
+
+    def _source(self, *, legacy_source=None, origin=None):
+        rec = self._recommendation()
+
+        class WithRecs(AcmeSource):
+            id: ClassVar[str] = "acme.recs"
+
+            async def collect(self, ctx):
+                return SourceBatch(signals=[_signal("acme.recs")], recommendations=[rec])
+
+        WithRecs.legacy_source = legacy_source
+        source = WithRecs()
+        source.registry_origin = origin
+        return source
+
+    async def test_a_source_without_legacy_source_has_its_recommendations_dropped(self):
+        report = await _run(self._source())
+        assert report.run.status == SourceRunStatus.SUCCEEDED
+        assert report.recommendations == [] and report.run.recommendation_count == 0
+        assert len(report.signals) == 1
+        [diagnostic] = report.run.diagnostics
+        assert (diagnostic.code, diagnostic.count, diagnostic.level) == ("recommendations_ignored", 1, "warning")
+
+    async def test_a_plugin_instance_is_never_trusted_even_with_a_legacy_source(self):
+        report = await _run(self._source(legacy_source="greenkube", origin="plugin"))
+        assert report.recommendations == []
+        assert report.legacy_source is None
+
+    async def test_builtin_sources_keep_their_recommendations(self):
+        for origin in ("builtin", None):
+            report = await _run(self._source(legacy_source="greenkube", origin=origin))
+            assert len(report.recommendations) == 1 and report.legacy_source == "greenkube"
+            assert report.run.diagnostics == []
+
+
 class TestCircuitBreakerAndRateLimit:
     async def test_circuit_opens_after_consecutive_failures_and_retries_after_cooldown(self):
         clock = Clock()
