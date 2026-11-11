@@ -413,6 +413,7 @@ The chart keeps the API key out of the controller (least privilege), so this end
 monitoring:
   prometheusRule:
     enabled: false       # Optional automation backlog/stuck-state alerts; requires the PrometheusRule CRD
+    controllerAlerts: true # Controller loop alerts (needs the controller metrics endpoint scraped)
     namespace: monitoring
     additionalLabels: {}
   serviceMonitor:
@@ -428,7 +429,7 @@ monitoring:
 
 The controller's own metrics endpoint is configured with `collector.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-collectormetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
-`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
+`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint (`collector.metricsPort` with the controller ServiceMonitor). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
 When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
 

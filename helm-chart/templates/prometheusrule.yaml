@@ -80,16 +80,16 @@ spec:
             summary: A GreenKube controller loop keeps failing
             description: {{ `Controller loop {{ $labels.loop }} failed {{ $value }} times in a row; see GET /api/v1/automation/status (controller.instances[].loops) and the controller logs.` | quote }}
         - alert: GreenKubeAutomationLoopStale
-          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="automation-controller"}) > 900
+          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="automation-controller"}) > 600
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: The GreenKube automation controller loop has not succeeded for 15 minutes
+            summary: The GreenKube automation controller loop has not succeeded for 10 minutes
             description: Webhook outbox, PR polling, plan expiry and retention are not advancing on the leader controller.
         - alert: GreenKubeNoActiveController
           expr: (max(greenkube_controller_leader) or vector(0)) < 1
-          for: 10m
+          for: 5m
           labels:
             severity: critical
           annotations:
