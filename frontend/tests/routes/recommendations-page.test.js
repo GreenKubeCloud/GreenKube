@@ -822,4 +822,34 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(change).toHaveTextContent('live request unchanged (384.0 MB)');
 		expect(change).not.toHaveTextContent('(live after the change)');
 	});
+
+	it('shows a merged change with an unknown live value as baseline to proposal, never as unchanged', async () => {
+		// Migration 0061 clears the actual_* value that old rescans reverted to the baseline.
+		api.getAppliedRecommendations.mockResolvedValue([
+			{
+				...recommendation,
+				id: 42,
+				pod_name: 'oversized-web',
+				status: 'verified',
+				application_method: 'pr_merge',
+				applied_at: '2026-11-08T11:58:13+00:00',
+				created_at: '2026-11-08T11:52:59+00:00',
+				current_cpu_request_millicores: 400,
+				recommended_cpu_request_millicores: 10,
+				actual_cpu_request_millicores: null
+			}
+		]);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		const summary = await screen.findByTestId('request-summary-cpu');
+		expect(summary).toHaveTextContent('400m → 10m (proposed)');
+
+		await fireEvent.click(await screen.findByText('oversized-web'));
+		const change = await screen.findByTestId('request-change-cpu');
+		expect(change).toHaveTextContent('400m');
+		expect(change).toHaveTextContent('10m');
+		expect(change).toHaveTextContent('(proposed)');
+		expect(change).not.toHaveTextContent('live request unchanged');
+	});
 });

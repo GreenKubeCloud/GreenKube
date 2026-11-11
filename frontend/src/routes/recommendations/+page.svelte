@@ -1902,8 +1902,13 @@
 											{/if}
 											{#each requestChanges(rec) as change (change.resource)}
 												{#if change.after != null && !change.unchanged}
-													<p class="text-xs text-dark-500 mt-0.5 font-mono">
+													<p class="text-xs text-dark-500 mt-0.5 font-mono" data-testid="request-summary-{change.resource}">
 														{change.label} {change.format(change.before)} → <span class="text-blue-400">{change.format(change.after)}</span>
+													</p>
+												{:else if change.after == null && change.proposed != null}
+													<!-- Live value after the change unknown (never detected, or cleared by migration 0061). -->
+													<p class="text-xs text-dark-500 mt-0.5 font-mono" data-testid="request-summary-{change.resource}">
+														{change.label} {change.format(change.before)} → <span class="text-green-400">{change.format(change.proposed)}</span> <span class="font-sans text-[10px] text-dark-600">(proposed)</span>
 													</p>
 												{/if}
 											{/each}
