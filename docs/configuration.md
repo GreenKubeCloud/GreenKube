@@ -176,8 +176,8 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.changeMeasurement.minCoverage` | `CHANGE_MEASUREMENT_MIN_COVERAGE` | `0.8` | Minimum share of post-window hours matched with a baseline hour of the week (and the minimum coverage of a load driver); below it the measurement is `inconclusive`. |
 | `config.recommendations.changeMeasurement.bootstrapSamples` | `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` | `1000` | Moving-block bootstrap resamples for the 90% confidence interval (100–100000). |
 | `config.recommendations.changeMeasurement.epsilonRatio` | `CHANGE_MEASUREMENT_EPSILON_RATIO` | `0.02` | Noise floor: `not_realized` when the interval's upper bound is at most this share of the counterfactual. |
-| — (no Helm key yet) | `CHANGE_DRIFT_THRESHOLD` | `0.5` | Drift monitor: share of a realized change's per-replica saving that must be lost for a day to count as drifted ([method](methodology/savings-measurement.md#10-drift-monitor-c8)). |
-| — (no Helm key yet) | `CHANGE_DRIFT_SUSTAINED_DAYS` | `3` | Consecutive drifted days (1 to 7) after which the change is `regressed` and its accruals since the drift began are reversed. The two drift settings are read from the controller's environment; the chart does not set them yet, so the defaults apply. |
+| `config.recommendations.changeMeasurement.driftThreshold` | `CHANGE_DRIFT_THRESHOLD` | `0.5` | Drift monitor: share of a realized change's per-replica saving that must be lost for a day to count as drifted ([method](methodology/savings-measurement.md#10-drift-monitor-c8)). |
+| `config.recommendations.changeMeasurement.driftSustainedDays` | `CHANGE_DRIFT_SUSTAINED_DAYS` | `3` | Consecutive drifted days (1 to 7) after which the change is `regressed` and its accruals since the drift began are reversed. Both drift settings are read by the controller's `savings-drift` loop; the values schema rejects a threshold outside (0, 1] and a day count outside 1 to 7. |
 | `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). The controller also scans once right after its initial collection. On-demand scans are queued with `POST /api/v1/optimization/runs`. |
 
 ### Recommendation sources (`sources`)
@@ -414,7 +414,7 @@ automation:
 | `fail` | Reject the plan with `policy_evidence_missing`. |
 | `warn` | Allow the plan, mark the gate `not_available`, and add a warning to `policy_result.warnings`. |
 
-The default is `fail`. Any other value is rejected by the values schema. Without Helm, an unset value in `GITOPS_POLICY_JSON` means `warn`.
+The default is `fail`, with or without Helm: an unset value in `GITOPS_POLICY_JSON` also means `fail` (principle 6, fail closed). Any other value is rejected by the values schema. Set `warn` only where discovery cannot read rollouts, HPAs, VPAs or PDBs, such as a sandbox without the discovery RBAC.
 
 #### Pull request options (`automation.pullRequests`)
 

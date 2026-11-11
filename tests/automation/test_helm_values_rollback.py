@@ -11,6 +11,7 @@ from ruamel.yaml import YAML
 
 from greenkube.automation.plan_runtime import RuntimePlanService
 from greenkube.automation.plans import AutomationPlanError, AutomationPlanService, GitBlobFile
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.automation.rollback import (
     ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY,
     HelmValuesRollbackRenderer,
@@ -41,6 +42,9 @@ from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_gitops_repository import WorkloadBinding
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 BASE_REVISION = "a" * 40
 CURRENT_REVISION = "b" * 40
@@ -727,6 +731,7 @@ async def test_helm_values_runtime_persists_linked_preview_and_requires_exact_di
         operation_enqueuer=queue,
     )
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=cast(Any, Bindings()),
         cluster="prod",
@@ -771,6 +776,7 @@ async def test_helm_values_runtime_rejects_missing_persisted_baseline_before_sna
 
     snapshot_resolver = SnapshotResolver()
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, object()),
         binding_repository=cast(Any, object()),
         cluster="prod",
@@ -851,6 +857,7 @@ async def test_helm_values_runtime_rejects_a_changed_source_mapping_before_snaps
 
     snapshot_resolver = SnapshotResolver()
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=cast(Any, Bindings()),
         cluster="prod",

@@ -9,6 +9,7 @@ import pytest
 
 from greenkube.automation.plan_runtime import RuntimePlanService
 from greenkube.automation.plans import AutomationPlanError
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     AutomationErrorCode,
@@ -28,6 +29,9 @@ from greenkube.gitops.contracts import (
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_gitops_repository import AutomationPlanRecord, WorkloadBinding
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 _NOW = datetime(2026, 10, 23, 1, tzinfo=timezone.utc)
 _DIGEST = "sha256:" + "c" * 64
@@ -203,6 +207,7 @@ async def test_plan_runtime_blocks_high_risk_before_snapshot_or_renderer(operati
 
     plan_service = PlanService()
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=_Recommendations(_recommendation(risk_level="high")),
         binding_repository=_Bindings(source),
         cluster="prod",
@@ -259,6 +264,7 @@ async def test_approval_revalidates_and_persists_a_new_open_pr_rejection():
 
     plan_service = PlanService()
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=_Recommendations(_recommendation()),
         binding_repository=_Bindings(source),
         cluster="prod",

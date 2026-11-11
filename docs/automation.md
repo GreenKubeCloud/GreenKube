@@ -299,7 +299,7 @@ Discovery also supplies live workload labels, rollout state, controller suspend/
 - `fail` rejects the plan with `policy_evidence_missing`.
 - `warn` allows it and adds a warning to `policy_result.warnings`.
 
-The chart defaults to `fail`.
+The default is `fail`, in the chart and in Python (an unset `missingEvidence` in `GITOPS_POLICY_JSON` fails closed too).
 
 ## Pull-request options
 

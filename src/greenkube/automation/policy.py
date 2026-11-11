@@ -115,8 +115,9 @@ class AutomationPolicyConfig(BaseModel):
     )
     # What a live gate does when discovery could not collect its evidence (rollout,
     # controller health, HPA/VPA/PDB): "fail" rejects, "warn" allows with a warning (D13).
+    # One install, no profiles (F11): fail closed by default (principle 6).
     missing_evidence: MissingEvidenceMode = Field(
-        default="warn",
+        default="fail",
         validation_alias=AliasChoices("missingEvidence", "missing_evidence"),
     )
 

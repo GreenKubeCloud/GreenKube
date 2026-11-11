@@ -521,6 +521,11 @@ config:
       bootstrapSamples: 1000
       # Noise floor: not realized when the CI upper bound is at most this share of the counterfactual.
       epsilonRatio: 0.02
+      # Drift monitor (C8): share of a realized change's per-replica saving that must be
+      # lost for a day to count as drifted (0 excluded, at most 1).
+      driftThreshold: 0.5
+      # Consecutive drifted days (1 to 7) after which the change is regressed.
+      driftSustainedDays: 3
 
 # ---------------------------------------------------------------------------
 # Recommendation sources (Source SDK, docs/sources.md)

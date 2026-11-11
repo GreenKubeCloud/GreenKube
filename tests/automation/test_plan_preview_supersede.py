@@ -11,6 +11,7 @@ import pytest
 
 from greenkube.automation.plan_runtime import RuntimePlanService
 from greenkube.automation.plans import AutomationPlanError, AutomationPlanService
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.gitops.contracts import AutomationErrorCode, BindingStatus, PlanStatus, WorkloadSource
@@ -27,6 +28,9 @@ from tests.automation.test_plan_service import (  # pyrefly: ignore[missing-impo
     _archive_snapshot,
     _source,
 )
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 
 class _Recommendations:
@@ -105,6 +109,7 @@ async def preview_runtime(monkeypatch: pytest.MonkeyPatch):
         clock=lambda: now[0],
     )
     runtime = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=_Recommendations(),
         binding_repository=_Bindings(source),
         cluster="prod",

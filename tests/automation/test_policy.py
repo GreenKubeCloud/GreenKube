@@ -167,7 +167,7 @@ def _evaluator(
     history: _PlanHistory | None = None,
 ) -> AutomationPolicyEvaluator:
     return AutomationPolicyEvaluator(
-        config=config or AutomationPolicyConfig(),
+        config=config or AutomationPolicyConfig(missing_evidence="warn"),
         plan_repository=history if history is not None else _PlanHistory(),
         clock=lambda: _NOW,
     )
@@ -178,7 +178,7 @@ def _codes(result) -> list[AutomationErrorCode]:
 
 
 def test_policy_defaults_match_the_documented_gitops_values():
-    config = AutomationPolicyConfig()
+    config = AutomationPolicyConfig(missing_evidence="warn")
 
     assert config.max_risk_level.value == "medium"
     assert config.min_confidence == 0.6
@@ -409,7 +409,7 @@ async def test_available_rollout_controller_and_interaction_evidence_blocks(evid
 @pytest.mark.asyncio
 async def test_missing_plan_history_fails_closed_for_budget_and_cooldown():
     result = await AutomationPolicyEvaluator(
-        config=AutomationPolicyConfig(),
+        config=AutomationPolicyConfig(missing_evidence="warn"),
         plan_repository=None,
         clock=lambda: _NOW,
     ).evaluate([_recommendation()], _source())

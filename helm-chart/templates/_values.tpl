@@ -23,6 +23,9 @@ minor release.
 {{- $recommendations := $config.recommendations | default dict -}}
 {{- $deprecations := list -}}
 {{- $pauseDelivery := (get $policy "pauseDelivery") | default false -}}
+{{- /* Live policy gates fail closed when their evidence is missing (D13): one
+install, no profile picks "warn" any more. */ -}}
+{{- $missingEvidence := (get $policy "missingEvidence") | default "fail" -}}
 
 {{- /* profile: one topology now. */ -}}
 {{- if hasKey $values "profile" -}}
@@ -210,6 +213,7 @@ production block included) keeps the single-replica sizes. */ -}}
     "renderer" $renderer
     "worker" $worker
     "pauseDelivery" $pauseDelivery
+    "missingEvidence" $missingEvidence
     "minSamples" $minSamples
     "policyMinSamples" $policyMinSamples
     "verificationMinSamples" $verificationMinSamples

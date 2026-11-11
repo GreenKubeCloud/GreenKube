@@ -6,9 +6,7 @@ keeps rejecting unknown keys; minSamples comes from the single
 config.recommendations.minSamples knob (N3). */ -}}
 {{- $policy := omit (deepCopy (.Values.automation.policy | default dict)) "pauseDelivery" }}
 {{- $_ := set $policy "minSamples" $v.policyMinSamples }}
-{{- if not (get $policy "missingEvidence") }}
-{{- $_ := set $policy "missingEvidence" "fail" }}
-{{- end }}
+{{- $_ := set $policy "missingEvidence" $v.missingEvidence }}
 {{- $prPollInterval := .Values.automation.prPollIntervalSeconds | int | toString }}
 {{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | int | toString }}
 {{- $syncTimeout := .Values.automation.syncTimeoutSeconds | int | toString }}
@@ -197,6 +195,8 @@ data:
   CHANGE_MEASUREMENT_MIN_COVERAGE: {{ .minCoverage | default 0.8 | quote }}
   CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: {{ .bootstrapSamples | default 1000 | int | quote }}
   CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
+  CHANGE_DRIFT_THRESHOLD: {{ if hasKey . "driftThreshold" }}{{ .driftThreshold | quote }}{{ else }}"0.5"{{ end }}
+  CHANGE_DRIFT_SUSTAINED_DAYS: {{ if hasKey . "driftSustainedDays" }}{{ .driftSustainedDays | int | quote }}{{ else }}"3"{{ end }}
   {{- end }}
   {{- end }}
 

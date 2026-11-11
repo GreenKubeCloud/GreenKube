@@ -933,7 +933,7 @@ async def test_discovered_freeze_label_evidence_blocks_policy_without_hiding_oth
             return None
 
     evaluator = AutomationPolicyEvaluator(
-        config=AutomationPolicyConfig(change_freeze_labels=("maintenance=true",)),
+        config=AutomationPolicyConfig(change_freeze_labels=("maintenance=true",), missing_evidence="warn"),
         plan_repository=Plans(),
     )
     frozen_source = resolver.resolve(
