@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
+from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.confounders import is_contaminated
 from greenkube.verify.counterfactual import HourOfWeekCounterfactual, align
@@ -28,10 +29,15 @@ from greenkube.verify.model import (
     TimeWindow,
     WindowPlan,
 )
-from greenkube.verify.series import quantity_series, window_hours
+from greenkube.verify.regression import METHOD_OLS, OlsCounterfactual, residual_bootstrap
+from greenkube.verify.series import co2e_series, has_embodied, quantity_series, window_hours
 from greenkube.verify.statistics import moving_block_bootstrap, outcome_rule, seed_for
 
 HOURS_PER_YEAR = 365.25 * 24
+#: The hour-of-week MVP counterfactual (C3), the fallback of the regression.
+MVP_METHOD = "hour_of_week_mean"
+#: Projection key of the CO2e of every component, embodied included (component matching).
+CO2E_WITH_EMBODIED = "co2e_g_with_embodied"
 
 
 @dataclass(frozen=True)
@@ -105,15 +111,23 @@ class RequestRightsizingStrategy:
     * ``cost_cpu`` / ``cost_ram`` — its CPU and RAM components (used to split
       the saving between the change's recommendations, C5);
     * ``core_hours`` / ``gib_hours`` — requested capacity freed (reported);
-    * ``co2e_g`` — operational CO2e of the workload as the Impact Model
-      allocates it (idle power by CPU reservation, memory power by memory
-      reservation, dynamic and GPU power by usage), so request changes move
-      it. It is compared with the projected operational components only:
-      embodied emissions are not in the measured rows (component matching).
+    * ``co2e_g`` — CO2e of the workload as the Impact Model allocates it
+      (idle power by CPU reservation, memory power by memory reservation,
+      dynamic and GPU power by usage, embodied emissions by reservation), so
+      request changes move it. Embodied emissions are included only when the
+      baseline snapshot carries them (snapshots frozen before they were
+      measured do not); ``components`` lists what was measured, and the
+      projection it is compared with covers the same components;
+    * ``embodied_co2e_g`` — the embodied part alone (reported).
+
+    Each quantity's counterfactual is the load regression (C3 v2,
+    :mod:`greenkube.verify.regression`) when a load driver exists and the fit's
+    diagnostics pass, otherwise the hour-of-week MVP; ``method`` and the
+    diagnostics are recorded.
     """
 
     key = "request_rightsizing"
-    version = "1.0"
+    version = "2.0"
     primary = "allocated_cost"
 
     QUANTITIES = (
@@ -122,7 +136,8 @@ class RequestRightsizingStrategy:
         QuantitySpec("cost_ram", "currency", False, "allocated RAM cost"),
         QuantitySpec("core_hours", "core-hours", False, "requested CPU cores"),
         QuantitySpec("gib_hours", "GiB-hours", False, "requested memory"),
-        QuantitySpec("co2e_g", "gCO2e", True, "operational CO2e"),
+        QuantitySpec("co2e_g", "gCO2e", True, "allocated CO2e"),
+        QuantitySpec("embodied_co2e_g", "gCO2e", False, "embodied CO2e"),
     )
 
     def required_windows(self, change: ChangeEvent, settings: MeasurementSettings) -> WindowPlan:
@@ -150,18 +165,42 @@ class RequestRightsizingStrategy:
     ) -> StrategyResult:
         expected_hours = len(window_hours(plan.post)) or 1
         estimates: List[SavingsEstimate] = []
-        params: Dict[str, Any] = {"model": "hour_of_week_mean", "elasticity": {}, "matched_hours_of_week": {}}
+        methods: Dict[str, str] = {}
+        elasticities: Dict[str, float] = {}
+        matched: Dict[str, int] = {}
+        diagnostics: Dict[str, Any] = {}
+        embodied = has_embodied(pre) and has_embodied(post)
         for spec in self.QUANTITIES:
-            estimate, model = self._estimate_quantity(
-                spec, pre, post, load, expected_hours, projections.get(spec.quantity), settings, seed_parts
+            fitted = self._estimate_quantity(
+                spec,
+                pre,
+                post,
+                load,
+                expected_hours,
+                projections,
+                settings,
+                seed_parts,
+                embodied=embodied,
             )
-            estimates.append(estimate)
-            if model is not None:
-                params["elasticity"][spec.quantity] = round(model.elasticity, 6)
-                params["matched_hours_of_week"][spec.quantity] = len(model.means)
-        params["block_hours"] = 24
-        params["bootstrap_samples"] = settings.bootstrap_samples
-        params["epsilon_ratio"] = settings.epsilon_ratio
+            estimates.append(fitted.estimate)
+            if fitted.mvp is not None:
+                elasticities[spec.quantity] = round(fitted.mvp.elasticity, 6)
+                matched[spec.quantity] = len(fitted.mvp.means)
+            if fitted.estimate.method is not None:
+                methods[spec.quantity] = fitted.estimate.method
+            if fitted.diagnostics is not None:
+                diagnostics[spec.quantity] = fitted.diagnostics
+        params: Dict[str, Any] = {
+            "model": methods.get(self.primary, MVP_METHOD),
+            "methods": methods,
+            "elasticity": elasticities,
+            "matched_hours_of_week": matched,
+            "diagnostics": diagnostics,
+            "co2e_components": list(_co2e_components(embodied)),
+            "block_hours": 24,
+            "bootstrap_samples": settings.bootstrap_samples,
+            "epsilon_ratio": settings.epsilon_ratio,
+        }
 
         primary = next(item for item in estimates if item.quantity == self.primary)
         reasons: List[str] = []
@@ -187,41 +226,84 @@ class RequestRightsizingStrategy:
         post: Sequence[HourBucket],
         load: Optional[ResolvedLoad],
         expected_hours: int,
-        projected: Optional[float],
+        projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
-    ) -> tuple[SavingsEstimate, Optional[HourOfWeekCounterfactual]]:
-        pre_values = quantity_series(pre, spec.quantity)
-        post_values = quantity_series(post, spec.quantity)
-        base = {"quantity": spec.quantity, "unit": spec.unit, "claimed": spec.claimed, "projected_annual": projected}
+        *,
+        embodied: bool = False,
+    ) -> "_Fitted":
+        components: List[str] = []
+        projected = projections.get(spec.quantity)
+        if spec.quantity == "co2e_g":
+            # Component matching: the measured CO2e covers embodied emissions only when both
+            # windows carry them (snapshots frozen before they were measured do not).
+            components = list(_co2e_components(embodied))
+            pre_values = co2e_series(pre, embodied=embodied)
+            post_values = co2e_series(post, embodied=embodied)
+            projected = projections.get(CO2E_WITH_EMBODIED) if embodied else projections.get("co2e_g")
+        else:
+            pre_values = quantity_series(pre, spec.quantity)
+            post_values = quantity_series(post, spec.quantity)
+        base: Dict[str, Any] = {
+            "quantity": spec.quantity,
+            "unit": spec.unit,
+            "claimed": spec.claimed,
+            "projected_annual": projected,
+            "components": components,
+        }
         if not pre_values or not post_values:
             missing = "baseline" if not pre_values else "post-change"
-            return (
+            return _Fitted(
                 SavingsEstimate(
                     **base,
                     outcome=ChangeOutcome.INCONCLUSIVE,
                     reason=f"no trusted {spec.description} in the {missing} window",
-                ),
-                None,
+                )
             )
-        model = HourOfWeekCounterfactual.fit(pre_values, load.pre if load is not None else None)
-        aligned = align(model, post_values, load.post if load is not None else None)
+        mvp = HourOfWeekCounterfactual.fit(pre_values, load.pre if load is not None else None)
+        diagnostics: Optional[Dict[str, Any]] = None
+        ols: Optional[OlsCounterfactual] = None
+        if load is not None:
+            post_load = {hour: load.post[hour] for hour in post_values if load.post.get(hour) is not None}
+            candidate = OlsCounterfactual.fit(pre_values, load.pre, post_load)
+            diagnostics = candidate.diagnostics.as_dict()
+            if candidate.diagnostics.passed:
+                ols = candidate
+            else:
+                diagnostics["fallback"] = MVP_METHOD
+        seed = seed_for(*seed_parts, spec.quantity)
+        if ols is not None and load is not None:
+            method = METHOD_OLS
+            aligned = ols.align(post_values, load.post)
+            interval = residual_bootstrap(
+                [item.saving for item in aligned],
+                [residual for *_, residual in ols.baseline],
+                ols.residual_weights(aligned, load.post),
+                dof=ols.diagnostics.dof,
+                seed=seed,
+                samples=settings.bootstrap_samples,
+            )
+            elasticity = ols.elasticity
+        else:
+            method = MVP_METHOD
+            aligned = align(mvp, post_values, load.post if load is not None else None)
+            interval = moving_block_bootstrap(
+                [item.saving for item in aligned], seed=seed, samples=settings.bootstrap_samples
+            )
+            elasticity = mvp.elasticity
         coverage = len(aligned) / expected_hours
         if not aligned:
-            return (
+            return _Fitted(
                 SavingsEstimate(
                     **base,
-                    elasticity=model.elasticity,
+                    elasticity=round(elasticity, 6),
+                    method=method,
                     outcome=ChangeOutcome.INCONCLUSIVE,
                     reason=f"no post-change hour of {spec.description} matches a baseline hour of the week",
                 ),
-                model,
+                mvp,
+                diagnostics,
             )
-        interval = moving_block_bootstrap(
-            [item.saving for item in aligned],
-            seed=seed_for(*seed_parts, spec.quantity),
-            samples=settings.bootstrap_samples,
-        )
         counterfactual = math.fsum(item.counterfactual for item in aligned) / len(aligned)
         actual = math.fsum(item.actual for item in aligned) / len(aligned)
         epsilon = settings.epsilon_ratio * abs(counterfactual)
@@ -232,7 +314,7 @@ class RequestRightsizingStrategy:
             outcome = outcome_rule(interval.low, interval.high, epsilon)
             reason = _reason(spec, outcome, interval.low, interval.high, epsilon)
         annualized = interval.mean * HOURS_PER_YEAR
-        return (
+        return _Fitted(
             SavingsEstimate(
                 **base,
                 rate_per_hour=interval.mean,
@@ -245,13 +327,26 @@ class RequestRightsizingStrategy:
                 annualized_ci_high=interval.high * HOURS_PER_YEAR if interval.high is not None else None,
                 coverage=round(coverage, 4),
                 aligned_hours=len(aligned),
-                elasticity=round(model.elasticity, 6),
+                elasticity=round(elasticity, 6),
+                method=method,
                 outcome=outcome,
                 reason=reason,
                 projection_accuracy=(annualized / projected) if projected else None,
             ),
-            model,
+            mvp,
+            diagnostics,
         )
+
+
+@dataclass
+class _Fitted:
+    estimate: SavingsEstimate
+    mvp: Optional[HourOfWeekCounterfactual] = None
+    diagnostics: Optional[Dict[str, Any]] = None
+
+
+def _co2e_components(embodied: bool) -> tuple[str, ...]:
+    return CO2E_COMPONENTS if embodied else MEASURED_CO2E_COMPONENTS
 
 
 def _reason(

@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.impact.comparison import measurable_co2e_projection
+from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.measurement import (
     MeasurementOutcome,
     QuantityEstimate,
@@ -61,6 +62,7 @@ from greenkube.verify.model import (
 )
 from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
 from greenkube.verify.strategy import (
+    CO2E_WITH_EMBODIED,
     MeasurementSettings,
     SavingsMeasurementStrategy,
     strategy_for,
@@ -598,7 +600,7 @@ class ChangeMeasurementService:
         ids = sorted({item.recommendation_id for item in measurement.allocations})
         if len(ids) <= 1:
             return {rec_id: 1.0 for rec_id in ids}
-        return co2e_shares(await self._records(ids), ids)
+        return co2e_shares(await self._records(ids), ids, _co2e_components_of(measurement))
 
     def _plan(self, change: ChangeEvent, status: ChangeStatus) -> WindowPlan:
         plan = self._strategy(change).required_windows(change, self.settings)
@@ -834,6 +836,7 @@ class ChangeMeasurementService:
             "allocated_cost": _sum(member.potential_savings_cost for member in in_effect),
             # Component-matched: only the projected components the measured rows carry.
             "co2e_g": _sum(_measurable_co2e(member) for member in in_effect),
+            CO2E_WITH_EMBODIED: _sum(_measurable_co2e(member, CO2E_COMPONENTS) for member in in_effect),
         }
         result = strategy.estimate(
             change,
@@ -1071,7 +1074,13 @@ class ChangeMeasurementService:
         co2e_share = share if co2e_shares is None else co2e_shares.get(member.id, 0.0)
         co2e_basis = basis if co2e_shares is None or allocation is None else _co2e_basis(co2e_shares)
         co2e = _quantity_estimate(
-            "co2e_g", "gCO2e", co2e_basis, co2e_share, co2e_source, co2e_outcome, _measurable_co2e(member)
+            "co2e_g",
+            "gCO2e",
+            co2e_basis,
+            co2e_share,
+            co2e_source,
+            co2e_outcome,
+            _measurable_co2e(member, _co2e_components_of(measurement)),
         )
         windows = {
             "baseline": {
@@ -1151,13 +1160,17 @@ def _with_unavailable_drivers(params: Mapping[str, Any], pre: Any, post: Collect
     return {**params, UNAVAILABLE_DRIVERS_KEY: unavailable}
 
 
-def co2e_shares(records: Sequence[RecommendationRecord], ids: Sequence[int]) -> Dict[int, float]:
+def co2e_shares(
+    records: Sequence[RecommendationRecord],
+    ids: Sequence[int],
+    components: Sequence[str] = MEASURED_CO2E_COMPONENTS,
+) -> Dict[int, float]:
     """Shares (summing to 1) of ``ids`` by projected measurable CO2e; equal when nothing was projected."""
     by_id = {record.id: record for record in records}
     weights = {}
     for rec_id in ids:
         record = by_id.get(rec_id)
-        value = _measurable_co2e(record) if record is not None else None
+        value = _measurable_co2e(record, components) if record is not None else None
         weights[rec_id] = max(value or 0.0, 0.0)
     total = math.fsum(weights.values())
     if total <= 0:
@@ -1169,9 +1182,17 @@ def _co2e_basis(shares: Mapping[int, float]) -> str:
     return "projected_co2e_share" if len(shares) > 1 else "total"
 
 
-def _measurable_co2e(member: RecommendationRecord) -> Optional[float]:
+def _measurable_co2e(
+    member: RecommendationRecord, components: Sequence[str] = MEASURED_CO2E_COMPONENTS
+) -> Optional[float]:
     """Projected CO2e of the components a measurement sees (None: nothing comparable)."""
-    return measurable_co2e_projection(getattr(member, "impact", None))
+    return measurable_co2e_projection(getattr(member, "impact", None), components)
+
+
+def _co2e_components_of(measurement: ChangeMeasurement) -> Sequence[str]:
+    """Components the measured CO2e covers (operational only for measurements before embodied was measured)."""
+    estimate = measurement.estimate("co2e_g")
+    return tuple(estimate.components) if estimate is not None and estimate.components else MEASURED_CO2E_COMPONENTS
 
 
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:

@@ -127,6 +127,8 @@ class HourBucket(_Frozen):
     ``cost_coverage``/``co2e_coverage`` the share with trusted cost or carbon.
     ``replicas`` is the average pod count; ``core_hours``/``gib_hours`` are the
     requested CPU cores and memory GiB summed over pods (per hour).
+    ``embodied_co2e_g``/``embodied_coverage`` are ``None`` when the bucket was
+    aggregated before embodied emissions were measured (older snapshots).
     """
 
     hour: datetime
@@ -142,11 +144,19 @@ class HourBucket(_Frozen):
     energy_kwh: Optional[float] = None
     co2e_g: Optional[float] = None
     co2e_coverage: float = 0.0
+    #: Embodied (hardware manufacturing) CO2e allocated to the workload, per hour.
+    #: ``None`` in snapshots frozen before embodied emissions were measured.
+    embodied_co2e_g: Optional[float] = None
+    embodied_coverage: Optional[float] = None
     instance_types: dict[str, float] = Field(default_factory=dict)
 
     @property
     def hour_of_week(self) -> int:
         return hour_of_week(self.hour)
+
+
+#: HourBucket fields added after snapshots were first frozen (omitted from the digest while unset).
+_OPTIONAL_BUCKET_FIELDS = ("embodied_co2e_g", "embodied_coverage")
 
 
 def hour_of_week(moment: datetime) -> int:
@@ -177,7 +187,14 @@ class BaselineSnapshot(_Frozen):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def digest_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"content_sha256", "created_at"})
+        payload = self.model_dump(mode="json", exclude={"content_sha256", "created_at"})
+        for bucket in payload.get("hours") or []:
+            # Fields added after the first snapshots were frozen are left out while unset,
+            # so the digest of an older snapshot still verifies.
+            for key in _OPTIONAL_BUCKET_FIELDS:
+                if bucket.get(key) is None:
+                    bucket.pop(key, None)
+        return payload
 
     def with_digest(self) -> "BaselineSnapshot":
         return self.model_copy(update={"content_sha256": sha256_hex(self.digest_payload())})
@@ -299,6 +316,10 @@ class SavingsEstimate(_Frozen):
     coverage: float = 0.0
     aligned_hours: int = 0
     elasticity: float = 0.0
+    #: Counterfactual model used (``ols_load_seasonal`` or ``hour_of_week_mean``; None before C3 v2).
+    method: Optional[str] = None
+    #: Impact components the measured quantity covers (CO2e only, for component-matched comparison).
+    components: List[str] = Field(default_factory=list)
     outcome: ChangeOutcome
     reason: str = ""
     projected_annual: Optional[float] = None

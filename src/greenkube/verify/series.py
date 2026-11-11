@@ -8,11 +8,14 @@ trust rules as the verifier: cost only from rows with trusted cost provenance
 Rows are grouped per timestamp (the replicas of one sample); a timestamp
 group counts towards cost (or carbon) only when every row in it is trusted.
 Rates divide by the covered time, so raw 5-minute rows and hourly rollups
-mix correctly.
+mix correctly. Embodied CO2e (``embodied_co2e_grams``, allocated by
+reservation) is aggregated apart from the operational CO2e: it needs no
+measured intensity.
 """
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -64,6 +67,8 @@ class _Accumulator:
         "energy_joules",
         "co2e",
         "co2e_seconds",
+        "embodied",
+        "embodied_seconds",
         "instance_types",
     )
 
@@ -82,6 +87,8 @@ class _Accumulator:
         self.energy_joules = 0.0
         self.co2e = 0.0
         self.co2e_seconds = 0.0
+        self.embodied = 0.0
+        self.embodied_seconds = 0.0
         self.instance_types: Dict[str, float] = defaultdict(float)
 
 
@@ -142,6 +149,12 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
         if all(carbon_is_trusted(row) for row in members):
             acc.co2e += sum(float(getattr(row, "co2e_grams", 0.0) or 0.0) for row in members)
             acc.co2e_seconds += coverage
+        embodied = [_number(getattr(row, "embodied_co2e_grams", None)) for row in members]
+        if all(value is not None and value >= 0 for value in embodied):
+            # Embodied emissions are allocated by the Impact Model by reservation; they do not
+            # depend on the grid intensity, so they need no measured intensity.
+            acc.embodied += math.fsum(value for value in embodied if value is not None)
+            acc.embodied_seconds += coverage
 
     buckets: List[HourBucket] = []
     for hour in window_hours(TimeWindow(start=start, end=end)):
@@ -169,6 +182,8 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
                 energy_kwh=acc.energy_joules / _JOULES_PER_KWH * per_hour,
                 co2e_g=acc.co2e / acc.co2e_seconds * 3600.0 if acc.co2e_seconds > 0 else None,
                 co2e_coverage=min(acc.co2e_seconds / 3600.0, 1.0),
+                embodied_co2e_g=acc.embodied / acc.embodied_seconds * 3600.0 if acc.embodied_seconds > 0 else None,
+                embodied_coverage=min(acc.embodied_seconds / 3600.0, 1.0),
                 instance_types={key: value * per_hour for key, value in acc.instance_types.items()},
             )
         )
@@ -183,6 +198,7 @@ QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
     "core_hours": ("core_hours", "coverage"),
     "gib_hours": ("gib_hours", "coverage"),
     "co2e_g": ("co2e_g", "co2e_coverage"),
+    "embodied_co2e_g": ("embodied_co2e_g", "embodied_coverage"),
     "replicas": ("replicas", "coverage"),
     "cpu_usage_cores": ("cpu_usage_cores", "coverage"),
 }
@@ -191,13 +207,33 @@ QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
 MIN_HOUR_COVERAGE = 0.5
 
 
+def has_embodied(buckets: Sequence[HourBucket]) -> bool:
+    """Whether ``buckets`` measured embodied CO2e.
+
+    Snapshots frozen before embodied emissions were measured carry none, and a
+    window whose embodied CO2e is zero everywhere had no hardware profile (the
+    Impact Model writes 0 when the node's embodied emissions are unknown).
+    """
+    return any(bucket.embodied_co2e_g is not None and bucket.embodied_co2e_g > 0 for bucket in buckets)
+
+
+def co2e_series(buckets: Sequence[HourBucket], *, embodied: bool) -> Dict[datetime, float]:
+    """Operational CO2e per hour, plus embodied CO2e when ``embodied`` (hours with both only)."""
+    operational = quantity_series(buckets, "co2e_g")
+    if not embodied:
+        return operational
+    manufactured = quantity_series(buckets, "embodied_co2e_g")
+    return {hour: value + manufactured[hour] for hour, value in operational.items() if hour in manufactured}
+
+
 def quantity_series(buckets: Sequence[HourBucket], quantity: str) -> Dict[datetime, float]:
     """``{hour: value}`` of a quantity over the hours with enough qualifying data."""
     attribute, coverage_attribute = QUANTITY_FIELDS[quantity]
     series: Dict[datetime, float] = {}
     for bucket in buckets:
         value = getattr(bucket, attribute)
-        if value is None or getattr(bucket, coverage_attribute) < MIN_HOUR_COVERAGE:
+        coverage = getattr(bucket, coverage_attribute)
+        if value is None or coverage is None or coverage < MIN_HOUR_COVERAGE:
             continue
         series[ensure_utc(bucket.hour)] = float(value)
     return series
