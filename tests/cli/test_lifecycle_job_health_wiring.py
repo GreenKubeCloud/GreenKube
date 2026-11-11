@@ -54,3 +54,25 @@ async def test_lifecycle_job_wires_health_collector_and_measurement_store():
 
     assert isinstance(detector_kwargs["change_recorder"], ChangeMeasurementService)
     change_repo.list_statuses.assert_awaited()
+
+
+async def test_lifecycle_job_runs_the_phantom_change_repair_and_survives_its_failure():
+    calls: list = []
+
+    class Repair:
+        def __init__(self, recommendations, **kwargs):
+            calls.append((recommendations, sorted(kwargs)))
+
+        async def run(self):
+            raise RuntimeError("database down")
+
+    repo = MagicMock()
+    with (
+        patch("greenkube.core.optimization.phantom_repair.PhantomChangeRepair", Repair),
+        patch("greenkube.core.db.get_db_manager", return_value=MagicMock(db_type="sqlite")),
+        patch("greenkube.core.factory.get_savings_ledger_repository", return_value=MagicMock()),
+        patch("greenkube.storage.change_repository.get_change_repository", return_value=MagicMock()),
+    ):
+        await start._repair_phantom_changes(repo)
+
+    assert calls == [(repo, ["changes", "savings", "usage"])]
