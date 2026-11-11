@@ -52,7 +52,7 @@ A freshly generated in-memory `Recommendation` has no lifecycle state until it i
 | `stale` | A previously active recommendation no longer appears in the latest generated set and every source that supported it completed the scan. It is kept in history but no longer shown as active. | `reconcile_active_recommendations()` at the end of each scan (see [Per-source reconciliation](#per-source-reconciliation)). |
 | `expired` | The recommendation passed `expires_at` (`generated_at + RECOMMENDATION_TTL_DAYS`) without being applied. It is hidden from active lists but retained for history. | `RecommendationLifecycle.expire()` during every scan and every lifecycle job. |
 | `ignored` | A user intentionally hid the recommendation with an optional reason. Ignored records are preserved for review and can be restored. | `PATCH /api/v1/recommendations/{id}/ignore`, only from `active`, `stale` or `expired` (an open PR or an applied change returns `409`). |
-| `pr_open` | The PR bot opened a pull request that applies the recommendation. | The plan worker, after the plan is approved (`POST /api/v1/automation/plans/{plan_id}/approve`). |
+| `pr_open` | A pull request that applies the recommendation is open, or merged and not yet observed in the cluster. Scans no longer rewrite its baseline and proposal, it never goes stale or expires, and the active listings (`GET /recommendations`, `/recommendations/active`) still return it with the `pull_request_open` blocker. | Set in the same transaction as the GitOps action status: `pr_open`, `merged` and `sync_pending` make an `active` recommendation `pr_open`; a PR closed unmerged, a failed action or a cleared plan returns it to `active` (events `pr_opened` and `pr_closed`). Apply detection moves it to `applied`. |
 | `applied` | The change landed in the cluster. Applying freezes a verification baseline. A measured change whose saving was not realized (`verification_status=failed`) or inconclusive also stays `applied`. | `PATCH .../apply` (manual, only from `active` or `pr_open`; 409 otherwise), apply detection (Kubernetes API, once the rollout completed), or a merged PR. A dismissed rollback review returns here. |
 | `verifying` | The observation window after apply is in progress (extended once because of insufficient samples, or started again by an explicit re-measurement). | `RecommendationVerifier` lifecycle job; `POST .../remeasure`. |
 | `verified` | The measured saving was realized and no health gate failed; the ledger accrues the measured savings (method `measured`) from verification onward. | `RecommendationVerifier` lifecycle job (never directly from `active`). |
@@ -222,7 +222,9 @@ scope + namespace + pod_name + target_node + type
 
 This identity allows pod, workload, namespace, and node recommendations to coexist without collapsing unrelated targets. Active records with the same identity are refreshed in place with the latest description, reason, priority, projected savings, current requests, recommended requests, schedule, and node target.
 
-Ignored records are left untouched by normal upsert so a user decision is not overwritten by the next scan. If a generated recommendation matches a previously applied record, the applied record can be refreshed so its realized savings reflect the current observed state.
+Ignored records are left untouched by normal upsert so a user decision is not overwritten by the next scan. A `pr_open` record is frozen: a scan that regenerates it neither rewrites it nor inserts a duplicate, so the pull request, its baseline and its proposal stay consistent. If a generated recommendation matches a previously applied record, only the applied record's `updated_at` is refreshed (see [Realized savings](#realized-savings)).
+
+**Request fields.** `current_*_request` is the request the recommendation was made against (the baseline; it is frozen when the change is applied), `recommended_*` is the proposal and `actual_*` is the live request detected in the cluster once the change landed (or declared with `PATCH .../apply`). A scan never writes `actual_*`.
 
 ### Per-source reconciliation
 
@@ -241,7 +243,7 @@ All recommendation API paths are under `/api/v1`.
 | Method | Path | Behavior |
 |---|---|---|
 | `GET` | `/recommendations?namespace=&profile=&carbon_price=` | Returns persisted active records (never generates them) with their live `value` and `eligibility`, ordered by expected value. |
-| `GET` | `/recommendations/active?namespace=&source=&risk_level=&capability=&profile=&carbon_price=` | Returns persisted active records with their live `value` and `eligibility`, ordered by expected value (`ranking_score`, highest first, unscored last), then value, projected cost savings and identity. Optional filters by source, risk level and capability; `profile` and `carbon_price` re-score the list for this request (`422` for an unknown profile or a negative price). |
+| `GET` | `/recommendations/active?namespace=&source=&risk_level=&capability=&profile=&carbon_price=` | Returns persisted active and `pr_open` records with their live `value` and `eligibility`, ordered by expected value (`ranking_score`, highest first, unscored last), then value, projected cost savings and identity. Optional filters by source, risk level and capability; `profile` and `carbon_price` re-score the list for this request (`422` for an unknown profile or a negative price). |
 | `GET` | `/recommendations/top?limit=5&metric=co2&profile=&carbon_price=&namespace=` | Returns ranked active recommendations. `metric` is `co2` or `cost` (recommendations with a positive projection of that saving) or `value` (every recommendation, by expected value); `limit` is 1 to 50. With `profile` or `carbon_price`, recommendations are re-scored and ranked by expected value. |
 | `GET` | `/sources/track-record` | Returns the measured realization rate of each source family and capability as Beta(α, β) entries (`realized`, `not_realized`, `rollback_review`, `inconclusive`, `alpha`, `beta`, `mean`, `summary`). |
 | `POST` | `/optimization/runs` | Queues a scan for the controller (optional body `{"namespace": "..."}`); returns `202 {"run_id", "status"}`, deduplicated while a run is queued for the same scope. |
@@ -270,6 +272,8 @@ The bot resolves workload sources from Argo CD and Flux discovery, not from mand
 2. The plan API accepts recommendation IDs only, snapshots the authorized Git revision, and validates the source and rendered diff for raw YAML/JSON, Kustomize, and the supported Helm subsets.
 3. Approval binds to the exact preview digest. A durable idempotent worker creates one commit and PR per plan; duplicate requests reuse the same plan operation.
 4. After the PR merges, the controller observes the Argo CD/Flux revision (the landed commit, or a later commit that contains it and still carries the planned values) and workload readiness. Apply detection compares the post-baseline workload identity and per-container requests; verification attributes measured savings only after its health and evidence gates pass.
+
+A pull request that would change nothing is never opened (`no_effective_change`, fail closed): the eligibility check blocks a proposal equal to the current request after unit normalization (`1Gi` = `1024Mi`, `0.5` = `500m`), plan creation fails with `409 no_effective_change` when the Git source already declares the proposal, and the worker fails the plan (reason `no_effective_change`) before any branch or commit when the live workload already runs every proposed request. Apply detection then records such a recommendation as applied (`detected`) instead of offering it again.
 
 Example lifecycle calls:
 
@@ -315,7 +319,7 @@ The `/recommendations` page currently provides:
 - A **Preview plan** action on cards the server marks eligible: the server resolves the GitOps binding, renders the change, and returns a digest-addressed diff. Approval submits that exact digest; the worker creates or adopts the pull request. The UI tracks the durable operation until the provider result is available. Closing the dialog of a preview that was not approved discards it with `DELETE /automation/plans/{id}`, so the next preview of the same workload is not blocked. A plan whose approval was requested is never discarded, even if the dialog is closed while the approval is still in flight.
 - Ignore from the Active tab, with an optional reason kept for review.
 - Restore from the Ignored tab.
-- Applied recommendation details, verification state (`applied`, `verifying`, `verified`, `rollback_review`), measured vs projected savings and an expandable lifecycle event trail.
+- Applied recommendation details, verification state (`applied`, `verifying`, `verified`, `rollback_review`), measured vs projected savings and an expandable lifecycle event trail. Each request change reads baseline → live value after the change (with the proposal when it differs); a recorded change whose live request still equals the baseline is flagged **live request unchanged** instead of showing identical values.
 - Realized savings summary split into **measured (verified)** and **projected (prorated)** totals.
 
 ## Prometheus And Grafana
@@ -352,10 +356,11 @@ When explicit savings are omitted:
 - CPU and memory rightsizing scale savings by the actual reduction compared with the original recommendation. For example, if the recommendation was 500m to 200m CPU but the user applied 350m, GreenKube records half of the projected savings.
 - Other recommendation types fall back to the projected potential savings.
 
-Applied recommendations can later be refreshed when the same issue is observed again:
+Applied recommendations can later be regenerated by a scan when the same identity is observed again:
 
-- For CPU and memory rightsizing, the current observed request updates the actual value and recalculates realized savings.
-- For non-resource recommendation types, seeing the same issue again sets realized savings back to zero, because the implementation no longer appears effective.
+- For CPU and memory rightsizing, nothing but `updated_at` changes: the baseline, the actual value and the realized savings stay as recorded. A scan reads requests from the hourly usage rollup, whose latest bucket can still carry the replaced request for up to an hour after a rollout, so it is not a live observation; drift after a change is measured from the cluster (C8), not from a regenerated recommendation.
+- Orphaned volumes and load balancers keep their savings (the regenerated observation means the deletion is pending).
+- For other non-resource recommendation types, seeing the same issue again sets realized savings back to zero, because the implementation no longer appears effective.
 
 ### Savings ledger
 
@@ -423,7 +428,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `CHANGE_MEASUREMENT_EPSILON_RATIO` | `config.recommendations.changeMeasurement.epsilonRatio` | `0.02` |
 | `RECOMMENDATION_SCAN_INTERVAL` | `config.recommendations.scanInterval` | `1h` (`1m` to `24h`, units `s`, `m`, `h`) |
 
-`RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance. A decrease by itself, including an unrelated large decrease, is not sufficient. The pre-apply workload-generation and per-container baseline is captured before provider mutation.
+`RECOMMENDATION_APPLY_TOLERANCE` drives the automatic **apply detection**: Kubernetes workload snapshots preserve CPU and memory requests per container, and a typed GitOps action with a plan in flight is considered only after its persisted action status reaches `sync_pending`. It is marked applied only when the targeted live request matches the recommended value within tolerance **and** moved from the baseline toward it: a live request still equal to `current_*` is never an applied change, even when the proposal lies within the tolerance of it (a 20Mi → 23Mi proposal on an untouched 20Mi request). A rollout that completed before the recommendation was created is not its application either. A decrease by itself, including an unrelated large decrease, is not sufficient. A recommendation with a typed action but no plan in flight (action status `none`, `failed` or `closed`) whose proposal is already live is recorded as applied (`detected`). The pre-apply workload-generation and per-container baseline is captured before provider mutation.
 
 The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes in the collector/scheduler container) runs apply detection (which also records changes and workload revisions), outcome verification, change measurement and TTL expiry.
 

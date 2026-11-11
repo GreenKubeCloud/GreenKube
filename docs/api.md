@@ -91,8 +91,8 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/recommendations` | Read persisted active records in an optional `namespace`. Never runs the optimizer. |
-| `GET` | `/recommendations/active` | Read persisted active records with their live expected value (`value`) and delivery `eligibility`, ordered by expected value (`ranking_score`, unscored last), then value, projected cost savings and identity. Supports `namespace`, `source`, `risk_level`, `capability`, `profile` and `carbon_price`. |
+| `GET` | `/recommendations` | Read persisted active records (and `pr_open` ones, whose pull request is in flight) in an optional `namespace`. Never runs the optimizer. |
+| `GET` | `/recommendations/active` | Read persisted active and `pr_open` records with their live expected value (`value`) and delivery `eligibility`, ordered by expected value (`ranking_score`, unscored last), then value, projected cost savings and identity. Supports `namespace`, `source`, `risk_level`, `capability`, `profile` and `carbon_price`. |
 | `GET` | `/recommendations/top` | Rank active recommendations by projected savings (`metric=co2\|cost`, default `co2`) or by expected value (`metric=value`, a `profile` or a `carbon_price`); supports `namespace`; `limit` defaults to 5. |
 | `GET` | `/sources/track-record` | Measured realization rate per source family and capability, as Beta(α, β) entries. |
 | `POST` | `/optimization/runs` | Queue a recommendation scan for the controller (optional body `{"namespace": "..."}`). Returns `202 {"run_id", "status": "queued"}` and a `Location` header; while a run is queued for the same scope (or a cluster-wide run is queued) its id is returned instead of a duplicate. |

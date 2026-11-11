@@ -397,7 +397,7 @@ A daily retention job removes rendered file contents and terminal operation/webh
 
 ## Observability
 
-- `GET /api/v1/automation/status` reports worker heartbeat age, the inline loop state (`worker.inline_loop`: state, heartbeat age, restarts, last error code), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`.
+- `GET /api/v1/automation/status` reports worker heartbeat age, the inline loop state (`worker.inline_loop`: state, heartbeat age, restarts, last error code), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`. A provider's `status` is `unverified` until a real call: the worker sets `verified` (with `last_checked_at`) once it opened or adopted a pull request, and `error` with `last_error_code` `auth_failed` (HTTP 401) or `permission_denied` (403) when the provider refuses the token. Changing a provider's endpoint or credential reference resets it to `unverified`; other configuration changes keep it.
 - `GET /api/v1/automation/pull-requests` lists safe pending/open PR metadata.
 - `GET /prometheus/metrics` exposes control-loop metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the worker's process-local registry.
 - Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, and stale worker heartbeats.
