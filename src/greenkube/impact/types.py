@@ -21,8 +21,9 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: Version of the Impact Model methodology, persisted with every projection and
 #: every allocated metric row. Bump the major version when an existing formula
 #: changes the numbers it produces, the minor version when a new component is
-#: added and existing components keep their values (1.1.0: memory and GPU power).
-IMPACT_MODEL_VERSION = "1.1.0"
+#: added and existing components keep their values (1.1.0: memory and GPU power,
+#: 2.0.0: projections annualize over the target's observed coverage).
+IMPACT_MODEL_VERSION = "2.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
 IDLE_WORKLOAD_NAME = "__idle__"
@@ -201,6 +202,33 @@ class Co2eBreakdown:
         }
 
 
+#: CO2e components of a projection (roadmap principle "same model for estimate
+#: and measurement"). ``operational_energy`` is the dynamic CPU, memory and GPU
+#: power, ``idle_share`` the node idle power allocated by CPU reservation and
+#: ``embodied`` the manufacturing emissions allocated by CPU reservation.
+CO2E_OPERATIONAL_ENERGY = "operational_energy"
+CO2E_IDLE_SHARE = "idle_share"
+CO2E_EMBODIED = "embodied"
+CO2E_COMPONENTS: Tuple[str, ...] = (CO2E_OPERATIONAL_ENERGY, CO2E_IDLE_SHARE, CO2E_EMBODIED)
+
+#: Components a measurement over stored metric rows sees: ``co2e_grams`` of a
+#: row is its operational CO2e (idle share, dynamic, memory and GPU power, as
+#: allocated by the Impact Model); embodied emissions are stored apart
+#: (``embodied_co2e_grams``) and change measurement does not read them.
+MEASURED_CO2E_COMPONENTS: Tuple[str, ...] = (CO2E_OPERATIONAL_ENERGY, CO2E_IDLE_SHARE)
+
+
+def co2e_components(breakdown: Co2eBreakdown) -> Dict[str, float]:
+    """Splits a CO2e breakdown into the three projection components."""
+    return {
+        CO2E_OPERATIONAL_ENERGY: breakdown.dynamic_operational
+        + breakdown.memory_operational
+        + breakdown.gpu_operational,
+        CO2E_IDLE_SHARE: breakdown.idle_operational,
+        CO2E_EMBODIED: breakdown.embodied,
+    }
+
+
 @dataclass(frozen=True)
 class CapacityDelta:
     """Capacity a change releases per year (negative values mean it consumes more)."""
@@ -345,6 +373,24 @@ class ResourceSample:
 
 
 @dataclass(frozen=True)
+class ObservedCoverage:
+    """How long a projection's target was observed, which sets its annualization.
+
+    ``lookback_hours`` is the analysis window; ``observed_hours`` the span from
+    the target's first observation to the end of that window (a workload that
+    appeared two hours ago was observable for two hours, not for the whole
+    lookback). ``basis`` says where the first observation came from:
+    ``target_summary`` (the usage summary of the target), ``samples`` (the
+    timestamps of raw metric rows) or ``lookback`` (unknown: the whole window).
+    """
+
+    lookback_hours: float
+    observed_hours: float
+    basis: str
+    first_observed: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class WorkloadBaseline:
     """Observed history of one workload (or container) used to project a change."""
 
@@ -352,6 +398,9 @@ class WorkloadBaseline:
     samples: Sequence[ResourceSample]
     #: Observation window length; window totals are annualized by HOURS_PER_YEAR / window_hours.
     window_hours: float
+    #: Observed coverage of the target. When set, the model annualizes over it
+    #: (with a minimum coverage) instead of ``window_hours`` and reports it.
+    coverage: Optional[ObservedCoverage] = None
 
 
 @dataclass(frozen=True)
@@ -483,6 +532,19 @@ class ImpactDelta:
     assumptions: Dict[str, Any] = field(default_factory=dict)
     model_version: str = IMPACT_MODEL_VERSION
 
+    @property
+    def co2e_components_annual_g(self) -> Dict[str, float]:
+        """Allocated annual CO2e by projection component (operational energy, idle share, embodied)."""
+        return co2e_components(self.co2e_breakdown_annual_g)
+
+    @property
+    def co2e_measurable_expected_annual_g(self) -> Optional[float]:
+        """Expected annual CO2e of the components a change measurement can see (None when not modeled)."""
+        if not self.co2e_modeled:
+            return None
+        components = self.co2e_components_annual_g
+        return sum(components[name] for name in MEASURED_CO2E_COMPONENTS) * self.realization_factor
+
     def to_dict(self) -> Dict[str, Any]:
         """JSON-safe representation persisted as ``impact`` on recommendations."""
         return {
@@ -499,6 +561,9 @@ class ImpactDelta:
             "co2e_allocated_annual_g": self.co2e_allocated_annual_g,
             "co2e_expected_annual_g": self.co2e_expected_annual_g,
             "co2e_breakdown_annual_g": self.co2e_breakdown_annual_g.to_dict(),
+            "co2e_components_annual_g": self.co2e_components_annual_g,
+            "co2e_measurable_components": list(MEASURED_CO2E_COMPONENTS),
+            "co2e_measurable_expected_annual_g": self.co2e_measurable_expected_annual_g,
             "carbon_price_per_tonne": self.carbon_price_per_tonne,
             "value_annual": self.value_annual,
             "confidence": self.confidence,

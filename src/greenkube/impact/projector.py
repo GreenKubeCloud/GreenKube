@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
@@ -42,6 +42,7 @@ from greenkube.impact.types import (
     NodeImpactProfile,
     NodePoolChange,
     NodePoolContext,
+    ObservedCoverage,
     PowerSource,
     ReplicaScheduleChange,
     ResourceSample,
@@ -58,6 +59,14 @@ _CONTEXT_CACHE_ATTR = "_greenkube_impact_projector"
 
 #: Name of the fallback node profile used for samples on unknown nodes.
 UNKNOWN_NODE = "__unknown__"
+
+#: ``ObservedCoverage.basis`` values: where a target's first observation came from.
+COVERAGE_FROM_SUMMARY = "target_summary"
+COVERAGE_FROM_SAMPLES = "samples"
+COVERAGE_FROM_LOOKBACK = "lookback"
+
+#: Looks up when a target was first observed (None when unknown).
+FirstObservedLookup = Callable[["WorkloadRef"], Optional[datetime]]
 
 #: Fallbacks used only when the configuration object lacks a setting.
 _FALLBACK_LIFESPAN_YEARS = 4
@@ -174,6 +183,70 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
     )
 
 
+def _utc(value: Any) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _is_aggregated(row: Any) -> bool:
+    """True for rollup baseline rows, whose timestamp is the last hour they cover, not a sample time."""
+    from greenkube.models.workload_usage import BaselineMetric
+
+    return isinstance(row, BaselineMetric)
+
+
+def first_observed_from_summaries(snapshot: Any, ref: WorkloadRef) -> Optional[datetime]:
+    """First observed hour of a target in a usage snapshot (``UsageSnapshot``), or None.
+
+    A container ref reads its container summary, then the pod-level one; a
+    workload ref the pod-level summary, then the earliest of its containers;
+    a ``Namespace`` ref the earliest target of the namespace.
+    """
+    summaries = getattr(snapshot, "summaries", None)
+    if not isinstance(summaries, Mapping):
+        return None
+    if ref.kind == "Namespace":
+        candidates = [
+            summary
+            for target, containers in summaries.items()
+            if target and target[0] == ref.namespace
+            for summary in containers.values()
+        ]
+    else:
+        containers = summaries.get((ref.namespace, ref.kind, ref.name)) or {}
+        candidates = []
+        for key in ((ref.container,) if ref.container else ()) + ("",):
+            summary = containers.get(key)
+            if summary is not None:
+                candidates = [summary]
+                break
+        if not candidates:
+            candidates = list(containers.values())
+    hours = [hour for hour in (_utc(getattr(summary, "first_hour", None)) for summary in candidates) if hour]
+    return min(hours) if hours else None
+
+
+def _context_first_observed(context: Any) -> Optional[FirstObservedLookup]:
+    """First-observation lookup over the context's usage summaries (computed once, on first use)."""
+    reader = getattr(context, "usage_snapshot", None)
+    if not callable(reader):
+        snapshot = getattr(context, "usage", None)
+        if snapshot is None:
+            return None
+        return lambda ref: first_observed_from_summaries(snapshot, ref)
+
+    def lookup(ref: WorkloadRef) -> Optional[datetime]:
+        try:
+            snapshot = reader()
+        except Exception:  # pragma: no cover - defensive: coverage falls back to samples
+            logger.debug("Usage snapshot unavailable for coverage of %s", ref, exc_info=True)
+            return None
+        return first_observed_from_summaries(snapshot, ref)
+
+    return lookup
+
+
 def observed_window_hours(samples: Sequence[ResourceSample]) -> float:
     """Observation span of samples when the analysis window is unknown."""
     timestamped = [sample for sample in samples if sample.timestamp is not None]
@@ -200,7 +273,13 @@ class ImpactProjector:
         analysis_window_seconds: Optional[float] = None,
         model: Optional[ImpactModel] = None,
         catalog: Optional[PricingCatalog] = None,
+        window_end: Optional[datetime] = None,
+        first_observed: Optional[FirstObservedLookup] = None,
     ):
+        """``window_end`` is the end of the analysis window and ``first_observed``
+        finds when a target was first observed; with them, projections are
+        annualized over each target's observed coverage (Impact Model 2.0.0).
+        """
         self.config = config
         self.model: ImpactModel = model if model is not None else DEFAULT_IMPACT_MODEL
         self.cluster_uid = str(_setting(config, "CLUSTER_NAME", "") or "")
@@ -211,6 +290,8 @@ class ImpactProjector:
             if isinstance(analysis_window_seconds, (int, float)) and analysis_window_seconds > 0
             else None
         )
+        self.window_end = _utc(window_end)
+        self._first_observed = first_observed
         rows = list(rows)
         self.resolver = UnitPriceResolver(
             catalog=catalog if catalog is not None else PricingCatalog(),
@@ -235,6 +316,8 @@ class ImpactProjector:
             node_infos=getattr(context, "node_infos", None) or [],
             rows=rows,
             analysis_window_seconds=getattr(context, "analysis_window_seconds", None),
+            window_end=getattr(context, "window_end", None),
+            first_observed=_context_first_observed(context),
         )
         try:
             setattr(context, _CONTEXT_CACHE_ATTR, projector)
@@ -388,9 +471,58 @@ class ImpactProjector:
         )
 
     def baseline(self, ref: WorkloadRef, series: Sequence[Any]) -> WorkloadBaseline:
+        series = list(series)
         samples = [sample_from_metric(metric, ref, self.default_hours) for metric in series]
-        window = self.window_hours if self.window_hours is not None else observed_window_hours(samples)
-        return WorkloadBaseline(ref=ref, samples=samples, window_hours=window)
+        if self.window_hours is None:
+            # No analysis window: the samples' own span is already their coverage.
+            return WorkloadBaseline(ref=ref, samples=samples, window_hours=observed_window_hours(samples))
+        window = self.window_hours
+        return WorkloadBaseline(
+            ref=ref, samples=samples, window_hours=window, coverage=self.coverage(ref, series, samples, window)
+        )
+
+    def coverage(
+        self,
+        ref: WorkloadRef,
+        series: Sequence[Any],
+        samples: Sequence[ResourceSample],
+        lookback_hours: float,
+    ) -> Optional[ObservedCoverage]:
+        """Observed coverage of a target: from its first observation to the end of the window.
+
+        The first observation comes from the target's usage summary, else from
+        the timestamps of raw metric rows (rollup baseline rows carry the last
+        hour they cover, not a sample time). Without either, or without a
+        known window end, the whole lookback is the coverage (basis
+        ``lookback``), as before Impact Model 2.0.0: coverage is never
+        guessed short, which would inflate the projection.
+        """
+        if lookback_hours <= 0 or not samples:
+            return None
+        first: Optional[datetime] = None
+        basis = COVERAGE_FROM_LOOKBACK
+        if self._first_observed is not None:
+            first = _utc(self._first_observed(ref))
+            if first is not None:
+                basis = COVERAGE_FROM_SUMMARY
+        raw = not any(_is_aggregated(row) for row in series)
+        stamps = [stamp for stamp in (_utc(sample.timestamp) for sample in samples) if stamp is not None]
+        if first is None and raw and stamps:
+            first, basis = min(stamps), COVERAGE_FROM_SAMPLES
+        # Without the window end, the span since the first observation is
+        # unknown (the last sample may predate it): keep the lookback.
+        end = self.window_end
+        if first is None or end is None:
+            return ObservedCoverage(
+                lookback_hours=lookback_hours, observed_hours=lookback_hours, basis=COVERAGE_FROM_LOOKBACK
+            )
+        observed = max((end - first).total_seconds() / 3600.0, 0.0)
+        return ObservedCoverage(
+            lookback_hours=lookback_hours,
+            observed_hours=min(observed, lookback_hours),
+            basis=basis,
+            first_observed=first,
+        )
 
     # ------------------------------------------------------------------ #
     # Projections                                                         #

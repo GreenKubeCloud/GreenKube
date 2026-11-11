@@ -64,6 +64,18 @@ OBSERVED_TOTAL_APPORTIONED = "observed_total_apportioned"
 #: Unit prices listed in ``assumptions`` are capped to keep payloads small.
 MAX_LISTED_PRICES = 10
 
+#: Shortest coverage a projection is annualized over: a target observed for a
+#: few minutes is annualized as if observed for one hour, never extrapolated
+#: from a single scrape.
+MIN_COVERAGE_HOURS = 1.0
+
+#: Coverage below one week is short: weekly cycles are not seen yet. Short
+#: coverage is reported and lowers the projection's confidence.
+SHORT_COVERAGE_HOURS = 7 * 24.0
+
+#: Lowest confidence multiplier applied for short coverage.
+SHORT_COVERAGE_CONFIDENCE_FLOOR = 0.25
+
 
 class ImpactModel(Protocol):
     """Contract shared by allocation (measurement) and projection (estimation)."""
@@ -293,6 +305,56 @@ class _Accumulator:
         )
 
 
+@dataclass(frozen=True)
+class Annualization:
+    """Hours a projection's window totals are annualized over, and why."""
+
+    hours: float
+    assumptions: Dict[str, Any] = field(default_factory=dict)
+    confidence_scale: float = 1.0
+    notes: Tuple[str, ...] = ()
+
+
+def annualization(baseline: WorkloadBaseline) -> Annualization:
+    """Annualization of a baseline: over the target's observed coverage when known.
+
+    Window totals (cost, CO2e, capacity) are sums over the samples of the
+    target, which exist only since the target was first observed. Dividing
+    them by the whole lookback would treat a workload that appeared two hours
+    ago as if it had run two hours in fourteen days. The model divides by the
+    observed coverage instead (from the first observation to the end of the
+    lookback, at least :data:`MIN_COVERAGE_HOURS`, at most the lookback), and
+    marks coverage below :data:`SHORT_COVERAGE_HOURS` as short.
+    """
+    coverage = baseline.coverage
+    if coverage is None:
+        return Annualization(hours=baseline.window_hours)
+    lookback = coverage.lookback_hours if coverage.lookback_hours > 0 else baseline.window_hours
+    observed = max(float(coverage.observed_hours), 0.0)
+    if lookback > 0:
+        observed = min(observed, lookback)
+    hours = max(observed, MIN_COVERAGE_HOURS)
+    assumptions: Dict[str, Any] = {
+        "lookback_hours": lookback,
+        "coverage_hours": observed,
+        "coverage_basis": coverage.basis,
+    }
+    if coverage.first_observed is not None:
+        assumptions["first_observed_at"] = coverage.first_observed.isoformat()
+    notes: List[str] = []
+    scale = 1.0
+    if observed < MIN_COVERAGE_HOURS:
+        assumptions["minimum_coverage_applied"] = True
+    if observed < SHORT_COVERAGE_HOURS and observed < lookback:
+        assumptions["short_coverage"] = True
+        scale = max(observed / SHORT_COVERAGE_HOURS, SHORT_COVERAGE_CONFIDENCE_FLOOR)
+        notes.append(
+            f"Annualized from {observed:.1f} h of observation (the target is younger than the "
+            f"{lookback:.0f} h lookback): weekly cycles are not seen yet, so the projection is less certain."
+        )
+    return Annualization(hours=hours, assumptions=assumptions, confidence_scale=scale, notes=tuple(notes))
+
+
 class ReservationAwareImpactModel:
     """Impact Model v1: reservation-aware allocation and projection."""
 
@@ -381,7 +443,7 @@ class ReservationAwareImpactModel:
         delta = self._finalize(
             ChangeKind.CONTAINER_RESOURCES,
             acc,
-            baseline.window_hours,
+            annualization(baseline),
             pool,
             realization_factor=factor,
             realization_source=source,
@@ -444,7 +506,7 @@ class ReservationAwareImpactModel:
         return self._finalize(
             kind,
             acc,
-            baseline.window_hours,
+            annualization(baseline),
             pool,
             realization_factor=realization_factor,
             realization_source=realization_source,
@@ -532,7 +594,7 @@ class ReservationAwareImpactModel:
         delta = self._finalize(
             ChangeKind.NODE_POOL,
             acc,
-            float(HOURS_PER_YEAR),
+            Annualization(hours=float(HOURS_PER_YEAR)),
             pool,
             realization_factor=realization_factor,
             realization_source=realization_source,
@@ -553,7 +615,7 @@ class ReservationAwareImpactModel:
         self,
         kind: ChangeKind,
         acc: _Accumulator,
-        window_hours: float,
+        annualized: Annualization,
         pool: NodePoolContext,
         *,
         realization_factor: float,
@@ -561,6 +623,7 @@ class ReservationAwareImpactModel:
         realization_source: Optional[str] = None,
         node_hours: float = 0.0,
     ) -> ImpactDelta:
+        window_hours = annualized.hours
         factor = HOURS_PER_YEAR / window_hours if window_hours > 0 else 0.0
         realization = min(max(float(realization_factor), 0.0), 1.0)
         cost = acc.cost.scaled(factor)
@@ -568,6 +631,7 @@ class ReservationAwareImpactModel:
         expected_cost = cost.total * realization
         expected_co2e = co2e.total * realization
         confidence = acc.confidence_weighted / acc.weight_hours if acc.weight_hours > 0 else 0.0
+        confidence *= annualized.confidence_scale
         currencies = sorted(acc.currencies) or [pool.currency]
         currency = currencies[0] if len(currencies) == 1 else "mixed"
 
@@ -578,7 +642,10 @@ class ReservationAwareImpactModel:
             "unit_prices": acc.listed_prices(),
             "realization_factor_source": realization_source or pool.realization_source,
             "co2e_basis": co2e_basis,
+            **annualized.assumptions,
         }
+        if annualized.notes:
+            assumptions["notes"] = list(annualized.notes)
         if acc.weight_hours > 0:
             assumptions["pue"] = acc.pue_weighted / acc.weight_hours
             assumptions["grid_intensity_g_per_kwh"] = acc.intensity_weighted / acc.weight_hours
