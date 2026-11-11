@@ -19,6 +19,7 @@ recommendations stale. Each source's run and signals are recorded in
 
 import asyncio
 import logging
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
@@ -68,6 +69,9 @@ logger = logging.getLogger(__name__)
 SOURCE_PROBE_TIMEOUT_SECONDS = 30.0
 #: Bound on one source's collection; a hung connector must not stall the scan.
 SOURCE_COLLECT_TIMEOUT_SECONDS = 300.0
+
+#: Cluster uids whose v2 backfill completed, per recommendation repository (E4).
+_V2_BACKFILLED: "weakref.WeakKeyDictionary[object, set]" = weakref.WeakKeyDictionary()
 
 
 @dataclass
@@ -444,12 +448,24 @@ class OptimizationEngine:
         return with_v2_fields(RecommendationRecord.from_recommendation(recommendation), self.cluster_uid)
 
     async def _backfill_v2_fields(self, reco_repo: "RecommendationRepository") -> None:
-        """Give rows written before Recommendation v2 their v2 columns (once, then a no-op)."""
+        """Give rows written before Recommendation v2 their v2 columns (once per repository and cluster).
+
+        The engine writes the v2 columns with every record, so one successful
+        pass per process is enough; rows whose v2 view cannot be derived are
+        not scanned again on every scan.
+        """
+        try:
+            done = _V2_BACKFILLED.setdefault(reco_repo, set())
+        except TypeError:
+            done = set()
+        if self.cluster_uid in done:
+            return
         try:
             filled = await reco_repo.backfill_v2_fields(self.cluster_uid)
         except Exception as exc:
             logger.warning("Could not backfill the v2 recommendation columns (%s).", type(exc).__name__)
             return
+        done.add(self.cluster_uid)
         if isinstance(filled, int) and filled:
             logger.info("Backfilled the v2 columns of %d recommendation(s).", filled)
 

@@ -283,3 +283,13 @@ def _empty_krr() -> Source:
             return SourceBatch(signals=[])
 
     return EmptyKrr(SourceSettings(), SourceDeps(config=get_config(), cluster_uid="c1"))
+
+
+async def test_the_v2_backfill_runs_once_per_repository(repo):
+    calls = AsyncMock(wraps=repo.backfill_v2_fields)
+    repo.backfill_v2_fields = calls
+
+    await _engine([_krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+    await _engine([_krr(260)]).refresh(AsyncMock(), AsyncMock(), repo)
+
+    assert calls.await_count == 1
