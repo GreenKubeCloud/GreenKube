@@ -11,7 +11,7 @@ import typer
 
 from ..core.config import get_config
 from ..utils.log import configure_logging
-from . import demo, recompute, start
+from . import db, demo, recompute, start
 
 _cfg = get_config()
 configure_logging(level=_cfg.LOG_LEVEL, log_format=_cfg.LOG_FORMAT)
@@ -64,6 +64,7 @@ def main(
 # Register command sub-apps
 app.add_typer(start.app, name="start")
 app.add_typer(demo.app, name="demo")
+app.add_typer(db.app, name="db")
 app.command(name="recompute")(recompute.recompute)
 
 

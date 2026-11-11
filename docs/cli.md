@@ -1,24 +1,20 @@
 # CLI Reference
 
-GreenKube ships with a CLI with two runtime modes: `start` runs the collector service and `demo` launches a self-contained sample environment. `recompute` is a maintenance command for stored metrics. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
+GreenKube ships with a CLI with two runtime modes: `start` runs the controller and `demo` launches a self-contained sample environment. `recompute` and `db copy` are maintenance commands. Reporting and recommendations are provided by the REST API and the dashboard, not by the CLI.
 
 ## Getting started
 
-In a Kubernetes deployment the collector container already runs `greenkube start`; commands can be run inside the pod via `kubectl exec`:
+In a Kubernetes deployment the controller already runs `greenkube start`; commands can be run inside it via `kubectl exec`:
 
 ```bash
-# Find the GreenKube pod name
-kubectl get pods -n greenkube
-
-# Open a shell in the pod
-kubectl exec -it <pod-name> -n greenkube -- bash
+kubectl -n greenkube exec -it deploy/greenkube-controller -- bash
 ```
 
 ## Commands
 
 ### `greenkube start`
 
-Start the controller: connects to the database, runs schema migrations, performs an initial collection, then runs every periodic loop in its loop registry: collection, compression, dashboard summary refresh, recommendation scans and lifecycle, GitOps discovery and sync and, when Git providers are configured, the automation controller loop and (when automation is enabled) plan execution. See [Process topology](architecture.md#process-topology).
+Start the controller: connects to the database, runs schema migrations (under a PostgreSQL advisory lock; `DB_RUN_MIGRATIONS=false` skips them in the API and worker), performs an initial collection, then runs every periodic loop in its loop registry: collection, compression, dashboard summary refresh, recommendation scans and lifecycle, GitOps discovery and sync, the automation readiness reconciler (capability activation, F12), the automation controller loop and plan execution (active while a repository is deliverable). See [Process topology](architecture.md#process-topology).
 
 ```
 greenkube start [OPTIONS]
@@ -28,9 +24,9 @@ greenkube start [OPTIONS]
 |------|-------------|
 | `--last TEXT` | Re-collect this range at startup, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month), overwriting existing rows with an idempotent upsert. Without it, the initial and scheduled runs catch up every window missing since the collection watermark (bounded by `COLLECTION_MAX_BACKFILL`). |
 
-This is the default runtime for the collector container in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
+This is the runtime of the controller Deployment in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 
-The process also serves its control-loop metrics (recommendation scans, verification, collection) at `/prometheus/metrics` (and `/metrics`) on `CONTROLLER_METRICS_PORT` (default `9102`; the chart sets it from `collector.metricsPort`; `0` disables the listener). Scrapes need a bearer token only when `GREENKUBE_API_KEY` is set in the controller's environment. A port that cannot be bound is logged and the controller keeps running without the listener.
+The process also serves its control-loop metrics (recommendation scans, verification, collection) at `/prometheus/metrics` (and `/metrics`) on `CONTROLLER_METRICS_PORT` (default `9102`; the chart sets it from `controller.metricsPort`; `0` disables the listener). Scrapes need a bearer token only when `GREENKUBE_API_KEY` is set in the controller's environment. A port that cannot be bound is logged and the controller keeps running without the listener.
 
 ### `greenkube demo`
 
@@ -69,19 +65,39 @@ greenkube recompute --since TEXT [OPTIONS]
 
 Run it inside the controller pod (`kubectl exec`), where the database settings are configured.
 
+### `greenkube db copy`
+
+Copy a SQLite database into PostgreSQL, once, when upgrading a 0.3.x SQLite install ([Upgrading](upgrading.md#from-a-sqlite-install)).
+
+```
+greenkube db copy --from sqlite:///data/greenkube_data.db --to "$DB_CONNECTION_STRING" [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--from TEXT` | Source SQLite database (`sqlite:///absolute/path` or `sqlite://relative/path`). Never written: a working copy is migrated to the current schema. |
+| `--to TEXT` | Target PostgreSQL URL. The target is migrated under the controller's advisory lock. |
+| `--schema TEXT` | Target schema (default `public`, or `DB_SCHEMA`). |
+| `--include-metrics` | Also copy the metric history (otherwise re-collected). Caches are never copied. |
+| `--batch-size INTEGER` | Rows per batch (default 1000). |
+| `--dry-run` | Count the rows per table; write nothing. |
+| `--work-dir PATH` | Where the working copy is written (default: the temporary directory). |
+
+Tables are copied parents first with `ON CONFLICT DO NOTHING`, so a rerun only adds missing rows; identity sequences are moved past the copied ids.
+
 ### `greenkube version`
 
 Print the GreenKube version.
 
 ### Automation worker (`greenkube.cli.automation_worker`)
 
-The production profile starts the plan worker as:
+With `worker.replicas` greater than 0, the chart starts dedicated plan workers as:
 
 ```bash
 python -m greenkube.cli.automation_worker
 ```
 
-The worker is an optional extra plan executor: it claims queued plan operations through database leases and executes them, nothing else (the webhook outbox, PR polling, branch cleanup, plan expiry and retention run in the controller). Operation leases make several replicas safe. The chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value. The worker exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Use the Helm chart so the mode and credentials are configured consistently.
+The worker is an optional extra plan executor: it claims queued plan operations through database leases and executes them, nothing else (the webhook outbox, PR polling, branch cleanup, plan expiry and retention run in the controller). Operation leases make several replicas safe. The chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value. The worker exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `worker.metricsPort`, default `8001`). Use the Helm chart so the mode and credentials are configured consistently.
 
 ## Global flags
 
