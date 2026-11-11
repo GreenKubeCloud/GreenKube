@@ -637,7 +637,7 @@ class AutomationReadiness:
                 if paused
                 else _aggregate(repositories, "delivery", empty_reason="no_repository_discovered")
             ),
-            "sync_tracking": self._tracking_state(providers),
+            "sync_tracking": self._tracking_state(providers, default_kind),
             "webhooks": (
                 CapabilityState(STATE_ACTIVE)
                 if self._webhooks_configured()
@@ -659,7 +659,7 @@ class AutomationReadiness:
             return CapabilityState(STATE_PENDING, "discovery_not_run")
         return CapabilityState(STATE_DORMANT, "no_gitops_controller")
 
-    def _tracking_state(self, providers: Sequence[GitOpsProviderConfig]) -> CapabilityState:
+    def _tracking_state(self, providers: Sequence[GitOpsProviderConfig], default_kind: str | None) -> CapabilityState:
         credentialed = [
             p.id
             for p in providers
@@ -667,6 +667,9 @@ class AutomationReadiness:
         ]
         if credentialed or self._webhooks_configured():
             return CapabilityState(STATE_ACTIVE, details={"providers": credentialed})
+        if default_kind is not None:
+            # Credentials are mounted, but no discovered repository uses them yet.
+            return CapabilityState(STATE_DORMANT, "no_repository_discovered")
         return CapabilityState(STATE_DORMANT, "credentials_missing")
 
     async def _renderer_state(self) -> CapabilityState:

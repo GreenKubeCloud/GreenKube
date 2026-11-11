@@ -336,6 +336,7 @@ async def test_vanished_hosts_disable_their_inferred_provider(tmp_path):
 
     repository.repo_urls = []
     snapshot = await readiness.run_once()
+    assert snapshot.capabilities["sync_tracking"].reason == "no_repository_discovered"
 
     assert repository.providers["inferred-github.com"].enabled is False
     assert repository.allowlists["inferred-github.com"] == set()
