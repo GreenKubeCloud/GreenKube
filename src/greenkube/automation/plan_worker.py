@@ -11,7 +11,12 @@ from functools import partial
 from typing import Any, Literal, Protocol, TypeVar, cast
 
 from greenkube.automation.actions import action_kind_of
-from greenkube.automation.delivery import normalized_url, plan_trailer_of, pull_request_number_from_url
+from greenkube.automation.delivery import (
+    EXTERNAL_DELIVERY_RESUME_AFTER,
+    normalized_url,
+    plan_trailer_of,
+    pull_request_number_from_url,
+)
 from greenkube.automation.git.base import (
     EMPTY_PULL_REQUEST_OPTIONS,
     GitCommitRequest,
@@ -400,6 +405,7 @@ class PlanWorker:
         self.lease_seconds = lease_seconds
         self._render_settings = render_settings
         self._pull_request_features = pull_request_features
+        self._link_cursor = 0
 
     async def process_once(self, worker_id: str) -> bool:
         """Claim and process a single operation, returning whether one was claimed."""
@@ -1836,13 +1842,30 @@ class PlanWorker:
         if plan.delivery_mode == "ci" and head_sha is None:
             raise ExternalDeliveryError("invalid_head_sha", "A CI delivery report must include head_sha.", 422)
 
-        if plan.status is not PlanStatus.APPROVED:
+        # A plan left APPLYING by an interrupted recording (no queued operation ever
+        # drives an external plan) resumes here instead of staying busy for good.
+        resuming = plan.status is PlanStatus.APPLYING
+        if plan.status is not PlanStatus.APPROVED and not resuming:
             return await self._repeated_delivery(plan, number, head_sha)
 
         target = await self.provider_resolver.resolve(plan.source)
         try:
             self._validate_target(plan.source, target)
             verified = await self._verify_external_pull_request(plan, target, number, pr_url, head_sha)
+            if resuming:
+                other = next(
+                    (
+                        record
+                        for record in await self._plan_pull_request_records(plan)
+                        if record.pr_number not in (None, verified.pull_request.number)
+                    ),
+                    None,
+                )
+                if other is not None:
+                    raise ExternalDeliveryError(
+                        "delivery_conflict",
+                        f"The plan is already delivered by pull request #{other.pr_number}.",
+                    )
             try:
                 plan = await self._ensure_pre_apply_baseline(None, plan)
             except PlanWorkerError as exc:
@@ -1851,40 +1874,34 @@ class PlanWorker:
                     f"The pre-apply workload baseline could not be captured: {exc}",
                     status_code=503 if exc.retryable else 409,
                 ) from exc
-            applying = await self.plans.set_plan_status(
-                plan.plan_id,
-                PlanStatus.APPLYING,
-                expected_statuses=(PlanStatus.APPROVED,),
-                expected_digest=plan.digest,
-                actor=actor,
-            )
-            if applying is None:
-                current = await self.plans.get_plan(plan.plan_id)
-                if current is None:
-                    raise ExternalDeliveryError("plan_not_found", f"Plan {plan_id!r} was not found.", status_code=404)
-                return await self._repeated_delivery(current, number, head_sha)
-            plan = applying
-            if verified.committed_on_revision is not None:
-                plan = await self._record_committed_on_revision(plan, verified.committed_on_revision)
-            await self._record_open_pull_request(
-                plan, target, verified.head_ref, verified.pull_request, commit_sha=verified.head_sha
-            )
-            opened = await self.plans.set_plan_status(
-                plan.plan_id,
-                PlanStatus.PR_OPEN,
-                expected_statuses=(PlanStatus.APPLYING,),
-                expected_digest=plan.digest,
-                actor=actor,
-            )
-            if opened is None:
-                raise ExternalDeliveryError("plan_stale", "The plan changed while its delivery was recorded.")
-            await self.plans.set_recommendation_action_status(
-                plan.recommendation_ids,
-                ActionStatus.PR_OPEN,
-                expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
-                actor=actor,
-                plan_id=plan.plan_id,
-            )
+            if not resuming:
+                applying = await self.plans.set_plan_status(
+                    plan.plan_id,
+                    PlanStatus.APPLYING,
+                    expected_statuses=(PlanStatus.APPROVED,),
+                    expected_digest=plan.digest,
+                    actor=actor,
+                )
+                if applying is None:
+                    current = await self.plans.get_plan(plan.plan_id)
+                    if current is None:
+                        raise ExternalDeliveryError(
+                            "plan_not_found", f"Plan {plan_id!r} was not found.", status_code=404
+                        )
+                    return await self._repeated_delivery(current, number, head_sha)
+                plan = applying
+            try:
+                opened = await self._complete_external_delivery(plan, target, verified, actor)
+            except Exception as exc:
+                await self._release_external_delivery(plan, actor)
+                if isinstance(exc, ExternalDeliveryError):
+                    raise
+                raise ExternalDeliveryError(
+                    "delivery_not_recorded",
+                    "The verified pull request could not be recorded; the plan is approved again, retry the "
+                    f"report ({type(exc).__name__}).",
+                    status_code=503 if _is_retryable(exc) else 409,
+                ) from exc
             logger.info(
                 "Plan %s delivered externally (%s): pull request #%s linked by %s.",
                 plan.plan_id,
@@ -1906,19 +1923,92 @@ class PlanWorker:
             except Exception:
                 pass
 
+    async def _complete_external_delivery(
+        self,
+        plan: Plan,
+        target: GitProviderTarget,
+        verified: _ExternalPullRequest,
+        actor: str,
+    ) -> Plan:
+        """Record a verified external pull request for an ``APPLYING`` plan and open it (re-entrant)."""
+        if verified.committed_on_revision is not None:
+            plan = await self._record_committed_on_revision(plan, verified.committed_on_revision)
+        await self._record_open_pull_request(
+            plan, target, verified.head_ref, verified.pull_request, commit_sha=verified.head_sha
+        )
+        opened = await self.plans.set_plan_status(
+            plan.plan_id,
+            PlanStatus.PR_OPEN,
+            expected_statuses=(PlanStatus.APPLYING,),
+            expected_digest=plan.digest,
+            actor=actor,
+        )
+        if opened is None:
+            raise ExternalDeliveryError("plan_stale", "The plan changed while its delivery was recorded.")
+        await self.plans.set_recommendation_action_status(
+            plan.recommendation_ids,
+            ActionStatus.PR_OPEN,
+            expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
+            actor=actor,
+            plan_id=plan.plan_id,
+        )
+        return opened
+
+    async def _release_external_delivery(self, plan: Plan, actor: str) -> None:
+        """Return a plan whose delivery recording failed to ``APPROVED`` so it stays cancellable and retryable.
+
+        Best effort: when this write fails too, the plan stays ``APPLYING`` and the
+        next report (or the controller's branch linkage) resumes the recording.
+        """
+        try:
+            await self.plans.set_plan_status(
+                plan.plan_id,
+                PlanStatus.APPROVED,
+                expected_statuses=(PlanStatus.APPLYING,),
+                expected_digest=plan.digest,
+                actor=actor,
+                reason_code="external_delivery_failed",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Plan %s: could not release the interrupted delivery recording (%s); it resumes on the next report.",
+                plan.plan_id,
+                type(exc).__name__,
+            )
+
     async def link_external_deliveries(self, *, limit: int = 20) -> int:
         """Link pull requests opened from the plan branch of approved patch/ci plans (F4).
 
         Nobody has to report a pull request opened from the deterministic plan branch:
         the automation controller finds it by branch name and records it through the
-        same verification as a report. Returns the number of plans linked.
+        same verification as a report. Plans left ``APPLYING`` by an interrupted
+        recording are resumed once they have been idle for a while. Candidates rotate
+        between passes so plans that never get a pull request cannot starve the others.
+        Returns the number of plans linked.
         """
         lister = getattr(self.plans, "list_plans", None)
         if not callable(lister):
             return 0
-        plans = await cast(Any, lister)(status=PlanStatus.APPROVED)
+        candidates = [
+            plan
+            for plan in await cast(Any, lister)(status=PlanStatus.APPROVED)
+            if plan.delivery_mode in ("patch", "ci") and plan.digest
+        ]
+        idle_before = ensure_utc(self.clock()) - EXTERNAL_DELIVERY_RESUME_AFTER
+        candidates.extend(
+            plan
+            for plan in await cast(Any, lister)(status=PlanStatus.APPLYING)
+            if plan.delivery_mode in ("patch", "ci")
+            and plan.digest
+            and (plan.updated_at is None or ensure_utc(plan.updated_at) <= idle_before)
+        )
+        if not candidates:
+            return 0
+        offset = self._link_cursor % len(candidates)
+        selected = (candidates[offset:] + candidates[:offset])[:limit]
+        self._link_cursor = offset + len(selected)
         linked = 0
-        for plan in [plan for plan in plans if plan.delivery_mode in ("patch", "ci") and plan.digest][:limit]:
+        for plan in selected:
             pull_request: PullRequestInfo | None = None
             try:
                 target = await self.provider_resolver.resolve(plan.source)
@@ -1933,6 +2023,10 @@ class PlanWorker:
                     target.repository, plan_branch_name(plan), plan.source.ref
                 )
                 pull_request = found if isinstance(found, PullRequestInfo) else None
+                if pull_request is None and plan.status is PlanStatus.APPLYING:
+                    # The interrupted recording may come from a link-back report on another
+                    # branch (patch mode): resume from the request already recorded, if any.
+                    pull_request = await self._recorded_pull_request(plan)
             except Exception as exc:
                 logger.info("Plan %s: pull-request lookup failed (%s).", plan.plan_id, type(exc).__name__)
             finally:
@@ -1954,6 +2048,13 @@ class PlanWorker:
                 continue
             linked += 1
         return linked
+
+    async def _recorded_pull_request(self, plan: Plan) -> PullRequestInfo | None:
+        for record in await self._plan_pull_request_records(plan):
+            if record.pr_number is not None and record.pr_url:
+                raw: dict[str, Any] = {"head": {"sha": record.commit_sha}} if record.commit_sha else {}
+                return PullRequestInfo(number=record.pr_number, url=record.pr_url, status="open", raw=raw)
+        return None
 
     async def _repeated_delivery(self, plan: Plan, number: int, head_sha: str | None) -> ExternalDeliveryResult:
         """Idempotent answer to a report of the request already recorded for ``plan``."""

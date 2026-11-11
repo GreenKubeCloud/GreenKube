@@ -684,3 +684,161 @@ async def test_a_browser_url_on_another_origin_names_the_same_pull_request():
         await other.record_external_delivery(
             "plan-1", pr_url="https://github.com/evil/gitops/pull/42", head_sha=HEAD_SHA, actor="apikey:ci"
         )
+
+
+# --------------------------------------------------------------------------- interrupted recording
+
+
+def _fail_second_save(pull_requests: Any) -> list[int]:
+    """Make the second ``save_pull_request`` raise once (a transient DB error mid-recording)."""
+    original = pull_requests.save_pull_request
+    calls: list[int] = []
+
+    async def flaky(record: PullRequestRecord) -> PullRequestRecord:
+        calls.append(record.recommendation_id)
+        if len(calls) == 2:
+            raise ConnectionError("database connection lost")
+        return await original(record)
+
+    pull_requests.save_pull_request = flaky
+    return calls
+
+
+def _release_fails(plans: Any) -> None:
+    """Make the release write (back to APPROVED) fail too, leaving the plan APPLYING."""
+    original = plans.set_plan_status
+
+    async def set_plan_status(plan_id: str, status: PlanStatus, **kwargs: Any) -> Plan | None:
+        if status is PlanStatus.APPROVED:
+            raise ConnectionError("database connection lost")
+        return await original(plan_id, status, **kwargs)
+
+    plans.set_plan_status = set_plan_status
+
+
+@pytest.mark.asyncio
+async def test_a_failed_delivery_recording_returns_the_plan_to_approved_and_the_retry_succeeds():
+    worker, operations, plans, pull_requests, provider = _external_worker("ci")
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    _fail_second_save(pull_requests)
+
+    with pytest.raises(ExternalDeliveryError) as failed:
+        await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert failed.value.code == "delivery_not_recorded" and failed.value.status_code == 503
+    # Never stuck APPLYING: approved again, so it stays cancellable, expirable and retryable.
+    assert plans.plans["plan-1"].status is PlanStatus.APPROVED
+    assert plans.reason_codes[-1] == "external_delivery_failed"
+
+    result = await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert result.created and plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert set(plans.action_status.values()) == {ActionStatus.PR_OPEN}
+    assert sorted(record.recommendation_id for record in pull_requests.records) == sorted(
+        plans.plans["plan-1"].recommendation_ids
+    )
+    assert {record.pr_number for record in pull_requests.records} == {PR_NUMBER}
+    assert operations.claims == []
+
+
+@pytest.mark.asyncio
+async def test_a_plan_left_applying_by_an_interrupted_recording_resumes_on_the_next_report():
+    worker, _, plans, pull_requests, provider = _external_worker("ci")
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    _fail_second_save(pull_requests)
+    _release_fails(plans)
+
+    with pytest.raises(ExternalDeliveryError):
+        await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING  # the release write failed too
+
+    result = await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert result.created and plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert len(pull_requests.records) == len(plans.plans["plan-1"].recommendation_ids)
+    assert {record.pr_number for record in pull_requests.records} == {PR_NUMBER}
+
+
+@pytest.mark.asyncio
+async def test_resuming_an_interrupted_recording_refuses_another_pull_request():
+    worker, _, plans, pull_requests, provider = _external_worker("ci")
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    _fail_second_save(pull_requests)
+    _release_fails(plans)
+    with pytest.raises(ExternalDeliveryError):
+        await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+
+    other_url = "https://github.com/acme/gitops/pull/43"
+    assert provider.pull_request_info is not None
+    provider.pull_request_info = PullRequestInfo(
+        number=43, url=other_url, status="open", raw=dict(provider.pull_request_info.raw)
+    )
+    with pytest.raises(ExternalDeliveryError) as conflict:
+        await worker.record_external_delivery("plan-1", pr_url=other_url, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert conflict.value.code == "delivery_conflict"
+    assert {record.pr_number for record in pull_requests.records} == {PR_NUMBER}
+
+
+@pytest.mark.asyncio
+async def test_the_controller_link_step_recovers_a_plan_left_applying():
+    from datetime import datetime, timedelta, timezone
+
+    worker, _, plans, pull_requests, provider = _external_worker("patch", _BranchLookupProvider())
+    worker.plans = _ListingPlans(plans)
+    provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
+    _fail_second_save(pull_requests)
+    _release_fails(plans)
+    with pytest.raises(ExternalDeliveryError):
+        await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="apikey:ci")
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING
+
+    # A recording that may still be in flight (recent update) is left alone.
+    now = datetime.now(timezone.utc)
+    worker.clock = lambda: now
+    plans.plans["plan-1"] = plans.plans["plan-1"].model_copy(update={"updated_at": now - timedelta(seconds=30)})
+    assert await worker.link_external_deliveries() == 0
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING
+
+    plans.plans["plan-1"] = plans.plans["plan-1"].model_copy(update={"updated_at": now - timedelta(minutes=10)})
+    assert await worker.link_external_deliveries() == 1
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert set(plans.action_status.values()) == {ActionStatus.PR_OPEN}
+
+
+@pytest.mark.asyncio
+async def test_the_link_step_resumes_a_link_back_recorded_from_another_branch():
+    from datetime import datetime, timedelta, timezone
+
+    worker, _, plans, pull_requests, provider = _external_worker("patch", _BranchLookupProvider())
+    worker.plans = _ListingPlans(plans)
+    trailer = f"GreenKube-Plan: {plans.plans['plan-1'].plan_id}"
+    provider.open_pull_request(head_ref="feature/my-branch", body=trailer)
+    _fail_second_save(pull_requests)
+    _release_fails(plans)
+    with pytest.raises(ExternalDeliveryError):
+        await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=HEAD_SHA, actor="user:alice")
+
+    now = datetime.now(timezone.utc)
+    worker.clock = lambda: now
+    plans.plans["plan-1"] = plans.plans["plan-1"].model_copy(update={"updated_at": now - timedelta(minutes=10)})
+    assert await worker.link_external_deliveries() == 1
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+
+
+@pytest.mark.asyncio
+async def test_branch_linkage_rotates_so_plans_without_a_pull_request_cannot_starve_the_others():
+    provider = _BranchLookupProvider()
+    worker, _, plans, _, _ = _external_worker("ci", provider)
+    template = plans.plans["plan-1"]
+    lookups: list[str] = []
+    original = provider.find_pull_request
+
+    async def find(repo: GitRepository, head: str, base: str) -> PullRequestInfo | None:
+        lookups.append(head)
+        return await original(repo, head, base)
+
+    provider.find_pull_request = find  # type: ignore[method-assign]
+    worker.plans = _ListingPlans(plans)
+    for index in range(2, 6):
+        plans.plans[f"plan-{index}"] = template.model_copy(update={"plan_id": f"plan-{index}"})
+
+    for _ in range(3):
+        await worker.link_external_deliveries(limit=2)
+    assert len(set(lookups)) == 5  # every plan was looked up within three passes

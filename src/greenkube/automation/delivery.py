@@ -57,6 +57,10 @@ EXTERNAL_DELIVERY_MODES: frozenset[str] = frozenset({DELIVERY_PATCH, DELIVERY_CI
 #: report is verified against the plan's files, so a moved base cannot slip through.
 EXTERNAL_DELIVERY_GRACE = timedelta(days=7)
 
+#: How long a patch/ci plan may sit ``APPLYING`` (an interrupted delivery recording) before
+#: the automation controller resumes the recording itself.
+EXTERNAL_DELIVERY_RESUME_AFTER = timedelta(minutes=5)
+
 #: The trailer that links a commit or a pull request body to its plan.
 PLAN_TRAILER = "GreenKube-Plan"
 _PLAN_TRAILER_LINE = re.compile(rf"^{PLAN_TRAILER}:\s*(\S+)\s*$", re.MULTILINE)
