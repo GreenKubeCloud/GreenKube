@@ -84,7 +84,8 @@ async def test_list_and_read_a_measured_change(measured):
         cost = next(item for item in measurement["estimates"] if item["quantity"] == "allocated_cost")
         assert cost["claimed"] is True and cost["ci_low"] > 0
         co2e = next(item for item in measurement["estimates"] if item["quantity"] == "co2e_g")
-        assert co2e["claimed"] is False
+        # Operational CO2e is claimable (component-matched), but these rows keep it constant.
+        assert co2e["claimed"] is True and co2e["outcome"] != "realized"
         assert sorted(row["recommendation_id"] for row in measurement["recommendations"]) == sorted(
             record.id for record in applied
         )

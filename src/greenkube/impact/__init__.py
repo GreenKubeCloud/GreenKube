@@ -7,6 +7,7 @@ See ``docs/methodology/impact-model.md`` for the methodology. Analyzers use
 """
 
 from greenkube.impact.allocation import allocate_node, allocate_snapshot, node_totals, reservation_shares
+from greenkube.impact.comparison import measurable_co2e_projection, projected_co2e_components
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel, ReservationAwareImpactModel
 from greenkube.impact.power import (
     DEFAULT_MEMORY_WATTS_PER_GIB,
@@ -41,6 +42,7 @@ from greenkube.impact.types import (
     NodeImpactProfile,
     NodePoolChange,
     NodePoolContext,
+    ObservedCoverage,
     PowerSource,
     ReplicaScheduleChange,
     ResourceSample,
@@ -78,6 +80,7 @@ __all__ = [
     "NodeImpactProfile",
     "NodePoolChange",
     "NodePoolContext",
+    "ObservedCoverage",
     "PowerSource",
     "PricingCatalog",
     "ReplicaScheduleChange",
@@ -94,8 +97,10 @@ __all__ = [
     "apportion_node_price",
     "carbon_value",
     "impact_fields",
+    "measurable_co2e_projection",
     "node_gpu_power",
     "node_totals",
     "opencost_default_rates",
+    "projected_co2e_components",
     "reservation_shares",
 ]

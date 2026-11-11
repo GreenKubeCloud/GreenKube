@@ -4,7 +4,7 @@ Since Cloud Carbon Footprint (CCF) does not provide default estimation constants
 
 ## Node power and its allocation
 
-GreenKube estimates node power from three components (Impact Model `1.1.0`, see [Impact Model methodology](methodology/impact-model.md)). For a collection step of `H` hours:
+GreenKube estimates node power from three components (Impact Model `1.1.0` and later, see [Impact Model methodology](methodology/impact-model.md)). For a collection step of `H` hours:
 
 ```text
 node_utilization = min(total_node_cpu_cores / node_vcores, 1)

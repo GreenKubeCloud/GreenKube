@@ -1,6 +1,6 @@
 # Impact Model v1 — methodology
 
-**Model version:** `1.1.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
+**Model version:** `2.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
 
 The Impact Model is the single set of formulas GreenKube uses to say what a workload **is charged** (allocated cost and allocated CO₂e), what it **draws** (energy), and what a proposed change **releases**. Recommendation projections and the metric rows collection stores both come from it, so a projection and its later measurement are computed the same way.
 
@@ -10,6 +10,7 @@ This page is the reference for code review. When a formula below changes the num
 |---|---|
 | `1.0.0` | Reservation-aware allocation and projections (CPU power, embodied, cost). |
 | `1.1.0` | Memory power (`MemoryPowerModel`) and GPU power (`GpuPowerModel`), allocated and projected. Stored rows carry the version that allocated them. |
+| `2.0.0` | Projections are annualized over the target's [observed coverage](#annualization-and-observed-coverage) instead of the whole lookback, with a minimum coverage and a short-coverage note. Projected CO₂e is reported by [component](#co2e-components-and-component-matched-comparison) (operational energy, idle share, embodied) with the value a measurement is compared with. Allocation is unchanged. |
 
 ## Status of this version
 
@@ -204,7 +205,23 @@ All window totals are annualized:
 annual = window_total × 8760 / window_hours
 ```
 
-`window_hours` is the analysis window of the scan. When no window is known, it is the observed span of the samples.
+### Annualization and observed coverage
+
+The window totals of a target are sums over its samples, and a target has samples only since it was first observed. `window_hours` is therefore the target's **observed coverage**, not the scan's lookback:
+
+```text
+coverage     = window_end − first_observed(target)        # capped at the lookback
+window_hours = max(coverage, MIN_COVERAGE_HOURS)          # MIN_COVERAGE_HOURS = 1
+```
+
+- `first_observed` is the first rolled hour of the target's usage summary (bounded scans: a container target reads its container summary, then the pod-level one; a namespace reads its earliest target). For contexts built from raw metric rows it is the earliest row timestamp. Rollup baseline rows are aggregates whose timestamp is the last hour they cover, so they are never used to guess a coverage.
+- `window_end` is the end of the scan window. When it, or the first observation, is unknown, the coverage is the whole lookback (basis `lookback`), as in model 1.x: coverage is never guessed short, which would inflate the projection. When no lookback is known either, `window_hours` is the observed span of the samples.
+- Gaps after the first observation stay in the coverage: a CronJob that runs one hour a day is annualized at one hour a day, and a workload that stopped is not extrapolated as if it still ran.
+- **Minimum coverage.** A target observed for a few minutes is annualized as if observed for one hour (`assumptions.minimum_coverage_applied`), never from a single scrape.
+- **Short coverage.** Below one week (`SHORT_COVERAGE_HOURS = 168`), and shorter than the lookback, weekly cycles are not seen yet. The projection records `short_coverage: true` and a note in `assumptions.notes`, and its `confidence` is multiplied by `max(coverage / 168, 0.25)`.
+- The projection records `lookback_hours`, `coverage_hours`, `coverage_basis` (`target_summary`, `samples` or `lookback`) and `first_observed_at`.
+
+Before model 2.0.0 the lookback was the denominator for every target. A workload observed for 2 hours inside a 14-day lookback was annualized as if those 2 hours were spread over 336 hours: for a workload allocated 0.05 per hour, a deletion projected 2 × 0.05 × 8760 / 336 = **2.61** per year instead of 0.05 × 8760 = **438** per year (168 times too low).
 
 ### Container requests (rightsizing; native analyzers and VPA)
 
@@ -342,10 +359,39 @@ Every projected recommendation carries `impact` (persisted in `recommendation_hi
 
 This example is a CPU cut from 1000m to 96m for one replica observed hourly for 7 days (usage 80m, 512 MiB of memory requested). OpenCost charged the container 0.01 per hour, with no CPU/RAM split. That total is apportioned with the default rate weights: 94% goes to the 1-core CPU reservation, hence 0.009372 per core-hour. The node appears in the metric rows but not in the node snapshot, so the default 1-vCPU power profile applies. Without OpenCost (`total_cost = 0`), the same cut is priced at the default rates: 250.33 per year with confidence 0.5. A node that is also absent from the metric rows is flagged `unknown_node_profile`.
 
+Model 2.0.0 adds `lookback_hours`, `coverage_hours`, `coverage_basis` and `first_observed_at` to `assumptions` (and `short_coverage`, `notes` when the coverage is short), and three top-level fields described in [CO₂e components](#co2e-components-and-component-matched-comparison):
+
+```json
+  "co2e_components_annual_g": {"operational_energy": 0.0, "idle_share": 1029.48, "embodied": 22600.0},
+  "co2e_measurable_components": ["operational_energy", "idle_share"],
+  "co2e_measurable_expected_annual_g": 1029.48
+```
+
 The API v1 fields stay compatible:
 
 - `potential_savings_cost = expected_billable_cost_annual`;
 - `potential_savings_co2e_grams = co2e_expected_annual_g`, or empty when `co2e_modeled` is false.
+
+## CO₂e components and component-matched comparison
+
+The same model produces the projection and the measured rows (product principle "same model for estimate and measurement"). A projection splits its CO₂e into three components:
+
+| Component | Breakdown fields | Allocated by |
+|---|---|---|
+| `operational_energy` | `dynamic_operational` + `memory_operational` + `gpu_operational` | CPU usage, memory reservation, DCGM attribution |
+| `idle_share` | `idle_operational` | CPU reservation |
+| `embodied` | `embodied` | CPU reservation |
+
+Stored metric rows carry the operational CO₂e (`co2e_grams`: operational energy and idle share, allocated by the same model) and the embodied emissions apart (`embodied_co2e_grams`). Change measurement (`greenkube.verify`) reads `co2e_grams` only, so it **sees `operational_energy` and `idle_share`, not `embodied`**.
+
+**Rule:** a measured value is only ever compared with the projected value of the components the measurement sees. `co2e_measurable_expected_annual_g` is that value (the measurable components × the realization factor, the basis of `co2e_expected_annual_g`); `greenkube.impact.comparison.measurable_co2e_projection` derives it from any stored projection, including projections written before model 2.0.0 (from `co2e_breakdown_annual_g`). Without a projection that models CO₂e there is nothing to compare with, and no projection accuracy is reported (fail closed).
+
+In change measurement:
+
+- the `co2e_g` quantity is the workload's operational CO₂e per hour. Because idle and memory power are allocated by reservation, request changes move it, so it is claimed (`claimed_annualized`, `measured_co2e_saved_grams`) when the change is realized **and** its own 90% interval shows a saving;
+- its `projected_annual` and `projection_accuracy` use the measurable projection, never the total that includes embodied emissions;
+- it is split between the recommendations of a change by their measurable projections (equal shares when none was projected), so a CPU and a memory recommendation on the same container never both claim the whole CO₂e saving;
+- the projected embodied share is reported in the projection but is not measured, so it is never claimed as measured.
 
 ## SCI mapping
 
@@ -369,7 +415,8 @@ The Software Carbon Intensity specification (ISO/IEC 21031) defines `SCI = (E ×
 - **Marginal pricing.** Projections price released capacity at the node's unit rate. On an over-committed node, the measured allocation change can be smaller.
 - **List prices.** Catalogs contain on-demand list prices with no discounts, savings plans or spot prices. Observed OpenCost costs take precedence when available.
 - **Unsplit observed totals.** OpenCost's `totalCost` can include volume, network and load-balancer cost. While rows carry only the total, the apportioning attributes those to CPU and RAM. Request-cut projections can then be high by that amount, but never above the observed total.
-- **Annualization assumes the observed window repeats.** Short or unusual windows extrapolate their pattern.
+- **Annualization assumes the observed coverage repeats.** Short or unusual coverage extrapolates its pattern; coverage below one week is flagged and lowers the confidence.
+- **Embodied emissions are projected, not measured.** Change measurement compares and claims operational CO₂e only.
 - **Rows written before model 1.1.0** (`model_version` empty) follow the previous usage-based policy until they are recomputed. Hourly aggregates are never recomputed.
 - **Realization is a heuristic.** It does not yet measure pool headroom or the node-hours actually removed (`realize()`, roadmap C).
 

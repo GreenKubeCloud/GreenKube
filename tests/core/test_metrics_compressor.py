@@ -494,12 +494,14 @@ class TestPostgresCompressionBranches:
         watermark = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
         conn = type("Conn", (), {})()
         conn.fetchval = AsyncMock(return_value=watermark)
-        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 2"])
+        # combined_metrics, then its node_idle_metrics rows (same cutoff), then container_metrics.
+        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 1", "DELETE 2"])
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
 
-        assert await compressor._prune_raw(now) == 6
+        assert await compressor._prune_raw(now) == 7
         cutoffs = {call.args[1] for call in conn.execute.await_args_list}
         assert cutoffs == {datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)}
+        assert "node_idle_metrics" in conn.execute.await_args_list[1].args[0]
 
     @pytest.mark.asyncio
     async def test_postgres_hourly_pruning_parses_deleted_row_counts(self):

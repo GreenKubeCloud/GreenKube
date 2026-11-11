@@ -10,7 +10,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, List, Optional, cast
+from typing import Any, Callable, Dict, Iterable, List, Optional, cast
 
 from greenkube.core.db import DatabaseManager
 from greenkube.core.optimization.applied_detector import WorkloadSnapshot
@@ -185,8 +185,16 @@ class Scenario:
         self.metrics.pod_rows.extend(workload_rows(window, **values))
         self.metrics.container_rows.extend(workload_rows(window, container="api", **values))
 
-    async def apply(self, change_id: str = "change-a", completed: Optional[datetime] = None, generation: int = 2):
+    async def apply(
+        self,
+        change_id: str = "change-a",
+        completed: Optional[datetime] = None,
+        generation: int = 2,
+        fields: Optional[Dict[RecommendationType, Dict[str, Any]]] = None,
+    ):
+        """``fields`` adds or overrides fields of the CPU or memory recommendation."""
         completed = completed or self.completed
+        fields = fields or {}
         common = dict(
             pod_name="api",
             namespace="prod",
@@ -206,14 +214,14 @@ class Scenario:
                     recommended_cpu_request_millicores=300,
                     potential_savings_cost=900.0,
                     **common,
-                ),
+                ).model_copy(update=fields.get(RecommendationType.RIGHTSIZING_CPU, {})),
                 RecommendationRecord(
                     type=RecommendationType.RIGHTSIZING_MEMORY,
                     current_memory_request_bytes=2 * 1024**3,
                     recommended_memory_request_bytes=1024**3,
                     potential_savings_cost=150.0,
                     **common,
-                ),
+                ).model_copy(update=fields.get(RecommendationType.RIGHTSIZING_MEMORY, {})),
             ]
         )
         active = await self.reco_repo.get_recommendations_by_statuses(["active"])

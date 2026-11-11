@@ -73,6 +73,19 @@ def _mode(column: str, backend: str) -> str:
     return column  # SQLite returns a value from the group for bare columns.
 
 
+#: Duration-weighted average GPU power of an hour (B5, migration 0064): times
+#: the hourly ``duration_seconds`` it gives back the GPU energy of the raw
+#: rows, which the workload usage rollup re-reads once raw rows are pruned.
+#: Rows without GPU power count as 0 W when others in the hour have some, and
+#: rows without a duration fall back to the plain average (one step each).
+_GPU_POWER_AVERAGE = (
+    "CASE WHEN COUNT(gpu_power_watts) = 0 THEN NULL "
+    "WHEN SUM(COALESCE(duration_seconds, 0)) > 0 THEN "
+    "SUM(COALESCE(gpu_power_watts, 0) * COALESCE(duration_seconds, 0)) * 1.0 / SUM(COALESCE(duration_seconds, 0)) "
+    "ELSE SUM(COALESCE(gpu_power_watts, 0)) * 1.0 / COUNT(*) END"
+)
+
+
 @dataclass(frozen=True)
 class _MetricsTable:
     raw: str
@@ -126,6 +139,7 @@ class _MetricsTable:
             ("power_source", _source_aggregate("power_source")),
             ("intensity_source", _source_aggregate("intensity_source")),
             ("emaps_zone", _mode("emaps_zone", backend)),
+            ("gpu_power_watts", _GPU_POWER_AVERAGE),
         ]
         if self.pod_scope:
             columns += [
@@ -186,6 +200,9 @@ TABLES: tuple[_MetricsTable, ...] = (
         pod_scope=False,
     ),
 )
+
+#: Raw ``__idle__`` rows per node and step (B2, migration 0050), pruned with ``combined_metrics``.
+IDLE_TABLE = "node_idle_metrics"
 
 CollectionWatermarkProvider = Callable[[], Awaitable[Optional[datetime]]]
 
@@ -514,6 +531,11 @@ class MetricsCompressor:
         Set to -1 to disable pruning (keep raw data indefinitely). Rows at or
         after a table's compression watermark are never deleted, whatever the
         retention, so uncompressed hours cannot be lost.
+
+        The ``__idle__`` rows of ``node_idle_metrics`` (B2) are raw rows too:
+        they are pruned with the pod rows of ``combined_metrics`` (same
+        retention, same watermark), so every pod step kept in raw form keeps
+        the idle rows that complete its node totals, for ``greenkube recompute``.
         """
         retention_days = self._config.METRICS_RAW_RETENTION_DAYS
         if retention_days < 0:
@@ -527,6 +549,8 @@ class MetricsCompressor:
                 continue
             cutoff = min(retention_cutoff, watermark)
             total += await self._delete_raw_before(table, cutoff)
+            if table.pod_scope:
+                total += await self._delete_idle_before(cutoff)
         if total:
             logger.info("Pruned %d raw metrics older than %d days", total, retention_days)
         return total
@@ -540,6 +564,20 @@ class MetricsCompressor:
                 return _status_count(status)
             cursor = await conn.execute(
                 f"DELETE FROM {table.raw} WHERE {ts} < ? AND {table.hour_expr(backend)} < ?",
+                (to_iso_z(cutoff + timedelta(seconds=1)), to_iso_z(cutoff)),
+            )
+            await conn.commit()
+            return max(cursor.rowcount, 0)
+
+    async def _delete_idle_before(self, cutoff: datetime) -> int:
+        """Delete ``__idle__`` rows of steps before ``cutoff`` (an hour boundary)."""
+        async with self._db.connection_scope() as conn:
+            if self._db.db_type == "postgres":
+                status = await conn.execute(f"DELETE FROM {IDLE_TABLE} WHERE timestamp < $1", cutoff)
+                return _status_count(status)
+            # Stored timestamps are ISO strings: compare on the hour bucket, like raw rows.
+            cursor = await conn.execute(
+                f'DELETE FROM {IDLE_TABLE} WHERE "timestamp" < ? AND {_SQLITE_HOUR.format(column='"timestamp"')} < ?',
                 (to_iso_z(cutoff + timedelta(seconds=1)), to_iso_z(cutoff)),
             )
             await conn.commit()
