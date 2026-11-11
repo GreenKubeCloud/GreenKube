@@ -40,8 +40,9 @@ from greenkube.gitops.planning.helm import (
     HelmValuesPlanner,
     HelmValuesUnsupportedError,
 )
+from greenkube.gitops.planning.kustomize import controller_supplies_namespace
 from greenkube.gitops.planning.kustomize import render_as_deployed as render_kustomize_as_deployed
-from greenkube.gitops.planning.raw_manifest import RawManifestPlanError, _containers, _pod_spec
+from greenkube.gitops.planning.raw_manifest import _POD_SPEC_PATHS, RawManifestPlanError, _containers, _pod_spec
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult, RenderedResource, render_raw
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
@@ -445,6 +446,7 @@ def build_inverse_plan(
         after,
         original_plan.action.target,
         has_inverse_edits=bool(inverse_files),
+        allow_namespace_less=_allows_namespace_less_target(file_plan.renderer, render_source),
     )
     if file_plan.renderer is RendererKind.HELM_RELEASE:
         _validate_flux_helm_release_rendered_baseline(original_plan, after.resources)
@@ -1135,14 +1137,36 @@ def _render_payload(resources: Mapping[_ResourceIdentity, dict[str, Any]]) -> li
     return payload
 
 
+def _allows_namespace_less_target(renderer: RendererKind, source: WorkloadSource) -> bool:
+    """Mirror forward planning: raw manifests, and Kustomize overlays a controller namespaces (Argo CD)."""
+    if renderer is RendererKind.RAW:
+        return True
+    return renderer is RendererKind.KUSTOMIZE and controller_supplies_namespace(source)
+
+
+def _rendered_target_identity(
+    resources: Mapping[_ResourceIdentity, dict[str, Any]],
+    target: ResourceTarget,
+    *,
+    allow_namespace_less: bool,
+) -> _ResourceIdentity:
+    """Rendered identity of the live target: exact, or namespace-less when the controller supplies the namespace."""
+    identity = _resource_identity(target)
+    if identity in resources or not allow_namespace_less or not target.namespace or target.kind not in _POD_SPEC_PATHS:
+        return identity
+    namespace_less = (target.api_version, target.kind, "", target.name)
+    return namespace_less if namespace_less in resources else identity
+
+
 def _validate_render_pair(
     before: _RenderedState,
     after: _RenderedState,
     target: ResourceTarget,
     *,
     has_inverse_edits: bool,
+    allow_namespace_less: bool = False,
 ) -> None:
-    identity = _resource_identity(target)
+    identity = _rendered_target_identity(before.resources, target, allow_namespace_less=allow_namespace_less)
     if identity not in before.resources or identity not in after.resources:
         raise RollbackValidationError("rollback render did not preserve the original exact resource target")
     if before.resources.keys() != after.resources.keys():

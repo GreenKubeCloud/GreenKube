@@ -142,9 +142,7 @@ class KustomizePlanner:
             original_kustomization,
             overrides,
         )
-        # Only a controller that supplies a namespace to namespace-less resources (an Argo CD
-        # destination) may match one; Flux namespaces them through targetNamespace above.
-        allow_namespace_less = source.controller_kind is not ControllerKind.FLUX_KUSTOMIZATION
+        allow_namespace_less = controller_supplies_namespace(source)
         rendered_target = _require_target(before, action.target, allow_namespace_less=allow_namespace_less)
         _reject_post_build_variables(before, rendered_target, overrides)
         selector = _target_selector(
@@ -306,6 +304,15 @@ def plan_kustomize(
     """Plan one Kustomize overlay action without retaining workspace edits."""
 
     return KustomizePlanner().plan(action, source, snapshot, base_revision)
+
+
+def controller_supplies_namespace(source: WorkloadSource) -> bool:
+    """Whether the GitOps controller namespaces the overlay's namespace-less resources itself.
+
+    Only such a controller (an Argo CD destination) lets a namespace-less rendered workload
+    match the live one; Flux namespaces them through ``targetNamespace`` in the build.
+    """
+    return source.controller_kind is not ControllerKind.FLUX_KUSTOMIZATION
 
 
 def render_as_deployed(
