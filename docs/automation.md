@@ -508,6 +508,6 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 - The planned-change check for a later commit compares only the files the plan edited, parsed as YAML or JSON. A later commit that overrides the planned values from another file (for example a second Helm values file) is not detected at sync time; apply detection then never matches the live workload and the plan stays `synced`. Files that no longer parse, or whose base content no longer matches the plan, never confirm a later commit.
 - Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options. High-risk plans on Gitea are marked with a `WIP:` title instead of a draft.
 - CODEOWNERS team owners are requested only on GitHub; on GitLab and Gitea only user owners become reviewers (GitLab resolves usernames to numeric user IDs through its user API).
-- If the CNI does not enforce NetworkPolicy, keep the renderer disabled unless you have independently validated an equivalent egress boundary.
+- If the CNI does not enforce NetworkPolicy, Kustomize and Helm plans carry the `renderer_egress_unenforced` warning until the egress boundary is enforced (a NetworkPolicy-enforcing CNI or `renderer.egressFirewall.enabled`). Raw-manifest plans never call the renderer.
 
 See the [API reference](api.md) for plan, GitOps, and webhook endpoints.

@@ -872,3 +872,27 @@ def renderer_status_reader(
             return None
 
     return read
+
+
+def renderer_egress_unenforced(row: CapabilityRow | None) -> bool:
+    """Whether a persisted ``renderer`` capability row reports the egress canary unenforced (F6)."""
+    if row is None:
+        return False
+    payload = row.payload or {}
+    return payload.get("reason") == "renderer_egress_unenforced" or payload.get("egress_enforced") is False
+
+
+def renderer_egress_probe(db_manager: Any) -> Callable[[], Awaitable[bool]]:
+    """Reads the reconciler's last renderer state: True when previews must carry the F6 warning.
+
+    It reads the stored snapshot only (never the renderer itself), so a plan
+    preview costs one small query. The last known state is used even when the
+    snapshot is old: an unenforced NetworkPolicy rarely fixes itself.
+    """
+    from greenkube.storage.automation_capability_repository import AutomationCapabilityRepository
+
+    async def probe() -> bool:
+        rows = await AutomationCapabilityRepository(db_manager).list_capabilities(SCOPE_GLOBAL)
+        return renderer_egress_unenforced(next((row for row in rows if row.subject == "renderer"), None))
+
+    return probe

@@ -1658,12 +1658,16 @@ async def create_plan_runtime(
     blob_resolver = AuthorizedGitBlobResolver(provider_resolver)
     snapshot_resolver = ProviderSourceSnapshotResolver(provider_resolver, limits=snapshot_limits)
 
+    from greenkube.automation.readiness import renderer_egress_probe
+
     plan_service = AutomationPlanService(
         gitops_repository,
         git_blob_resolver=blob_resolver,
         revision_resolver=revision_resolver,
         planner=RawManifestPlanner(),
         operation_enqueuer=cast(PlanOperationEnqueuer, plan_operation_repository),
+        # Kustomize and Helm previews say when the renderer's egress is not enforced (F6).
+        renderer_egress_unenforced=renderer_egress_probe(db_manager),
     )
     worker = PlanWorker(
         operations=plan_operation_repository,
