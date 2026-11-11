@@ -1085,6 +1085,32 @@
 		}
 	}
 
+	/**
+	 * Request change of an applied recommendation, per resource: the baseline
+	 * before the change, the proposal and the live value detected after it.
+	 * `unchanged` flags a recorded change whose live value still equals the
+	 * baseline, so it is never shown as a pointless "400m → 400m".
+	 */
+	function requestChanges(rec) {
+		const changes = [];
+		for (const [resource, label, format, before, proposed, after] of [
+			['cpu', 'CPU', formatCPU, rec.current_cpu_request_millicores, rec.recommended_cpu_request_millicores, rec.actual_cpu_request_millicores],
+			['memory', 'Memory', formatBytes, rec.current_memory_request_bytes, rec.recommended_memory_request_bytes, rec.actual_memory_request_bytes]
+		]) {
+			if (before == null) continue;
+			changes.push({
+				resource,
+				label,
+				format,
+				before,
+				proposed: proposed ?? null,
+				after: after ?? null,
+				unchanged: after != null && after === before
+			});
+		}
+		return changes;
+	}
+
 	function verificationClass(status) {
 		if (status === 'passed') return 'bg-green-600/20 text-green-400';
 		if (status === 'failed') return 'bg-red-600/20 text-red-400';
@@ -1874,6 +1900,13 @@
 											{#if rec.namespace}
 												<p class="text-xs text-dark-500 mt-0.5">Namespace: <span class="text-dark-400">{rec.namespace}</span></p>
 											{/if}
+											{#each requestChanges(rec) as change (change.resource)}
+												{#if change.after != null && !change.unchanged}
+													<p class="text-xs text-dark-500 mt-0.5 font-mono">
+														{change.label} {change.format(change.before)} → <span class="text-blue-400">{change.format(change.after)}</span>
+													</p>
+												{/if}
+											{/each}
 										</div>
 										<!-- Savings chips -->
 										<div class="flex items-center gap-3 shrink-0">
@@ -1960,38 +1993,30 @@
 												</div>
 											{/if}
 
-											{#if rec.current_cpu_request_millicores != null || rec.current_memory_request_bytes != null}
-												<div class="flex flex-wrap gap-4">
-													{#if rec.current_cpu_request_millicores != null}
-														<div class="flex items-center gap-2">
-															<span class="text-[10px] uppercase text-dark-600">CPU</span>
-															<span class="text-xs text-dark-400 font-mono">{formatCPU(rec.current_cpu_request_millicores)}</span>
-															{#if rec.actual_cpu_request_millicores != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-blue-400 font-mono">{formatCPU(rec.actual_cpu_request_millicores)}</span>
-																<span class="text-[10px] text-dark-600">(actual)</span>
-															{:else if rec.recommended_cpu_request_millicores != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-green-400 font-mono">{formatCPU(rec.recommended_cpu_request_millicores)}</span>
-																<span class="text-[10px] text-dark-600">(recommended)</span>
+											{#if requestChanges(rec).length}
+												<div class="flex flex-col gap-1.5">
+													{#each requestChanges(rec) as change (change.resource)}
+														<div class="flex flex-wrap items-center gap-2" data-testid="request-change-{change.resource}">
+															<span class="text-[10px] uppercase text-dark-600 w-14">{change.label}</span>
+															<span class="text-xs text-dark-400 font-mono" title="Request before the change">{change.format(change.before)}</span>
+															<span class="text-dark-600" aria-hidden="true">→</span>
+															{#if change.after != null && !change.unchanged}
+																<span class="text-xs text-blue-400 font-mono" title="Live request detected after the change">{change.format(change.after)}</span>
+																<span class="text-[10px] text-dark-600">(live after the change)</span>
+																{#if change.proposed != null && change.proposed !== change.after}
+																	<span class="text-[10px] text-dark-600">· proposed {change.format(change.proposed)}</span>
+																{/if}
+															{:else if change.proposed != null}
+																<span class="text-xs text-green-400 font-mono" title="Proposed request">{change.format(change.proposed)}</span>
+																<span class="text-[10px] text-dark-600">(proposed)</span>
+															{/if}
+															{#if change.unchanged}
+																<span class="text-[10px] px-2 py-0.5 rounded-sm bg-yellow-600/20 text-yellow-400" title="The live request detected after the change still equals the request before it.">
+																	live request unchanged ({change.format(change.after)})
+																</span>
 															{/if}
 														</div>
-													{/if}
-													{#if rec.current_memory_request_bytes != null}
-														<div class="flex items-center gap-2">
-															<span class="text-[10px] uppercase text-dark-600">Memory</span>
-															<span class="text-xs text-dark-400 font-mono">{formatBytes(rec.current_memory_request_bytes)}</span>
-															{#if rec.actual_memory_request_bytes != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-blue-400 font-mono">{formatBytes(rec.actual_memory_request_bytes)}</span>
-																<span class="text-[10px] text-dark-600">(actual)</span>
-															{:else if rec.recommended_memory_request_bytes != null}
-																<span class="text-dark-600">→</span>
-																<span class="text-xs text-green-400 font-mono">{formatBytes(rec.recommended_memory_request_bytes)}</span>
-																<span class="text-[10px] text-dark-600">(recommended)</span>
-															{/if}
-														</div>
-													{/if}
+													{/each}
 												</div>
 											{/if}
 

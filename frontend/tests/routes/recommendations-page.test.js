@@ -765,4 +765,61 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(api.createAutomationPlan).toHaveBeenCalledWith([101]);
 		expect(screen.queryByRole('button', { name: 'Create pull request' })).not.toBeInTheDocument();
 	});
+
+	it('shows an applied change as baseline to live value, with the proposal when it differs', async () => {
+		api.getAppliedRecommendations.mockResolvedValue([
+			{
+				...recommendation,
+				id: 42,
+				pod_name: 'oversized-web',
+				status: 'verified',
+				verification_status: 'passed',
+				application_method: 'pr_merge',
+				applied_at: '2026-11-08T11:58:13+00:00',
+				created_at: '2026-11-08T11:52:59+00:00',
+				current_cpu_request_millicores: 400,
+				recommended_cpu_request_millicores: 10,
+				actual_cpu_request_millicores: 12
+			}
+		]);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		await fireEvent.click(await screen.findByText('oversized-web'));
+
+		const change = await screen.findByTestId('request-change-cpu');
+		expect(change).toHaveTextContent('400m');
+		expect(change).toHaveTextContent('12m');
+		expect(change).toHaveTextContent('(live after the change)');
+		expect(change).toHaveTextContent('proposed 10m');
+		expect(change).not.toHaveTextContent('live request unchanged');
+	});
+
+	it('flags an applied change whose live request still equals the baseline instead of showing 400m → 400m', async () => {
+		api.getAppliedRecommendations.mockResolvedValue([
+			{
+				...recommendation,
+				id: 44,
+				type: 'RIGHTSIZING_MEMORY',
+				pod_name: 'oversized-web',
+				status: 'applied',
+				applied_at: '2026-11-08T11:58:13+00:00',
+				created_at: '2026-11-08T11:52:59+00:00',
+				current_memory_request_bytes: 402653184,
+				recommended_memory_request_bytes: 16777216,
+				actual_memory_request_bytes: 402653184
+			}
+		]);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		await fireEvent.click(await screen.findByText('oversized-web'));
+
+		const change = await screen.findByTestId('request-change-memory');
+		expect(change).toHaveTextContent('384.0 MB');
+		expect(change).toHaveTextContent('16.0 MB');
+		expect(change).toHaveTextContent('(proposed)');
+		expect(change).toHaveTextContent('live request unchanged (384.0 MB)');
+		expect(change).not.toHaveTextContent('(live after the change)');
+	});
 });
