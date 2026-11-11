@@ -493,6 +493,7 @@ class MetricsCompressor:
             repository,
             step_seconds=parse_query_step_seconds(self._config.PROMETHEUS_QUERY_RANGE_STEP),
             backfill_hours=lookback_days * 24,
+            warmup_seconds=int(getattr(self._config, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60,
         )
 
     async def refresh_usage_rollup(self, now: datetime | None = None, *, refresh_hours: int | None = None):

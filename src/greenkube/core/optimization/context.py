@@ -104,7 +104,8 @@ class OptimizationContext:
             pod_rows = [metric for metric in self.metrics if not metric.container_name]
             container_rows = [metric for metric in self.metrics if metric.container_name]
             container_rows.extend(self.container_metrics)
-            self.usage = summarize_rows(pod_rows, container_rows, step_seconds=step)
+            warmup = int(getattr(self.config, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60
+            self.usage = summarize_rows(pod_rows, container_rows, step_seconds=step, warmup_seconds=warmup)
         return self.usage
 
     def workload_summaries(self) -> Iterator[Tuple[TargetKey, WorkloadUsageSummary]]:

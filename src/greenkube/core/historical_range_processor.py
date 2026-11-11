@@ -51,6 +51,12 @@ CALCULATION_VERSION = f"{__version__}+range.3"
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
 _TIMESTAMP_TOLERANCE = 1e-3
+#: Smallest real cgroup memory figure: one page.
+_MEMORY_PAGE_BYTES = 4096
+#: Metrics API container usage may exceed its pod cgroup by this share (sampling skew) before it is refitted.
+POD_CGROUP_TOLERANCE = 0.05
+#: Estimation reason of container usage refitted to its pod cgroup (USER BUG 2).
+CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 
 
 class RangeCollectionError(RuntimeError):
@@ -169,21 +175,94 @@ class HistoricalRangeProcessor:
         return by_sample
 
     @classmethod
+    def _deduplicated_samples(
+        cls, results, chunk: CollectionWindow
+    ) -> tuple[dict[int, dict[tuple[str, str, str], float]], dict[int, dict[tuple[str, str], str]]]:
+        """One value per ``(namespace, pod, container)`` and sample; ``container`` is ``""`` for a pod cgroup.
+
+        Several series of one container (``/metrics/resource`` next to
+        ``/metrics/cadvisor``, two scrape jobs, two cgroup paths, or variants of
+        the ``node`` label) are duplicates, not parts: they are merged with
+        ``max``, never summed (USER BUG 2). Also returns the node of each pod.
+        """
+        values: dict[int, dict[tuple[str, str, str], float]] = defaultdict(dict)
+        nodes: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
+        for series in results or []:
+            namespace, pod, container, node = cls._series_identity(series)
+            if not namespace or not pod:
+                continue
+            key = (namespace, pod, container)
+            for sample_start, value in cls._iter_window_samples(series, chunk):
+                current = values[sample_start].get(key)
+                values[sample_start][key] = value if current is None else max(current, value)
+                if node:
+                    nodes[sample_start].setdefault((namespace, pod), node)
+        return values, nodes
+
+    @classmethod
     def _container_series_by_sample(
         cls, results, chunk: CollectionWindow
     ) -> tuple[dict[int, dict[tuple[str, str], float]], dict[int, dict[tuple[str, str, str], float]]]:
-        """Return pod sums and per-container values for every sample of the chunk."""
+        """Return pod sums and per-container values for every sample of the chunk.
+
+        A pod's value is the sum of its (deduplicated) containers, or its pod
+        cgroup value when only pod-level series exist. A pod cgroup working set
+        below one memory page is a gap in cAdvisor's stats (a running pod
+        always holds pages; Minikube reported 0 or 8 bytes for hours), not a
+        measurement: it is left out.
+        """
+        values, _nodes = cls._deduplicated_samples(results, chunk)
         pods: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
         containers: dict[int, dict[tuple[str, str, str], float]] = defaultdict(lambda: defaultdict(float))
-        for series in results or []:
-            namespace, pod, container, _node = cls._series_identity(series)
-            if not namespace or not pod:
-                continue
-            for sample_start, value in cls._iter_window_samples(series, chunk):
-                pods[sample_start][(namespace, pod)] += value
+        for sample_start, by_key in values.items():
+            named_pods = {(namespace, pod) for namespace, pod, container in by_key if container}
+            for (namespace, pod, container), value in by_key.items():
                 if container:
-                    containers[sample_start][(namespace, pod, container)] += value
+                    containers[sample_start][(namespace, pod, container)] = value
+                    pods[sample_start][(namespace, pod)] += value
+                elif (namespace, pod) not in named_pods and value >= _MEMORY_PAGE_BYTES:
+                    pods[sample_start][(namespace, pod)] = value
         return pods, containers
+
+    @staticmethod
+    def _fit_to_pod_cgroup(
+        container_usage: dict[tuple[str, str, str], int],
+        filled: set[tuple[str, str, str]],
+        pod_usage: dict[tuple[str, str], float] | dict[tuple[str, str], int],
+        measured_pods: set[tuple[str, str]],
+    ) -> set[tuple[str, str, str]]:
+        """Scale Metrics API container usage down to its pod's cgroup when the sum exceeds it.
+
+        The containers of a pod live inside the pod cgroup, so their usage can
+        never add up to more than the pod's. Some kubelets (cri-dockerd, e.g.
+        Minikube's Docker driver) report a container working set that includes
+        page cache the pod cgroup's working set excludes: ~665Mi for a
+        container whose pod measures ~560Mi (USER BUG 2). When the sum of the
+        filled containers exceeds the pod cgroup value from Prometheus for the
+        same step by more than :data:`POD_CGROUP_TOLERANCE`, every container is
+        scaled by ``pod / sum``, keeping their split. Only pods whose
+        Prometheus value is the pod cgroup itself (no container series in
+        ``measured_pods``) are checked. Mutates ``container_usage`` and returns
+        the refitted keys, which the caller marks as estimated.
+        """
+        by_pod: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+        for key in filled:
+            by_pod[(key[0], key[1])].append(key)
+        refitted: set[tuple[str, str, str]] = set()
+        for pod_key, keys in by_pod.items():
+            if pod_key in measured_pods:
+                continue
+            pod_value = pod_usage.get(pod_key)
+            if pod_value is None or pod_value <= 0:
+                continue
+            total = sum(max(container_usage[key], 0) for key in keys)
+            if total <= pod_value * (1 + POD_CGROUP_TOLERANCE):
+                continue
+            factor = pod_value / total
+            for key in keys:
+                container_usage[key] = int(max(container_usage[key], 0) * factor)
+                refitted.add(key)
+        return refitted
 
     async def _query_range(self, chunk: CollectionWindow, query: str):
         return await self.prometheus_collector.collect_range(
@@ -208,6 +287,17 @@ class HistoricalRangeProcessor:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
+
+    async def _collect_memory(self, chunk: CollectionWindow):
+        """Container working-set series, or the pod cgroup series when no container series exist.
+
+        The pod cgroup fallback gives the pod-level working set only: it never
+        becomes container usage (rightsizing reports ``pod_level_usage_only``).
+        """
+        results = await self._query_range(chunk, self._promql.container_memory_working_set())
+        if results:
+            return results
+        return await self._query_range(chunk, self._promql.pod_cgroup_memory_working_set())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
@@ -421,8 +511,12 @@ class HistoricalRangeProcessor:
             pod_request_map_agg = defaultdict(int)
             pod_mem_map_agg = defaultdict(int)
             pod_ephemeral_storage_map_agg = defaultdict(int)
+            pod_owner_map: dict[tuple[str, str], tuple[str, str]] = {}
             for p in pod_metrics_list:
                 key = (p.namespace, p.pod_name)
+                if p.owner_kind and p.owner_name:
+                    # Pod rows carry their workload owner so replicas share one usage target.
+                    pod_owner_map.setdefault(key, (p.owner_kind, p.owner_name))
                 pod_request_map_agg[key] += p.cpu_request
                 pod_mem_map_agg[key] += p.memory_request
                 pod_ephemeral_storage_map_agg[key] += p.ephemeral_storage_request
@@ -431,6 +525,7 @@ class HistoricalRangeProcessor:
             pod_ephemeral_storage_map = pod_ephemeral_storage_map_agg
         except Exception:
             pod_metrics_list = []
+            pod_owner_map = {}
             pod_request_map = {}
             pod_mem_map = {}
             pod_ephemeral_storage_map = {}
@@ -530,7 +625,7 @@ class HistoricalRangeProcessor:
                     self._query_range(chunk, promql.pod_disk_read()),
                     self._query_range(chunk, promql.pod_disk_write()),
                     self._query_range(chunk, promql.pod_restarts()),
-                    self._query_range(chunk, promql.container_memory_working_set()),
+                    self._collect_memory(chunk),
                     self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
                 )
@@ -567,20 +662,25 @@ class HistoricalRangeProcessor:
                 lambda: defaultdict(float)
             )
             pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
-            for series in results:
-                series_ns, pod, container, node = self._series_identity(series)
-                if not series_ns or not pod:
-                    continue
-                key = (series_ns, pod)
-                for sample_start, usage in self._iter_window_samples(series, chunk):
-                    samples[sample_start][key] += usage
+            # Duplicate series of one container are merged with max (USER BUG 2).
+            cpu_values, cpu_nodes = self._deduplicated_samples(results, chunk)
+            for sample_start, by_key in cpu_values.items():
+                named_pods = {(series_ns, pod) for series_ns, pod, container in by_key if container}
+                for (series_ns, pod, container), usage in by_key.items():
+                    key = (series_ns, pod)
                     if container:
-                        normalized_container_samples[sample_start][(series_ns, pod, container)] += usage
+                        samples[sample_start][key] += usage
+                        normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
+                    elif key not in named_pods:
+                        samples[sample_start][key] = usage
                     resolved_node = (
-                        node or pod_info_node_by_sample.get(sample_start, {}).get(key) or pod_info_node_latest.get(key)
+                        cpu_nodes.get(sample_start, {}).get(key)
+                        or pod_info_node_by_sample.get(sample_start, {}).get(key)
+                        or pod_info_node_latest.get(key)
                     )
                     if resolved_node:
                         pod_node_map_by_ts[sample_start][key] = resolved_node
+            del cpu_values, cpu_nodes
 
             del results
 
@@ -686,10 +786,13 @@ class HistoricalRangeProcessor:
                     if fallback_reasons:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
+                    owner = pod_owner_map.get(pod_key)
                     node_rows.append(
                         CombinedMetric(
                             pod_name=pod_name,
                             namespace=em_namespace,
+                            owner_kind=owner[0] if owner else None,
+                            owner_name=owner[1] if owner else None,
                             period=None,
                             **costs,
                             usage_source=UsageSource.PROMETHEUS.value,
@@ -769,11 +872,16 @@ class HistoricalRangeProcessor:
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
                 container_sample_count_map = {}
+                refitted_containers: set[tuple[str, str, str]] = set()
                 # Point-in-time metrics-server usage only fills gaps of the latest
                 # sample of a current window, and only when it was measured during
                 # or after that sample (A5, BUG-05).  The row keeps its own
                 # timestamp and step duration.
                 if current_chunk and sample_key == latest_sample_ts:
+                    cpu_measured_pods = {(key[0], key[1]) for key in container_cpu_usage}
+                    memory_measured_pods = {(key[0], key[1]) for key in container_memory_usage}
+                    cpu_filled: set[tuple[str, str, str]] = set()
+                    memory_filled: set[tuple[str, str, str]] = set()
                     freshness_cutoff = max(now - timedelta(seconds=max(chosen_step_sec * 2, 60)), ts)
                     for usage in container_usages:
                         if (
@@ -786,12 +894,20 @@ class HistoricalRangeProcessor:
                         usage_added = False
                         if usage.cpu_usage_millicores is not None and container_key not in container_cpu_usage:
                             container_cpu_usage[container_key] = usage.cpu_usage_millicores
+                            cpu_filled.add(container_key)
                             usage_added = True
                         if usage.memory_usage_bytes is not None and container_key not in container_memory_usage:
                             container_memory_usage[container_key] = usage.memory_usage_bytes
+                            memory_filled.add(container_key)
                             usage_added = True
                         if usage_added:
                             container_sample_count_map[container_key] = 1
+                    # The pod cgroup bounds its containers (USER BUG 2): refit what contradicts it.
+                    refitted_containers = self._fit_to_pod_cgroup(
+                        container_cpu_usage, cpu_filled, range_cpu_usage_map, cpu_measured_pods
+                    ) | self._fit_to_pod_cgroup(
+                        container_memory_usage, memory_filled, range_memory_map, memory_measured_pods
+                    )
                 container_maps = (
                     PodResourceMaps(
                         container_cpu_usage_map=container_cpu_usage,
@@ -804,13 +920,17 @@ class HistoricalRangeProcessor:
                 for aggregate_metric in allocated.rows:
                     combined.append(aggregate_metric)
                     if container_maps is not None:
-                        combined.extend(
-                            self.assembler.assemble_container_metrics(
-                                [aggregate_metric],
-                                pod_metrics_list,
-                                container_maps,
-                            )
+                        container_rows = self.assembler.assemble_container_metrics(
+                            [aggregate_metric],
+                            pod_metrics_list,
+                            container_maps,
                         )
+                        if refitted_containers:
+                            container_rows = [
+                                _mark_refitted(row) if _container_key(row) in refitted_containers else row
+                                for row in container_rows
+                            ]
+                        combined.extend(container_rows)
 
             del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
@@ -833,3 +953,13 @@ class HistoricalRangeProcessor:
 
         await self.calculator.clear_cache()
         return combined
+
+
+def _container_key(row: CombinedMetric) -> tuple[str, str, str]:
+    return (row.namespace or "", row.pod_name or "", row.container_name or "")
+
+
+def _mark_refitted(row: CombinedMetric) -> CombinedMetric:
+    """Flags a container row whose usage was scaled down to its pod cgroup (explicit evidence flag)."""
+    reasons = list(dict.fromkeys([*row.estimation_reasons, CONTAINER_USAGE_EXCEEDS_POD]))
+    return row.model_copy(update={"is_estimated": True, "estimation_reasons": reasons})

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from greenkube.collectors.metrics_server_collector import MetricsServerCollector
+from greenkube.collectors.metrics_server_collector import MetricsServerCollector, _parse_duration_seconds
 from greenkube.models.prometheus_metrics import ContainerResourceUsage
 
 
@@ -64,3 +64,31 @@ async def test_collect_returns_empty_when_kubernetes_client_is_unavailable(monke
 
     assert await MetricsServerCollector().collect() == []
     get_api.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("window", "seconds"),
+    [
+        ("15s", 15),
+        ("16.7s", 16),
+        ("59.999s", 59),
+        ("1m30s", 90),
+        ("1h0m0s", 3600),
+        ("2m", 120),
+        ("1.5h", 5400),
+        ("1m0.5s", 60),
+    ],
+)
+def test_go_duration_windows_are_parsed(window, seconds):
+    """The Metrics API renders ``window`` as a Go duration, not only as plain seconds."""
+    assert _parse_duration_seconds(window, namespace="ns", pod_name="p") == seconds
+
+
+@pytest.mark.parametrize("window", ["", "abc", "5", "1x", "1m30", "-5s", "s"])
+def test_invalid_windows_are_ignored(window):
+    assert _parse_duration_seconds(window, namespace="ns", pod_name="p") is None
+
+
+@pytest.mark.parametrize("window", ["0s", "500ms", "0"])
+def test_sub_second_windows_are_unknown(window):
+    assert _parse_duration_seconds(window, namespace="ns", pod_name="p") is None

@@ -18,11 +18,11 @@ def test_container_scoped_expressions_exclude_pod_cgroup_and_pause_series():
     catalog = PromQLCatalog(step_seconds=300)
 
     assert catalog.container_cpu_usage() == (
-        'sum(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[300s])) '
+        'max(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[300s])) '
         "by (namespace,pod,container,node)"
     )
     assert catalog.container_memory_working_set() == (
-        'sum(container_memory_working_set_bytes{container!="",container!="POD"}) by (namespace,pod,container,node)'
+        'max(container_memory_working_set_bytes{container!="",container!="POD"}) by (namespace,pod,container,node)'
     )
     for expression in (catalog.pod_disk_read(), catalog.pod_disk_write(), catalog.pod_ephemeral_storage_usage()):
         assert CONTAINER_FILTER in expression
@@ -36,7 +36,10 @@ def test_pod_scoped_and_kube_state_expressions_are_unfiltered_by_container():
     assert catalog.pod_restarts() == "sum(kube_pod_container_status_restarts_total) by (namespace,pod)"
     assert catalog.pod_node() == 'max(kube_pod_info{node!=""}) by (namespace,pod,node)'
     assert catalog.pod_cgroup_cpu_usage() == (
-        'sum(rate(container_cpu_usage_seconds_total{container="",pod!=""}[300s])) by (namespace,pod,node)'
+        'max(rate(container_cpu_usage_seconds_total{container="",pod!=""}[300s])) by (namespace,pod,node)'
+    )
+    assert catalog.pod_cgroup_memory_working_set() == (
+        'max(container_memory_working_set_bytes{container="",pod!=""}) by (namespace,pod,node)'
     )
 
 

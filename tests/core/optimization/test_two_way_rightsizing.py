@@ -10,12 +10,19 @@ import pytest
 
 from greenkube.core.config import Config
 from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer, MemoryRightsizingAnalyzer, NodesAnalyzer
-from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, memory_proposal
+from greenkube.core.optimization.analyzers.rightsizing import (
+    CONTAINER_USAGE_EXCEEDS_POD,
+    POD_LEVEL_USAGE_ONLY,
+    bounded_by_pod,
+    cpu_proposal,
+    memory_proposal,
+    skipped_increase,
+)
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.evidence import build_evidence
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 from greenkube.models.node import NodeInfo
-from greenkube.models.workload_usage import UsageStats, WorkloadUsageSummary
+from greenkube.models.workload_usage import UsageSnapshot, UsageStats, WorkloadUsageSummary
 
 MIB = 1024 * 1024
 
@@ -125,13 +132,15 @@ class TestLimitsPolicy:
         summary = _summary(cpu_limit=1000, cpu=_stats(avg=900, p95=980, p99=990, peak=1000))
         proposal = cpu_proposal(Config(), summary)
         assert proposal is not None and proposal.proposed > 1000
-        assert proposal.limit_advice and "below the proposed request" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "below the proposed request" in proposal.limit_advice[0].text
+        assert (proposal.limit_advice[0].action, proposal.limit_advice[0].reason) == ("raise", "below_request")
 
     def test_keep_flags_cpu_throttling(self):
         summary = _summary(days=14, cpu_limit=2000, throttling_ratio=0.12)
         proposal = cpu_proposal(Config(), summary)
         assert proposal is not None and proposal.direction == "decrease"
-        assert proposal.limit_advice and "throttled in 12%" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "throttled in 12%" in proposal.limit_advice[0].text
+        assert proposal.limit_advice[0].reason == "throttling"
 
     def test_keep_leaves_healthy_limits_alone(self):
         proposal = cpu_proposal(Config(), _summary(cpu_limit=2000))
@@ -139,9 +148,10 @@ class TestLimitsPolicy:
 
     def test_remove_cpu_policy(self):
         proposal = cpu_proposal(_config(RECOMMENDATION_LIMITS_POLICY="remove_cpu"), _summary(cpu_limit=2000))
-        assert proposal is not None and proposal.limit_advice == [
+        assert proposal is not None and [advice.text for advice in proposal.limit_advice] == [
             "Remove the CPU limit (2000m) (limits policy remove_cpu)."
         ]
+        assert (proposal.limit_advice[0].action, proposal.limit_advice[0].current) == ("remove", 2000)
 
     def test_memory_equals_request_keeps_the_observed_maximum_covered(self):
         summary = _summary(memory=_stats(avg=50 * MIB, p95=60 * MIB, p99=70 * MIB, peak=500 * MIB))
@@ -150,7 +160,8 @@ class TestLimitsPolicy:
         assert keep is not None and equal is not None
         # Under memory_equals_request the request becomes the limit: never below max x 1.1.
         assert equal.proposed >= 500 * MIB * 1.1 > keep.proposed
-        assert "equal to the request" in equal.limit_advice[0]
+        assert "equal to the request" in equal.limit_advice[0].text
+        assert equal.limit_advice[0].minimum == equal.proposed
 
     def test_keep_asks_to_raise_a_memory_limit_below_the_new_floor(self):
         summary = _summary(
@@ -161,7 +172,10 @@ class TestLimitsPolicy:
         proposal = memory_proposal(Config(), summary)
         assert proposal is not None and proposal.direction == "increase"
         assert "working_set_near_limit" in proposal.triggers
-        assert proposal.limit_advice and "Raise the memory limit (1100MiB)" in proposal.limit_advice[0]
+        assert proposal.limit_advice and "Raise the memory limit (1100MiB)" in proposal.limit_advice[0].text
+        advice = proposal.limit_advice[0]
+        assert (advice.resource, advice.action, advice.current) == ("memory", "raise", 1100 * MIB)
+        assert advice.minimum is not None and advice.minimum >= 1050 * MIB * 1.1
 
     def test_invalid_policy_is_rejected(self):
         with pytest.raises(ValueError):
@@ -266,3 +280,150 @@ def test_memory_analyzer_reports_the_reliability_cause():
     assert rec.priority == "high"
     assert "Reliability" in rec.reason
     assert rec.potential_savings_cost is not None and rec.potential_savings_cost < 0
+
+
+class TestIncreaseSizing:
+    """How increases are sized (USER BUG 2): robust statistic, explained cap, no pod-level guess."""
+
+    def test_a_single_startup_spike_does_not_size_the_increase(self):
+        # Steady p99 at 450Mi over a 400Mi request; one WAL-replay spike at 1.1Gi.
+        summary = _summary(
+            memory_request=400 * MIB,
+            memory=_stats(avg=380 * MIB, p95=440 * MIB, p99=450 * MIB, peak=1100 * MIB),
+        )
+        proposal = memory_proposal(Config(), summary)
+        assert proposal is not None and proposal.direction == "increase"
+        assert proposal.basis == "p99"
+        assert proposal.proposed == math.ceil(450 * 1.2) * MIB
+        assert not proposal.capped
+
+    def test_oom_kills_size_from_the_observed_maximum_without_a_cap(self):
+        summary = _summary(
+            memory_request=400 * MIB,
+            oom_kill_count=3,
+            memory=_stats(avg=380 * MIB, p95=440 * MIB, p99=450 * MIB, peak=1100 * MIB),
+        )
+        proposal = memory_proposal(Config(), summary)
+        assert proposal is not None
+        assert proposal.basis == "observed_max" and proposal.cap_factor is None
+        assert proposal.proposed == math.ceil(1100 * 1.1) * MIB
+        assert proposal.proposed > 2 * 400 * MIB
+
+    def test_one_step_is_capped_at_twice_the_request_and_explained(self):
+        summary = _summary(
+            memory_request=400 * MIB,
+            memory=_stats(avg=900 * MIB, p95=1000 * MIB, p99=1100 * MIB, peak=1200 * MIB),
+        )
+        proposal = memory_proposal(Config(), summary)
+        assert proposal is not None and proposal.capped
+        assert proposal.proposed == 800 * MIB
+        assert proposal.raw_proposed == math.ceil(1100 * 1.2) * MIB
+
+        context = OptimizationContext(config=Config(), usage=_snapshot(summary))
+        (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
+        assert rec.recommended_memory_request_bytes == 800 * MIB
+        assert "Capped at 2x the current request" in rec.reason
+        assert "1320MiB" in rec.reason
+
+    def test_the_cap_is_configurable_and_applies_to_cpu(self):
+        hot = _summary(cpu_request=100, cpu=_stats(avg=300, p95=380, p99=400, peak=450))
+        capped = cpu_proposal(Config(), hot)
+        assert capped is not None and capped.proposed == 200 and capped.capped
+        wide = cpu_proposal(_config(RIGHTSIZING_MAX_INCREASE_FACTOR=10.0), hot)
+        assert wide is not None and wide.proposed == 480 and not wide.capped
+        with pytest.raises(ValueError):
+            Config(RIGHTSIZING_MAX_INCREASE_FACTOR=1.0)
+
+    def test_pod_level_usage_is_skipped_for_increases_and_flagged_for_decreases(self):
+        hot = _summary(
+            container_name="", memory_request=400 * MIB, memory=_stats(500 * MIB, 600 * MIB, 640 * MIB, 650 * MIB)
+        )
+        assert memory_proposal(Config(), hot) is None
+        assert skipped_increase(Config(), hot, "memory") == POD_LEVEL_USAGE_ONLY
+        assert skipped_increase(Config(), _summary(), "memory") is None
+
+        context = OptimizationContext(config=Config(), usage=_snapshot(hot))
+        analyzer = MemoryRightsizingAnalyzer(context.config)
+        assert analyzer.analyze(context) == []
+        assert analyzer.skipped == [(("shop", "Deployment", "api"), None, "memory", POD_LEVEL_USAGE_ONLY)]
+
+        idle = _summary(container_name="")
+        context = OptimizationContext(config=Config(), usage=_snapshot(idle))
+        (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
+        assert rec.recommended_memory_request_bytes is not None and rec.recommended_memory_request_bytes < 1024 * MIB
+        assert "Pod-level usage only" in rec.reason
+
+    def test_jvm_hint_is_explained_on_memory_decreases(self):
+        summary = _summary(jvm_hint="JAVA_TOOL_OPTIONS")
+        context = OptimizationContext(config=Config(), usage=_snapshot(summary))
+        (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
+        assert "JVM runtime suspected (JAVA_TOOL_OPTIONS)" in rec.reason
+
+
+class TestContainerBoundedByItsPod:
+    """USER BUG 2: a container's usage above its pod's (Metrics API page cache) never sizes an increase."""
+
+    @staticmethod
+    def _inflated() -> tuple[WorkloadUsageSummary, WorkloadUsageSummary]:
+        # Minikube/cri-dockerd: the Metrics API reports ~1Gi for a container whose pod cgroup holds ~610Mi.
+        container = _summary(
+            memory_request=400 * MIB,
+            memory=_stats(avg=900 * MIB, p95=1000 * MIB, p99=1050 * MIB, peak=1072 * MIB),
+            cpu_request=100,
+            cpu=_stats(avg=300, p95=380, p99=400, peak=450),
+        )
+        pod = _summary(
+            container_name="",
+            memory_request=450 * MIB,
+            memory=_stats(avg=540 * MIB, p95=600 * MIB, p99=606 * MIB, peak=640 * MIB),
+            cpu_request=110,
+            cpu=_stats(avg=20, p95=24, p99=25, peak=30),
+        )
+        return container, pod
+
+    def test_memory_increase_is_sized_from_the_pod_when_the_container_exceeds_it(self):
+        container, pod = self._inflated()
+        unbounded = memory_proposal(Config(), container)
+        assert unbounded is not None and unbounded.capped  # the cap alone hid the bad basis
+
+        proposal = memory_proposal(Config(), container, pod)
+        assert proposal is not None and proposal.direction == "increase"
+        assert proposal.evidence == [CONTAINER_USAGE_EXCEEDS_POD]
+        assert proposal.proposed == math.ceil(606 * 1.2) * MIB
+        assert not proposal.capped
+
+        context = OptimizationContext(config=Config(), usage=_snapshot(container, pod))
+        (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
+        assert rec.recommended_memory_request_bytes == math.ceil(606 * 1.2) * MIB
+        assert "pod's p99 (606MiB" in rec.reason and CONTAINER_USAGE_EXCEEDS_POD in rec.reason
+        assert "Capped" not in rec.reason and "usage suggests" not in rec.reason
+
+    def test_cpu_above_the_pod_triggers_nothing_once_bounded(self):
+        container, pod = self._inflated()
+        assert cpu_proposal(Config(), container) is not None
+        # Bounded by the pod (p99 25m of a 100m request): no increase, and no decrease from contradicting data.
+        assert cpu_proposal(Config(), container, pod) is None
+        context = OptimizationContext(config=Config(), usage=_snapshot(container, pod))
+        assert CpuRightsizingAnalyzer(context.config).analyze(context) == []
+
+    def test_consistent_containers_are_sized_from_their_own_usage(self):
+        container = _summary(memory_request=400 * MIB, memory=_stats(500 * MIB, 560 * MIB, 590 * MIB, 600 * MIB))
+        pod = _summary(container_name="", memory=_stats(520 * MIB, 590 * MIB, 610 * MIB, 615 * MIB))
+        proposal = memory_proposal(Config(), container, pod)
+        assert proposal is not None and proposal.evidence == []
+        assert proposal.proposed == math.ceil(590 * 1.2) * MIB
+
+    def test_bounding_needs_pod_samples(self):
+        stats = _stats(900 * MIB, 1000 * MIB, 1050 * MIB, 1072 * MIB)
+        empty = UsageStats(sample_count=0, avg=0, p50=0, p90=0, p95=0, p99=0, max=0)
+        assert bounded_by_pod(stats, empty) == (stats, False)
+        assert bounded_by_pod(stats, None) == (stats, False)
+        bounded, flagged = bounded_by_pod(stats, _stats(540 * MIB, 600 * MIB, 606 * MIB, 640 * MIB))
+        assert flagged and bounded is not None and bounded.p99 == 606 * MIB and bounded.max == 640 * MIB
+
+
+def _snapshot(*summaries: WorkloadUsageSummary) -> UsageSnapshot:
+    snapshot = UsageSnapshot(source="rows")
+    for summary in summaries:
+        snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
+    return snapshot

@@ -110,7 +110,12 @@ class WorkloadUsageHour:
 
 @dataclass(frozen=True, slots=True)
 class UsageStats:
-    """Distribution of one resource's per-replica usage over the lookback."""
+    """Distribution of one resource's per-replica usage over the lookback.
+
+    Every value is per container and per replica: one point per replica and
+    collection step, never a sum across replicas or pods. Percentiles exclude
+    the warm-up after a container (re)start; ``max`` is every observed value.
+    """
 
     sample_count: int
     avg: float
@@ -156,8 +161,11 @@ class WorkloadUsageSummary:
     intensity_sample_count: int = 0
     emaps_zone: Optional[str] = None
     #: Reliability signals over the lookback, when a source provided them (None = unknown).
+    #: Filled by scans from kube-state-metrics / cAdvisor (``greenkube.core.reliability_signals``).
     oom_kill_count: Optional[int] = None
     throttling_ratio: Optional[float] = None
+    #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
+    jvm_hint: Optional[str] = None
 
     @property
     def target(self) -> TargetKey:

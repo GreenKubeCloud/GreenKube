@@ -79,6 +79,23 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         sql = f"SELECT {q.select_list(columns, 'hour_bucket')} FROM {table} WHERE hour_bucket = $1"
         return _input_rows(await self._fetch(sql, (hour,)), columns)
 
+    async def read_restart_context(self, hour: datetime, seconds: float) -> List[UsageInputRow]:
+        hour = ensure_utc(hour)
+        rows = await self._fetch(
+            "SELECT namespace, pod_name, timestamp, restart_count FROM combined_metrics "
+            "WHERE timestamp >= $1 AND timestamp < $2",
+            (hour - timedelta(seconds=seconds), hour),
+        )
+        return [
+            UsageInputRow(
+                namespace=row["namespace"],
+                pod_name=row["pod_name"],
+                timestamp=_decode(row["timestamp"]),
+                restart_count=None if row["restart_count"] is None else int(row["restart_count"]),
+            )
+            for row in rows
+        ]
+
     async def read_hour_inputs(self, hour: datetime) -> Tuple[List[UsageInputRow], List[UsageInputRow], str]:
         hour = ensure_utc(hour)
         sources = set()

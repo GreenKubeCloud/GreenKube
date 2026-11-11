@@ -36,6 +36,10 @@ def _decode(value: Any) -> Optional[datetime]:
     return ensure_utc(value)
 
 
+def _count(value: Any) -> Optional[int]:
+    return None if value is None else int(value)
+
+
 def _params(start: datetime, end: datetime, namespace: Optional[str]) -> Tuple[Any, ...]:
     values: Tuple[Any, ...] = (_encode(start), _encode(end))
     return (*values, namespace) if namespace is not None else values
@@ -116,6 +120,18 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
     ) -> List[UsageInputRow]:
         sql = f"SELECT {q.select_list(columns, 'hour_bucket')} FROM {table} WHERE hour_bucket = ?"
         return _input_rows(await self._fetch(sql, (_encode(hour),)), columns)
+
+    async def read_restart_context(self, hour: datetime, seconds: float) -> List[UsageInputRow]:
+        hour = ensure_utc(hour)
+        rows = await self._fetch(
+            'SELECT namespace, pod_name, "timestamp", restart_count FROM combined_metrics '
+            'WHERE "timestamp" >= ? AND "timestamp" < ?',
+            (_encode(hour - timedelta(seconds=seconds)), _encode(hour)),
+        )
+        return [
+            UsageInputRow(namespace=row[0], pod_name=row[1], timestamp=_decode(row[2]), restart_count=_count(row[3]))
+            for row in rows
+        ]
 
     async def read_hour_inputs(self, hour: datetime) -> Tuple[List[UsageInputRow], List[UsageInputRow], str]:
         hour = ensure_utc(hour)

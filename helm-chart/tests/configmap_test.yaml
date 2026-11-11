@@ -237,6 +237,24 @@ tests:
       - equal:
           path: data.RECOMMENDATION_LIMITS_POLICY
           value: "keep"
+      - equal:
+          path: data.RIGHTSIZING_MAX_INCREASE_FACTOR
+          value: "2"
+      - equal:
+          path: data.RIGHTSIZING_WARMUP_MINUTES
+          value: "10"
+
+  - it: should let the increase cap and the warm-up be configured, including a disabled warm-up
+    set:
+      config.recommendations.rightsizingMaxIncreaseFactor: 3
+      config.recommendations.rightsizingWarmupMinutes: 0
+    asserts:
+      - equal:
+          path: data.RIGHTSIZING_MAX_INCREASE_FACTOR
+          value: "3"
+      - equal:
+          path: data.RIGHTSIZING_WARMUP_MINUTES
+          value: "0"
 
   - it: should set the deletion evidence period
     asserts:

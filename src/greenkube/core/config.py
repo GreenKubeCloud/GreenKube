@@ -275,6 +275,12 @@ class Config(BaseSettings):
     # Two-way rightsizing (E9): recommend a request increase when p99 usage
     # exceeds this share of the request.
     RIGHTSIZING_INCREASE_THRESHOLD: float = 0.9
+    # One increase step is capped at this multiple of the current request,
+    # unless OOM kills back it; the next scan re-evaluates (USER BUG 2).
+    RIGHTSIZING_MAX_INCREASE_FACTOR: float = Field(2.0, gt=1)
+    # Minutes after a container (re)start excluded from usage percentiles:
+    # startup work (WAL replay, JIT, caches) is not steady-state demand.
+    RIGHTSIZING_WARMUP_MINUTES: int = Field(10, ge=0, le=1440)
     # Observed coverage (days) required before a request decrease is recommended.
     RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: float = 7.0
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.

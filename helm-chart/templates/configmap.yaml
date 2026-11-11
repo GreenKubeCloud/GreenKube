@@ -185,6 +185,8 @@ data:
   RIGHTSIZING_MEMORY_THRESHOLD: {{ .rightsizingMemoryThreshold | quote }}
   RIGHTSIZING_HEADROOM: {{ .rightsizingHeadroom | quote }}
   RIGHTSIZING_INCREASE_THRESHOLD: {{ .rightsizingIncreaseThreshold | default 0.9 | quote }}
+  RIGHTSIZING_MAX_INCREASE_FACTOR: {{ .rightsizingMaxIncreaseFactor | default 2.0 | quote }}
+  RIGHTSIZING_WARMUP_MINUTES: {{ if kindIs "invalid" .rightsizingWarmupMinutes }}"10"{{ else }}{{ .rightsizingWarmupMinutes | int | quote }}{{ end }}
   RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: {{ .minDecreaseCoverageDays | default 7 | quote }}
   RECOMMENDATION_LIMITS_POLICY: {{ .limitsPolicy | default "keep" | quote }}
   ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}

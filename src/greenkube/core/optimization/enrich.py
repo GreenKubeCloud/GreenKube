@@ -11,7 +11,7 @@ from greenkube.core.optimization.risks import WorkloadRiskProfile, assess
 from greenkube.core.optimization.scoring import score_recommendations
 from greenkube.core.optimization.statistics import percentile
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
-from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2
+from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2, RecommendationType
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -66,12 +66,38 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
             hpa_resources = frozenset({"*"})
         else:
             hpa_resources = frozenset()
+    summary = _usage_summary(rec, context)
     return WorkloadRiskProfile(
         replicas=_current_replicas(series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
         replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
+        oom_events=summary.oom_kill_count if summary is not None else None,
+        cpu_throttling_ratio=summary.throttling_ratio if summary is not None else None,
         hpa_resources=hpa_resources,
+        jvm=True if summary is not None and summary.jvm_hint else None,
     )
+
+
+def _usage_summary(rec: Recommendation, context: "OptimizationContext") -> Optional[Any]:
+    """The usage summary of the recommendation's target container, with its reliability signals (E9)."""
+    if not rec.namespace or rec.target_node or context.usage is None:
+        return None
+    if rec.owner_kind and rec.owner_name:
+        target = (rec.namespace, rec.owner_kind, rec.owner_name)
+    elif rec.pod_name:
+        target = (rec.namespace, "Pod", rec.pod_name)
+    else:
+        return None
+    return context.usage.summaries.get(target, {}).get(rec.container_name or "")
+
+
+#: Confidence multiplier of a memory decrease on a container suspected to run a JVM.
+JVM_MEMORY_DECREASE_CONFIDENCE = 0.5
+
+
+def _memory_decrease(rec: Recommendation) -> bool:
+    current, proposed = rec.current_memory_request_bytes, rec.recommended_memory_request_bytes
+    return current is not None and proposed is not None and proposed < current
 
 
 def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Config") -> Recommendation:
@@ -81,7 +107,15 @@ def _enrich_one(rec: Recommendation, context: "OptimizationContext", config: "Co
     evidence = build_evidence(rec, context)
     patch_payload = build_patch(rec)
     patch = RecommendationPatchV2.model_validate(patch_payload) if patch_payload is not None else None
-    assessment = assess(rec, evidence, config, build_risk_profile(rec, context))
+    profile = build_risk_profile(rec, context)
+    assessment = assess(rec, evidence, config, profile)
+    if profile.jvm and rec.type == RecommendationType.RIGHTSIZING_MEMORY and _memory_decrease(rec):
+        # The JVM sizes its heap itself: the working set does not show what it needs (E9).
+        assessment.confidence = round(assessment.confidence * JVM_MEMORY_DECREASE_CONFIDENCE, 4)
+        assessment.confidence_factors = {
+            **assessment.confidence_factors,
+            "jvm_suspected": JVM_MEMORY_DECREASE_CONFIDENCE,
+        }
 
     if evidence is not None:
         evidence = evidence.model_copy(
