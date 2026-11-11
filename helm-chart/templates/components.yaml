@@ -143,6 +143,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # Release namespace, for the copy-paste fixes of the setup checklist (F1).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           {{- if eq $component "api" }}
           ports:
             - name: http-api
