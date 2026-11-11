@@ -1,12 +1,11 @@
 # tests/core/optimization/test_verifier_co2e_alignment.py
-"""The interim verifier measures CO2e like change measurement (Impact Model, component matching).
+"""The interim verifier compares CO2e like change measurement (Impact Model, component matching).
 
 Before: the interim verifier compared a measured CO2e delta (operational CO2e
 of stored rows) with ``potential_savings_co2e_grams`` (a total that includes
-embodied emissions the rows never carry), split a group's CO2e by projected
-*cost*, and never claimed the CO2e of a rightsizing even when the rows were
-allocated by the Impact Model (idle power by reservation), whose CO2e moves
-with requests. Change measurement already did all three the matching way.
+embodied emissions the rows never carry) and split a group's CO2e by projected
+*cost*. Change measurement already did both the matching way. A rightsizing's
+CO2e stays reported, not claimed, by the interim verifier.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -18,7 +17,7 @@ from greenkube.core.config import Config
 from greenkube.core.db import db_manager
 from greenkube.core.metrics_compressor import MetricsCompressor
 from greenkube.core.optimization.lifecycle import RecommendationLifecycle
-from greenkube.core.optimization.verifier import RecommendationVerifier, window_rates
+from greenkube.core.optimization.verifier import RecommendationVerifier, _projected_co2e_share
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.models.measurement import QuantityOutcome
 from greenkube.models.metrics import CombinedMetric, RecommendationRecord, RecommendationStatus, RecommendationType
@@ -123,16 +122,8 @@ def _co2e(record: RecommendationRecord) -> dict:
     return ledger
 
 
-async def test_impact_model_rows_claim_the_rightsizing_co2e_against_the_operational_projection(database):
+async def test_rightsizing_co2e_is_reported_not_claimed(database):
     record = await _verify(database, model_version="2.0.0")
-    assert record.status is RecommendationStatus.VERIFIED
-    # 0.4 g per 5 minutes -> 4.8 g/h of operational CO2e freed by the request cut.
-    assert record.measured_co2e_saved_grams == pytest.approx(4.8 * HOURS_PER_YEAR, rel=0.05)
-    assert _co2e(record)["co2e_outcome"] == "realized"
-
-
-async def test_rows_without_impact_allocation_keep_the_co2e_unclaimed(database):
-    record = await _verify(database, model_version=None)
     assert record.status is RecommendationStatus.VERIFIED
     assert record.measured_co2e_saved_grams == 0.0
     assert _co2e(record)["co2e_outcome"] == "not_claimed"
@@ -145,16 +136,33 @@ async def test_co2e_projection_is_component_matched(database):
     assert record.id is not None
     rows = await SavingsMeasurementRepository(database).list_for_recommendation(record.id)
     co2e = next(item for item in rows[-1].estimates if item.quantity == "co2e_g")
-    assert co2e.outcome is QuantityOutcome.REALIZED
+    assert co2e.outcome is QuantityOutcome.NOT_CLAIMED
     # The projection it is compared with excludes the 50 kg of embodied CO2e the rows do not carry.
     assert co2e.projected_annual == pytest.approx(40_000.0)
     assert co2e.projected_annual == pytest.approx(measurable_co2e_projection(_impact(40_000.0, 50_000.0)))
     assert co2e.projection_accuracy == pytest.approx(4.8 * HOURS_PER_YEAR / 40_000.0, rel=0.05)
 
 
-def test_window_rates_flag_impact_model_allocation_only_when_every_carbon_row_has_it():
-    now = datetime.now(timezone.utc)
-    rows = _rows(now, now - timedelta(hours=1), model_version="2.0.0")
-    assert window_rates(rows, 300).co2e_model_allocated is True
-    rows[0] = rows[0].model_copy(update={"model_version": None})
-    assert window_rates(rows, 300).co2e_model_allocated is False
+def _record(rec_id: int, idle: Optional[float]) -> RecommendationRecord:
+    return RecommendationRecord(
+        id=rec_id,
+        pod_name="api",
+        namespace="prod",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        description="CPU oversized",
+        potential_savings_cost=100.0,
+        potential_savings_co2e_grams=1_000_000.0,
+        impact=_impact(idle=idle, embodied=10_000.0) if idle is not None else None,
+    )
+
+
+def test_group_co2e_is_split_by_projected_measurable_co2e_not_by_cost():
+    first, second = _record(1, 30_000.0), _record(2, 10_000.0)
+    # Equal projected costs would split the CO2e 50/50; the operational projections say 75/25.
+    assert _projected_co2e_share(first, [first, second]) == pytest.approx(0.75)
+    assert _projected_co2e_share(second, [first, second]) == pytest.approx(0.25)
+
+
+def test_group_without_comparable_projection_shares_co2e_equally():
+    first, second = _record(1, None), _record(2, None)
+    assert _projected_co2e_share(first, [first, second]) == pytest.approx(0.5)
