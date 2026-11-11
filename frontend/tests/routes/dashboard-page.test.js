@@ -13,7 +13,9 @@ vi.mock('$lib/api.js', () => ({
 	getActiveRecommendations: vi.fn(),
 	getRecommendationSavings: vi.fn(),
 	refreshDashboardSummary: vi.fn(),
-	getNamespaces: vi.fn()
+	getNamespaces: vi.fn(),
+	getOpenPullRequests: vi.fn(),
+	listChanges: vi.fn()
 }));
 
 vi.mock('echarts', () => ({
@@ -51,6 +53,8 @@ describe('DashboardPage', () => {
 		api.getActiveRecommendations.mockResolvedValue([]);
 		api.getRecommendationSavings.mockResolvedValue({});
 		api.getNamespaces.mockResolvedValue([]);
+		api.getOpenPullRequests.mockResolvedValue([]);
+		api.listChanges.mockResolvedValue({ items: [], next_cursor: null });
 	});
 
 	it('aborts the active dashboard request when the page is unmounted', async () => {
@@ -93,5 +97,72 @@ describe('DashboardPage', () => {
 			'≈ $35/yr expected · 90% success'
 		]);
 		expect(getByText('best').compareDocumentPosition(getByText('second')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	it('links each top recommendation to its detail page and shows its delivery state', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{ id: 7, pod_name: 'api', owner_kind: 'Deployment', owner_name: 'api', namespace: 'shop', eligibility: { can_open_pr: true } },
+			{
+				id: 8,
+				pod_name: 'worker',
+				eligibility: { can_open_pr: false, blockers: [{ code: 'repository_not_allowlisted', message: 'Repository is not allowlisted.' }] }
+			}
+		]);
+
+		const { findByRole, getAllByTestId } = render(DashboardPage);
+
+		const link = await findByRole('link', { name: 'Deployment/api' });
+		expect(link).toHaveAttribute('href', '/recommendations/7');
+		expect(getAllByTestId('delivery-hint').map((node) => node.textContent.trim())).toEqual([
+			'✓ Ready for a pull request',
+			'• Repository is not allowlisted.'
+		]);
+	});
+
+	it('shows realized ledger savings and projected opportunity side by side, never summed (K1)', async () => {
+		api.getRecommendationSavings.mockResolvedValue({
+			realized_to_date: { method: 'measured', basis: 'accrued', cost: 120, co2e_grams: 4000 },
+			run_rate_annual: { method: 'measured', basis: 'annual_rate', cost: 0, co2e_grams: 0 },
+			projected_annual: { method: 'projected', basis: 'annual_rate', cost: 0, co2e_grams: 0 },
+			total_cost_saved: 999
+		});
+		api.getActiveRecommendations.mockResolvedValue([{ id: 1, pod_name: 'api', potential_savings_cost: 300 }]);
+
+		const { findByTestId, container } = render(DashboardPage);
+
+		expect(await findByTestId('realized-cost')).toHaveTextContent('$120');
+		expect(await findByTestId('opportunity-cost')).toHaveTextContent('$300/yr');
+		expect(container.textContent).not.toContain('$420');
+		expect(container.textContent).not.toContain('$999');
+		// Realized savings are the whole ledger, not the footprint period.
+		expect(api.getRecommendationSavings.mock.calls.at(-1)[0]).not.toHaveProperty('last');
+	});
+
+	it('counts the changes in flight from open PRs and /api/v2/changes', async () => {
+		api.getOpenPullRequests.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+		api.listChanges.mockResolvedValue({
+			items: [{ state: 'applied' }, { state: 'measuring' }, { state: 'measuring' }],
+			next_cursor: null
+		});
+
+		const { findByTestId } = render(DashboardPage);
+
+		await waitFor(async () => expect(await findByTestId('inflight-prs')).toHaveTextContent('2'));
+		expect(await findByTestId('inflight-applied')).toHaveTextContent('1');
+		expect(await findByTestId('inflight-measuring')).toHaveTextContent('2');
+		expect(api.listChanges.mock.calls.at(-1)[0].state).toEqual(['applied', 'measuring']);
+	});
+
+	it('explains the empty inbox and the evidence warm-up', async () => {
+		const { findByTestId, unmount } = render(DashboardPage);
+		expect(await findByTestId('inbox-empty')).toHaveTextContent('No open recommendation');
+		unmount();
+
+		const later = new Date(Date.now() + 30 * 3_600_000).toISOString();
+		api.getActiveRecommendations.mockResolvedValue([
+			{ id: 3, pod_name: 'api', eligibility: { can_open_pr: false, eligible_at: later, blockers: [] } }
+		]);
+		const second = render(DashboardPage);
+		expect(await second.findByTestId('warm-up')).toHaveTextContent('1 recommendation becomes eligible for a pull request in ~30h');
 	});
 });
