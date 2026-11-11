@@ -65,6 +65,7 @@ ROLLUP_COLUMNS: Tuple[str, ...] = (
     "emaps_zone",
     "node_instance_type",
     "source",
+    "latest_sample_offset_seconds",
 )
 
 
@@ -124,6 +125,17 @@ class WorkloadUsageRepository(ABC):
 
         Only ``namespace``, ``pod_name``, ``timestamp`` and ``restart_count``
         are filled. Backends without raw rows return none.
+        """
+        return []
+
+    async def read_hourly_restart_context(self, hour: datetime) -> List[UsageInputRow]:
+        """Compressed pod rows of the hour before ``hour`` with their restart counts.
+
+        The warm-up context of an hour re-rolled from the compressed hourly
+        tables: a pod whose restart count rose since the previous hour, or that
+        was absent from it, warmed up during the hour. Only ``namespace``,
+        ``pod_name``, ``timestamp`` (the previous hour) and ``restart_count``
+        are filled.
         """
         return []
 

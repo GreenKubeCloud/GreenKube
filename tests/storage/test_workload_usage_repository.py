@@ -390,3 +390,43 @@ async def test_rollup_marks_cover_container_rows_and_table_resets(db):
     # Marks above the current ids (tables emptied and recreated) read from id 0.
     reset = {table: value + 10_000 for table, value in marks.items()}
     assert late in await repository.hours_written_between(reset, upto)
+
+
+async def test_latest_request_comes_from_the_latest_sample_after_a_rollout_to_another_node(db):
+    """A rollout that moves a pod to another node within the hour shows the new request at once.
+
+    The hour holds one row per node: the replaced pod on node-a (500m until
+    minute 10) and its successor on node-b (200m from minute 15). The latest
+    request is the newest sample's (200m), not the hour's maximum (500m).
+    """
+    start = _base_hour()
+    rows = [
+        _row(start + timedelta(minutes=5 * step), pod_name="api-old", node="node-a", cpu_request=500)
+        for step in range(3)
+    ]
+    rows += [
+        _row(start + timedelta(minutes=5 * step), pod_name="api-new", node="node-b", cpu_request=200)
+        for step in range(3, 12)
+    ]
+    rows += [
+        _row(
+            start + timedelta(minutes=5 * step),
+            pod_name=pod,
+            node=None,
+            container_name="web",
+            cpu_request=request,
+            cpu_limit=limit,
+        )
+        for step in range(12)
+        for pod, request, limit in [("api-old", 500, 1000) if step < 3 else ("api-new", 200, 400)]
+    ]
+    repository, _ = await _rolled(db, rows, start, hours=1)
+
+    window = (start, start + timedelta(hours=1))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+    for summaries in (snapshot.summaries, reference.summaries):
+        api = summaries[("shop", "Deployment", "api")]
+        assert api[""].cpu_request == 200
+        assert api["web"].cpu_request == 200
+        assert api["web"].cpu_limit == 400

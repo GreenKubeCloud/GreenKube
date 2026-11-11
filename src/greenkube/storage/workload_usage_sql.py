@@ -217,7 +217,14 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             percentile_columns.append(f"MAX({resource}_usage_p{p}) AS {alias}_p{p}")
         percentile_columns.append(f"MAX({resource}_usage_max) AS {alias}_max")
     return f"""
-        WITH hourly AS (
+        WITH scoped AS (
+            SELECT workload_usage_hourly.*,
+                COALESCE(latest_sample_offset_seconds, -1) AS row_offset,
+                MAX(COALESCE(latest_sample_offset_seconds, -1)) OVER ({partition}, hour_bucket) AS hour_offset
+            FROM workload_usage_hourly
+            WHERE {_window_filter(ph, namespace, namespaces=namespaces)}
+        ),
+        hourly AS (
             SELECT {_KEY}, hour_bucket,
                 SUM(sample_count) AS sample_count,
                 MAX(step_count) AS step_count,
@@ -229,10 +236,10 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 SUM(memory_sample_count) AS mem_n,
                 SUM(COALESCE(memory_usage_avg, 0) * memory_sample_count) AS mem_sum,
                 {", ".join(percentile_columns)},
-                MAX(cpu_request) AS cpu_request,
-                MAX(memory_request) AS memory_request,
-                MAX(cpu_limit) AS cpu_limit,
-                MAX(memory_limit) AS memory_limit,
+                MAX(CASE WHEN row_offset = hour_offset THEN cpu_request END) AS cpu_request,
+                MAX(CASE WHEN row_offset = hour_offset THEN memory_request END) AS memory_request,
+                MAX(CASE WHEN row_offset = hour_offset THEN cpu_limit END) AS cpu_limit,
+                MAX(CASE WHEN row_offset = hour_offset THEN memory_limit END) AS memory_limit,
                 MAX(restart_count) AS restart_count,
                 SUM(total_cost) AS total_cost,
                 SUM(co2e_grams) AS co2e_grams,
@@ -241,8 +248,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 SUM(COALESCE(grid_intensity, 0) * intensity_sample_count) AS intensity_sum,
                 SUM(intensity_sample_count) AS intensity_n,
                 MAX(emaps_zone) AS emaps_zone
-            FROM workload_usage_hourly
-            WHERE {_window_filter(ph, namespace, namespaces=namespaces)}
+            FROM scoped
             GROUP BY {_KEY}, hour_bucket
         ),
         ranked AS (
@@ -565,4 +571,5 @@ def hour_from_values(values: Mapping[str, Any], decode_time: Callable[[Any], Opt
         data[column] = int(data[column] or 0)
     for column in ("cpu_limit", "memory_limit", "restart_count"):
         data[column] = _i(data[column])
+    data["latest_sample_offset_seconds"] = _f(data["latest_sample_offset_seconds"])
     return WorkloadUsageHour(**data)
