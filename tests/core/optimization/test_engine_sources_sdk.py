@@ -141,10 +141,15 @@ class TestSourceRunPersistence:
         assert stored.recommendation_fingerprint in persisted
         assert stored.signal.target.key() == f"{engine.cluster_uid}/apps.Deployment/prod/alive"
 
-        # A plugin's signals are recorded; they feed recommendations once consensus (E6) lands.
+        # A plugin's signals are recorded and become a recommendation only through consensus (E6),
+        # under the plugin's own source id.
         [plugin_signal] = await signals.list_signals("acme")
         assert plugin_signal.recommendation_fingerprint is None
-        assert await _active(repo) == {"alive"}
+        assert await _active(repo) == {"alive", "pv-9"}
+        [pv] = [record for record in await repo.get_active_recommendations() if record.pod_name == "pv-9"]
+        assert pv.source == "acme"
+        assert pv.sources == ["acme"]
+        assert pv.consensus is not None and pv.consensus["chosen_from"] == ["acme"]
         assert {o.source for o in result.source_outcomes} == {"greenkube", "acme"}
 
     async def test_circuit_state_survives_engines_through_storage(self, sqlite_db):

@@ -31,11 +31,30 @@ def test_single_source_gets_provenance():
     assert recs[0].sources == ["greenkube"]
 
 
-def test_vpa_wins_over_native_for_same_capability():
+def test_safest_consensus_keeps_the_least_aggressive_proposal():
     native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
     vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
 
     recs = finalize_recommendations([native, vpa], Config())
+
+    assert len(recs) == 1
+    assert recs[0].source == RecommendationSource.GREENKUBE
+    # No source's proposal is dropped unseen: both support the recommendation.
+    assert recs[0].sources == ["greenkube", "vpa"]
+    assert recs[0].recommended_cpu_request_millicores == 250
+    consensus = recs[0].consensus or {}
+    assert consensus["policy"] == "safest"
+    assert consensus["spread"]["cpu_request_m"] == {"greenkube": 250, "vpa": 200}
+    assert consensus["agreement"] == 0.8
+
+
+def test_priority_policy_keeps_the_former_arbitration():
+    cfg = Config()
+    cfg.RECOMMENDATION_CONSENSUS_POLICY = "priority"
+    native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
+    vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
+
+    recs = finalize_recommendations([native, vpa], cfg)
 
     assert len(recs) == 1
     assert recs[0].source == RecommendationSource.VPA
@@ -43,8 +62,20 @@ def test_vpa_wins_over_native_for_same_capability():
     assert recs[0].recommended_cpu_request_millicores == 200
 
 
+def test_source_priority_breaks_ties_between_equal_proposals():
+    native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=200)
+    vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
+
+    recs = finalize_recommendations([native, vpa], Config())
+
+    assert len(recs) == 1
+    assert recs[0].source == RecommendationSource.VPA
+    assert (recs[0].consensus or {})["chosen_from"] == ["greenkube", "vpa"]
+
+
 def test_priority_config_can_flip_winner():
     cfg = Config()
+    cfg.RECOMMENDATION_CONSENSUS_POLICY = "priority"
     cfg.RECOMMENDATION_SOURCE_PRIORITY = "greenkube,vpa"
     native = _workload_rec(source=RecommendationSource.GREENKUBE, cpu=250)
     vpa = _workload_rec(source=RecommendationSource.VPA, cpu=200)
