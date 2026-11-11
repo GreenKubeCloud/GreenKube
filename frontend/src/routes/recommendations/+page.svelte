@@ -17,6 +17,8 @@
 		cancelAutomationPlan,
 		discardAutomationPlan,
 		previewAutomationPlanRollback,
+		reportPlanDelivery,
+		planPatchUrl,
 		getRecommendationEvents
 	} from '$lib/api.js';
 	import {
@@ -41,6 +43,7 @@
 		planTargetFor
 	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
+	import { etaFrom } from '$lib/overview.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -131,6 +134,11 @@
 	let modalTitleId = 'recommendation-modal-title';
 	let planPollTimer = null;
 	let planPollGeneration = 0;
+	// Delivery modes (F4) and auto-approval (F5).
+	let autoApproveBlockers = [];
+	let deliveryPrUrl = '';
+	let deliveryReport = null;
+	let deliveryError = '';
 
 	const PLAN_POLL_INTERVAL_MS = 3000;
 
@@ -448,6 +456,63 @@
 		}
 		const [first] = eligibility?.blockers ?? [];
 		return first ? blockerText(first) : 'This recommendation has no GitOps action planner; apply it manually.';
+	}
+
+	/** How approved plans become pull requests (F4): direct, patch or ci. */
+	function deliveryMode() {
+		const mode = automationStatus?.delivery_mode;
+		return mode === 'patch' || mode === 'ci' ? mode : 'direct';
+	}
+
+	function approveLabel(mode = deliveryMode()) {
+		if (mode === 'patch') return 'Approve and get the patch';
+		if (mode === 'ci') return 'Approve for CI delivery';
+		return 'Approve and open PR';
+	}
+
+	const AUTO_APPROVE_REASONS = {
+		approve_scope_missing: 'your account may not approve plans',
+		risk_above_auto_approve: 'the risk is above the auto-approval limit',
+		confidence_below_auto_approve: 'the confidence is below the auto-approval limit',
+		consensus_contested: 'sources disagree (contested advice is never approved automatically)',
+		decrease_without_native_evidence: 'a decrease needs GreenKube evidence or two agreeing sources',
+		not_active: 'a recommendation is not active',
+		recommendation_missing: 'a recommendation could not be read',
+		rollback_plan: 'rollbacks are always approved by a person',
+		plan_not_validated: 'the preview is not validated'
+	};
+
+	/** Why automation.autoApprove left this preview for the click, or '' when it is off. */
+	function autoApproveNote(blockers) {
+		const reasons = (Array.isArray(blockers) ? blockers : [])
+			.filter((code) => code !== 'auto_approve_disabled')
+			.map((code) => AUTO_APPROVE_REASONS[code] ?? code);
+		return reasons.length ? `Not approved automatically: ${reasons.join('; ')}.` : '';
+	}
+
+	/** "Collecting evidence — eligible in ~31h" while usage evidence warms up (F7). */
+	function warmUpText(rec) {
+		const eta = etaFrom(eligibilityOf(rec)?.eligibleAt ?? '');
+		return eta ? `Collecting evidence — eligible in ${eta}` : '';
+	}
+
+	async function submitDeliveryLinkBack() {
+		const preview = planPresentation(prPlan);
+		const prUrl = deliveryPrUrl.trim();
+		if (!preview.planId || !prUrl || prLoading) return;
+		const modal = prModal;
+		prLoading = true;
+		deliveryError = '';
+		try {
+			const result = await reportPlanDelivery(preview.planId, prUrl);
+			if (prModal !== modal) return;
+			deliveryReport = result;
+			if (result?.plan) prPlan = result.plan;
+		} catch (e) {
+			if (prModal === modal) deliveryError = e?.message ?? 'The pull request could not be linked.';
+		} finally {
+			if (prModal === modal) prLoading = false;
+		}
 	}
 
 	function canPreviewRecommendation(rec) {
@@ -773,6 +838,14 @@
 			return false;
 		}
 		prPlan = response?.plan ?? response;
+		autoApproveBlockers = Array.isArray(response?.auto_approve_blockers) ? response.auto_approve_blockers : [];
+		if (response?.auto_approved === true) {
+			// automation.autoApprove approved the digest with the preview (F5): no extra click.
+			planApproval = response;
+			planFeedback = 'Approved automatically by the automation.autoApprove policy.';
+			if (prModal) schedulePlanStatusPolling(prModal);
+			return true;
+		}
 		if (!canApprovePlan(prPlan)) {
 			const preview = planPresentation(prPlan);
 			prError = preview.expiresAt && !preview.expiryValid
@@ -916,6 +989,10 @@
 		planPollingError = '';
 		prError = null;
 		prLoading = false;
+		autoApproveBlockers = [];
+		deliveryPrUrl = '';
+		deliveryReport = null;
+		deliveryError = '';
 		chartMappingOptions = null;
 		chartMappingSelection = null;
 		chartMappingFile = '';
@@ -1411,6 +1488,44 @@
 				<p class="text-xs text-green-400" role="status">{planFeedback}</p>
 			{/if}
 
+			{#if prPlan && !planApproval && autoApproveNote(autoApproveBlockers)}
+				<p class="text-xs text-dark-400" data-testid="auto-approve-note">{autoApproveNote(autoApproveBlockers)}</p>
+			{/if}
+
+			{#if planApproval && !prError && (prPlan?.delivery_mode === 'patch' || prPlan?.delivery_mode === 'ci')}
+				<div class="text-xs rounded-lg px-3 py-2 border border-blue-600/30 bg-blue-600/10 text-blue-200 space-y-2" data-testid="external-delivery">
+					{#if prPlan.delivery_mode === 'ci'}
+						<p>Approved for CI delivery: your CI job opens the pull request with its own token and reports it back. GreenKube then tracks it to merge and sync.</p>
+					{:else}
+						<p>
+							Approved. <a class="underline underline-offset-2" href={planPatchUrl(planPresentation(prPlan).planId)} download>Download the patch</a>
+							or run <code>greenkube plan apply-patch {planPresentation(prPlan).planId}</code>, push the branch and open the pull request.
+							GreenKube links it by its branch name or its GreenKube-Plan trailer.
+						</p>
+					{/if}
+					{#if deliveryReport?.pull_request}
+						<p role="status">Pull request #{deliveryReport.pull_request.number} linked; GreenKube tracks it now.</p>
+					{:else if prPlan.status === 'approved'}
+						<form class="flex flex-wrap items-end gap-2" on:submit|preventDefault={submitDeliveryLinkBack}>
+							<label class="flex-1 min-w-[16rem]">
+								<span class="block text-[11px] text-dark-400">I opened PR</span>
+								<input
+									class="input text-xs w-full"
+									type="url"
+									placeholder="https://github.com/org/repo/pull/42"
+									bind:value={deliveryPrUrl}
+									disabled={prLoading}
+								/>
+							</label>
+							<button class="btn-secondary text-xs disabled:opacity-50" type="submit" disabled={prLoading || !deliveryPrUrl.trim()}>
+								Link pull request
+							</button>
+						</form>
+						{#if deliveryError}<p class="text-red-400" role="alert">{deliveryError}</p>{/if}
+					{/if}
+				</div>
+			{/if}
+
 			{#if planApproval && !prError}
 				<div
 					role={prPlan?.status === 'sync_failed' || prPlan?.operation_status === 'failed' ? 'alert' : 'status'}
@@ -1640,7 +1755,7 @@
 						on:click={approvePlan}
 					>
 						{#if prLoading}<span class="animate-spin">⟳</span>{/if}
-						Approve plan
+						{approveLabel()}
 					</button>
 				{/if}
 			</div>
@@ -2177,6 +2292,13 @@
 														title={manualReason(rec)}
 													>Manual change required</span>
 												{/if}
+												{#if activeTab === 'active' && warmUpText(rec)}
+													<span
+														class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/10 text-blue-300"
+														role="status"
+														data-testid="warm-up-eta"
+													>{warmUpText(rec)}</span>
+												{/if}
 												{#if isReliabilityLane(rec)}
 													<span
 														class="text-[10px] px-2 py-0.5 rounded-sm bg-purple-600/10 text-purple-300"
@@ -2233,10 +2355,10 @@
 													<button
 														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 														       hover:border-green-600/50 hover:text-green-400 transition-colors"
-														title="Preview the server-resolved GitOps plan for this container action"
+														title="Preview the diff of the server-resolved GitOps plan, then open the pull request in one click"
 														on:click={() => openPrModal(rec)}
 													>
-														Preview plan
+														Open PR
 													</button>
 												{:else if rec.scope === 'workload' && rec.owner_kind && rec.owner_name && hasOpenPr(rec)}
 													<button

@@ -172,3 +172,32 @@ class TestV1Compatibility:
         # v1 keeps its shape and gains the v2 fields additively.
         assert v1["recommended_cpu_request_millicores"] == 300
         assert v1["revision"] == 3 and v1["consensus"]["policy"] == "safest"
+
+
+class TestWarmUpEta:
+    def test_v1_and_v2_expose_when_a_warming_recommendation_becomes_eligible(self, client, mock_reco_repo):
+        """F7: 'Collecting evidence — eligible in ~Nh' is computed server-side on both API versions."""
+        from datetime import timedelta
+
+        from greenkube.models.evidence import RecommendationEvidence
+
+        now = datetime.now(timezone.utc)
+        evidence = RecommendationEvidence(
+            observation_window_start=now - timedelta(minutes=30),
+            observation_window_end=now,
+            observation_window_seconds=7 * 86400,
+            sample_count=6,
+            coverage_ratio=0.9,
+        )
+        record = _record(evidence=evidence, consensus=None, source="greenkube", sources=["greenkube"])
+        mock_reco_repo.get_active_recommendations = AsyncMock(return_value=[record])
+        mock_reco_repo.get_queued_revisions = AsyncMock(return_value={})
+
+        [v2] = client.get("/api/v2/recommendations").json()["items"]
+        v1 = client.get("/api/v1/recommendations").json()
+
+        eligible_at = datetime.fromisoformat(v2["eligibility"]["eligible_at"])
+        assert now < eligible_at <= now + timedelta(days=1)
+        assert "warming_up" in [blocker["code"] for blocker in v2["eligibility"]["blockers"]]
+        [v1_item] = v1 if isinstance(v1, list) else v1["items"]
+        assert v1_item["eligibility"]["eligible_at"] == v2["eligibility"]["eligible_at"]

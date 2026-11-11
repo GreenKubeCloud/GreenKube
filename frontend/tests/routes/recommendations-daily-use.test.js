@@ -31,6 +31,8 @@ vi.mock('$lib/api.js', () => ({
 	ignoreRecommendation: vi.fn(),
 	listOptimizationRuns: vi.fn(),
 	previewAutomationPlanRollback: vi.fn(),
+	reportPlanDelivery: vi.fn(),
+	planPatchUrl: vi.fn((id) => `/api/v1/automation/plans/${id}/patch`),
 	requestOptimizationRun: vi.fn(),
 	unignoreRecommendation: vi.fn()
 }));
@@ -411,7 +413,7 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 
 	it('discards an unapproved preview when the dialog closes', async () => {
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await screen.findByText('sha256:digest');
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -422,7 +424,7 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 
 	it('discards the preview when the dialog is dismissed with Escape', async () => {
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await screen.findByText('sha256:digest');
 
 		await fireEvent.keyDown(window, { key: 'Escape' });
@@ -438,7 +440,7 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 			})
 		);
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await screen.findByText(/Preparing preview/);
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -452,8 +454,8 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 	it('keeps an approved plan when the dialog closes', async () => {
 		api.approveAutomationPlan.mockResolvedValue({ ...validatedPlan, status: 'approved' });
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 		await screen.findByText(/Plan approved/);
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -472,8 +474,8 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 			})
 		);
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 		await vi.waitFor(() => expect(api.approveAutomationPlan).toHaveBeenCalledWith('pln-1', 'sha256:digest'));
 
 		await close();
@@ -489,8 +491,8 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 	it('never discards a plan whose approval is in flight when the page is left', async () => {
 		api.approveAutomationPlan.mockReturnValue(new Promise(() => {}));
 		const { unmount } = render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 		await vi.waitFor(() => expect(api.approveAutomationPlan).toHaveBeenCalled());
 
 		unmount();
@@ -506,8 +508,8 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 			Object.assign(new Error('Approval could not be confirmed.'), { status: 503 })
 		);
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 		await screen.findByText(/Approval could not be confirmed/);
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -521,7 +523,7 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 	it('closes the dialog even when the preview cannot be discarded', async () => {
 		api.discardAutomationPlan.mockRejectedValue(Object.assign(new Error('Conflict'), { status: 409 }));
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await screen.findByText('sha256:digest');
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -544,7 +546,7 @@ describe('plan preview lifecycle (D6, BUG-48)', () => {
 		);
 		render(RecommendationsPage);
 
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		const alert = await screen.findByRole('alert');
 		expect(alert).toHaveTextContent('Another plan for this workload is still active');

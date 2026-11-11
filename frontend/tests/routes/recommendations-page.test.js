@@ -28,7 +28,9 @@ vi.mock('$lib/api.js', () => ({
 	getAutomationPlan: vi.fn(),
 	approveAutomationPlan: vi.fn(),
 	cancelAutomationPlan: vi.fn(),
-	previewAutomationPlanRollback: vi.fn()
+	previewAutomationPlanRollback: vi.fn(),
+	reportPlanDelivery: vi.fn(),
+	planPatchUrl: vi.fn((id) => `/api/v1/automation/plans/${id}/patch`)
 }));
 
 const recommendation = {
@@ -148,7 +150,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		).toBeInTheDocument();
 		expect(await screen.findByText('CPU usage is consistently low')).toBeInTheDocument();
 		expect(screen.getByText('Manual change required')).toBeInTheDocument();
-		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Open PR' })).not.toBeInTheDocument();
 	});
 
 	it('shows readiness as pending instead of disabled while the status request is unresolved', async () => {
@@ -190,7 +192,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			await screen.findByText(/GitOps automation status is unavailable\. Pull-request previews are disabled/)
 		).toBeInTheDocument();
 		expect(await screen.findByText('CPU usage is consistently low')).toBeInTheDocument();
-		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Open PR' })).not.toBeInTheDocument();
 	});
 
 	it('previews and approves a typed action using the server plan digest', async () => {
@@ -200,7 +202,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		render(RecommendationsPage);
 
 		expect(await screen.findByText('Container action ready')).toBeInTheDocument();
-		await fireEvent.click(screen.getByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Open PR' }));
 
 		expect(api.createAutomationPlan).toHaveBeenCalledWith([101, 102]);
 		expect(await screen.findByText('Review automation plan')).toBeInTheDocument();
@@ -221,7 +223,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(screen.getByText('sha256:rendered-output-digest')).toBeInTheDocument();
 		expect(screen.getByText('sha256:exact-plan-digest')).toBeInTheDocument();
 		expect(screen.getByText('2099-10-21T23:00:00Z')).toBeInTheDocument();
-		await fireEvent.click(screen.getByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve and open PR' }));
 
 		expect(api.approveAutomationPlan).toHaveBeenCalledWith(
 			'pln-101',
@@ -235,7 +237,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
 
 		render(RecommendationsPage);
-		const trigger = await screen.findByRole('button', { name: 'Preview plan' });
+		const trigger = await screen.findByRole('button', { name: 'Open PR' });
 		trigger.focus();
 		await fireEvent.click(trigger);
 
@@ -276,7 +278,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			.mockResolvedValueOnce(validatedPlan);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByRole('heading', { name: 'One-time Helm values mapping' })).toBeInTheDocument();
 		expect(screen.getByLabelText('Git-managed values file')).toHaveValue('apps/payments/values.yaml');
@@ -324,7 +326,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		render(RecommendationsPage);
 
 		expect(await screen.findAllByText('Container action ready')).toHaveLength(2);
-		await fireEvent.click(screen.getAllByRole('button', { name: 'Preview plan' })[0]);
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Open PR' })[0]);
 
 		expect(api.createAutomationPlan).toHaveBeenCalledWith([101, 102]);
 		expect(await screen.findByText('Review automation plan')).toBeInTheDocument();
@@ -342,7 +344,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 
 		render(RecommendationsPage);
 
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByText(/current repository branch head.*differs from the revision reported/i)).toBeInTheDocument();
 		expect(screen.getByText('Controller-reported revision')).toBeInTheDocument();
@@ -367,7 +369,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		});
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByText('Automation policy')).toBeInTheDocument();
 		expect(screen.getByText('Policy checks passed')).toBeInTheDocument();
@@ -401,7 +403,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.createAutomationPlan.mockRejectedValueOnce(rejection);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByText('Policy blocks this plan')).toBeInTheDocument();
 		expect(screen.getByText('minimum confidence')).toBeInTheDocument();
@@ -420,7 +422,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 
 		render(RecommendationsPage);
 
-		expect(await screen.findAllByRole('button', { name: 'Preview plan' })).toHaveLength(1);
+		expect(await screen.findAllByRole('button', { name: 'Open PR' })).toHaveLength(1);
 	});
 
 	it('refreshes an approved plan through merge, sync, and apply states', async () => {
@@ -432,8 +434,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		});
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Refresh plan status' }));
 
@@ -458,8 +460,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		});
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		const approveButton = await screen.findByRole('button', { name: 'Approve plan' });
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		const approveButton = await screen.findByRole('button', { name: 'Approve and open PR' });
 
 		vi.useFakeTimers();
 		try {
@@ -501,8 +503,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			.mockResolvedValueOnce([{ recommendation_id: 101, status: 'open' }]);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		const approveButton = await screen.findByRole('button', { name: 'Approve plan' });
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		const approveButton = await screen.findByRole('button', { name: 'Approve and open PR' });
 
 		vi.useFakeTimers();
 		try {
@@ -540,8 +542,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			});
 
 		render(RecommendationsPage);
-			await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-			const approveButton = await screen.findByRole('button', { name: 'Approve plan' });
+			await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+			const approveButton = await screen.findByRole('button', { name: 'Approve and open PR' });
 			vi.useFakeTimers();
 			try {
 				await fireEvent.click(approveButton);
@@ -582,7 +584,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.cancelAutomationPlan.mockResolvedValueOnce({ ...validatedPlan, status: 'stale' });
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await fireEvent.click(await screen.findByRole('button', { name: 'Cancel plan' }));
 
 		expect(api.cancelAutomationPlan).toHaveBeenCalledWith('pln-101');
@@ -600,7 +602,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.cancelAutomationPlan.mockRejectedValueOnce(new Error('Cancellation was rejected.'));
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 		await fireEvent.click(await screen.findByRole('button', { name: 'Cancel plan' }));
 
 		expect(await screen.findByRole('alert')).toHaveTextContent('Cancellation was rejected.');
@@ -629,8 +631,8 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.previewAutomationPlanRollback.mockResolvedValueOnce(rollbackPreview);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and open PR' }));
 		await fireEvent.click(await screen.findByRole('button', { name: 'Refresh plan status' }));
 
 		expect(await screen.findByRole('button', { name: 'Preview rollback' })).toBeInTheDocument();
@@ -640,7 +642,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(await screen.findByText('Rollback preview ready. Review it before approving.')).toBeInTheDocument();
 		expect(screen.getByText('pln-101')).toBeInTheDocument();
 		expect(screen.getByText('sha256:rollback-digest')).toBeInTheDocument();
-		expect(screen.getByRole('button', { name: 'Approve plan' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Approve and open PR' })).toBeInTheDocument();
 	});
 
 	it('renders a safe generic warning without leaking internal renderer warning text', async () => {
@@ -651,7 +653,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		});
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(
 			await screen.findByText('Renderer reported a non-blocking warning; details are omitted for safety.')
@@ -670,7 +672,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.createAutomationPlan.mockRejectedValueOnce(Object.assign(new Error('Request failed.'), { code }));
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByRole('alert')).toHaveTextContent(expectedMessage);
 		expect(api.approveAutomationPlan).not.toHaveBeenCalled();
@@ -696,7 +698,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		render(RecommendationsPage);
 
 		await screen.findByText('CPU usage is consistently low');
-		expect(screen.queryByRole('button', { name: 'Preview plan' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Open PR' })).not.toBeInTheDocument();
 		expect(screen.queryByRole('button', { name: 'Create pull request' })).not.toBeInTheDocument();
 		const blockers = screen.getByTestId('eligibility-blockers');
 		expect(blockers).toHaveTextContent('The proposed change does not target one named container of the workload.');
@@ -714,7 +716,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(api.createAutomationPlan).toHaveBeenCalledWith([101]);
 	});
@@ -756,7 +758,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: 'Preview plan' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
 
 		expect(await screen.findByRole('alert')).toHaveTextContent(/server-side plan preparation is unavailable/i);
 		expect(api.createAutomationPlan).toHaveBeenCalledWith([101]);
@@ -848,5 +850,122 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(change).toHaveTextContent('10m');
 		expect(change).toHaveTextContent('(proposed)');
 		expect(change).not.toHaveTextContent('live request unchanged');
+	});
+});
+
+describe('RecommendationsPage one-click Open PR, delivery modes and warm-up (F4, F5, F7)', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		resetOptimizationRunsSupport();
+		api.discardAutomationPlan.mockResolvedValue({ discarded: true, status: 204 });
+		api.getNamespaces.mockResolvedValue(['production']);
+		api.listOptimizationRuns.mockResolvedValue([]);
+		api.getAppliedRecommendations.mockResolvedValue([]);
+		api.getIgnoredRecommendations.mockResolvedValue([]);
+		api.getOpenPullRequests.mockResolvedValue([]);
+		api.getRecommendationSavings.mockResolvedValue({});
+		api.getAutomationPlan.mockResolvedValue(validatedPlan);
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation([101, 102])]);
+	});
+
+	it('skips the approval click when the autoApprove policy approved the preview', async () => {
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, delivery_mode: 'direct' });
+		api.createAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			status: 'approved',
+			operation_id: 'operation-1',
+			operation_status: 'queued',
+			delivery_mode: 'direct',
+			auto_approved: true,
+			auto_approve_blockers: []
+		});
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+
+		expect(await screen.findByText('Approved automatically by the automation.autoApprove policy.')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Approve and open PR' })).not.toBeInTheDocument();
+		expect(api.approveAutomationPlan).not.toHaveBeenCalled();
+	});
+
+	it('explains why a contested preview still needs the click', async () => {
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, delivery_mode: 'direct' });
+		api.createAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			auto_approved: false,
+			auto_approve_blockers: ['consensus_contested']
+		});
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+
+		expect(await screen.findByTestId('auto-approve-note')).toHaveTextContent(/sources disagree/);
+		expect(screen.getByRole('button', { name: 'Approve and open PR' })).toBeInTheDocument();
+	});
+
+	it('offers the patch and the "I opened PR" link-back in patch mode', async () => {
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, delivery_mode: 'patch' });
+		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
+		const approved = { ...validatedPlan, status: 'approved', delivery_mode: 'patch' };
+		api.approveAutomationPlan.mockResolvedValueOnce(approved);
+		api.getAutomationPlan.mockResolvedValue(approved);
+		api.reportPlanDelivery.mockResolvedValueOnce({
+			plan: { ...approved, status: 'pr_open' },
+			pull_request: { number: 42, url: 'https://github.com/example/gitops/pull/42', linked_by: 'trailer' },
+			created: true
+		});
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve and get the patch' }));
+
+		const delivery = await screen.findByTestId('external-delivery');
+		expect(screen.getByRole('link', { name: 'Download the patch' })).toHaveAttribute(
+			'href',
+			'/api/v1/automation/plans/pln-101/patch'
+		);
+		expect(delivery).toHaveTextContent('greenkube plan apply-patch pln-101');
+		await fireEvent.input(screen.getByPlaceholderText('https://github.com/org/repo/pull/42'), {
+			target: { value: 'https://github.com/example/gitops/pull/42' }
+		});
+		await fireEvent.click(screen.getByRole('button', { name: 'Link pull request' }));
+
+		expect(api.reportPlanDelivery).toHaveBeenCalledWith('pln-101', 'https://github.com/example/gitops/pull/42');
+		expect(await screen.findByText(/Pull request #42 linked/)).toBeInTheDocument();
+	});
+
+	it('approves for CI delivery in ci mode', async () => {
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, delivery_mode: 'ci' });
+		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
+		const approved = { ...validatedPlan, status: 'approved', delivery_mode: 'ci' };
+		api.approveAutomationPlan.mockResolvedValueOnce(approved);
+		api.getAutomationPlan.mockResolvedValue(approved);
+
+		render(RecommendationsPage);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Approve for CI delivery' }));
+
+		expect(await screen.findByText(/Approved for CI delivery/)).toBeInTheDocument();
+	});
+
+	it('shows when a warming-up recommendation becomes eligible', async () => {
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true });
+		const eligibleAt = new Date(Date.now() + 31 * 3_600_000 + 60_000).toISOString();
+		api.getActiveRecommendations.mockResolvedValue([
+			{
+				...recommendation,
+				eligibility: {
+					can_open_pr: false,
+					delivery_modes: ['manual'],
+					blockers: [{ code: 'warming_up', message: 'Collecting usage evidence.', fix: 'Wait.' }],
+					warnings: [],
+					eligible_at: eligibleAt
+				}
+			}
+		]);
+
+		render(RecommendationsPage);
+
+		expect(await screen.findByTestId('warm-up-eta')).toHaveTextContent('Collecting evidence — eligible in ~31h');
 	});
 });
