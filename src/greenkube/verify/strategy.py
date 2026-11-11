@@ -105,8 +105,11 @@ class RequestRightsizingStrategy:
     * ``cost_cpu`` / ``cost_ram`` — its CPU and RAM components (used to split
       the saving between the change's recommendations, C5);
     * ``core_hours`` / ``gib_hours`` — requested capacity freed (reported);
-    * ``co2e_g`` — usage-based CO2e: reported, never claimed, because a
-      request change does not move the usage-based carbon model.
+    * ``co2e_g`` — operational CO2e of the workload as the Impact Model
+      allocates it (idle power by CPU reservation, memory power by memory
+      reservation, dynamic and GPU power by usage), so request changes move
+      it. It is compared with the projected operational components only:
+      embodied emissions are not in the measured rows (component matching).
     """
 
     key = "request_rightsizing"
@@ -119,7 +122,7 @@ class RequestRightsizingStrategy:
         QuantitySpec("cost_ram", "currency", False, "allocated RAM cost"),
         QuantitySpec("core_hours", "core-hours", False, "requested CPU cores"),
         QuantitySpec("gib_hours", "GiB-hours", False, "requested memory"),
-        QuantitySpec("co2e_g", "gCO2e", False, "usage-based CO2e"),
+        QuantitySpec("co2e_g", "gCO2e", True, "operational CO2e"),
     )
 
     def required_windows(self, change: ChangeEvent, settings: MeasurementSettings) -> WindowPlan:

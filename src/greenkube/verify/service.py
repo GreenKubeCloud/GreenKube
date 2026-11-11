@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.models.measurement import (
     MeasurementOutcome,
     QuantityEstimate,
@@ -586,6 +587,19 @@ class ChangeMeasurementService:
     async def _members(self, change: ChangeEvent) -> List[RecommendationRecord]:
         return await self._records(change.recommendation_ids)
 
+    async def _co2e_shares(self, measurement: ChangeMeasurement) -> Dict[int, float]:
+        """Split of the measured CO2e between the recommendations of a measurement.
+
+        Cost is split by cost component (CPU and memory recommendations each
+        take their whole component), but the workload's CO2e is one quantity:
+        it is split by each recommendation's projected measurable CO2e, so it
+        is never claimed twice.
+        """
+        ids = sorted({item.recommendation_id for item in measurement.allocations})
+        if len(ids) <= 1:
+            return {rec_id: 1.0 for rec_id in ids}
+        return co2e_shares(await self._records(ids), ids)
+
     def _plan(self, change: ChangeEvent, status: ChangeStatus) -> WindowPlan:
         plan = self._strategy(change).required_windows(change, self.settings)
         if status.post_window_start is not None and status.post_window_end is not None:
@@ -818,7 +832,8 @@ class ChangeMeasurementService:
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
         projections = {
             "allocated_cost": _sum(member.potential_savings_cost for member in in_effect),
-            "co2e_g": _sum(member.potential_savings_co2e_grams for member in in_effect),
+            # Component-matched: only the projected components the measured rows carry.
+            "co2e_g": _sum(_measurable_co2e(member) for member in in_effect),
         }
         result = strategy.estimate(
             change,
@@ -961,6 +976,7 @@ class ChangeMeasurementService:
                 gates_apply=sequence == change_sequence,
                 previous=previous_ids[-1] if previous_ids else None,
                 note=note,
+                co2e_shares=await self._co2e_shares(measurement),
             )
             stored = await self.measurement_repo.insert(row) if self.measurement_repo is not None else row
         else:
@@ -974,7 +990,13 @@ class ChangeMeasurementService:
             measured_cost = cost.claimed_annualized
         else:
             measured_cost = cost.annualized
-        measured_co2e = None if stored.outcome is MeasurementOutcome.INCONCLUSIVE or co2e is None else 0.0
+        measured_co2e: Optional[float]
+        if stored.outcome is MeasurementOutcome.INCONCLUSIVE or co2e is None:
+            measured_co2e = None
+        elif stored.outcome is MeasurementOutcome.REALIZED:
+            measured_co2e = co2e.claimed_annualized
+        else:
+            measured_co2e = co2e.annualized
         try:
             return await self.verifier.apply_stored_measurement(
                 member, stored, baseline, previous_ids, measured_cost=measured_cost, measured_co2e=measured_co2e
@@ -998,6 +1020,7 @@ class ChangeMeasurementService:
         gates_apply: bool,
         previous: Optional[str],
         note: Optional[str] = None,
+        co2e_shares: Optional[Mapping[int, float]] = None,
     ) -> SavingsMeasurement:
         assert member.id is not None
         allocation = next((item for item in measurement.allocations if item.recommendation_id == member.id), None)
@@ -1033,8 +1056,22 @@ class ChangeMeasurementService:
             reasons = [gate.detail for gate in failed]
         cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, member.potential_savings_cost)
         co2e_source = measurement.estimate("co2e_g")
+        # The measured CO2e (operational, allocated by the Impact Model like the
+        # projection) is claimed only when its own interval shows a saving, and
+        # is compared with the projected components the measured rows carry.
+        co2e_outcome = outcome
+        if outcome is MeasurementOutcome.REALIZED and (
+            co2e_source is None or co2e_source.outcome is not ChangeOutcome.REALIZED
+        ):
+            co2e_outcome = (
+                _OUTCOME_TO_RECOMMENDATION.get(co2e_source.outcome, MeasurementOutcome.INCONCLUSIVE)
+                if co2e_source is not None
+                else MeasurementOutcome.INCONCLUSIVE
+            )
+        co2e_share = share if co2e_shares is None else co2e_shares.get(member.id, 0.0)
+        co2e_basis = basis if co2e_shares is None or allocation is None else _co2e_basis(co2e_shares)
         co2e = _quantity_estimate(
-            "co2e_g", "gCO2e", basis, share, co2e_source, outcome, member.potential_savings_co2e_grams, claimed=False
+            "co2e_g", "gCO2e", co2e_basis, co2e_share, co2e_source, co2e_outcome, _measurable_co2e(member)
         )
         windows = {
             "baseline": {
@@ -1112,6 +1149,29 @@ def _with_unavailable_drivers(params: Mapping[str, Any], pre: Any, post: Collect
     if not unavailable["pre"] and not unavailable["post"]:
         return dict(params)
     return {**params, UNAVAILABLE_DRIVERS_KEY: unavailable}
+
+
+def co2e_shares(records: Sequence[RecommendationRecord], ids: Sequence[int]) -> Dict[int, float]:
+    """Shares (summing to 1) of ``ids`` by projected measurable CO2e; equal when nothing was projected."""
+    by_id = {record.id: record for record in records}
+    weights = {}
+    for rec_id in ids:
+        record = by_id.get(rec_id)
+        value = _measurable_co2e(record) if record is not None else None
+        weights[rec_id] = max(value or 0.0, 0.0)
+    total = math.fsum(weights.values())
+    if total <= 0:
+        return {rec_id: 1.0 / len(ids) for rec_id in ids} if ids else {}
+    return {rec_id: weight / total for rec_id, weight in weights.items()}
+
+
+def _co2e_basis(shares: Mapping[int, float]) -> str:
+    return "projected_co2e_share" if len(shares) > 1 else "total"
+
+
+def _measurable_co2e(member: RecommendationRecord) -> Optional[float]:
+    """Projected CO2e of the components a measurement sees (None: nothing comparable)."""
+    return measurable_co2e_projection(getattr(member, "impact", None))
 
 
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:

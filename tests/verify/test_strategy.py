@@ -45,7 +45,7 @@ def test_windows_follow_the_merge_and_the_rollout():
     assert plan.pre.end <= plan.post.start
 
 
-def test_verify_e2e_cpu_cut_is_realized_on_cost_and_never_claims_co2e():
+def test_verify_e2e_cpu_cut_is_realized_on_cost_and_claims_no_unchanged_co2e():
     """The audit's verify_e2e scenario: 2 replicas, 1000m -> 300m, cost -20%, CO2e unchanged."""
 
     def before(window):
@@ -63,7 +63,9 @@ def test_verify_e2e_cpu_cut_is_realized_on_cost_and_never_claims_co2e():
     # Projection accuracy is reported, not a gate: 28% of the projection is still realized.
     assert cost.projection_accuracy == pytest.approx(true_saving / 1500.0)
     co2e = estimates["co2e_g"]
-    assert co2e.claimed is False and co2e.rate_per_hour == pytest.approx(0.0, abs=1e-9)
+    # Operational CO2e is claimable (allocated by the Impact Model), but it did not move here.
+    assert co2e.rate_per_hour == pytest.approx(0.0, abs=1e-9)
+    assert co2e.outcome is not ChangeOutcome.REALIZED
     assert estimates["core_hours"].rate_per_hour == pytest.approx(1.4)
 
 
