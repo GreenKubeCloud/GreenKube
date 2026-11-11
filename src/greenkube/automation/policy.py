@@ -11,12 +11,12 @@ from typing import Any, Literal, Protocol, cast
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from greenkube.automation.actions import operation_kind_of
 from greenkube.gitops.contracts import (
     AddHorizontalPodAutoscaler,
     AutomationErrorCode,
     Plan,
     PlanStatus,
-    SetContainerResources,
     WorkloadSource,
 )
 from greenkube.models.metrics import RecommendationRecord, RiskLevel
@@ -1037,9 +1037,9 @@ def _planned_resource_changes(records: Sequence[RecommendationRecord]) -> tuple[
         if action is None:
             continue
         for operation in action.operations:
-            if isinstance(operation, SetContainerResources):
-                for resource in {*operation.resources.requests, *operation.resources.limits}:
-                    changes.add((operation.container, resource.lower()))
+            spec = operation_kind_of(operation)
+            if spec is not None:
+                changes.update(spec.changed_fields([operation]))
             elif isinstance(operation, AddHorizontalPodAutoscaler):
                 adds_hpa = True
     return changes, adds_hpa

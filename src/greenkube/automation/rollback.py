@@ -15,12 +15,18 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
+from greenkube.automation.actions import (
+    ACTION_KINDS,
+    InverseConflictError,
+    InverseUnsupportedError,
+    action_kind_of,
+)
+from greenkube.automation.actions.workloads import POD_SPEC_PATHS
 from greenkube.gitops.contracts import (
     PLANNABLE_RENDERERS,
     ActionPlanV3,
     BindingStatus,
     ContainerRequestBaseline,
-    ContainerResources,
     ControllerKind,
     FileEdit,
     FilePlan,
@@ -28,7 +34,6 @@ from greenkube.gitops.contracts import (
     PreApplyWorkloadBaseline,
     RendererKind,
     ResourceTarget,
-    SetContainerResources,
     WorkloadSource,
 )
 from greenkube.gitops.planning.helm import (
@@ -42,7 +47,7 @@ from greenkube.gitops.planning.helm import (
 )
 from greenkube.gitops.planning.kustomize import controller_supplies_namespace
 from greenkube.gitops.planning.kustomize import render_as_deployed as render_kustomize_as_deployed
-from greenkube.gitops.planning.raw_manifest import _POD_SPEC_PATHS, RawManifestPlanError, _containers, _pod_spec
+from greenkube.gitops.planning.raw_manifest import RawManifestPlanError, _containers, _pod_spec
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult, RenderedResource, render_raw
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
@@ -511,8 +516,11 @@ def _validate_original_plan(plan: Plan) -> FilePlan:
         or plan.action.target.name != plan.source.workload_name
     ):
         raise RollbackConflictError("original action target does not match its resolved workload source")
-    if not all(isinstance(operation, SetContainerResources) for operation in plan.action.operations):
-        raise UnsupportedRollbackError("only per-container resource operations have a supported inverse")
+    spec = action_kind_of(plan.action)
+    if spec is None or not spec.supports_rollback(plan.action.operations):
+        raise UnsupportedRollbackError(
+            f"only {ACTION_KINDS.supported_titles()} operations with a baseline-derived inverse can be rolled back"
+        )
     if file_plan.renderer not in PLANNABLE_RENDERERS:
         raise UnsupportedRollbackError(f"renderer {file_plan.renderer.value!r} does not support exact-target rollback")
     if file_plan.renderer is RendererKind.HELM_VALUES:
@@ -571,28 +579,15 @@ def flux_helm_release_inverse_baseline(plan: Plan) -> PreApplyWorkloadBaseline:
         or not baseline.container_requests
     ):
         raise RollbackConflictError("the persisted pre-apply workload baseline is invalid")
-    operations: list[SetContainerResources] = []
-    for operation in plan.action.operations:
-        if not isinstance(operation, SetContainerResources):
-            raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires per-container resource operations")
-        operations.append(operation)
-    if not operations:
-        raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires per-container resource operations")
-    containers: set[str] = set()
-    for operation in operations:
-        if (
-            not operation.resources.requests
-            or operation.resources.limits
-            or set(operation.resources.requests) - {"cpu", "memory"}
-        ):
-            raise UnsupportedRollbackError(
-                "Flux HELM_RELEASE rollback can restore only CPU and memory requests from the persisted baseline"
-            )
-        if operation.container in containers:
-            raise UnsupportedRollbackError("Flux HELM_RELEASE rollback requires one operation per container")
-        containers.add(operation.container)
-    if not containers.issubset(baseline.container_requests):
-        raise RollbackConflictError("the persisted pre-apply baseline omits an action container")
+    spec = action_kind_of(plan.action)
+    try:
+        if spec is None or not spec.supports_rollback(plan.action.operations):
+            raise InverseUnsupportedError("rollback requires operations of a kind with a baseline-derived inverse")
+        spec.validate_inverse_scope(plan.action.operations, baseline)
+    except InverseUnsupportedError as exc:
+        raise UnsupportedRollbackError(f"Flux HELM_RELEASE {exc}") from exc
+    except InverseConflictError as exc:
+        raise RollbackConflictError(str(exc)) from exc
     return baseline
 
 
@@ -879,42 +874,33 @@ def helm_values_inverse_action(plan: Plan) -> ActionPlanV3:
     baseline = plan.pre_apply_baseline
     if not isinstance(baseline, PreApplyWorkloadBaseline):
         raise RollbackConflictError("the original plan has no persisted pre-apply workload baseline")
-    operations = plan.action.operations
-    if len(operations) != 1 or not isinstance(operations[0], SetContainerResources):
+    if len(plan.action.operations) != 1:
         raise UnsupportedRollbackError("HELM_VALUES rollback requires one explicitly mapped container operation")
-    operation = operations[0]
-    if not operation.resources.requests or operation.resources.limits:
-        raise UnsupportedRollbackError(
-            "HELM_VALUES rollback can restore only CPU and memory requests from the persisted baseline"
-        )
-    if set(operation.resources.requests) - {"cpu", "memory"}:
-        raise UnsupportedRollbackError("the persisted baseline cannot restore this Helm resource request")
-    container_baseline: ContainerRequestBaseline | None = baseline.container_requests.get(operation.container)
-    if container_baseline is None:
-        raise RollbackConflictError("the persisted pre-apply baseline omits the target container")
-
-    requests: dict[str, str] = {}
-    for resource in operation.resources.requests:
-        value = container_baseline.cpu_millicores if resource == "cpu" else container_baseline.memory_bytes
-        if value is None or isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise RollbackConflictError(f"the persisted pre-apply baseline omits the target {resource} request")
-        requests[resource] = f"{value}m" if resource == "cpu" else str(value)
-
     try:
-        inverse_operation = SetContainerResources(
-            container=operation.container,
-            resources=ContainerResources(requests=requests),
-        )
+        inverse_operations = _baseline_inverse(plan.action, baseline)
+    except InverseUnsupportedError as exc:
+        raise UnsupportedRollbackError(f"HELM_VALUES {exc}") from exc
+    except InverseConflictError as exc:
+        raise RollbackConflictError(str(exc)) from exc
+    try:
         return ActionPlanV3(
             action_id=plan.action.action_id,
             recommendation_ids=plan.action.recommendation_ids,
             target=plan.action.target,
-            operations=[inverse_operation],
+            operations=inverse_operations,
             constraints=plan.action.constraints,
             evidence_ref=plan.action.evidence_ref,
         )
     except ValidationError as exc:
         raise RollbackConflictError("the persisted pre-apply baseline cannot form a valid inverse action") from exc
+
+
+def _baseline_inverse(action: ActionPlanV3, baseline: PreApplyWorkloadBaseline) -> list[Any]:
+    """Typed operations restoring the persisted pre-apply baseline, derived by the action kind (H0c)."""
+    spec = action_kind_of(action)
+    if spec is None or not spec.supports_rollback(action.operations):
+        raise InverseUnsupportedError("rollback requires operations of a kind with a baseline-derived inverse")
+    return spec.inverse(action.operations, baseline)
 
 
 def same_rollback_source(left: WorkloadSource, right: WorkloadSource) -> bool:
@@ -1152,7 +1138,7 @@ def _rendered_target_identity(
 ) -> _ResourceIdentity:
     """Rendered identity of the live target: exact, or namespace-less when the controller supplies the namespace."""
     identity = _resource_identity(target)
-    if identity in resources or not allow_namespace_less or not target.namespace or target.kind not in _POD_SPEC_PATHS:
+    if identity in resources or not allow_namespace_less or not target.namespace or target.kind not in POD_SPEC_PATHS:
         return identity
     namespace_less = (target.api_version, target.kind, "", target.name)
     return namespace_less if namespace_less in resources else identity

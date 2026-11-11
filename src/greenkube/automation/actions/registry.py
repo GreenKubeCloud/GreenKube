@@ -126,6 +126,14 @@ def action_kind_of(action: ActionPlanV3 | None) -> ActionKindSpec | None:
     return ACTION_KINDS.kind_of(action) if action is not None else None
 
 
+def operation_kind_of(operation: TypedOperation) -> ActionKindSpec | None:
+    """The registered kind of one operation, or ``None``."""
+    try:
+        return ACTION_KINDS.spec_for_operation(operation)
+    except UnknownActionKindError:
+        return None
+
+
 def operation_subjects(action: ActionPlanV3) -> set[str]:
     """Sub-resources (container names) an action changes; empty for an unknown kind."""
     spec = action_kind_of(action)

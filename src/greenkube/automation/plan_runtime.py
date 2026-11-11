@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
+from greenkube.automation.actions import action_kind_of, operation_subjects
 from greenkube.automation.git.base import (
     DEFAULT_AUTOMATION_PULL_REQUEST_OPTIONS,
     GitProviderArchiveLimitError,
@@ -85,7 +86,6 @@ from greenkube.gitops.contracts import (
     Plan,
     PlanStatus,
     RendererKind,
-    SetContainerResources,
     WorkloadSource,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
@@ -888,14 +888,13 @@ class RuntimePlanService:
         records: list[RecommendationRecord] = []
         expected_action = plan.action.model_dump(mode="json")
         operations = plan.action.operations
-        if not operations or any(not isinstance(operation, SetContainerResources) for operation in operations):
+        spec = action_kind_of(plan.action)
+        if spec is None or not spec.supports_rollback(operations):
             raise AutomationPlanError(
                 AutomationErrorCode.ROLLBACK_UNSUPPORTED,
                 "only per-container resource actions have a supported rollback workflow",
             )
-        operation_containers = {
-            operation.container for operation in operations if isinstance(operation, SetContainerResources)
-        }
+        operation_containers = spec.subjects(operations)
         for recommendation_id in plan.recommendation_ids:
             record = await self._recommendation_repository.get_recommendation_by_id(recommendation_id)
             if (
@@ -1717,12 +1716,13 @@ def _with_one_time_helm_values_mapping(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
             "a configured Application mapping takes precedence over a one-time plan mapping",
         )
-    if len(action.operations) != 1 or not isinstance(action.operations[0], SetContainerResources):
+    containers = operation_subjects(action)
+    if len(action.operations) != 1 or len(containers) != 1:
         raise AutomationPlanError(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
             "one-time Helm values mappings require a single container-resource operation",
         )
-    operation = action.operations[0]
+    (operation_container,) = containers
     if not isinstance(mapping, Mapping) or set(mapping) != {"file_path", "container", "path"}:
         raise AutomationPlanError(
             AutomationErrorCode.UNSUPPORTED_SOURCE,
@@ -1737,7 +1737,7 @@ def _with_one_time_helm_values_mapping(
         not isinstance(file_path, str)
         or file_path != allowed_file
         or not isinstance(container, str)
-        or container != operation.container
+        or container != operation_container
         or not isinstance(path, (list, tuple))
         or not path
         or len(path) > 32
@@ -1790,11 +1790,11 @@ def _helm_values_mapping_options(
     }
     if file_path is None or file_path not in available_paths:
         return None
-    operation = action.operations[0]
-    if not isinstance(operation, SetContainerResources):
+    containers = operation_subjects(action)
+    if len(containers) != 1:
         return None
-    container = operation.container
-    if not isinstance(container, str) or not container:
+    (container,) = containers
+    if not container:
         return None
     return {"files": [file_path], "containers": [container]}
 

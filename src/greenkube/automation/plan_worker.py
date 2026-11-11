@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Literal, Protocol, TypeVar, cast
 
+from greenkube.automation.actions import action_kind_of, operation_subjects
 from greenkube.automation.git.base import (
     EMPTY_PULL_REQUEST_OPTIONS,
     GitCommitRequest,
@@ -64,7 +65,6 @@ from greenkube.gitops.contracts import (
     Plan,
     PlanStatus,
     PreApplyWorkloadBaseline,
-    SetContainerResources,
     WorkloadSource,
 )
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
@@ -700,20 +700,8 @@ class PlanWorker:
         """
         if plan.rollback_of_plan_id is not None:
             return
-        proposed: list[tuple[int | None, int | None]] = []
-        for operation in plan.action.operations:
-            if not isinstance(operation, SetContainerResources):
-                return
-            live = baseline.container_requests.get(operation.container)
-            if live is None:
-                return
-            requests = operation.resources.requests
-            for resource, value in requests.items():
-                parsed = _parse_request_quantity(resource, value)
-                if parsed is None:
-                    return
-                proposed.append((parsed, live.cpu_millicores if resource == "cpu" else live.memory_bytes))
-        if proposed and all(value == current for value, current in proposed):
+        spec = action_kind_of(plan.action)
+        if spec is not None and spec.effective_change(plan.action.operations, baseline) is False:
             raise PlanWorkerError(
                 "no_effective_change: the workload already runs every proposed request, so a pull request would "
                 "change nothing; no branch or pull request was created.",
@@ -794,10 +782,7 @@ class PlanWorker:
             except Exception:
                 raise unavailable(f"resource requests for container {name!r} are invalid") from None
 
-        required_containers = {
-            operation.container for operation in plan.action.operations if isinstance(operation, SetContainerResources)
-        }
-        if not required_containers.issubset(containers):
+        if not operation_subjects(plan.action).issubset(containers):
             raise unavailable("the action target container is missing from the workload")
         try:
             return PreApplyWorkloadBaseline(
@@ -843,10 +828,7 @@ class PlanWorker:
                 "The persisted pre-apply workload baseline is invalid; verify plan storage and retry.",
                 retryable=True,
             )
-        required_containers = {
-            operation.container for operation in plan.action.operations if isinstance(operation, SetContainerResources)
-        }
-        if not required_containers.issubset(baseline.container_requests):
+        if not operation_subjects(plan.action).issubset(baseline.container_requests):
             raise PlanWorkerError(
                 "The persisted pre-apply workload baseline does not include every action container; "
                 "create and approve a fresh plan before retrying.",
@@ -906,14 +888,13 @@ class PlanWorker:
             )
         self._validate_pre_apply_baseline(original, original.pre_apply_baseline)
         operations = plan.action.operations
-        if not operations or any(not isinstance(operation, SetContainerResources) for operation in operations):
+        spec = action_kind_of(plan.action)
+        if spec is None or not spec.supports_rollback(operations):
             raise PlanWorkerError(
                 "Rollback plan contains an unsupported resource operation.",
                 plan_status=PlanStatus.STALE,
             )
-        operation_containers = {
-            operation.container for operation in operations if isinstance(operation, SetContainerResources)
-        }
+        operation_containers = spec.subjects(operations)
         recommendation_containers: set[str] = set()
         for recommendation_id in plan.recommendation_ids:
             recommendation = await self.recommendation_repository.get_recommendation_by_id(recommendation_id)
@@ -1872,20 +1853,6 @@ def _provider_access_error_code(error: BaseException) -> str | None:
                 return "permission_denied"
         current = current.__cause__ or current.__context__
     return None
-
-
-def _parse_request_quantity(resource: str, value: object) -> int | None:
-    """Normalize a proposed request to millicores or bytes; None when it cannot be compared."""
-    from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
-
-    parser = {"cpu": parse_cpu_quantity, "memory": parse_memory_quantity}.get(resource)
-    if parser is None or not isinstance(value, (str, int, float)) or isinstance(value, bool):
-        return None
-    try:
-        parsed = parser(value)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, int) and not isinstance(parsed, bool) else None
 
 
 def _plan_on_committed_revision(plan: Plan) -> Plan:

@@ -24,13 +24,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
+from greenkube.automation.actions import action_kind_of
 from greenkube.core.recommendation_realization import RECORDED_CHANGE_STATUSES
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     ActionStatus,
     PlanStatus,
     PreApplyWorkloadBaseline,
-    SetContainerResources,
 )
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -820,23 +820,17 @@ class AppliedDetector:
         ):
             return False
 
-        operations = [
-            operation
-            for operation in plan.action.operations
-            if isinstance(operation, SetContainerResources) and operation.container == record.container_name
-        ]
-        if len(operations) != 1:
+        spec = action_kind_of(plan.action)
+        if spec is None:
             return False
         resource = "cpu" if record.type is RecommendationType.RIGHTSIZING_CPU else "memory"
-        target_value = operations[0].resources.requests.get(resource)
-        if target_value is None:
-            return False
-        if resource == "cpu":
-            expected = _parse_cpu(target_value)
-        else:
-            expected = _parse_memory(target_value)
-        observed = _observed_request(snapshot, record.container_name, resource)
-        return observed is not None and expected > 0 and abs(observed - expected) <= expected * tolerance
+        return spec.is_applied(
+            plan.action.operations,
+            subject=record.container_name,
+            field_name=resource,
+            observed=_observed_request(snapshot, record.container_name, resource),
+            tolerance=tolerance,
+        ).applied
 
     async def _latest_rollback_plan(self, recommendation_id: int) -> SyncPlanStatus | None:
         if self.action_status_repository is None:
@@ -881,11 +875,10 @@ class AppliedDetector:
             return []
 
         operations = rollback_plan.action.operations
-        if not operations or any(not isinstance(operation, SetContainerResources) for operation in operations):
+        spec = action_kind_of(rollback_plan.action)
+        if spec is None or not spec.supports_rollback(operations):
             return []
-        operation_containers = {
-            operation.container for operation in operations if isinstance(operation, SetContainerResources)
-        }
+        operation_containers = spec.subjects(operations)
 
         records: list[RecommendationRecord] = []
         observations: dict[int, tuple[int | None, int | None]] = {}

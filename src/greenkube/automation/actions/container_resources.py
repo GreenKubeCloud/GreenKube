@@ -107,6 +107,13 @@ class ContainerResourcesSpec(ActionKindSpec):
     def subjects(self, operations: Sequence[TypedOperation]) -> set[str]:
         return {operation.container for operation in container_operations(operations)}
 
+    def changed_fields(self, operations: Sequence[TypedOperation]) -> set[tuple[str, str]]:
+        return {
+            (operation.container, resource.lower())
+            for operation in container_operations(operations)
+            for resource in {*operation.resources.requests, *operation.resources.limits}
+        }
+
     def compile(self, target: ResourceTarget, operations: Sequence[TypedOperation]) -> list[PrimitiveOp]:
         pod_spec_path = POD_SPEC_PATHS.get(target.kind)
         if pod_spec_path is None:
@@ -226,12 +233,14 @@ class ContainerResourcesSpec(ActionKindSpec):
         applied = observed is not None and expected > 0 and abs(observed - expected) <= expected * tolerance
         return AppliedVerdict(applied=applied, expected=expected, observed=observed)
 
-    def inverse(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> list[TypedOperation]:
-        """Restore the persisted pre-apply CPU/memory requests of every changed container."""
-        resource_operations = container_operations(operations)
+    def validate_inverse_scope(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> None:
+        """Rollback restores CPU/memory requests of containers the persisted baseline recorded."""
+        try:
+            resource_operations = container_operations(operations)
+        except ActionKindError as exc:
+            raise InverseUnsupportedError("rollback requires per-container resource operations") from exc
         if not resource_operations:
             raise InverseUnsupportedError("rollback requires per-container resource operations")
-        inverse: list[TypedOperation] = []
         seen: set[str] = set()
         for operation in resource_operations:
             requests = operation.resources.requests
@@ -240,15 +249,23 @@ class ContainerResourcesSpec(ActionKindSpec):
                     "rollback can restore only CPU and memory requests from the persisted baseline"
                 )
             if set(requests) - {"cpu", "memory"}:
-                raise InverseUnsupportedError("the persisted baseline cannot restore this resource request")
+                raise InverseUnsupportedError(
+                    "rollback cannot restore this resource request from the persisted baseline"
+                )
             if operation.container in seen:
                 raise InverseUnsupportedError("rollback requires one operation per container")
             seen.add(operation.container)
-            container_baseline = baseline.container_requests.get(operation.container)
-            if container_baseline is None:
-                raise InverseConflictError("the persisted pre-apply baseline omits the target container")
+        if not seen.issubset(baseline.container_requests):
+            raise InverseConflictError("the persisted pre-apply baseline omits an action container")
+
+    def inverse(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> list[TypedOperation]:
+        """Restore the persisted pre-apply CPU/memory requests of every changed container."""
+        self.validate_inverse_scope(operations, baseline)
+        inverse: list[TypedOperation] = []
+        for operation in container_operations(operations):
+            container_baseline = baseline.container_requests[operation.container]
             restored: dict[str, str] = {}
-            for resource in requests:
+            for resource in operation.resources.requests:
                 value = container_baseline.cpu_millicores if resource == "cpu" else container_baseline.memory_bytes
                 if value is None or isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise InverseConflictError(f"the persisted pre-apply baseline omits the target {resource} request")

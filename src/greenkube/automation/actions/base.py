@@ -150,6 +150,12 @@ class ActionKindSpec:
         del operations
         return set()
 
+    def changed_fields(self, operations: Sequence[TypedOperation]) -> set[tuple[str, str]]:
+        """``(subject, field)`` pairs the operations change, for policy gates (for example
+        ``("api", "cpu")``); empty when the kind has no sub-resources."""
+        del operations
+        return set()
+
     def compile(self, target: ResourceTarget, operations: Sequence[TypedOperation]) -> list[PrimitiveOp]:
         """Typed operations -> primitive edits of ``target`` (and of created or deleted resources)."""
         raise NotImplementedError
@@ -200,10 +206,20 @@ class ActionKindSpec:
         del operations, subject, field_name
         return AppliedVerdict(applied=False, observed=observed, reason=f"tolerance {tolerance} not applicable")
 
+    def validate_inverse_scope(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> None:
+        """Whether rollback can restore these operations from ``baseline`` without deriving values.
+
+        Renderers that restore whole files (Flux HelmRelease) only need this; ``inverse``
+        derives the restoring operations. Raise ``InverseUnsupportedError`` or
+        ``InverseConflictError``.
+        """
+        del operations, baseline
+        raise InverseUnsupportedError(f"rollback of {self.kind} actions is not supported")
+
     def inverse(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> list[TypedOperation]:
         """Typed operations restoring ``baseline`` (raise ``InverseUnsupportedError``/``InverseConflictError``)."""
         del operations, baseline
-        raise InverseUnsupportedError(f"{self.kind} actions have no baseline-derived inverse")
+        raise InverseUnsupportedError(f"rollback of {self.kind} actions is not supported")
 
     def supports_rollback(self, operations: Sequence[TypedOperation]) -> bool:
         """Whether a delivered change of these operations can be rolled back."""

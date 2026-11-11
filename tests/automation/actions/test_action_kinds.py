@@ -15,11 +15,14 @@ from greenkube.automation.actions import (
     action_kind_of,
     operation_subjects,
 )
+from greenkube.automation.rollback import UnsupportedRollbackError, build_inverse_plan
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     AddHorizontalPodAutoscaler,
     ContainerResources,
     DeleteResource,
+    Plan,
+    PlanStatus,
     SetContainerResources,
 )
 from greenkube.gitops.planning.kustomize import KustomizePlanError, KustomizePlanner
@@ -193,3 +196,22 @@ def test_a_managed_patch_with_a_field_no_kind_owns_fails_closed(tmp_path: Path) 
     # Without the kind registered, its field in the managed patch is no longer GreenKube-managed.
     with pytest.raises(KustomizePlanError, match="does not manage: /spec/minReadySeconds"):
         _kustomize_plan(second_dir, files, kustomize_cases._action())
+
+
+def test_rollback_explains_that_a_kind_without_an_inverse_cannot_be_rolled_back() -> None:
+    files = {"apps/payments/deployment.yaml": raw_cases.DEPLOYMENT}
+    with registered():
+        action = ActionPlanV3.model_validate(_payload())
+        forward = raw_cases._plan(action=action)
+        plan = Plan(
+            plan_id=forward.plan_id,
+            recommendation_ids=action.recommendation_ids,
+            source=raw_cases._source(),
+            action=action,
+            file_plan=forward,
+            status=PlanStatus.APPLIED,
+            digest=forward.digest,
+        )
+        updated = {path: forward.files[0].content or "" for path in files}
+        with pytest.raises(UnsupportedRollbackError, match="baseline-derived inverse"):
+            build_inverse_plan(plan, files, updated, "b" * 40)
