@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Literal, Protocol, TypeVar, cast
 
-from greenkube.automation.actions import action_kind_of, operation_subjects
+from greenkube.automation.actions import action_kind_of
 from greenkube.automation.git.base import (
     EMPTY_PULL_REQUEST_OPTIONS,
     GitCommitRequest,
@@ -782,10 +782,8 @@ class PlanWorker:
             except Exception:
                 raise unavailable(f"resource requests for container {name!r} are invalid") from None
 
-        if not operation_subjects(plan.action).issubset(containers):
-            raise unavailable("the action target container is missing from the workload")
         try:
-            return PreApplyWorkloadBaseline(
+            baseline = PreApplyWorkloadBaseline(
                 workload_uid=snapshot.uid,
                 generation=snapshot.generation,
                 observed_generation=snapshot.observed_generation,
@@ -793,6 +791,10 @@ class PlanWorker:
             )
         except Exception as exc:
             raise unavailable(str(exc)) from exc
+        spec = action_kind_of(plan.action)
+        if spec is not None and not spec.baseline_covers(plan.action.operations, baseline):
+            raise unavailable("the action target container is missing from the workload")
+        return baseline
 
     @staticmethod
     def _validate_pre_apply_baseline(plan: Plan, baseline: PreApplyWorkloadBaseline) -> None:
