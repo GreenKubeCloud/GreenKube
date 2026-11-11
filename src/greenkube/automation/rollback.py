@@ -40,6 +40,7 @@ from greenkube.gitops.planning.helm import (
     HelmValuesPlanner,
     HelmValuesUnsupportedError,
 )
+from greenkube.gitops.planning.kustomize import render_as_deployed as render_kustomize_as_deployed
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanError, _containers, _pod_spec
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult, RenderedResource, render_raw
@@ -140,7 +141,7 @@ class KustomizeRollbackRenderer:
         files: Mapping[str, str | bytes],
         source: WorkloadSource,
     ) -> RawRenderResult:
-        """Render every candidate file at the verified current base revision."""
+        """Render every candidate file at the verified current base revision, as the controller builds it."""
         revision = source.revision
         if not isinstance(revision, str) or not GIT_OBJECT_SHA.fullmatch(revision):
             raise RollbackValidationError("Kustomize rollback requires the verified current base revision")
@@ -152,7 +153,7 @@ class KustomizeRollbackRenderer:
             limits=self._snapshot_limits,
         )
         try:
-            return self._renderer.render(snapshot, source.path)
+            return render_kustomize_as_deployed(self._renderer, snapshot, source)
         finally:
             snapshot.close()
 

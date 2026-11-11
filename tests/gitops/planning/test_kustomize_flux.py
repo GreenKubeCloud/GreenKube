@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from ruamel.yaml import YAML
 
+from greenkube.automation.rollback import KustomizeRollbackRenderer
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     BindingStatus,
@@ -30,7 +31,8 @@ from greenkube.gitops.contracts import (
     SetContainerResources,
     WorkloadSource,
 )
-from greenkube.gitops.planning.kustomize import KustomizePlanError, KustomizePlanner
+from greenkube.gitops.planning.kustomize import KustomizePlanError, KustomizePlanner, render_as_deployed
+from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.sandbox import SandboxResult
 from tests.gitops.planning.test_kustomize import BASE_REVISION, _snapshot, _yaml  # pyrefly: ignore[missing-import]
 
@@ -499,3 +501,19 @@ def test_flux_post_build_variables_in_planned_fields_fail_closed(tmp_path: Path,
         with pytest.raises(KustomizePlanError) as excinfo:
             _plan(tmp_path, files, source, _action(), _KustomizeSemanticsRunner())
         assert "postBuild" not in str(excinfo.value)
+
+
+def test_render_as_deployed_and_kustomize_rollback_use_the_flux_build(tmp_path: Path):
+    """Rollback validation compares exact live identities, so it must render like Flux too."""
+    renderer = KustomizeRenderer(expected_version="v5.8.3", runner=_KustomizeSemanticsRunner())
+    snapshot = _snapshot(tmp_path, _layout())
+    try:
+        direct = render_as_deployed(renderer, snapshot, _flux_source())
+    finally:
+        snapshot.close()
+    rollback = KustomizeRollbackRenderer(renderer).render(_layout(), _flux_source())
+
+    for result in (direct, rollback):
+        assert ("Deployment", TARGET_NAMESPACE, "worker") in {
+            (resource.target.kind, resource.target.namespace, resource.target.name) for resource in result.resources
+        }

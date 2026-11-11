@@ -308,6 +308,35 @@ def plan_kustomize(
     return KustomizePlanner().plan(action, source, snapshot, base_revision)
 
 
+def render_as_deployed(
+    renderer: KustomizeRenderer,
+    snapshot: RepositorySnapshot,
+    source: WorkloadSource,
+) -> RawRenderResult:
+    """Render a Kustomize source the way its GitOps controller builds it.
+
+    Flux ``targetNamespace``/``namePrefix``/``nameSuffix`` are applied to the root
+    Kustomization for the render only, so rendered identities match the live cluster.
+    """
+    root = _snapshot_root(snapshot)
+    snapshot_files = _snapshot_file_map(snapshot)
+    overlay_path = _overlay_path(source)
+    kustomization_path = _kustomization_index(snapshot_files).get(overlay_path)
+    if kustomization_path is None:
+        raise KustomizePlanError("resolved overlay does not contain a Kustomization file in the snapshot")
+    config = _load_kustomization(root, snapshot_files, kustomization_path)
+    return _render_as_deployed(
+        renderer,
+        snapshot,
+        root,
+        snapshot_files,
+        overlay_path,
+        kustomization_path,
+        _read_snapshot_file(root, snapshot_files, kustomization_path),
+        _flux_build_overrides(source, config),
+    )
+
+
 def _validate_request(
     action: ActionPlanV3,
     source: WorkloadSource,
