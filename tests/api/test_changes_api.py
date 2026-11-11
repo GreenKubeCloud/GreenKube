@@ -132,3 +132,33 @@ async def test_list_changes_filters_by_plan_id_on_the_server(measured):
         everything = client.get("/api/v2/changes").json()["items"]
         assert [item["change_id"] for item in everything] == [change.change_id]
         assert calls[-1]["plan_id"] is None
+
+
+async def test_change_pull_request_links_use_the_gitea_web_origin(measured, monkeypatch):
+    """e2e: change records kept the in-cluster API host of the PR, a link no browser can open."""
+    import json
+
+    from greenkube.api.routers.changes import _change_payload
+
+    _, change, _ = measured
+    monkeypatch.setenv(
+        "GITOPS_PROVIDERS_JSON",
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "id": "gitea-quickstart",
+                        "type": "gitea",
+                        "apiBaseUrl": "http://gitea-http.gitea.svc.cluster.local:3000/api/v1",
+                        "webBaseUrl": "http://localhost:3000",
+                    }
+                ]
+            }
+        ),
+    )
+    internal = "http://gitea-http.gitea.svc.cluster.local:3000/greenkube/repo/pulls/1"
+    payload = _change_payload(change.model_copy(update={"pr_url": internal}), None)
+    assert payload["pr_url"] == "http://localhost:3000/greenkube/repo/pulls/1"
+
+    other = "https://github.com/acme/gitops/pull/7"
+    assert _change_payload(change.model_copy(update={"pr_url": other}), None)["pr_url"] == other
