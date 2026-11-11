@@ -1,4 +1,8 @@
-"""USER BUG 2: a Prometheus container proposed to go from 400Mi to more than 1.2Gi.
+"""USER BUG 2, Prometheus-only shapes: absurd increases from summed or pod-level series.
+
+The reported case itself (Metrics API container working sets that count page
+cache) is replayed in ``test_rightsizing_metrics_api_regression.py``. This
+module covers the Prometheus-only paths with the same workload.
 
 The fixture holds real ``query_range`` responses recorded on the Minikube
 cluster: ``monitoring/prometheus-k8s`` (StatefulSet, 2 replicas), container
@@ -7,14 +11,16 @@ only exports pod-level cgroups (no ``container`` label).
 
 Two cluster shapes are replayed through the real collection pipeline
 (:class:`HistoricalRangeProcessor`), the usage rollup (Python reference and
-SQLite SQL) and the memory analyzer:
+SQLite SQL) and the memory analyzer, with the Metrics API disabled:
 
-* **kubeadm with duplicated container series**: each container's working set
-  is exported twice (kubelet ``/metrics/cadvisor`` and ``/metrics/resource``),
-  as on clusters scraping both endpoints. The collector summed the duplicates:
-  ~1.2Gi per replica, sized to ~1.5Gi. Fixed: duplicates are merged with max.
-* **pod-level cgroups only** (the recorded shape): usage exists for the pod,
-  never for a container; no container-level increase may be invented.
+* **duplicated container series** (defensive, not the reported cluster): each
+  container's working set is exported twice (kubelet ``/metrics/cadvisor`` and
+  ``/metrics/resource``), as on clusters scraping both endpoints. The collector
+  summed the duplicates: ~1.2Gi per replica, sized to ~1.5Gi. Fixed:
+  duplicates are merged with max.
+* **pod-level cgroups only** (the recorded shape, without Metrics API
+  samples): usage exists for the pod, never for a container; no
+  container-level increase may be invented from it.
 """
 
 from __future__ import annotations
