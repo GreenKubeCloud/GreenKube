@@ -1,10 +1,10 @@
 # Deliberately oversized: a sleeping worker that requests far more CPU and
-# memory than it uses. Reconciled by Flux to exercise the Flux delivery path.
+# memory than it uses. Reconciled by Flux to exercise the Flux delivery path;
+# its namespace comes from the Flux Kustomization's targetNamespace.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: oversized-worker
-  namespace: greenkube-e2e-apps
   labels:
     app.kubernetes.io/name: oversized-worker
     app.kubernetes.io/part-of: greenkube-quickstart
