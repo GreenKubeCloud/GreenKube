@@ -15,6 +15,10 @@ How it stays safe:
 * The target is migrated under the controller's advisory lock, then every table
   is copied in foreign-key order with ``ON CONFLICT DO NOTHING``: a rerun copies
   only what is missing and never overwrites rows written since.
+* Tables the source fills must be empty on the target. Ids are copied as they are, so a row a running
+  GreenKube already wrote under the same id would make copied child rows
+  (events, ledger entries, plans) attach to the wrong parent. A rerun of an
+  interrupted copy into the same database is safe and needs ``--allow-nonempty``.
 * Values are converted to the PostgreSQL column types (SQLite stores timestamps
   as text and booleans as integers), and identity sequences are moved past the
   copied ids so later inserts never collide.
@@ -68,6 +72,21 @@ METRIC_TABLES = frozenset(
     }
 )
 DEFAULT_BATCH_SIZE = 1000
+
+
+class TargetNotEmptyError(RuntimeError):
+    """The target already holds rows in tables the copy writes (see ``--allow-nonempty``)."""
+
+    def __init__(self, tables: Sequence[str]) -> None:
+        self.tables = list(tables)
+        super().__init__(
+            "The target database already holds rows in: "
+            + ", ".join(self.tables)
+            + ". Copy into an empty database: ids are copied as they are, so rows a running GreenKube wrote "
+            "would collide with copied ids and attach copied events, ledger entries or plans to the wrong parent. "
+            "If these rows come from an interrupted run of this same copy, rerun with --allow-nonempty "
+            "(rows already present are skipped)."
+        )
 
 
 @dataclass
@@ -195,6 +214,7 @@ async def copy_sqlite_to_postgres(
     dry_run: bool = False,
     work_dir: Path | None = None,
     echo: Any = None,
+    allow_nonempty: bool = False,
 ) -> CopyReport:
     import aiosqlite
     import asyncpg
@@ -244,6 +264,17 @@ async def copy_sqlite_to_postgres(
                 )
             ]
             references = [(child.split(".")[-1], parent.split(".")[-1]) for child, parent in references]
+            if not dry_run and not allow_nonempty:
+                # Only tables with rows on both sides can collide; an admin the API created
+                # while the source has no account rows is harmless.
+                occupied = [
+                    table
+                    for table in selected
+                    if await target.fetchval(f'SELECT EXISTS (SELECT 1 FROM "{table}")')
+                    and await (await reader.execute(f'SELECT 1 FROM "{table}" LIMIT 1')).fetchone() is not None
+                ]
+                if occupied:
+                    raise TargetNotEmptyError(occupied)
             for table in order_by_foreign_keys(selected, references):
                 report.tables.append(
                     await _copy_table(reader, target, schema, table, batch_size=batch_size, dry_run=dry_run)
@@ -334,22 +365,34 @@ def copy_command(
     work_dir: Annotated[
         Path | None, typer.Option("--work-dir", help="Where the migrated working copy of the source is written.")
     ] = None,
+    allow_nonempty: Annotated[
+        bool,
+        typer.Option(
+            "--allow-nonempty",
+            help="Copy into a target that already holds rows (only to resume an interrupted copy).",
+        ),
+    ] = False,
 ) -> None:
     """Copy a GreenKube SQLite database into PostgreSQL (one-shot upgrade from 0.3.x)."""
     if not target.startswith(("postgresql://", "postgres://")):
         raise typer.BadParameter("--to must be a postgresql:// URL")
-    report = asyncio.run(
-        copy_sqlite_to_postgres(
-            sqlite_path_from_url(source),
-            target,
-            schema=schema,
-            include_metrics=include_metrics,
-            batch_size=batch_size,
-            dry_run=dry_run,
-            work_dir=work_dir,
-            echo=typer.echo,
+    try:
+        report = asyncio.run(
+            copy_sqlite_to_postgres(
+                sqlite_path_from_url(source),
+                target,
+                schema=schema,
+                include_metrics=include_metrics,
+                batch_size=batch_size,
+                dry_run=dry_run,
+                work_dir=work_dir,
+                echo=typer.echo,
+                allow_nonempty=allow_nonempty,
+            )
         )
-    )
+    except TargetNotEmptyError as error:
+        typer.echo(f"Refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
     verb = "would copy" if dry_run else "copied"
     typer.echo(f"Done: {verb} {sum(t.source_rows if dry_run else t.copied for t in report.tables)} row(s).")
     if report.excluded:

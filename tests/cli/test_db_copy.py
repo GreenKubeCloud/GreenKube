@@ -149,9 +149,52 @@ async def test_copies_state_once_and_is_idempotent(tmp_path, target):
     finally:
         await conn.close()
 
-    rerun = await db_cli.copy_sqlite_to_postgres(source, dsn, schema=schema, work_dir=tmp_path)
+    # The target now holds rows: a plain rerun refuses, a resumed copy skips what is present.
+    with pytest.raises(db_cli.TargetNotEmptyError) as refused:
+        await db_cli.copy_sqlite_to_postgres(source, dsn, schema=schema, work_dir=tmp_path)
+    assert "recommendation_history" in refused.value.tables
+    rerun = await db_cli.copy_sqlite_to_postgres(source, dsn, schema=schema, work_dir=tmp_path, allow_nonempty=True)
     assert rerun.copied == 0
     assert {table.table: table.skipped for table in rerun.tables}["recommendation_history"] == 3
+
+
+async def test_a_target_a_running_greenkube_wrote_to_is_refused(tmp_path, target):
+    """Copied ids must never collide with rows already written: events would attach to the wrong parent."""
+    from greenkube.core.migrations import MigrationRunner
+
+    dsn, schema = target
+    source = tmp_path / "greenkube_data.db"
+    await _sqlite_source(source)
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"CREATE SCHEMA {schema}")
+    finally:
+        await conn.close()
+    conn = await asyncpg.connect(dsn, server_settings={"search_path": schema})
+    try:
+        await MigrationRunner("postgres").run(conn)
+        await conn.execute(
+            "INSERT INTO recommendation_history (type, description, created_at) "
+            "VALUES ('RIGHTSIZING_CPU', 'written by the new controller', NOW())"
+        )
+        # A table the source leaves empty cannot collide: it is not reported.
+        await conn.execute(
+            "INSERT INTO automation_capabilities (scope, subject, state, payload, updated_at) "
+            "VALUES ('global', 'delivery', 'dormant', '{}', NOW())"
+        )
+    finally:
+        await conn.close()
+
+    with pytest.raises(db_cli.TargetNotEmptyError) as refused:
+        await db_cli.copy_sqlite_to_postgres(source, dsn, schema=schema, work_dir=tmp_path)
+
+    assert refused.value.tables == ["recommendation_history"]
+    assert "--allow-nonempty" in str(refused.value)
+    conn = await asyncpg.connect(dsn, server_settings={"search_path": schema})
+    try:
+        assert await conn.fetchval("SELECT COUNT(*) FROM recommendation_events") == 0
+    finally:
+        await conn.close()
 
 
 async def test_dry_run_writes_nothing(tmp_path, target):

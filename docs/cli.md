@@ -82,8 +82,9 @@ greenkube db copy --from sqlite:///data/greenkube_data.db --to "$DB_CONNECTION_S
 | `--batch-size INTEGER` | Rows per batch (default 1000). |
 | `--dry-run` | Count the rows per table; write nothing. |
 | `--work-dir PATH` | Where the working copy is written (default: the temporary directory). |
+| `--allow-nonempty` | Copy into a target whose tables already hold rows the source also has. Only to resume an interrupted copy into the same database. |
 
-Tables are copied parents first with `ON CONFLICT DO NOTHING`, so a rerun only adds missing rows; identity sequences are moved past the copied ids.
+Tables are copied parents first with `ON CONFLICT DO NOTHING` and their ids kept; identity sequences are moved past the copied ids. Because ids are kept, the command refuses (exit code 1, naming the tables) a target where a table the source fills already holds rows, for example after a controller ran against it: copied events, ledger entries or plans would otherwise attach to the wrong parent. A resumed copy (`--allow-nonempty`) only adds the missing rows.
 
 ### `greenkube version`
 
