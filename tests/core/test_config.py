@@ -58,11 +58,37 @@ class TestElectricityProviderConfig:
 
 
 class TestAutomationRuntimeConfig:
-    def test_automation_defaults_to_disabled(self):
+    def test_automation_is_always_on_by_default(self):
+        """F12: no feature flag; delivery is on unless pauseDelivery is set."""
         with patch.dict(os.environ, {}, clear=True):
             cfg = Config()
-        assert not cfg.AUTOMATION_ENABLED
-        assert cfg.AUTOMATION_MODE == "disabled"
+        assert cfg.AUTOMATION_ENABLED is None
+        assert cfg.AUTOMATION_MODE is None
+        assert cfg.automation_delivery_paused is False
+        assert cfg.automation_repository_allowlist == ("@discovered",)
+        assert cfg.GITOPS_DEFAULT_CREDENTIALS_SECRET == "greenkube-git-credentials"
+        assert cfg.DB_RUN_MIGRATIONS is True
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"AUTOMATION_PAUSE_DELIVERY": "true"},
+            {"AUTOMATION_ENABLED": "false"},
+            {"AUTOMATION_ENABLED": "true", "AUTOMATION_MODE": "disabled"},
+        ],
+    )
+    def test_pause_delivery_and_its_deprecated_aliases(self, env):
+        with patch.dict(os.environ, env, clear=True):
+            assert Config().automation_delivery_paused is True
+
+    def test_repository_allowlist_accepts_json_and_comma_lists(self):
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": '["acme/*", "@discovered"]'}, clear=True):
+            assert Config().automation_repository_allowlist == ("acme/*", "@discovered")
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": "acme/a, acme/b"}, clear=True):
+            assert Config().automation_repository_allowlist == ("acme/a", "acme/b")
+        with patch.dict(os.environ, {"AUTOMATION_REPOSITORY_ALLOWLIST": '["bad pattern"]'}, clear=True):
+            with pytest.raises(ValueError, match="AUTOMATION_REPOSITORY_ALLOWLIST"):
+                Config()
 
     def test_inline_mode_is_normalized(self):
         with patch.dict(

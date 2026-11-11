@@ -30,6 +30,40 @@ def parse_gitops_duration_seconds(value: str) -> float:
     return seconds
 
 
+#: Allowlist token expanded at run time to the repositories of discovered GitOps sources (F12).
+DISCOVERED_REPOSITORIES = "@discovered"
+
+
+def parse_repository_allowlist(value: str) -> tuple[str, ...]:
+    """Parse ``AUTOMATION_REPOSITORY_ALLOWLIST``: a JSON list (or comma list) of patterns."""
+    import json
+
+    text = (value or "").strip()
+    if not text:
+        return (DISCOVERED_REPOSITORIES,)
+    if text.startswith("["):
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError:
+            raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST must be a JSON list of strings") from None
+        if not isinstance(items, list):
+            raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST must be a JSON list of strings")
+    else:
+        items = text.split(",")
+    patterns: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST must be a JSON list of strings")
+        pattern = item.strip()
+        if not pattern or any(character.isspace() or ord(character) < 32 for character in pattern):
+            raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST patterns must be non-empty and contain no whitespace")
+        if pattern not in patterns:
+            patterns.append(pattern)
+    if not patterns:
+        raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST needs at least one pattern (use @discovered)")
+    return tuple(patterns)
+
+
 def _scan_interval_seconds(value: str) -> int:
     """Parse a scheduler interval such as ``30m`` or ``1h`` (units s, m, h)."""
     match = re.fullmatch(r"(\d+)([smh])", str(value).strip().lower())
@@ -169,6 +203,11 @@ class Config(BaseSettings):
     DB_POOL_MIN_SIZE: int = 1
     DB_POOL_MAX_SIZE: int = 10
     DB_STATEMENT_TIMEOUT_MS: int = 30000
+    # Apply pending schema migrations when connecting (F11). The Helm chart sets it
+    # to true in the controller only (PostgreSQL advisory lock); the API and the
+    # optional worker report not-ready until the schema is current. SQLite always
+    # migrates (local development and `greenkube demo`).
+    DB_RUN_MIGRATIONS: bool = True
 
     # --- Prometheus variables ---
     PROMETHEUS_URL: str = ""
@@ -404,10 +443,21 @@ class Config(BaseSettings):
     # controller (E1). API requests only enqueue runs. Accepts s, m or h.
     RECOMMENDATION_SCAN_INTERVAL: str = "1h"
 
-    # Plan queue execution mode. Inline starts the worker in the API lifespan;
-    # worker mode uses the separate automation-worker process.
-    AUTOMATION_ENABLED: bool = False
-    AUTOMATION_MODE: str = "disabled"
+    # --- Always-on automation (F12) ---
+    # Change freeze and incident switch: plan approval returns a policy error and no
+    # pull request is opened; discovery, previews and measurement keep running.
+    AUTOMATION_PAUSE_DELIVERY: bool = False
+    # JSON list of repositories automation may open pull requests against, for
+    # inferred providers and providers without their own allowlist. "@discovered":
+    # repositories referenced by discovered Argo CD/Flux sources.
+    AUTOMATION_REPOSITORY_ALLOWLIST: str = '["@discovered"]'
+    # Secret (in the release namespace, mounted under GITOPS_SECRET_MOUNT) read for
+    # inferred providers: key "token", or "appId" + "privateKey" for a GitHub App.
+    GITOPS_DEFAULT_CREDENTIALS_SECRET: str = "greenkube-git-credentials"
+    # Deprecated (0.3.x, removed in 0.5): automation is always on. An explicit
+    # AUTOMATION_ENABLED=false or AUTOMATION_MODE=disabled pauses delivery.
+    AUTOMATION_ENABLED: Optional[bool] = None
+    AUTOMATION_MODE: Optional[str] = None
 
     # --- GitOps discovery ---
     # Duration strings (ms, s, m, h). Discovery defaults to five minutes and
@@ -479,11 +529,19 @@ class Config(BaseSettings):
 
     @field_validator("AUTOMATION_MODE", mode="after")
     @classmethod
-    def _validate_automation_mode(cls, value: str) -> str:
-        mode = value.lower()
+    def _validate_automation_mode(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return None
+        mode = value.strip().lower()
         if mode not in {"disabled", "inline", "worker"}:
             raise ValueError("AUTOMATION_MODE must be 'disabled', 'inline', or 'worker'.")
         return mode
+
+    @field_validator("AUTOMATION_REPOSITORY_ALLOWLIST", mode="after")
+    @classmethod
+    def _validate_repository_allowlist(cls, value: str) -> str:
+        parse_repository_allowlist(value)
+        return value
 
     @field_validator("GREENKUBE_EXTERNAL_URL", mode="after")
     @classmethod
@@ -875,6 +933,20 @@ class Config(BaseSettings):
     # ------------------------------------------------------------------ #
     # Public API                                                          #
     # ------------------------------------------------------------------ #
+
+    @property
+    def automation_delivery_paused(self) -> bool:
+        """True when no pull request may be opened (``pauseDelivery`` or a 0.3.x off switch)."""
+        return (
+            bool(self.AUTOMATION_PAUSE_DELIVERY)
+            or self.AUTOMATION_ENABLED is False
+            or self.AUTOMATION_MODE == "disabled"
+        )
+
+    @property
+    def automation_repository_allowlist(self) -> tuple[str, ...]:
+        """Configured repository allowlist patterns; ``@discovered`` is expanded at run time."""
+        return parse_repository_allowlist(self.AUTOMATION_REPOSITORY_ALLOWLIST)
 
     @property
     def gitops_discovery_interval_seconds(self) -> float:

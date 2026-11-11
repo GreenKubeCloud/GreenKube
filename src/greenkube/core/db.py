@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import aiosqlite
 import asyncpg
@@ -70,6 +71,15 @@ async def _rollback_quietly(connection: aiosqlite.Connection) -> None:
         logger.exception("SQLite rollback after a failed database scope failed.")
 
 
+@dataclass(frozen=True)
+class SchemaStatus:
+    """Migration state of the connected database."""
+
+    current: bool
+    pending: tuple[int, ...]
+    expected_version: int
+
+
 class DatabaseManager:
     """Manage the application's SQLite connection or PostgreSQL pool."""
 
@@ -80,6 +90,7 @@ class DatabaseManager:
         self._lock = asyncio.Lock()
         self._sqlite_operation_lock = _ReentrantAsyncLock()
         self._savepoint_counter = 0
+        self._schema_current = False
 
     @property
     def config(self) -> Config:
@@ -207,6 +218,7 @@ class DatabaseManager:
         pool, connection = self.pool, self.connection
         self.pool = None
         self.connection = None
+        self._schema_current = False
         if pool is not None:
             await pool.close()
         if connection is not None:
@@ -226,6 +238,7 @@ class DatabaseManager:
         await self.connection.execute("PRAGMA mmap_size=268435456")
         await self.connection.execute("PRAGMA synchronous=NORMAL")
         await MigrationRunner("sqlite").run(self.connection)
+        self._schema_current = True
 
     async def setup_postgres(self) -> None:
         if self.pool is None:
@@ -235,8 +248,30 @@ class DatabaseManager:
             schema = self.config.DB_SCHEMA
             if not schema.replace("_", "").isalnum():
                 raise ValueError("DB_SCHEMA contains invalid identifier characters")
+            if not self.config.DB_RUN_MIGRATIONS:
+                # Only the controller migrates (F11); this process waits for it and
+                # reports not-ready meanwhile (see schema_status).
+                logger.info("Schema migrations are run by the controller (DB_RUN_MIGRATIONS=false).")
+                return
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
             await MigrationRunner("postgres").run(connection)
+            self._schema_current = True
+
+    async def schema_status(self) -> "SchemaStatus":
+        """Whether every shipped migration is applied (F11 API readiness).
+
+        Once current, the answer is cached for the life of the process: migrations
+        only move forward while a release runs.
+        """
+        expected = MigrationRunner(self.db_type).latest_version()
+        if self._schema_current:
+            return SchemaStatus(current=True, pending=(), expected_version=expected)
+        async with self.connection_scope() as connection:
+            pending = tuple(await MigrationRunner(self.db_type).pending_versions(connection))
+        current = not pending
+        if current:
+            self._schema_current = True
+        return SchemaStatus(current=current, pending=pending, expected_version=expected)
 
 
 db_manager = DatabaseManager()

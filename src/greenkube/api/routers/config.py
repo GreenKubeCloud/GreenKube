@@ -19,7 +19,29 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse, responses={503: {"model": HealthResponse}})
 async def health(request: Request):
-    """Readiness: degraded (503) when a supervised in-process automation loop is wedged (D9)."""
+    """Readiness of an API replica.
+
+    503 ``migrating`` until the controller has applied every shipped migration (F11:
+    only the controller migrates; the answer is cached once current, so a database
+    blip never takes every replica out of rotation), and 503 ``degraded`` when a
+    supervised in-process loop is wedged (D9).
+    """
+    if getattr(request.app.state, "check_schema", False):
+        from greenkube.core.db import get_db_manager
+
+        try:
+            schema = await get_db_manager().schema_status()
+        except Exception as error:
+            logger.warning("Schema readiness check failed (%s).", type(error).__name__)
+            return JSONResponse(
+                status_code=503,
+                content=HealthResponse(status="database_unavailable", version=__version__).model_dump(),
+            )
+        if not schema.current:
+            return JSONResponse(
+                status_code=503,
+                content=HealthResponse(status="migrating", version=__version__).model_dump(),
+            )
     supervisor = getattr(request.app.state, "automation_loop_supervisor", None)
     if supervisor is not None and not supervisor.health.ready():
         return JSONResponse(
