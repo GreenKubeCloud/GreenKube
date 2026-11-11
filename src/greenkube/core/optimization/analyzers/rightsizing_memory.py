@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.analyzers.rightsizing import (
+    CONTAINER_USAGE_EXCEEDS_POD,
     MEMORY_MAX_FACTOR,
     MIB,
     RightsizingProposal,
@@ -14,6 +15,7 @@ from greenkube.core.optimization.analyzers.rightsizing import (
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
+from greenkube.models.workload_usage import POD_LEVEL
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -38,15 +40,23 @@ def increase_sizing_text(config: "Config", proposal: RightsizingProposal, stats:
     def fmt(value: float) -> str:
         return f"{value / MIB:.0f}MiB" if unit == "MiB" else f"{value:.0f}m"
 
+    bounded = CONTAINER_USAGE_EXCEEDS_POD in proposal.evidence
+    owner = "pod's" if bounded else "per-replica"
     if proposal.basis == "observed_max":
         text = (
-            f"Sized from the observed maximum ({fmt(stats.max)}) x {MEMORY_MAX_FACTOR:g}, "
+            f"Sized from the {owner} observed maximum ({fmt(stats.max)}) x {MEMORY_MAX_FACTOR:g}, "
             "because OOM kills or limit pressure show that peaks matter."
         )
     else:
         text = (
-            f"Sized from the per-replica p99 ({fmt(stats.p99)}, container warm-up excluded) "
+            f"Sized from the {owner} p99 ({fmt(stats.p99)}, container warm-up excluded) "
             f"x headroom {config.RIGHTSIZING_HEADROOM:g}."
+        )
+    if bounded:
+        text += (
+            " The container's own usage exceeded its pod's cgroup, which contains it "
+            f"({CONTAINER_USAGE_EXCEEDS_POD}): the Metrics API working set likely counts page cache, "
+            "so the pod's per-replica usage bounds the sizing."
         )
     if proposal.capped and proposal.cap_factor:
         text += (
@@ -72,6 +82,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
         projector = ImpactProjector.for_context(context)
         self.skipped = []
 
+        snapshot = context.usage_snapshot()
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
             skip = skipped_increase(cfg, summary, "memory")
@@ -85,8 +96,9 @@ class MemoryRightsizingAnalyzer(Analyzer):
                     skip,
                 )
                 continue
-            proposal = memory_proposal(cfg, summary)
-            stats = summary.memory
+            pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
+            proposal = memory_proposal(cfg, summary, pod_summary)
+            stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.memory
             if proposal is None or stats is None:
                 continue
 

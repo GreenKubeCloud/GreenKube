@@ -11,7 +11,9 @@ import pytest
 from greenkube.core.config import Config
 from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer, MemoryRightsizingAnalyzer, NodesAnalyzer
 from greenkube.core.optimization.analyzers.rightsizing import (
+    CONTAINER_USAGE_EXCEEDS_POD,
     POD_LEVEL_USAGE_ONLY,
+    bounded_by_pod,
     cpu_proposal,
     memory_proposal,
     skipped_increase,
@@ -356,6 +358,68 @@ class TestIncreaseSizing:
         context = OptimizationContext(config=Config(), usage=_snapshot(summary))
         (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
         assert "JVM runtime suspected (JAVA_TOOL_OPTIONS)" in rec.reason
+
+
+class TestContainerBoundedByItsPod:
+    """USER BUG 2: a container's usage above its pod's (Metrics API page cache) never sizes an increase."""
+
+    @staticmethod
+    def _inflated() -> tuple[WorkloadUsageSummary, WorkloadUsageSummary]:
+        # Minikube/cri-dockerd: the Metrics API reports ~1Gi for a container whose pod cgroup holds ~610Mi.
+        container = _summary(
+            memory_request=400 * MIB,
+            memory=_stats(avg=900 * MIB, p95=1000 * MIB, p99=1050 * MIB, peak=1072 * MIB),
+            cpu_request=100,
+            cpu=_stats(avg=300, p95=380, p99=400, peak=450),
+        )
+        pod = _summary(
+            container_name="",
+            memory_request=450 * MIB,
+            memory=_stats(avg=540 * MIB, p95=600 * MIB, p99=606 * MIB, peak=640 * MIB),
+            cpu_request=110,
+            cpu=_stats(avg=20, p95=24, p99=25, peak=30),
+        )
+        return container, pod
+
+    def test_memory_increase_is_sized_from_the_pod_when_the_container_exceeds_it(self):
+        container, pod = self._inflated()
+        unbounded = memory_proposal(Config(), container)
+        assert unbounded is not None and unbounded.capped  # the cap alone hid the bad basis
+
+        proposal = memory_proposal(Config(), container, pod)
+        assert proposal is not None and proposal.direction == "increase"
+        assert proposal.evidence == [CONTAINER_USAGE_EXCEEDS_POD]
+        assert proposal.proposed == math.ceil(606 * 1.2) * MIB
+        assert not proposal.capped
+
+        context = OptimizationContext(config=Config(), usage=_snapshot(container, pod))
+        (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
+        assert rec.recommended_memory_request_bytes == math.ceil(606 * 1.2) * MIB
+        assert "pod's p99 (606MiB" in rec.reason and CONTAINER_USAGE_EXCEEDS_POD in rec.reason
+        assert "Capped" not in rec.reason and "usage suggests" not in rec.reason
+
+    def test_cpu_above_the_pod_triggers_nothing_once_bounded(self):
+        container, pod = self._inflated()
+        assert cpu_proposal(Config(), container) is not None
+        # Bounded by the pod (p99 25m of a 100m request): no increase, and no decrease from contradicting data.
+        assert cpu_proposal(Config(), container, pod) is None
+        context = OptimizationContext(config=Config(), usage=_snapshot(container, pod))
+        assert CpuRightsizingAnalyzer(context.config).analyze(context) == []
+
+    def test_consistent_containers_are_sized_from_their_own_usage(self):
+        container = _summary(memory_request=400 * MIB, memory=_stats(500 * MIB, 560 * MIB, 590 * MIB, 600 * MIB))
+        pod = _summary(container_name="", memory=_stats(520 * MIB, 590 * MIB, 610 * MIB, 615 * MIB))
+        proposal = memory_proposal(Config(), container, pod)
+        assert proposal is not None and proposal.evidence == []
+        assert proposal.proposed == math.ceil(590 * 1.2) * MIB
+
+    def test_bounding_needs_pod_samples(self):
+        stats = _stats(900 * MIB, 1000 * MIB, 1050 * MIB, 1072 * MIB)
+        empty = UsageStats(sample_count=0, avg=0, p50=0, p90=0, p95=0, p99=0, max=0)
+        assert bounded_by_pod(stats, empty) == (stats, False)
+        assert bounded_by_pod(stats, None) == (stats, False)
+        bounded, flagged = bounded_by_pod(stats, _stats(540 * MIB, 600 * MIB, 606 * MIB, 640 * MIB))
+        assert flagged and bounded is not None and bounded.p99 == 606 * MIB and bounded.max == 640 * MIB
 
 
 def _snapshot(*summaries: WorkloadUsageSummary) -> UsageSnapshot:

@@ -9,6 +9,7 @@ from greenkube.core.optimization.analyzers.rightsizing_memory import Skip, _pod_
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
+from greenkube.models.workload_usage import POD_LEVEL
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -33,6 +34,7 @@ class CpuRightsizingAnalyzer(Analyzer):
         projector = ImpactProjector.for_context(context)
         self.skipped = []
 
+        snapshot = context.usage_snapshot()
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
             skip = skipped_increase(cfg, summary, "cpu")
@@ -46,8 +48,9 @@ class CpuRightsizingAnalyzer(Analyzer):
                     skip,
                 )
                 continue
-            proposal = cpu_proposal(cfg, summary)
-            stats = summary.cpu
+            pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
+            proposal = cpu_proposal(cfg, summary, pod_summary)
+            stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.cpu
             if proposal is None or stats is None:
                 continue
 
