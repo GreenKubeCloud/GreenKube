@@ -111,6 +111,44 @@ async def test_bootstrap_retries_and_reports_failure(service, monkeypatch):
     assert await bootstrap_initial_admin(service, attempts=2) == "failed"
 
 
+async def test_bootstrap_waits_for_the_schema_beyond_the_retry_budget(service, monkeypatch):
+    """F11: the controller migrates; a slow 0.3.x upgrade must not exhaust the bootstrap.
+
+    The schema stays "migrating" for far longer than attempts x retry delay; the
+    bootstrap waits without a deadline and only then creates the admin.
+    """
+    sleeps: list[float] = []
+
+    async def fast_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("greenkube.auth.lifecycle.asyncio.sleep", fast_sleep)
+    checks = 0
+
+    async def schema_ready() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            raise ConnectionError("database restarting")
+        return checks > 40
+
+    created: list[str] = []
+
+    async def ensure(*_args, **_kwargs):
+        assert checks > 40, "the admin is only created once the schema is current"
+        created.append("admin")
+        return "created"
+
+    monkeypatch.setattr("greenkube.auth.lifecycle.ensure_initial_admin", ensure)
+
+    assert await bootstrap_initial_admin(service, attempts=2, schema_ready=schema_ready) == "created"
+    assert created == ["admin"]
+    assert len(sleeps) == 40
+    assert max(sleeps) == 30.0
+    # Waiting lasted far longer than the 2 x 30 s retry budget.
+    assert sum(sleeps) > 2 * 30
+
+
 def test_secret_store_needs_a_name_and_a_cluster(tmp_path):
     namespace_file = tmp_path / "namespace"
     assert KubernetesInitialAdminSecret.from_environment("", str(namespace_file)) is None

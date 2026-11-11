@@ -9,8 +9,6 @@
 # merged change over 6 minutes. Every number GreenKube shows is then based on a
 # few minutes of data.
 
-profile: standalone
-
 image:
   repository: greenkube/greenkube
   # hack/e2e builds the image from your checkout with this tag. Use a release
@@ -32,7 +30,8 @@ config:
   nodeAnalysisInterval: 1m
   recommendations:
     lookbackDays: 1
-    # RECOMMENDATION_MIN_SAMPLES: 6 samples x 30s = 3 minutes of evidence.
+    # Every sample gate (recommendations, plan policy, verification):
+    # 6 samples x 30s = 3 minutes of evidence.
     minSamples: 6
     # Scheduled scans every minute (default 1h); POST /api/v1/optimization/runs
     # still queues one on demand.
@@ -40,11 +39,10 @@ config:
     verification:
       # Measure a merged change over 6 minutes (default 72 hours).
       windowHours: 0.1
-      minSamples: 6
       lifecycleInterval: 30s
 
+# Automation is always on; delivery activates once the Gitea token Secret exists.
 automation:
-  enabled: true
   discoveryInterval: 30s
   prPollIntervalSeconds: 10
   syncPollIntervalSeconds: 10
@@ -52,8 +50,6 @@ automation:
   policy:
     maxRiskLevel: medium
     minConfidence: 0.6
-    # Match RECOMMENDATION_MIN_SAMPLES above.
-    minSamples: 6
     # Coverage is measured against the whole lookback window (1 day), which a
     # fresh install cannot reach in minutes.
     minCoverage: 0

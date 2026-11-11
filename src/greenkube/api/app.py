@@ -43,6 +43,7 @@ from greenkube.api.dependencies import (
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import auth as auth_router
 from greenkube.api.routers import automation as automation_router
+from greenkube.api.routers import automation_repositories as automation_repositories_router
 from greenkube.api.routers import changes as changes_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
@@ -52,6 +53,7 @@ from greenkube.api.routers import metrics, namespaces, nodes, recommendations, r
 from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plans as plans_router
 from greenkube.api.routers import recommendations_v2 as recommendations_v2_router
+from greenkube.api.routers import setup as setup_router
 from greenkube.api.routers import signals as signals_router
 from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
@@ -218,6 +220,8 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
+    # Readiness (/api/v1/health) waits for the controller's migrations (F11).
+    app.state.check_schema = True
     # Account store and first-admin bootstrap (F14); the session purge runs in the controller.
     app.state._auth_tasks = start_auth_runtime(app, get_db_manager())
 
@@ -238,7 +242,7 @@ async def lifespan(app: FastAPI):
             logger.warning("Webhook processor is unavailable (%s).", type(error).__name__)
 
     try:
-        plan_service = await build_plan_api_service(connect_db=False)
+        plan_service = await build_plan_api_service(connect_db=False, allow_empty=True, reconcile_providers=False)
     except PlanRuntimeConfigurationError as exc:
         logger.warning("Automation plan API is unavailable: %s", exc)
     except Exception:
@@ -359,6 +363,8 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(optimization_router.router, prefix="/api/v1", tags=["Optimization runs"])
     app.include_router(sources_router.router, prefix="/api/v1", tags=["Sources"])
     app.include_router(signals_router.router, prefix="/api/v1", tags=["Sources"])
+    app.include_router(setup_router.router, prefix="/api/v1", tags=["Setup"])
+    app.include_router(automation_repositories_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])

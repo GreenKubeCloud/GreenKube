@@ -2,6 +2,9 @@
 
 The worker only claims and executes queued plan operations; operation leases make
 it safe next to the controller's own executor and next to other worker replicas.
+It follows the same delivery gate as the controller's executor (F12): nothing is
+claimed while ``automation.policy.pauseDelivery`` is set or while the readiness
+reconciler does not report delivery as active.
 The webhook outbox, pull-request polling, branch cleanup, plan expiry and retention
 run in the controller's automation loop (:mod:`greenkube.automation.controller`).
 """
@@ -12,8 +15,8 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Callable
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 
 import typer
 
@@ -31,6 +34,35 @@ logger = logging.getLogger(__name__)
 app = typer.Typer(name="automation-worker", help="Process queued GreenKube GitOps plan operations.")
 WORKER_METRICS_PORT_ENV = "GREENKUBE_WORKER_METRICS_PORT"
 WORKER_ITERATION_MAX_BACKOFF_SECONDS = 60.0
+#: A delivery capability row older than this is ignored (the controller stopped reporting).
+DELIVERY_GATE_STALE_AFTER = timedelta(minutes=5)
+
+
+async def delivery_allowed(now: datetime | None = None) -> bool:
+    """True when queued operations may open pull requests; fails closed.
+
+    The same gate as the controller's executor: ``pauseDelivery`` is off and the
+    readiness reconciler's global ``delivery`` capability is active and fresh.
+    """
+    from greenkube.core.config import get_config
+
+    if get_config().automation_delivery_paused:
+        return False
+    try:
+        from greenkube.core.db import get_db_manager
+        from greenkube.storage.automation_capability_repository import (
+            SCOPE_GLOBAL,
+            AutomationCapabilityRepository,
+        )
+
+        rows = await AutomationCapabilityRepository(get_db_manager()).list_capabilities(SCOPE_GLOBAL)
+    except Exception as exc:
+        logger.warning("Delivery gate unreadable; no operation is claimed. error_type=%s", type(exc).__name__)
+        return False
+    row = next((row for row in rows if row.subject == "delivery"), None)
+    if row is None or row.state != "active" or row.updated_at is None:
+        return False
+    return (now or datetime.now(timezone.utc)) - row.updated_at <= DELIVERY_GATE_STALE_AFTER
 
 
 async def process_once(
@@ -40,7 +72,7 @@ async def process_once(
 ) -> bool:
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             return False
@@ -119,11 +151,13 @@ async def _run_worker_loop(
     *,
     plan_worker: PlanWorker | None = None,
     heartbeat: Callable[[], None] | None = None,
+    delivery_gate: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     beat = heartbeat or _no_heartbeat
+    gate = delivery_gate or delivery_allowed
     if plan_worker is None:
         try:
-            plan_worker = (await create_plan_runtime()).worker
+            plan_worker = (await create_plan_runtime(allow_empty=True, reconcile_providers=False)).worker
         except PlanProvidersNotConfiguredError as exc:
             logger.warning("Plan queue is idle: %s", exc)
             if once:
@@ -135,12 +169,30 @@ async def _run_worker_loop(
         return
 
     worker_id = str(uuid.uuid4())
-    set_automation_worker_up(True)
     consecutive_failures = 0
+    gated: bool | None = None
     try:
         while True:
             record_automation_worker_heartbeat(datetime.now(timezone.utc).timestamp())
             beat()
+            # pauseDelivery and dormant delivery hold every queued operation (F12).
+            try:
+                allowed = bool(await gate())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Delivery gate failed; no operation is claimed. error_type=%s", type(exc).__name__)
+                allowed = False
+            if gated is None or gated is allowed:  # first iteration or the gate changed
+                gated = not allowed
+                set_automation_worker_up(allowed)
+                if gated:
+                    logger.info("Pull-request delivery is paused or dormant; queued operations wait.")
+            if not allowed:
+                if once:
+                    return
+                await asyncio.sleep(poll_seconds)
+                continue
             try:
                 processed = await process_once(worker_id=worker_id, plan_worker=plan_worker)
             except asyncio.CancelledError:

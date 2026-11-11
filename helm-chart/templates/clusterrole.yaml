@@ -22,16 +22,6 @@ rules:
   - get
   - list
   - watch
-{{- if and (eq .Values.profile "production") .Values.production.leaderElection.enabled }}
-  # The controller uses one namespaced Lease for active/standby coordination.
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["create"]
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  resourceNames: ["{{ include "greenkube.leaseName" . }}"]
-  verbs: ["get", "update", "patch"]
-{{- end }}
   # GreenKube needs to list HPAs to detect existing autoscalers before recommending new ones
 - apiGroups: ["autoscaling"]
   resources:
@@ -73,7 +63,8 @@ rules:
   verbs:
   - get
   - list
-  # GitOps discovery reads Argo CD Applications and projects.
+  # GitOps discovery reads Argo CD Applications and projects. Always rendered,
+  # read-only: discovery activates itself when the CRDs exist (F12).
 - apiGroups: ["argoproj.io"]
   resources:
   - applications

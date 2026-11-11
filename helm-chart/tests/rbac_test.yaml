@@ -3,17 +3,29 @@ templates:
   - templates/serviceaccount.yaml
   - templates/clusterrole.yaml
   - templates/clusterrolebinding.yaml
+  - templates/controller-role.yaml
+  - templates/rolebinding.yaml
+  - templates/leader-lease.yaml
+  - templates/components.yaml
 
 tests:
   # --------------------------------------------------------------------------
   # ServiceAccount
   # --------------------------------------------------------------------------
-  - it: should render a ServiceAccount when serviceAccount.create is true
+  - it: renders one ServiceAccount per component (api, controller)
     templates:
       - templates/serviceaccount.yaml
     asserts:
-      - isKind:
-          of: ServiceAccount
+      - hasDocuments:
+          count: 2
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-controller
 
   - it: should not render a ServiceAccount when serviceAccount.create is false
     set:
@@ -24,14 +36,20 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: should use a custom service account name when provided
+  - it: runs every component with an existing ServiceAccount when create is false
     set:
+      serviceAccount.create: false
       serviceAccount.name: my-sa
     templates:
-      - templates/serviceaccount.yaml
+      - templates/components.yaml
     asserts:
-      - equal:
-          path: metadata.name
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-sa
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.serviceAccountName
           value: my-sa
 
   # --------------------------------------------------------------------------
@@ -291,4 +309,80 @@ tests:
           value: ServiceAccount
       - equal:
           path: subjects[0].name
-          value: RELEASE-NAME-greenkube
+          value: RELEASE-NAME-greenkube-controller
+      - equal:
+          path: subjects[1].name
+          value: RELEASE-NAME-greenkube-api
+      - lengthEqual:
+          path: subjects
+          count: 2
+
+  - it: ClusterRoleBinding binds the worker ServiceAccount only with a worker
+    set:
+      worker.replicas: 1
+    templates:
+      - templates/clusterrolebinding.yaml
+    asserts:
+      - equal:
+          path: subjects[2].name
+          value: RELEASE-NAME-greenkube-worker
+
+  # --------------------------------------------------------------------------
+  # Controller Lease (always rendered, F11)
+  # --------------------------------------------------------------------------
+  - it: always renders the controller Lease and its namespaced Role
+    templates:
+      - templates/leader-lease.yaml
+      - templates/controller-role.yaml
+    asserts:
+      - template: templates/leader-lease.yaml
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-leader
+      - template: templates/leader-lease.yaml
+        equal:
+          path: spec.leaseDurationSeconds
+          value: 30
+      - template: templates/controller-role.yaml
+        documentIndex: 0
+        equal:
+          path: rules[1].resourceNames
+          value: [RELEASE-NAME-greenkube-leader]
+      - template: templates/controller-role.yaml
+        documentIndex: 1
+        equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-greenkube-controller
+
+  - it: maps the 0.3.x production.leaderElection values
+    set:
+      profile: production
+      production.leaderElection.leaseName: my-lease
+      production.leaderElection.leaseDurationSeconds: 45
+    templates:
+      - templates/leader-lease.yaml
+      - templates/components.yaml
+    asserts:
+      - template: templates/leader-lease.yaml
+        equal:
+          path: metadata.name
+          value: my-lease
+      - template: templates/leader-lease.yaml
+        equal:
+          path: spec.leaseDurationSeconds
+          value: 45
+      - template: templates/components.yaml
+        documentIndex: 1
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: LEADER_ELECTION_LEASE_NAME
+            value: my-lease
+
+  - it: binds the initial-admin Role to the API ServiceAccount
+    templates:
+      - templates/rolebinding.yaml
+    asserts:
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-greenkube-api

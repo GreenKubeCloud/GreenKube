@@ -18,7 +18,7 @@ tests:
       - matchRegexRaw:
           pattern: kubectl -n greenkube port-forward svc/gk-greenkube-api 8000:8000
       - matchRegexRaw:
-          pattern: "Setup & service health: http://localhost:8000/settings"
+          pattern: "Setup checklist:  http://localhost:8000/setup"
 
   - it: reads a values-supplied API key from the values Secret
     set:
@@ -38,9 +38,55 @@ tests:
       - notMatchRegexRaw:
           pattern: credentials-bootstrap
 
-  - it: omits the dashboard URLs when the API is disabled
+  - it: prints the one-Secret Git connection step (F12)
+    asserts:
+      - matchRegexRaw:
+          pattern: kubectl -n greenkube create secret generic greenkube-git-credentials
+      - notMatchRegexRaw:
+          pattern: pauseDelivery is true
+
+  - it: names a custom credentials Secret
+    set:
+      automation.credentialsSecret: my-git
+    asserts:
+      - matchRegexRaw:
+          pattern: create secret generic my-git
+
+  - it: describes the single topology and lists no deprecation by default
+    asserts:
+      - matchRegexRaw:
+          pattern: "One topology: api \\(1\\), controller \\(1\\, Lease gk-greenkube-leader\\), renderer and PostgreSQL"
+      - notMatchRegexRaw:
+          pattern: DEPRECATED VALUES
+
+  - it: reports every mapped 0.3.x value (F17)
+    set:
+      profile: production
+      replicaCount: 2
+      automation.enabled: false
+      automation.mode: worker
+      production.components.api.replicas: 3
+    asserts:
+      - matchRegexRaw:
+          pattern: DEPRECATED VALUES
+      - matchRegexRaw:
+          pattern: profile=production is ignored
+      - matchRegexRaw:
+          pattern: replicaCount is mapped to api.replicas
+      - matchRegexRaw:
+          pattern: automation.enabled=false is mapped to automation.policy.pauseDelivery=true
+      - matchRegexRaw:
+          pattern: automation.mode=worker is removed
+      - matchRegexRaw:
+          pattern: production.\* is mapped
+      - matchRegexRaw:
+          pattern: pauseDelivery is true
+
+  - it: keeps the dashboard URLs when the deprecated config.api.enabled is false
     set:
       config.api.enabled: false
     asserts:
-      - notMatchRegexRaw:
+      - matchRegexRaw:
           pattern: port-forward
+      - matchRegexRaw:
+          pattern: config.api.enabled is ignored

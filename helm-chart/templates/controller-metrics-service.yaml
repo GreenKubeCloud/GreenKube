@@ -20,5 +20,5 @@ spec:
       protocol: TCP
   selector:
     {{- include "greenkube.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: {{ if eq .Values.profile "production" }}controller{{ else }}app{{ end }}
+    app.kubernetes.io/component: controller
 {{- end }}

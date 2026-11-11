@@ -143,6 +143,7 @@ class AutomationErrorCode(StrEnum):
     POLICY_RISK_EXCEEDED = "policy_risk_exceeded"
     POLICY_CONFIDENCE_TOO_LOW = "policy_confidence_too_low"
     CHANGE_FREEZE_ACTIVE = "change_freeze_active"
+    DELIVERY_PAUSED = "delivery_paused"
     WORKLOAD_PR_LIMIT_EXCEEDED = "workload_pr_limit_exceeded"
     WORKLOAD_COOLDOWN_ACTIVE = "workload_cooldown_active"
     WORKLOAD_PLAN_ALREADY_EXISTS = "workload_plan_already_exists"

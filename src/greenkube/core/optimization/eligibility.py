@@ -104,12 +104,12 @@ CODES: Dict[str, Tuple[str, str]] = {
         "Rescan once the workload's container metrics are collected; GreenKube never patches a whole pod spec.",
     ),
     "automation_not_configured": (
-        "GitOps automation is not configured, so no pull request can be prepared.",
-        "Enable automation and configure a Git provider (see docs/automation.md).",
+        "The automation plan service is not available, so no pull request can be prepared.",
+        "Open the setup checklist (GET /api/v1/setup/status) and check the API logs.",
     ),
     "automation_disabled": (
-        "GitOps automation is disabled.",
-        "Set automation.enabled=true with an automation mode other than disabled.",
+        "Pull-request delivery is paused (automation.policy.pauseDelivery).",
+        "Set automation.policy.pauseDelivery=false once the change freeze is over.",
     ),
     "binding_unavailable": (
         "The workload's GitOps binding could not be read.",
@@ -230,7 +230,7 @@ class EligibilityContext:
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     #: The plan service is composed in this process (a plan could be prepared).
     automation_configured: bool = False
-    #: ``AUTOMATION_ENABLED`` and an automation mode other than ``disabled``.
+    #: Delivery is not paused (``automation.policy.pauseDelivery``, F12).
     automation_enabled: bool = False
     policy: AutomationPolicyConfig = field(default_factory=AutomationPolicyConfig)
     policy_error: Optional[str] = None

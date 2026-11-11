@@ -88,6 +88,27 @@ class MigrationRunner:
     def _lock_key(self) -> int:
         return 0x47524E4B554245
 
+    def latest_version(self) -> int:
+        """Highest migration version shipped with this release (0 when there is none)."""
+        return max((version for version, _, _ in self._discover_scripts()), default=0)
+
+    async def pending_versions(self, connection) -> list[int]:
+        """Shipped migration versions not yet applied (all of them before the first run).
+
+        Read-only: processes that do not migrate (the API and the optional worker, F11)
+        use it to report not-ready until the controller has migrated the schema.
+        """
+        shipped = [version for version, _, _ in self._discover_scripts()]
+        if self.db_type == "sqlite":
+            cursor = await connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            )
+            exists = await cursor.fetchone() is not None
+        else:
+            exists = bool(await connection.fetchval("SELECT to_regclass('schema_migrations') IS NOT NULL"))
+        applied = await self._get_applied_versions(connection) if exists else set()
+        return [version for version in shipped if version not in applied]
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

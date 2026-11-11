@@ -1,9 +1,8 @@
 suite: helpers and naming
 templates:
-  - templates/deployment.yaml
   - templates/configmap.yaml
   - templates/serviceaccount.yaml
-  - templates/pvc.yaml
+  - templates/legacy-sqlite-pvc.yaml
 
 tests:
   # --------------------------------------------------------------------------
@@ -15,7 +14,7 @@ tests:
     asserts:
       - equal:
           path: metadata.name
-          value: RELEASE-NAME-greenkube
+          value: RELEASE-NAME-greenkube-config
 
   - it: should use release name alone when it already contains the chart name
     release:
@@ -25,7 +24,7 @@ tests:
     asserts:
       - equal:
           path: metadata.name
-          value: greenkube
+          value: greenkube-config
 
   # --------------------------------------------------------------------------
   # nameOverride
@@ -38,7 +37,7 @@ tests:
     asserts:
       - equal:
           path: metadata.name
-          value: RELEASE-NAME-myapp
+          value: RELEASE-NAME-myapp-config
 
   # --------------------------------------------------------------------------
   # fullnameOverride
@@ -51,7 +50,7 @@ tests:
     asserts:
       - equal:
           path: metadata.name
-          value: custom-fullname
+          value: custom-fullname-config
 
   - it: should truncate fullnameOverride to 63 chars
     set:
@@ -90,34 +89,40 @@ tests:
           value: Helm
 
   # --------------------------------------------------------------------------
-  # PVC — SQLite persistence
+  # Former SQLite claim (F17): kept, never deleted, until db copy moved the data
   # --------------------------------------------------------------------------
-  - it: should not render PVC in postgres mode
+  - it: renders no claim on a new install
     templates:
-      - templates/pvc.yaml
+      - templates/legacy-sqlite-pvc.yaml
     asserts:
       - hasDocuments:
           count: 0
 
-  - it: should not render PVC when sqlite but persistence disabled
+  - it: keeps the former SQLite claim after switching to PostgreSQL
     set:
-      config.db.type: sqlite
-      config.persistence.enabled: false
-    templates:
-      - templates/pvc.yaml
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: should render PVC when sqlite and persistence enabled
-    set:
-      config.db.type: sqlite
+      config.db.type: postgres
       config.persistence.enabled: true
     templates:
-      - templates/pvc.yaml
+      - templates/legacy-sqlite-pvc.yaml
     asserts:
       - isKind:
           of: PersistentVolumeClaim
       - equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
           path: spec.resources.requests.storage
           value: 10Gi
+
+  - it: renders no claim when the former persistence was disabled
+    set:
+      config.db.type: postgres
+      config.persistence.enabled: false
+    templates:
+      - templates/legacy-sqlite-pvc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0

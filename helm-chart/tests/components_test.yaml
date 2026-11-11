@@ -1,0 +1,379 @@
+suite: one install topology (F11)
+templates:
+  - templates/components.yaml
+  - templates/configmap.yaml
+  - templates/secret.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Topology
+  # --------------------------------------------------------------------------
+  - it: renders exactly the api and controller Deployments by default
+    templates:
+      - templates/components.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Deployment
+      - documentIndex: 0
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: metadata.name
+          value: RELEASE-NAME-greenkube-controller
+      - equal:
+          path: spec.replicas
+          value: 1
+
+  - it: scales the api and controller for high availability with two numbers
+    set:
+      api.replicas: 2
+      controller.replicas: 2
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 2
+
+  - it: selects pods by component
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: api
+      - documentIndex: 1
+        equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+          value: controller
+
+  - it: restarts the pods when the configuration changes
+    templates:
+      - templates/components.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.template.metadata.annotations["checksum/config"]
+
+  # --------------------------------------------------------------------------
+  # 0.3.x values compatibility (F17)
+  # --------------------------------------------------------------------------
+  - it: maps replicaCount of the standalone profile to api.replicas
+    set:
+      replicaCount: 3
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.replicas
+          value: 3
+      - documentIndex: 1
+        equal:
+          path: spec.replicas
+          value: 1
+
+  - it: maps production.components replicas, resources and probes
+    set:
+      profile: production
+      production.components.api.replicas: 2
+      production.components.api.resources.requests.cpu: 150m
+      production.components.controller.replicas: 2
+      production.components.controller.resources.limits.memory: 2Gi
+      production.components.api.readinessProbe.periodSeconds: 20
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.replicas
+          value: 2
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 150m
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe.periodSeconds
+          value: 20
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /api/v1/health
+      - documentIndex: 1
+        equal:
+          path: spec.replicas
+          value: 2
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 2Gi
+
+  - it: ignores the production block of a standalone release reused with --reuse-values
+    set:
+      profile: standalone
+      production.components.api.replicas: 2
+      production.components.controller.resources.limits.memory: 2Gi
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.replicas
+          value: 1
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
+  - it: maps the standalone resources and apiResources
+    set:
+      resources.requests.cpu: 300m
+      apiResources.requests.cpu: 60m
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 60m
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 300m
+
+  # --------------------------------------------------------------------------
+  # Image
+  # --------------------------------------------------------------------------
+  - it: should use the correct image with default tag
+    templates:
+      - templates/components.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^greenkube/greenkube:"
+
+  - it: should respect a custom image tag
+    set:
+      image.tag: "1.2.3"
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube:1.2.3"
+
+  - it: digest should take precedence over tag
+    set:
+      image.tag: "1.2.3"
+      image.digest: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: should keep supporting a digest split across repository and tag
+    set:
+      image.repository: "greenkube/greenkube@sha256"
+      image.tag: "31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "greenkube/greenkube@sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+
+  - it: should fail when a digest is put in image.tag
+    set:
+      image.tag: "sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb"
+    templates:
+      - templates/components.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.tag must be a tag, not a digest"
+
+  # --------------------------------------------------------------------------
+  # API: stateless, ready once the schema is current
+  # --------------------------------------------------------------------------
+  - it: runs the API with heartbeat liveness and schema-aware readiness
+    templates:
+      - templates/components.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["greenkube-api"]
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 8000
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /api/v1/health/heartbeat
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /api/v1/health
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_RUN_MIGRATIONS
+            value: "false"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: LEADER_ELECTION_ENABLED
+            value: "true"
+
+  - it: exposes a custom API port
+    set:
+      config.api.port: 9000
+    templates:
+      - templates/components.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9000
+
+  - it: maps the 0.3.x config.api probes onto api.*
+    set:
+      config.api.livenessProbe.enabled: false
+    templates:
+      - templates/components.yaml
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+
+  # --------------------------------------------------------------------------
+  # Controller: migrations, Lease, loop-registry readiness
+  # --------------------------------------------------------------------------
+  - it: runs the controller with migrations, leader election and loop probes
+    templates:
+      - templates/components.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["greenkube"]
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: ["start"]
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_RUN_MIGRATIONS
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: LEADER_ELECTION_ENABLED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: LEADER_ELECTION_LEASE_NAME
+            value: RELEASE-NAME-greenkube-leader
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          value:
+            path: /readyz
+            port: ctrl-metrics
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+          value:
+            path: /healthz
+            port: ctrl-metrics
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 60
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name=="AUTOMATION_MODE")]
+
+  # --------------------------------------------------------------------------
+  # Database wait, security and resources
+  # --------------------------------------------------------------------------
+  - it: waits for the bundled PostgreSQL in every component
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-postgres
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: nc -z RELEASE-NAME-greenkube-postgres 5432
+
+  - it: does not wait for PostgreSQL when it is external
+    set:
+      postgres.enabled: false
+      secrets.dbConnectionString: postgresql://u:p@db:5432/greenkube
+    templates:
+      - templates/components.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: runs every component as non-root with a read-only root filesystem
+    templates:
+      - templates/components.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value: [ALL]
+
+  - it: uses one ServiceAccount per component
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-greenkube-api
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-greenkube-controller
+
+  - it: applies the evaluation-cluster resource defaults
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].resources.requests
+          value:
+            cpu: 100m
+            memory: 128Mi
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].resources.requests
+          value:
+            cpu: 100m
+            memory: 256Mi
+
+  - it: should reference an external secret when existingSecret is set
+    set:
+      secrets.existingSecret: my-external-secret
+    templates:
+      - templates/components.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_CONNECTION_STRING
+            valueFrom:
+              secretKeyRef:
+                name: my-external-secret
+                key: DB_CONNECTION_STRING

@@ -3,8 +3,7 @@ templates:
   - templates/configmap.yaml
   - templates/role.yaml
   - templates/rolebinding.yaml
-  - templates/deployment.yaml
-  - templates/production-deployments.yaml
+  - templates/components.yaml
   - templates/servicemonitor.yaml
   - templates/NOTES.txt
 release:
@@ -51,15 +50,6 @@ tests:
       - notExists:
           path: data.GREENKUBE_SECRET_NAME
 
-  - it: rejects an unknown secure-cookie policy
-    set:
-      auth.session.secureCookie: sometimes
-    templates:
-      - templates/configmap.yaml
-    asserts:
-      - failedTemplate:
-          errorMessage: auth.session.secureCookie must be auto, always or never
-
   - it: grants the API only get and patch on the initial-admin Secret
     templates:
       - templates/role.yaml
@@ -85,20 +75,7 @@ tests:
           path: rules[0].resourceNames
           content: gk-greenkube
 
-  - it: binds the initial-admin Role to the standalone service account
-    templates:
-      - templates/rolebinding.yaml
-    asserts:
-      - equal:
-          path: subjects[0].name
-          value: gk-greenkube
-      - equal:
-          path: roleRef.name
-          value: gk-greenkube-initial-admin
-
-  - it: binds the initial-admin Role to the production API service account
-    set:
-      profile: production
+  - it: binds the initial-admin Role to the API service account
     templates:
       - templates/rolebinding.yaml
     asserts:
@@ -130,35 +107,25 @@ tests:
       auth.admin.existingSecret: gk-admin
       auth.admin.existingSecretKey: pw
     templates:
-      - templates/deployment.yaml
+      - templates/components.yaml
     asserts:
-      - contains:
-          path: spec.template.spec.volumes[1].projected.sources
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.volumes[0].projected.sources
           content:
             secret:
               name: gk-admin
               items:
                 - key: pw
                   path: AUTH_ADMIN_PASSWORD
-      - lengthEqual:
-          path: spec.template.spec.volumes[0].projected.sources
-          count: 1
-
-  - it: projects the admin password into the production API component
-    set:
-      profile: production
-      auth.admin.existingSecret: gk-admin
-    templates:
-      - templates/production-deployments.yaml
-    documentIndex: 0
-    asserts:
-      - contains:
+      - documentIndex: 1
+        notContains:
           path: spec.template.spec.volumes[0].projected.sources
           content:
             secret:
               name: gk-admin
               items:
-                - key: password
+                - key: pw
                   path: AUTH_ADMIN_PASSWORD
 
   - it: lets Prometheus scrape with a scoped metrics:read key

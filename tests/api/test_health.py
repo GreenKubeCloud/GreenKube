@@ -22,3 +22,51 @@ class TestHealthEndpoint:
         data = response.json()
         assert "version" in data
         assert isinstance(data["version"], str)
+
+
+class TestSchemaReadiness:
+    """F11: only the controller migrates; API replicas are not ready until the schema is current."""
+
+    @staticmethod
+    def _manager(*results):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        statuses = [
+            result
+            if isinstance(result, Exception)
+            else SimpleNamespace(current=result, pending=(), expected_version=71)
+            for result in results
+        ]
+        return SimpleNamespace(schema_status=AsyncMock(side_effect=statuses))
+
+    def test_reports_migrating_until_the_controller_migrated(self, client, monkeypatch):
+        manager = self._manager(False, True)
+        monkeypatch.setattr("greenkube.core.db.get_db_manager", lambda: manager)
+        client.app.state.check_schema = True
+
+        first = client.get("/api/v1/health")
+        second = client.get("/api/v1/health")
+
+        assert first.status_code == 503
+        assert first.json()["status"] == "migrating"
+        assert second.status_code == 200
+        assert second.json()["status"] == "ok"
+
+    def test_reports_database_unavailable_without_crashing(self, client, monkeypatch):
+        manager = self._manager(ConnectionError("down"))
+        monkeypatch.setattr("greenkube.core.db.get_db_manager", lambda: manager)
+        client.app.state.check_schema = True
+
+        response = client.get("/api/v1/health")
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "database_unavailable"
+
+    def test_heartbeat_liveness_never_checks_the_schema(self, client, monkeypatch):
+        manager = self._manager(False)
+        monkeypatch.setattr("greenkube.core.db.get_db_manager", lambda: manager)
+        client.app.state.check_schema = True
+
+        assert client.get("/api/v1/health/heartbeat").status_code == 200
+        manager.schema_status.assert_not_awaited()

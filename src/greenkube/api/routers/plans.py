@@ -64,6 +64,10 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
         "The recommendation confidence is below the configured minimum.",
     ),
     AutomationErrorCode.CHANGE_FREEZE_ACTIVE: (409, "A configured change freeze is active for this workload."),
+    AutomationErrorCode.DELIVERY_PAUSED: (
+        409,
+        "Pull-request delivery is paused by policy (automation.policy.pauseDelivery).",
+    ),
     AutomationErrorCode.WORKLOAD_PR_LIMIT_EXCEEDED: (429, "The workload has reached its open pull-request limit."),
     AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE: (429, "The workload is inside its configured change cooldown."),
     AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS: (409, "Another plan for this workload is still active."),

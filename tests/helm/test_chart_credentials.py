@@ -43,7 +43,8 @@ RENDER_PROFILES = {
     "standalone-automation": ["--set", "automation.enabled=true"],
     "standalone-automation-worker": ["--set", "automation.enabled=true", "--set", "automation.mode=worker"],
     "production": ["--set", "profile=production"],
-    "production-values-file": ["-f", str(CHART_PATH / "values-production.yaml")],
+    "ha": ["--set", "api.replicas=2", "--set", "controller.replicas=2"],
+    "dedicated-worker": ["--set", "worker.replicas=1"],
     "production-automation-inline": [
         "--set",
         "profile=production",
@@ -52,7 +53,7 @@ RENDER_PROFILES = {
         "--set",
         "automation.mode=inline",
     ],
-    "sqlite": ["--set", "config.db.type=sqlite"],
+    "former-sqlite-claim": ["--set", "config.db.type=postgres", "--set", "config.persistence.enabled=true"],
     "values-credentials": ["--set", "secrets.apiKey=k3y", "--set", "postgres.auth.password=pw"],
     "values-postgres-password-production": ["--set", "profile=production", "--set", "postgres.auth.password=pw"],
     "external-postgres": [
@@ -147,14 +148,14 @@ def test_settings_page_service_url_override_survives_a_pod_restart(key):
     would be lost on the next restart."""
     docs = _documents(_render())
 
-    assert _projected_secret_for(docs, "greenkube", key) == "greenkube"
-    assert key not in _get(docs, "ConfigMap", "greenkube")["data"]
+    assert _projected_secret_for(docs, "greenkube-controller", key) == "greenkube"
+    assert key not in _get(docs, "ConfigMap", "greenkube-config")["data"]
 
 
 def test_service_url_set_in_values_wins_over_settings_page_overrides():
     docs = _documents(_render("--set", "config.boavizta.url=https://boavizta.example.com"))
 
-    assert _projected_secret_for(docs, "greenkube", "BOAVIZTA_API_URL") == "greenkube-values"
+    assert _projected_secret_for(docs, "greenkube-controller", "BOAVIZTA_API_URL") == "greenkube-values"
     values_secret = _get(docs, "Secret", "greenkube-values")
     assert base64.b64decode(values_secret["data"]["BOAVIZTA_API_URL"]).decode() == "https://boavizta.example.com"
 
@@ -193,39 +194,23 @@ def test_supplied_credentials_are_not_generated():
     assert password["valueFrom"]["secretKeyRef"]["name"] == "greenkube-values"
 
 
-def _hook_weight(doc: dict) -> int:
-    return int(doc["metadata"]["annotations"]["helm.sh/hook-weight"])
-
-
-def test_credential_check_validates_a_newly_supplied_postgres_password():
-    """The values Secret is applied after pre-upgrade hooks (and after Argo CD
-    PreSync), so the check must read the new password from a hook Secret that
-    exists before it runs, not the previous revision's values Secret."""
-    docs = _documents(_render("--set", "postgres.auth.password=new-password"))
-
-    job = _get(docs, "Job", "greenkube-db-credential-check")
-    dsn_ref = job["spec"]["template"]["spec"]["containers"][0]["env"][0]
-    assert dsn_ref["name"] == "DB_CONNECTION_STRING"
-    check_secret = _get(docs, "Secret", dsn_ref["valueFrom"]["secretKeyRef"]["name"])
-
-    annotations = check_secret["metadata"]["annotations"]
-    assert annotations["helm.sh/hook"] == "pre-upgrade"
-    assert _hook_weight(check_secret) < _hook_weight(job)
-    assert "hook-succeeded" in annotations["helm.sh/hook-delete-policy"]
-    assert set(check_secret["data"]) == {"DB_CONNECTION_STRING"}
-    dsn = base64.b64decode(check_secret["data"]["DB_CONNECTION_STRING"]).decode()
-    assert dsn == "postgresql://greenkube:new-password@greenkube-postgres:5432/greenkube"
-
-
-def test_credential_check_reads_generated_credentials_after_the_bootstrap_hook():
-    docs = _documents(_render())
-
-    job = _get(docs, "Job", "greenkube-db-credential-check")
-    dsn_ref = job["spec"]["template"]["spec"]["containers"][0]["env"][0]["valueFrom"]["secretKeyRef"]
-    assert dsn_ref["name"] == "greenkube"
-    bootstrap = _get(docs, "Job", "greenkube-credentials-bootstrap")
-    assert _hook_weight(bootstrap) < _hook_weight(job)
-    assert _find(docs, "Secret", "greenkube-db-credential-check") is None
+def test_only_the_credentials_bootstrap_and_test_pod_are_hooks():
+    """No migration or credential-check hook remains (F11): the controller migrates at
+    startup. The credentials bootstrap stays a pre-install/pre-upgrade hook because it
+    must create the generated credentials once, outside the release, before the pods
+    that read them (N1, BUG-58)."""
+    hooked = {
+        (doc["kind"], doc["metadata"]["name"])
+        for doc in _documents(_render("--set", "monitoring.serviceMonitor.enabled=true"))
+        if "helm.sh/hook" in (doc["metadata"].get("annotations") or {})
+    }
+    assert hooked == {
+        ("ServiceAccount", "greenkube-credentials-bootstrap"),
+        ("Role", "greenkube-credentials-bootstrap"),
+        ("RoleBinding", "greenkube-credentials-bootstrap"),
+        ("Job", "greenkube-credentials-bootstrap"),
+        ("Pod", "greenkube-test-connection"),
+    }
 
 
 def test_existing_secret_is_the_gitops_path():
@@ -270,6 +255,6 @@ def test_bootstrap_job_runs_the_tested_script_verbatim():
     # The hook runs in the application image; the tag follows values.image.tag
     # (rewritten by scripts/sync_version.py at release), so never hardcode it.
     values = yaml.safe_load((CHART_PATH / "values.yaml").read_text(encoding="utf-8"))
-    app_image = _get(docs, "Deployment", "greenkube")["spec"]["template"]["spec"]["containers"][0]["image"]
+    app_image = _get(docs, "Deployment", "greenkube-controller")["spec"]["template"]["spec"]["containers"][0]["image"]
     assert container["image"] == app_image
     assert container["image"] == f"{values['image']['repository']}:{values['image']['tag']}"

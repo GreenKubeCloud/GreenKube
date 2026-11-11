@@ -1,7 +1,14 @@
-{{- $automationMode := include "greenkube.automationMode" . -}}
-{{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
+{{- /*
+Isolated Helm/Kustomize renderer (F6): always deployed, small, without
+Secrets or a service-account token, behind an egress-deny NetworkPolicy. The
+renderer itself probes whether that policy is enforced (at startup and daily)
+and reports it on /status; the controller turns an unenforced policy into the
+renderer_egress_unenforced warning of the setup checklist.
+*/ -}}
 {{- $root := . }}
-{{- $rendererName := printf "%s-renderer" (include "greenkube.fullname" $root | trunc 50 | trimSuffix "-") }}
+{{- $v := include "greenkube.values" $root | fromYaml }}
+{{- $renderer := $v.renderer }}
+{{- $rendererName := include "greenkube.rendererName" $root }}
 {{- $component := "renderer-sandbox" }}
 {{- $selectorLabels := include "greenkube.selectorLabels" $root }}
 ---
@@ -14,7 +21,7 @@ metadata:
     {{- include "greenkube.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $component }}
 spec:
-  replicas: {{ $root.Values.rendererSandbox.replicas }}
+  replicas: {{ $renderer.replicas }}
   selector:
     matchLabels:
       {{- $selectorLabels | nindent 6 }}
@@ -33,7 +40,7 @@ spec:
         fsGroup: 20002
         seccompProfile:
           type: RuntimeDefault
-      {{- if $root.Values.rendererSandbox.egressFirewall.enabled }}
+      {{- if ($renderer.egressFirewall | default dict).enabled }}
       initContainers:
         - name: renderer-egress-deny
           image: "{{ include "greenkube.image" $root }}"
@@ -60,7 +67,7 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
-            {{- if $root.Values.rendererSandbox.egressFirewall.privilegedInitContainer }}
+            {{- if ($renderer.egressFirewall | default dict).privilegedInitContainer }}
             privileged: true
             {{- else }}
             allowPrivilegeEscalation: false
@@ -90,7 +97,7 @@ spec:
           command: ["python", "-m", "greenkube.gitops.renderers.service"]
           ports:
             - name: render-http
-              containerPort: {{ $root.Values.rendererSandbox.servicePort }}
+              containerPort: {{ $renderer.servicePort }}
               protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false
@@ -117,15 +124,21 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
+          # Egress canary (F6): at startup and daily the renderer opens a TCP
+          # connection to the cluster DNS Service (port 53, no lookup needed). It
+          # must fail while the egress-deny policy is enforced.
+          env:
+            - name: RENDERER_PORT
+              value: {{ $renderer.servicePort | quote }}
           resources:
-            {{- toYaml $root.Values.rendererSandbox.resources | nindent 12 }}
+            {{- toYaml $renderer.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: tmp
           emptyDir:
-            sizeLimit: {{ $root.Values.rendererSandbox.tmpSizeLimit }}
+            sizeLimit: {{ $renderer.tmpSizeLimit }}
 ---
 apiVersion: v1
 kind: Service
@@ -142,7 +155,7 @@ spec:
     app.kubernetes.io/component: {{ $component }}
   ports:
     - name: render-http
-      port: {{ $root.Values.rendererSandbox.servicePort }}
+      port: {{ $renderer.servicePort }}
       targetPort: render-http
       protocol: TCP
 ---
@@ -173,6 +186,5 @@ spec:
                   - {{ $component }}
       ports:
         - protocol: TCP
-          port: {{ $root.Values.rendererSandbox.servicePort }}
+          port: {{ $renderer.servicePort }}
   egress: []
-{{- end }}

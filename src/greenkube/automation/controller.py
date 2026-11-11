@@ -22,9 +22,11 @@ Step                What it does                                        Cadence
 
 The business logic of each step is unchanged and lives where it did (plan service,
 lifecycle reconciler, polling and branch-cleanup runtimes); this module only
-schedules it. Delivery steps run only when GitOps delivery is enabled
-(``AUTOMATION_ENABLED`` and ``AUTOMATION_MODE != disabled``); expiry and retention
-run whenever the plan runtime is configured, as the API sweep did.
+schedules it. Automation is always on (F12): the PR-tracking steps (webhook outbox,
+PR polling, recovery) run while :class:`~greenkube.automation.readiness.AutomationReadiness`
+reports tracking active (a provider has credentials, or webhooks are configured), so
+creating or deleting the credentials Secret switches them without a restart; expiry
+and retention always run.
 
 :class:`PlanExecutor` claims and executes queued plan operations. It runs in the
 controller (leader-gated); the optional dedicated worker runs the same executor
@@ -156,7 +158,7 @@ class AutomationController:
         lease_repository: PullRequestPollingLeaseRepository,
         plan_worker: Any | None = None,
         pull_request_polling: PullRequestPollingRuntime | None = None,
-        delivery_enabled: bool = False,
+        delivery_enabled: bool | Callable[[], bool] = False,
         owner_id: str | None = None,
         lease_seconds: int = AUTOMATION_CONTROLLER_LEASE_SECONDS,
         expiry_interval_seconds: float = PLAN_EXPIRY_INTERVAL_SECONDS,
@@ -169,7 +171,7 @@ class AutomationController:
         self.lease_repository = lease_repository
         self.plan_worker = plan_worker
         self.pull_request_polling = pull_request_polling
-        self.delivery_enabled = bool(delivery_enabled)
+        self._delivery_enabled = delivery_enabled
         self.owner_id = owner_id or f"automation-controller:{uuid.uuid4()}"
         self.lease_seconds = lease_seconds
         self.intervals = {
@@ -234,6 +236,12 @@ class AutomationController:
         if failed:
             report_loop_failure(f"{failed[0]}_failed")
         return summary
+
+    @property
+    def delivery_enabled(self) -> bool:
+        """Whether the PR-tracking steps run now (re-evaluated every tick, F12)."""
+        flag = self._delivery_enabled
+        return bool(flag() if callable(flag) else flag)
 
     def _steps(self):
         steps: list[tuple[str, Callable[[PullRequestPollingLease], Any]]] = [
@@ -322,6 +330,7 @@ class PlanExecutor:
         worker_id: str | None = None,
         max_operations_per_tick: int = PLAN_EXECUTOR_MAX_OPERATIONS_PER_TICK,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        active: Callable[[], bool] | None = None,
     ) -> None:
         if type(max_operations_per_tick) is not int or max_operations_per_tick < 1:
             raise ValueError("max_operations_per_tick must be a positive integer")
@@ -329,8 +338,14 @@ class PlanExecutor:
         self.worker_id = worker_id or str(uuid.uuid4())
         self.max_operations_per_tick = max_operations_per_tick
         self._clock = clock
+        self.active = active
 
     async def tick(self) -> int:
+        if self.active is not None and not self.active():
+            # Delivery is dormant (no deliverable repository, or pauseDelivery): queued
+            # operations wait; creating the credentials Secret resumes them (F12).
+            set_automation_worker_up(False)
+            return 0
         set_automation_worker_up(True)
         record_automation_worker_heartbeat(self._clock().timestamp())
         processed = 0
@@ -368,10 +383,12 @@ def create_pr_polling_runtime(plan_worker: Any) -> PullRequestPollingRuntime:
     )
 
 
-def create_automation_controller(plan_runtime: Any, *, delivery_enabled: bool) -> AutomationController:
+def create_automation_controller(
+    plan_runtime: Any, *, delivery_enabled: bool | Callable[[], bool]
+) -> AutomationController:
     """Compose the controller loop from a :class:`~greenkube.automation.plan_runtime.PlanRuntime`."""
     worker = plan_runtime.worker
-    polling = create_pr_polling_runtime(worker) if delivery_enabled else None
+    polling = create_pr_polling_runtime(worker) if delivery_enabled is not False else None
     return AutomationController(
         plan_service=plan_runtime.plan_service,
         lease_repository=cast(PullRequestPollingLeaseRepository, plan_runtime.gitops_repository),

@@ -7,21 +7,21 @@ tests:
   # --------------------------------------------------------------------------
   # API Service
   # --------------------------------------------------------------------------
-  - it: should render the API Service when api.enabled is true
+  - it: always renders the API Service (one topology, F11)
     templates:
       - templates/api-service.yaml
     asserts:
       - isKind:
           of: Service
 
-  - it: should not render the API Service when api.enabled is false
+  - it: keeps rendering the API Service when the deprecated config.api.enabled is false
     set:
       config.api.enabled: false
     templates:
       - templates/api-service.yaml
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
 
   - it: API Service should expose the configured port
     templates:
@@ -61,7 +61,7 @@ tests:
           value: greenkube
       - equal:
           path: spec.selector["app.kubernetes.io/component"]
-          value: app
+          value: api
 
   # --------------------------------------------------------------------------
   # Postgres Service
@@ -72,6 +72,15 @@ tests:
     asserts:
       - isKind:
           of: Service
+
+  - it: renders the Postgres Service when the deprecated config.db.type is postgres
+    set:
+      config.db.type: postgres
+    templates:
+      - templates/postgres-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
 
   - it: should not render Postgres Service when postgres.enabled is false
     set:

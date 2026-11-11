@@ -1,16 +1,14 @@
 suite: isolated renderer
 templates:
-  - templates/renderer-sandbox.yaml
+  - templates/renderer.yaml
   - templates/configmap.yaml
   - templates/networkpolicy.yaml
 tests:
-  - it: deploys a credential-free renderer with network-deny policy when automation is enabled
+  - it: deploys a credential-free renderer with network-deny policy
     set:
-      automation.enabled: true
-      automation.mode: inline
-      rendererSandbox.egressFirewall.enabled: true
+      renderer.egressFirewall.enabled: true
     templates:
-      - templates/renderer-sandbox.yaml
+      - templates/renderer.yaml
     asserts:
       - hasDocuments:
           count: 3
@@ -66,9 +64,6 @@ tests:
           value: []
 
   - it: configures policy gates and the renderer service endpoint
-    set:
-      automation.enabled: true
-      automation.mode: inline
     templates:
       - templates/configmap.yaml
     asserts:
@@ -85,12 +80,9 @@ tests:
           pattern: '"minCoverage":0.5'
       - matchRegex:
           path: data.GITOPS_POLICY_JSON
-          pattern: '"missingEvidence":"warn"'
+          pattern: '"missingEvidence":"fail"'
 
-  - it: fails closed on missing policy evidence in the production profile
-    set:
-      profile: production
-      automation.enabled: true
+  - it: fails closed on missing policy evidence by default
     templates:
       - templates/configmap.yaml
     asserts:
@@ -98,10 +90,8 @@ tests:
           path: data.GITOPS_POLICY_JSON
           pattern: '"missingEvidence":"fail"'
 
-  - it: lets an explicit missingEvidence override the profile default
+  - it: lets an explicit missingEvidence override the default
     set:
-      profile: production
-      automation.enabled: true
       automation.policy.missingEvidence: warn
     templates:
       - templates/configmap.yaml
@@ -110,30 +100,17 @@ tests:
           path: data.GITOPS_POLICY_JSON
           pattern: '"missingEvidence":"warn"'
 
-  - it: rejects an unknown missingEvidence mode
-    set:
-      automation.policy.missingEvidence: ignore
-    templates:
-      - templates/configmap.yaml
-    asserts:
-      - failedTemplate:
-          errorMessage: automation.policy.missingEvidence must be fail or warn
-
   - it: does not require the optional NET_ADMIN firewall init container by default
-    set:
-      automation.enabled: true
-      automation.mode: inline
     templates:
-      - templates/renderer-sandbox.yaml
+      - templates/renderer.yaml
     asserts:
       - isNull:
           path: spec.template.spec.initContainers
 
   - it: allows a privileged firewall init container for Minikube runtimes that deny NET_ADMIN
     set:
-      automation.enabled: true
-      rendererSandbox.egressFirewall.enabled: true
-      rendererSandbox.egressFirewall.privilegedInitContainer: true
+      renderer.egressFirewall.enabled: true
+      renderer.egressFirewall.privilegedInitContainer: true
       automation.providers:
         - id: github-primary
           type: github
@@ -142,7 +119,7 @@ tests:
           repositoryAllowlist:
             - acme/*
     templates:
-      - templates/renderer-sandbox.yaml
+      - templates/renderer.yaml
     asserts:
       - documentIndex: 0
         equal:
@@ -156,25 +133,52 @@ tests:
           path: spec.template.spec.initContainers[0].args[0]
           pattern: "iptables-legacy -w 10 -P OUTPUT DROP"
 
-  - it: does not deploy the renderer when automation is disabled
-    set:
-      automation.enabled: false
+  - it: always deploys the renderer with small requests (F6)
     templates:
-      - templates/renderer-sandbox.yaml
+      - templates/renderer.yaml
     asserts:
       - hasDocuments:
-          count: 0
+          count: 3
+      - documentIndex: 0
+        equal:
+          path: spec.template.spec.containers[0].resources.requests
+          value:
+            cpu: 25m
+            memory: 96Mi
+
+  - it: keeps the renderer when the 0.3.x rendererSandbox.enabled is false, mapping its other keys
+    set:
+      rendererSandbox.enabled: false
+      rendererSandbox.replicas: 2
+      rendererSandbox.servicePort: 8091
+    templates:
+      - templates/renderer.yaml
+      - templates/configmap.yaml
+    asserts:
+      - template: templates/renderer.yaml
+        documentIndex: 0
+        equal:
+          path: spec.replicas
+          value: 2
+      - template: templates/renderer.yaml
+        documentIndex: 1
+        equal:
+          path: spec.ports[0].port
+          value: 8091
+      - template: templates/configmap.yaml
+        matchRegex:
+          path: data.GITOPS_RENDERER_URL
+          pattern: "^http://.+-renderer:8091$"
 
   - it: allows controller pods to reach the isolated renderer without opening renderer egress
     set:
-      automation.enabled: true
-      automation.mode: inline
       monitoring.networkPolicy.enabled: true
     templates:
       - templates/networkpolicy.yaml
     asserts:
       - hasDocuments:
-          count: 1
-      - equal:
+          count: 2
+      - documentIndex: 1
+        equal:
           path: spec.egress[2].ports[0].port
           value: 8090

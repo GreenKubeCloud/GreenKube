@@ -483,27 +483,41 @@ async def test_async_start_registers_automation_loops_only_with_a_plan_runtime(m
     ):
         monkeypatch.setattr(start_module, name, AsyncMock())
 
-    for mode, delivery in (("inline", True), ("worker", True), ("disabled", False)):
-        config = _controller_config(AUTOMATION_ENABLED=mode != "disabled", AUTOMATION_MODE=mode)
-        with patch("greenkube.cli.start.get_config", return_value=config):
-            with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
-                with (
-                    patch("greenkube.cli.start.asyncio.Event", return_value=stop_event),
-                    patch("greenkube.cli.start.asyncio.get_running_loop", return_value=MagicMock()),
-                ):
-                    await start_module._async_start(last=None)
-        registry = _CapturingRegistry.instances[-1]
-        assert "gitops-sync" in registry.names
-        assert "automation-controller" in registry.names
-        assert ("plan-executor" in registry.names) is delivery, mode
-        if delivery:
-            executor_spec = registry.specs["plan-executor"]
-            # A standby controller stops reporting itself as an up executor.
-            assert executor_spec.on_standby == executor_spec.func.__self__.standby
-        controller = registry.specs["automation-controller"].func.__self__
-        assert controller.delivery_enabled is delivery
-        assert registry.specs["automation-controller"].leader_only
-        assert registry.specs["gitops-sync"].func is sync_runtime.run_once
+    config = _controller_config()
+    with patch("greenkube.cli.start.get_config", return_value=config):
+        with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
+            with (
+                patch("greenkube.cli.start.asyncio.Event", return_value=stop_event),
+                patch("greenkube.cli.start.asyncio.get_running_loop", return_value=MagicMock()),
+            ):
+                await start_module._async_start(last=None)
+    registry = _CapturingRegistry.instances[-1]
+    assert "gitops-sync" in registry.names
+    assert "automation-controller" in registry.names
+    # F12: always on. The executor and the readiness reconciler are always registered;
+    # the reconciler switches delivery and PR tracking at run time.
+    assert "plan-executor" in registry.names
+    assert "automation-readiness" in registry.names
+    readiness = registry.specs["automation-readiness"].func.__self__
+    executor = registry.specs["plan-executor"].func.__self__
+    controller = registry.specs["automation-controller"].func.__self__
+    executor_spec = registry.specs["plan-executor"]
+    # A standby controller stops reporting itself as an up executor.
+    assert executor_spec.on_standby == executor_spec.func.__self__.standby
+    assert readiness.delivery_active is False
+    assert executor.active() is False
+    assert controller.delivery_enabled is False
+    readiness._snapshot = SimpleNamespace(
+        capabilities={
+            "delivery": SimpleNamespace(active=True),
+            "sync_tracking": SimpleNamespace(active=True),
+        }
+    )
+    assert executor.active() is True
+    assert controller.delivery_enabled is True
+    assert registry.specs["automation-controller"].leader_only
+    assert registry.specs["automation-readiness"].leader_only
+    assert registry.specs["gitops-sync"].func is sync_runtime.run_once
 
 
 @pytest.mark.asyncio

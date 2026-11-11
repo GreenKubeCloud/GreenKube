@@ -85,7 +85,9 @@ async def test_api_lifespan_starts_no_background_mutation_in_any_mode(monkeypatc
     service = PlanService()
 
     async def build_plan_api_service(**kwargs):
-        assert kwargs == {"connect_db": False}
+        # F12: no explicit provider is needed, and the API never writes provider rows
+        # (it may start before the controller has migrated the schema).
+        assert kwargs == {"connect_db": False, "allow_empty": True, "reconcile_providers": False}
         return service
 
     async def run_worker(**kwargs):

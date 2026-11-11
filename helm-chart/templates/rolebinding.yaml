@@ -11,6 +11,6 @@ roleRef:
   name: {{ include "greenkube.fullname" . }}-initial-admin
 subjects:
   - kind: ServiceAccount
-    name: {{ if eq .Values.profile "production" }}{{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}{{ else }}{{ include "greenkube.serviceAccountName" . }}{{ end }}
+    name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

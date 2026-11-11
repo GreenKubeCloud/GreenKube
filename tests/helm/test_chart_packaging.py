@@ -21,4 +21,6 @@ def test_package_excludes_unit_tests_but_keeps_runtime_files(tmp_path):
     assert not [name for name in names if name.startswith("greenkube/tests/")]
     assert "greenkube/templates/tests/test-connection.yaml" in names
     assert "greenkube/files/credentials_bootstrap.py" in names
-    assert "greenkube/values-production.yaml" in names
+    assert "greenkube/values.schema.json" in names
+    # One install topology (F11): no profile values file any more.
+    assert "greenkube/values-production.yaml" not in names

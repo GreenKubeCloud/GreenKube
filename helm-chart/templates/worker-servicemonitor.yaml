@@ -1,8 +1,9 @@
-{{- if and .Values.monitoring.serviceMonitor.enabled .Values.automation.enabled (eq (include "greenkube.automationMode" .) "worker") }}
+{{- $v := include "greenkube.values" . | fromYaml }}
+{{- if and .Values.monitoring.serviceMonitor.enabled (gt (int ($v.worker.replicas | default 0)) 0) }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "greenkube.fullname" . }}-automation-worker
+  name: {{ include "greenkube.fullname" . }}-worker
   namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
@@ -17,18 +18,16 @@ spec:
   selector:
     matchLabels:
       {{- include "greenkube.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: automation-worker-metrics
+      app.kubernetes.io/component: worker-metrics
   endpoints:
     - port: worker-metrics
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      {{- if .Values.automation.enabled }}
       # The worker metrics endpoint uses the same bearer key as the API metrics endpoint.
       authorization:
         type: Bearer
         credentials:
           name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_API_KEY") }}
           key: GREENKUBE_API_KEY
-      {{- end }}
 {{- end }}

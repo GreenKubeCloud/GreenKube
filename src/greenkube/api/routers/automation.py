@@ -246,7 +246,9 @@ async def automation_status(
 
     config = get_config()
     configured = service is not None
-    enabled = configured and bool(config.AUTOMATION_ENABLED) and config.AUTOMATION_MODE != "disabled"
+    # Automation is always on (F12): only automation.policy.pauseDelivery stops PR delivery.
+    paused = config.automation_delivery_paused
+    enabled = configured and not paused
     now = datetime.now(timezone.utc)
 
     backlog = None
@@ -318,11 +320,14 @@ async def automation_status(
     )
     return {
         "enabled": enabled,
-        "ready": enabled and (worker_healthy if config.AUTOMATION_MODE != "disabled" else False),
+        "ready": enabled and worker_healthy,
         # True only when an enabled provider's credential Secret actually resolves (D12, BUG-56).
         "token_configured": token_configured,
         "provider": "gitops" if configured else None,
-        "mode": config.AUTOMATION_MODE,
+        # "paused" (pauseDelivery) or "controller": the controller always executes plans,
+        # optionally helped by dedicated workers (worker.replicas).
+        "mode": "paused" if paused else "controller",
+        "delivery_paused": paused,
         "worker": {
             "healthy": worker_healthy,
             "heartbeat_at": latest_heartbeat,

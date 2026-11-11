@@ -9,9 +9,7 @@ JSON report to POST /api/v1/sources/krr/reports. Disabled by default.
 */ -}}
 {{- $job := .Values.sources.krr.job -}}
 {{- if $job.enabled }}
-{{- if not .Values.config.api.enabled }}
-{{- fail "sources.krr.job.enabled requires config.api.enabled: the job pushes its report to the GreenKube API" }}
-{{- end }}
+{{- $v := include "greenkube.values" . | fromYaml }}
 {{- $secretName := required "sources.krr.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:write" $job.apiKeySecret.name }}
 {{- $digest := $job.image.digest | default "" | toString }}
 {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) }}
@@ -149,7 +147,7 @@ spec:
                     - ALL
               env:
                 - name: GREENKUBE_KRR_REPORT_URL
-                  value: "http://{{ include "greenkube.fullname" . }}-api.{{ .Release.Namespace }}.svc:{{ .Values.config.api.port }}/api/v1/sources/krr/reports"
+                  value: "http://{{ include "greenkube.fullname" . }}-api.{{ .Release.Namespace }}.svc:{{ $v.api.port }}/api/v1/sources/krr/reports"
                 - name: GREENKUBE_SIGNALS_API_KEY
                   valueFrom:
                     secretKeyRef:

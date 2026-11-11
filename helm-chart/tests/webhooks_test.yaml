@@ -1,8 +1,7 @@
 suite: signed webhook configuration
 templates:
   - templates/configmap.yaml
-  - templates/deployment.yaml
-  - templates/production-deployments.yaml
+  - templates/components.yaml
 
 tests:
   - it: disables webhooks by default
@@ -28,16 +27,17 @@ tests:
           path: data.GITOPS_WEBHOOK_SECRET_FILE
           pattern: webhook-signing|hmac
 
-  - it: mounts only the selected webhook key into the standalone API
+  - it: mounts only the selected webhook key into the API, never the controller
     set:
       automation.webhooks.enabled: true
       automation.webhooks.providerId: github-main
       automation.webhooks.secretName: webhook-signing
       automation.webhooks.secretKey: hmac
     templates:
-      - templates/deployment.yaml
+      - templates/components.yaml
     asserts:
-      - contains:
+      - documentIndex: 0
+        contains:
           path: spec.template.spec.volumes
           content:
             name: webhook-secret
@@ -48,13 +48,15 @@ tests:
                     items:
                       - key: hmac
                         path: github-main
-      - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
           content:
             name: webhook-secret
             mountPath: /etc/greenkube/webhooks
             readOnly: true
-      - notContains:
+      - documentIndex: 1
+        notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: webhook-secret
@@ -74,9 +76,10 @@ tests:
           repositoryAllowlist:
             - acme/*
     templates:
-      - templates/deployment.yaml
+      - templates/components.yaml
     asserts:
-      - contains:
+      - documentIndex: 0
+        contains:
           path: spec.template.spec.volumes
           content:
             name: git-provider-secrets
@@ -87,7 +90,22 @@ tests:
                     items:
                       - key: token
                         path: git-auth/token
-      - contains:
+                - secret:
+                    name: greenkube-git-credentials
+                    optional: true
+                    items:
+                      - key: token
+                        path: greenkube-git-credentials/token
+                      - key: host
+                        path: greenkube-git-credentials/host
+                      - key: apiBaseUrl
+                        path: greenkube-git-credentials/apiBaseUrl
+                      - key: appId
+                        path: greenkube-git-credentials/appId
+                      - key: privateKey
+                        path: greenkube-git-credentials/privateKey
+      - documentIndex: 0
+        contains:
           path: spec.template.spec.volumes
           content:
             name: webhook-secret
@@ -98,14 +116,16 @@ tests:
                     items:
                       - key: hmac
                         path: github-main
-      - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
           content:
             name: git-provider-secrets
             mountPath: /etc/greenkube/git-providers
             readOnly: true
-      - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
           content:
             name: webhook-secret
             mountPath: /etc/greenkube/webhooks
@@ -132,9 +152,10 @@ tests:
           repositoryAllowlist:
             - platform/*
     templates:
-      - templates/deployment.yaml
+      - templates/components.yaml
     asserts:
-      - contains:
+      - documentIndex: 0
+        contains:
           path: spec.template.spec.volumes
           content:
             name: webhook-secret
@@ -150,13 +171,15 @@ tests:
                     items:
                       - key: hmac
                         path: gitlab-builds
-      - contains:
-          path: spec.template.spec.containers[1].volumeMounts
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
           content:
             name: webhook-secret
             mountPath: /etc/greenkube/webhooks
             readOnly: true
-      - notContains:
+      - documentIndex: 1
+        notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: webhook-secret
@@ -165,81 +188,14 @@ tests:
 
   - it: does not mount webhook credentials when disabled
     templates:
-      - templates/deployment.yaml
-    asserts:
-      - notContains:
-          path: spec.template.spec.volumes
-          content:
-            name: webhook-secret
-      - notContains:
-          path: spec.template.spec.containers[1].volumeMounts
-          content:
-            name: webhook-secret
-            mountPath: /etc/greenkube/webhooks
-            readOnly: true
-
-  - it: mounts webhook credentials only into the production API
-    set:
-      profile: production
-      automation.enabled: true
-      automation.webhooks.enabled: true
-      automation.webhooks.providerId: github-main
-      automation.webhooks.secretName: webhook-signing
-      automation.webhooks.secretKey: hmac
-    templates:
-      - templates/production-deployments.yaml
+      - templates/components.yaml
     asserts:
       - documentIndex: 0
-        contains:
+        notContains:
           path: spec.template.spec.volumes
           content:
             name: webhook-secret
-            projected:
-              sources:
-                - secret:
-                    name: webhook-signing
-                    items:
-                      - key: hmac
-                        path: github-main
       - documentIndex: 0
-        contains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: webhook-secret
-            mountPath: /etc/greenkube/webhooks
-            readOnly: true
-      - documentIndex: 1
-        notContains:
-          path: spec.template.spec.volumes
-          content:
-            name: webhook-secret
-            projected:
-              sources:
-                - secret:
-                    name: webhook-signing
-                    items:
-                      - key: hmac
-                        path: github-main
-      - documentIndex: 1
-        notContains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: webhook-secret
-            mountPath: /etc/greenkube/webhooks
-            readOnly: true
-      - documentIndex: 2
-        notContains:
-          path: spec.template.spec.volumes
-          content:
-            name: webhook-secret
-            projected:
-              sources:
-                - secret:
-                    name: webhook-signing
-                    items:
-                      - key: hmac
-                        path: github-main
-      - documentIndex: 2
         notContains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -252,7 +208,7 @@ tests:
       automation.webhooks.enabled: true
       automation.webhooks.secretKey: hmac
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: automation.webhooks.secretName must be a valid Kubernetes Secret name
@@ -262,7 +218,7 @@ tests:
       automation.webhooks.enabled: true
       automation.webhooks.secretName: webhook-signing
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: automation.webhooks.secretKey must be a valid Kubernetes Secret key
@@ -273,7 +229,7 @@ tests:
       automation.webhooks.secretName: other-namespace/webhook-signing
       automation.webhooks.secretKey: hmac
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: automation.webhooks.secretName must be a valid Kubernetes Secret name
@@ -285,7 +241,7 @@ tests:
       automation.webhooks.secretName: webhook-signing
       automation.webhooks.secretKey: hmac
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: automation.webhooks.secretNamespace must match the Helm release namespace
@@ -296,7 +252,7 @@ tests:
       automation.webhooks.secretName: webhook-signing
       automation.webhooks.secretKey: "not a key"
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: automation.webhooks.secretKey must be a valid Kubernetes Secret key
@@ -322,7 +278,7 @@ tests:
           repositoryAllowlist:
             - platform/*
     templates:
-      - templates/deployment.yaml
+      - templates/configmap.yaml
     asserts:
       - failedTemplate:
           errorMessage: Each provider must use a distinct webhook Secret key

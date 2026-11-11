@@ -46,7 +46,8 @@ All paths below are relative to `/api/v1`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health status and application version. Returns `503` with `status: degraded` while a supervised in-process automation loop is down or its heartbeat is stale. |
+| `GET` | `/health` | Readiness and application version. Returns `503` with `status: migrating` until the controller has applied every database migration (cached once current), `database_unavailable` when the schema cannot be checked, and `degraded` while a supervised in-process loop is down or stale. |
+| `GET` | `/setup/status` | Guided setup checklist: `complete`, `checks[]` (`id`, `category`, `title`, `status` ok/action_needed/blocked/not_applicable/pending, `reason`, `fix` {`text`, `snippet`, `ui_action`}, `docs_url`) and `capabilities` (`discovery`, `delivery`, `sync_tracking`, `measurement` with `state` and `reason`). |
 | `GET` | `/version` | Application version. |
 | `GET` | `/config` | Current runtime configuration. |
 | `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). |
@@ -118,7 +119,9 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 | `GET` | `/recommendations/{rec_id}/apply-pr/eligibility` | **Deprecated.** Read the recommendation's `eligibility` field, or check with a read-only plan preview through `/automation/plans`. |
 | `GET` | `/recommendations/{rec_id}/pull-requests` | List pull-request attempts for one recommendation. |
 | `GET` | `/automation/pull-requests` | List pending or open pull requests. |
-| `GET` | `/automation/status` | Report secret-free automation readiness: worker heartbeat, queue depth, plan backlog, discovery freshness, renderer configuration, and provider capability/preflight state. |
+| `GET` | `/automation/status` | Report secret-free automation readiness: worker heartbeat, queue depth, plan backlog, discovery freshness, renderer configuration, and provider capability/preflight state. `mode` is `controller`, or `paused` with `automation.policy.pauseDelivery`. |
+| `GET` | `/automation/repositories/suggestions` | Discovered repositories with their inferred provider (`provider_type`, `api_base_url`, `inferred_from`: `host`, `probe`, `configured` or `unknown`) and `allowlisted`. |
+| `POST` | `/automation/repositories/allowlist` | `admin` scope. Allow discovered repositories (`{"repo_urls": [...]}`); applied by the controller within a minute. Returns `added`, `allowlisted` and the equivalent `values_snippet`. Unknown repositories are rejected with `422`. |
 | `GET` | `/automation/operations/{operation_id}` | **Deprecated.** Read durable plan-operation state through the compatibility route; use `/automation/plans/{plan_id}`. |
 | `POST` | `/automation/plans` | Create a render-validated preview from persisted recommendation IDs and the server-resolved GitOps binding. |
 | `GET` | `/automation/plans/{plan_id}` | Read a secret-safe plan preview, including source and rendered diffs. |

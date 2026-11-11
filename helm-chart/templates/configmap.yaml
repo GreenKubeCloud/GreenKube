@@ -1,64 +1,34 @@
-{{- $automationMode := include "greenkube.automationMode" . }}
+{{- $v := include "greenkube.values" . | fromYaml }}
 {{- $gitProviderConfig := include "greenkube.gitProviderConfigJson" . }}
-{{- if not (kindIs "map" .Values.automation.policy) }}
-{{- fail "automation.policy must be a map" }}
-{{- end }}
-{{- $policy := deepCopy .Values.automation.policy }}
+{{- /* Types and ranges are validated by values.schema.json (N2). pauseDelivery
+is a policy, but it travels as its own setting so that the policy evaluator
+keeps rejecting unknown keys; minSamples comes from the single
+config.recommendations.minSamples knob (N3). */ -}}
+{{- $policy := omit (deepCopy (.Values.automation.policy | default dict)) "pauseDelivery" }}
+{{- $_ := set $policy "minSamples" $v.policyMinSamples }}
 {{- if not (get $policy "missingEvidence") }}
-{{- $_ := set $policy "missingEvidence" (ternary "fail" "warn" (eq .Values.profile "production")) }}
+{{- $_ := set $policy "missingEvidence" "fail" }}
 {{- end }}
-{{- if not (has (get $policy "missingEvidence") (list "fail" "warn")) }}
-{{- fail "automation.policy.missingEvidence must be fail or warn" }}
-{{- end }}
-{{- if not (kindIs "map" .Values.automation.pullRequests) }}
-{{- fail "automation.pullRequests must be a map" }}
-{{- end }}
-{{- $prPollInterval := .Values.automation.prPollIntervalSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $prPollInterval) }}
-{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $prPollIntervalSeconds := int $prPollInterval }}
-{{- if or (lt $prPollIntervalSeconds 10) (gt $prPollIntervalSeconds 86400) }}
-{{- fail "automation.prPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $syncPollInterval) }}
-{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncPollIntervalSeconds := int $syncPollInterval }}
-{{- if or (lt $syncPollIntervalSeconds 10) (gt $syncPollIntervalSeconds 86400) }}
-{{- fail "automation.syncPollIntervalSeconds must be an integer between 10 and 86400" }}
-{{- end }}
-{{- $syncTimeout := .Values.automation.syncTimeoutSeconds | toString }}
-{{- if not (regexMatch "^[0-9]+$" $syncTimeout) }}
-{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
-{{- end }}
-{{- $syncTimeoutSeconds := int $syncTimeout }}
-{{- if or (lt $syncTimeoutSeconds 60) (gt $syncTimeoutSeconds 86400) }}
-{{- fail "automation.syncTimeoutSeconds must be an integer between 60 and 86400" }}
-{{- end }}
+{{- $prPollInterval := .Values.automation.prPollIntervalSeconds | int | toString }}
+{{- $syncPollInterval := .Values.automation.syncPollIntervalSeconds | int | toString }}
+{{- $syncTimeout := .Values.automation.syncTimeoutSeconds | int | toString }}
 {{- include "greenkube.validateAutomationWebhooks" . -}}
-{{- if not (has $automationMode (list "inline" "worker" "disabled")) }}
-{{- fail "automation.mode must be inline, worker, or disabled" }}
-{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "greenkube.fullname" . }}
+  name: {{ include "greenkube.configMapName" . }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-30"
-    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   # --- General Config ---
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   ENVIRONMENT: {{ .Values.config.environment | quote }}
   API_AUTH_MODE: {{ .Values.config.apiAuthMode | quote }}
-  AUTOMATION_ENABLED: {{ and .Values.automation.enabled (eq $automationMode "inline") | quote }}
-  AUTOMATION_MODE: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq $automationMode "inline")) | quote }}
+  # Automation is always on (F12); pauseDelivery blocks approvals and PR creation.
+  AUTOMATION_PAUSE_DELIVERY: {{ $v.pauseDelivery | quote }}
+  AUTOMATION_REPOSITORY_ALLOWLIST: {{ .Values.automation.repositoryAllowlist | default (list "@discovered") | toJson | quote }}
+  GITOPS_DEFAULT_CREDENTIALS_SECRET: {{ include "greenkube.gitCredentialsSecretName" . | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
@@ -76,13 +46,8 @@ data:
   GITOPS_PR_LIFECYCLE_COMMENTS: {{ hasKey $pr "lifecycleComments" | ternary $pr.lifecycleComments true | quote }}
   GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: {{ $pr.lifecycleLookbackDays | default 30 | quote }}
   GREENKUBE_EXTERNAL_URL: {{ .Values.config.externalUrl | default "" | trimSuffix "/" | quote }}
-  {{- if and .Values.automation.enabled .Values.rendererSandbox.enabled (ne $automationMode "disabled") }}
-  GITOPS_RENDERER_URL: {{ printf "http://%s-renderer:%v" (include "greenkube.fullname" .) .Values.rendererSandbox.servicePort | quote }}
-  GITOPS_RENDERER_EGRESS_FIREWALL: {{ .Values.rendererSandbox.egressFirewall.enabled | quote }}
-  {{- else }}
-  GITOPS_RENDERER_URL: ""
-  GITOPS_RENDERER_EGRESS_FIREWALL: "false"
-  {{- end }}
+  GITOPS_RENDERER_URL: {{ printf "http://%s:%v" (include "greenkube.rendererName" .) (int $v.renderer.servicePort) | quote }}
+  GITOPS_RENDERER_EGRESS_FIREWALL: {{ ($v.renderer.egressFirewall | default dict).enabled | default false | quote }}
   GITOPS_SECRET_MOUNT: "/etc/greenkube/git-providers"
   {{- if .Values.automation.webhooks.enabled }}
   GITOPS_WEBHOOK_SECRET_FILE: {{ include "greenkube.webhookSecretFilePath" . | quote }}
@@ -109,9 +74,8 @@ data:
   GITOPS_HELM_KUBE_VERSION: {{ .Capabilities.KubeVersion.Version | quote }}
   GITOPS_HELM_API_VERSIONS_JSON: {{ .Capabilities.APIVersions | toJson | quote }}
 
-  # --- Database Config ---
-  DB_TYPE: {{ .Values.config.db.type | quote }}
-  DB_PATH: {{ .Values.config.db.path | quote }}
+  # --- Database Config (PostgreSQL only; SQLite is for local development) ---
+  DB_TYPE: "postgres"
   DB_SSL_MODE: {{ .Values.config.db.sslMode | quote }}
   DB_POOL_MIN_SIZE: {{ .Values.config.db.poolMinSize | quote }}
   DB_POOL_MAX_SIZE: {{ .Values.config.db.poolMaxSize | quote }}
@@ -144,24 +108,19 @@ data:
   OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
 
   # --- API Config ---
-  {{- if .Values.config.api.enabled }}
   API_HOST: {{ .Values.config.api.host | quote }}
-  API_PORT: {{ .Values.config.api.port | quote }}
+  API_PORT: {{ $v.api.port | quote }}
   CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   API_RATE_LIMIT: {{ .Values.config.apiRateLimit | quote }}
   ROOT_PATH: {{ .Values.config.rootPath | default "" | quote }}
   METRICS_LIST_MAX_RANGE_DAYS: {{ .Values.config.metricsListMaxRangeDays | default 30 | int | quote }}
   TRUSTED_PROXY_IPS: {{ .Values.config.trustedProxyIps | default "" | quote }}
-  {{- end }}
 
   # --- Authentication (F14, F15) ---
   {{- $auth := .Values.auth | default dict }}
   {{- $session := $auth.session | default dict }}
   {{- $admin := $auth.admin | default dict }}
   {{- $secureCookie := $session.secureCookie | default "auto" | toString }}
-  {{- if not (has $secureCookie (list "auto" "always" "never")) }}
-  {{- fail "auth.session.secureCookie must be auto, always or never" }}
-  {{- end }}
   SESSION_COOKIE_SECURE: {{ $secureCookie | quote }}
   AUTH_SESSION_IDLE_TIMEOUT: {{ $session.idleTimeout | default "12h" | quote }}
   AUTH_SESSION_ABSOLUTE_LIFETIME: {{ $session.absoluteLifetime | default "7d" | quote }}
@@ -205,9 +164,9 @@ data:
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
-  RECOMMENDATION_VPA_ENABLED: {{ if hasKey . "vpaEnabled" }}{{ .vpaEnabled | toString | quote }}{{ else }}"true"{{ end }}
-  RECOMMENDATION_KARPENTER_ENABLED: {{ if hasKey . "karpenterEnabled" }}{{ .karpenterEnabled | toString | quote }}{{ else }}"true"{{ end }}
-  RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
+  RECOMMENDATION_VPA_ENABLED: {{ $v.vpaEnabled | quote }}
+  RECOMMENDATION_KARPENTER_ENABLED: {{ $v.karpenterEnabled | quote }}
+  RECOMMENDATION_SOURCE_PRIORITY: {{ $v.sourcePriority | quote }}
   RECOMMENDATION_CONSENSUS_POLICY: {{ .consensusPolicy | default "safest" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
@@ -218,11 +177,11 @@ data:
   {{- if not (kindIs "invalid" .engineerHourCost) }}
   RECOMMENDATION_ENGINEER_HOUR_COST: {{ .engineerHourCost | toString | quote }}
   {{- end }}
-  RECOMMENDATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  RECOMMENDATION_MIN_SAMPLES: {{ $v.minSamples | int | quote }}
   RECOMMENDATION_SCAN_INTERVAL: {{ .scanInterval | default "1h" | quote }}
   {{- with .verification }}
   VERIFICATION_WINDOW_HOURS: {{ .windowHours | default 72 | quote }}
-  VERIFICATION_MIN_SAMPLES: {{ .minSamples | default 36 | int | quote }}
+  VERIFICATION_MIN_SAMPLES: {{ $v.verificationMinSamples | int | quote }}
   VERIFICATION_MIN_SAVINGS_RATIO: {{ .minSavingsRatio | default 0.5 | quote }}
   VERIFICATION_USAGE_HEADROOM: {{ .usageHeadroom | default 1.1 | quote }}
   VERIFICATION_MAX_RESTART_DELTA: {{ .maxRestartDelta | default 0 | int | quote }}

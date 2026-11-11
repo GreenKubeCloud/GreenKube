@@ -32,17 +32,6 @@ tests:
       - failedTemplate:
           errorPattern: "sources.krr.job.image.digest must pin the KRR image"
 
-  - it: requires the API
-    templates:
-      - templates/krr-cronjob.yaml
-    set:
-      sources.krr.job.enabled: true
-      sources.krr.job.apiKeySecret.name: gk-krr
-      config.api.enabled: false
-    asserts:
-      - failedTemplate:
-          errorPattern: "requires config.api.enabled"
-
   - it: runs KRR pinned by digest and uploads with a signals:write key
     templates:
       - templates/krr-cronjob.yaml

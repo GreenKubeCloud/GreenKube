@@ -1,732 +1,263 @@
 # Installation Guide
 
-This guide covers a complete GreenKube installation with the official Helm chart. It explains the two deployment profiles, the values you are most likely to change, how API-key authentication works, and how to reach the dashboard from a workstation.
+One `helm install`, one sign-in, optionally one Secret for Git. There is no profile to choose and no feature flag
+to flip: GreenKube deploys the full loop and every capability activates itself when its prerequisites appear.
+Everything after [Install](#install) is optional and additive.
 
-For the full values reference, see the [Configuration reference](configuration.md). For the optional GitOps workflow, see [GitOps automation](automation.md).
+## Install
 
-## Before you begin
+You need a Kubernetes cluster you administer, Helm 3.10+ and `kubectl`. Prometheus is strongly recommended
+(GreenKube discovers it in the cluster).
 
-### Requirements
+```bash
+helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube && helm repo update
+helm install greenkube greenkube/greenkube --namespace greenkube --create-namespace
+```
 
-| Requirement | Details |
-|---|---|
-| Kubernetes cluster | A cluster you can administer. The chart creates a `ClusterRole`/`ClusterRoleBinding` so GreenKube can read (never write) nodes, pods, workloads, Services, EndpointSlices, Ingresses, Gateway API objects, volumes and snapshots, and supported GitOps resources. |
-| Helm | Helm 3.10 or later (the upgrade examples use `--set-json`). |
-| kubectl | A version compatible with your cluster. |
-| Prometheus | Strongly recommended. GreenKube reads CPU, memory, network, disk, and restart metrics from Prometheus. Auto-discovery is attempted when `config.prometheus.url` is empty. |
-| Metrics Server | Optional but recommended. When `metrics.k8s.io` is available, GreenKube reads per-container CPU and memory for recommendation evidence and verification. |
-| OpenCost | Optional. Provides real cost allocation instead of estimates. |
-| Electricity Maps or Wattnet | Optional. Without a carbon-intensity provider, GreenKube falls back to bundled/static intensity data and `config.defaultIntensity`. |
-| GitOps controllers | Optional. Argo CD and/or Flux are required only for the automation-backed plan and pull-request workflow. |
-| Git provider access | Optional. GitHub, GitLab, or Gitea with a token in a Kubernetes Secret and a repository allowlist. |
+**1. Sign in.** Open the dashboard and sign in as `admin` with the initial password (you choose a new one at the
+first sign-in; your browser can save it):
 
-### Deployment profiles
+```bash
+kubectl -n greenkube port-forward svc/greenkube-api 8000:8000   # then open http://localhost:8000
+kubectl -n greenkube get secret greenkube-initial-admin -o jsonpath='{.data.password}' | base64 -d; echo
+```
 
-The chart has two profiles:
+**2. Connect Git (optional).** GitOps discovery already runs. To let GreenKube open pull requests against the
+repositories your Argo CD or Flux sources point at, create one Secret. Delivery activates within one to two minutes,
+with no upgrade and no restart:
 
-| Profile | Workloads | Use it for |
+```bash
+kubectl -n greenkube create secret generic greenkube-git-credentials \
+  --from-literal=token=<token with write access to the repositories> \
+  --from-literal=host=github.com   # the one Git host this token belongs to
+```
+
+The token is only ever sent to the host named by `host` (`apiBaseUrl` is accepted too). Without that key it is
+used only when every discovered repository lives on `github.com`, or every one on `gitlab.com`. It is never sent to
+a self-hosted host the key does not name, so a GitOps source pointing at a server someone else controls cannot
+receive it. Repositories on other hosts need an explicit provider ([Automation](automation.md#configure-a-provider)).
+
+**3. Done.** The **Setup** page (`/setup`, or `GET /api/v1/setup/status`) shows what is active and, for anything
+missing, the exact fix. Recommendations appear once enough evidence is collected (about 3 hours with the default
+5-minute step); the checklist shows the estimate.
+
+## What gets installed
+
+| Component | Default | Responsibilities |
 |---|---|---|
-| `standalone` (default) | Controller and API in one Deployment. Automation runs in the controller container when enabled. | Evaluations, small clusters, local installations. |
-| `production` | Separate API, controller, and (when automation is enabled) automation worker Deployments. The controller uses a Kubernetes Lease for leader election; database migrations run as a Helm hook Job. | Production clusters and any installation that needs component isolation or horizontal API scaling. |
+| `greenkube-api` Deployment | 1 replica, 100m / 128Mi | REST API, dashboard, webhooks, sign-in. No background job. Ready once the database schema is current. |
+| `greenkube-controller` Deployment | 1 replica, 100m / 256Mi | Every periodic loop: collection, scans, measurement, GitOps discovery and sync, automation readiness, plan execution. Migrates the database at startup. Leader election through the `greenkube-leader` Lease. |
+| `greenkube-renderer` Deployment | 1 replica, 25m / 96Mi | Isolated Helm/Kustomize rendering: no Secret, no service-account token, egress-deny NetworkPolicy. |
+| `greenkube-postgres` StatefulSet | 100m / 128Mi, 10 GiB volume | Bundled PostgreSQL. |
+| `greenkube-worker` Deployment | 0 replicas | Optional extra plan executors (`worker.replicas`). |
 
-The default chart values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: session` (sign in with an account; an initial admin password is generated), and a generated bootstrap API key for machines. GitOps automation is disabled until you explicitly enable it.
+Requests total about 325m CPU and 600 MiB, small enough for kind or minikube. The chart also creates read-only
+cluster RBAC (nodes, pods, workloads, Services, volumes, Argo CD and Flux objects; never Secrets), a namespaced
+Role for the Lease, and the credentials bootstrap hook described in [Credentials](#credentials-and-gitops-argo-cd-flux).
 
-### Development vs production at a glance
+What activates when:
 
-| Aspect | Development | Production |
+| Capability | Active when | Otherwise |
 |---|---|---|
-| Profile | `standalone` | `production` |
-| Workloads | Collector and API in one pod | Separate API, controller, and optional automation worker |
-| API authentication | A key is optional when `config.environment=development`; an installation with no key in its Secret is open | `GREENKUBE_API_KEY` is mandatory; missing configuration returns `503` |
-| Migrations | Applied by the collector/API at startup | Dedicated post-install/post-upgrade Job |
-| API replicas | One | Two by default, horizontally scalable |
-| Leader election | Not used | Controller Lease |
-| Intended use | Local demos, evaluations, protected clusters | Production clusters |
+| Observe, recommend, measure | Always (each recommendation source activates when its probe succeeds) | — |
+| Discover | Argo CD or Flux CRDs are present (re-checked every discovery interval) | Dormant; the checklist explains how to connect a GitOps controller |
+| Preview | A discovered, allowlisted repository with credentials and a resolved workload binding | The recommendation shows the blocker and its fix |
+| Deliver (open PRs) | Preview + credentials + `automation.policy.pauseDelivery: false` | Dormant with its reason |
+| Webhooks | A provider webhook Secret is configured | Polling only |
 
-## Quick start
+A pull request is never opened without the approval of a plan digest by a signed-in user.
 
-### 1. Add the chart repository
+## Optional: configure your installation
 
-```bash
-helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube
-helm repo update
-```
-
-### 2. Install GreenKube
-
-```bash
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --create-namespace
-```
-
-This creates:
-
-- the GreenKube API/collector workload,
-- a bundled PostgreSQL StatefulSet and Service,
-- a one-time credentials bootstrap hook that generates `GREENKUBE_API_KEY` and the PostgreSQL password into the Secret `greenkube` (see [Credentials and GitOps](#credentials-and-gitops-argo-cd-flux)),
-- the read-only Kubernetes RBAC required by the collectors and recommendation engine.
-
-### 3. Verify the rollout
-
-```bash
-kubectl -n greenkube get pods
-kubectl -n greenkube get jobs
-kubectl -n greenkube logs \
-  -l app.kubernetes.io/instance=greenkube,app.kubernetes.io/component=app \
-  -c greenkube --tail=100
-kubectl -n greenkube logs \
-  -l app.kubernetes.io/instance=greenkube,app.kubernetes.io/component=app \
-  -c greenkube-api --tail=100
-```
-
-With the `production` profile, the component pods are named `<release>-api`, `<release>-controller`, and, when automation is enabled, `<release>-automation`. The migration Job must complete before the API is ready.
-
-### 4. Forward the API and dashboard
-
-The chart serves the dashboard and the REST API from the same pod:
-
-```bash
-kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
-```
-
-Open <http://localhost:8000>.
-
-Service names follow the Helm fullname convention. With the release name `greenkube` above, the Service is `greenkube-api`, generated credentials are in the Secret `greenkube`, and credentials you set in values are in `greenkube-values`. For a release named `greenkube-prod`, they are `greenkube-prod-api`, `greenkube-prod` and `greenkube-prod-values`, unless you set `secrets.existingSecret`.
-
-### 5. Sign in
-
-Open the dashboard and sign in as `admin`. On the first start GreenKube creates that account with an initial
-password, stored once in the Secret `<release>-initial-admin`. `helm install` prints the exact command for your
-release; for the default release:
-
-```bash
-kubectl -n greenkube get secret greenkube-initial-admin \
-  -o jsonpath='{.data.password}' | base64 -d; echo
-```
-
-The sign-in page is a regular form, so your browser or password manager can save and autofill the credentials.
-GreenKube asks you to choose a new password at the first sign-in and then erases the initial one from the Secret.
-You then stay signed in across reloads and new tabs (**Keep me signed in** also survives a browser restart), until
-you select **Sign out** or the session expires (12 hours of inactivity, 7 days at most). To provide the first
-password yourself (GitOps), set `auth.admin.existingSecret`. See [Authentication](authentication.md).
-
-For remote access, serve GreenKube over HTTPS (see [Reach the frontend](#reach-the-frontend)): the dashboard warns
-when it is opened over plain HTTP from another machine.
-
-### 6. API access for scripts and Prometheus
-
-Machines use scoped API keys: create one in **Settings > API keys**, choose its scopes (`read`, `write`, `approve`,
-`signals:write`, `metrics:read`, `admin`) and copy it: it is shown once.
-
-```bash
-curl -H "Authorization: Bearer gk_..." http://localhost:8000/api/v1/metrics/summary
-```
-
-The generated bootstrap key `GREENKUBE_API_KEY` still works as an admin key for one more minor release
-(deprecated):
-
-```bash
-kubectl -n greenkube get secret greenkube \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
-```
-
-If you set `secrets.apiKey`, read it from `greenkube-values` instead; with `secrets.existingSecret`, from your own
-Secret. Never put a key in a URL, a values file committed to Git, or shell history on a shared machine.
-
-## Configure your installation
-
-Create a values file instead of passing dozens of `--set` flags:
+Create a values file instead of `--set` flags, then `helm upgrade greenkube greenkube/greenkube -n greenkube -f my-values.yaml`:
 
 ```yaml
 # my-values.yaml
 config:
   clusterName: prod-eu-west
-  cloudProvider: aws
-  # Optional: override when node labels do not identify the grid zone.
-  defaultZone: FR
-
+  cloudProvider: aws          # aws, gcp, azure, ovh, scaleway, on-prem, unknown
+  defaultZone: FR             # grid zone when node labels do not identify it
   prometheus:
-    # Empty means in-cluster auto-discovery.
-    url: ""
-  opencost:
-    url: ""
-
+    url: ""                   # empty: in-cluster discovery
 secrets:
-  # Optional: real-time grid carbon intensity.
-  electricityMapsToken: ""
+  electricityMapsToken: ""    # live grid carbon intensity (optional)
 ```
 
-Apply it:
-
-```bash
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  -f my-values.yaml
-```
-
-### Pin the image by tag or digest
-
-By default the chart uses the image tag matching its app version. To pin a specific release, use `image.tag`:
-
-```bash
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --set image.tag=0.3.0
-```
-
-To pin the exact image bytes, use `image.digest`. Do **not** put `sha256:` in `image.tag`; that renders an invalid Kubernetes image reference (`greenkube/greenkube:sha256:...`) and the pod stays in `InvalidImageName`.
-
-```bash
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --create-namespace \
-  --set image.digest="sha256:<64-hex-digest>" \
-  --wait --timeout 5m
-```
-
-Replace `<64-hex-digest>` with the digest reported by your registry or CI. The rendered reference is `greenkube/greenkube@sha256:<digest>`. `image.digest` takes precedence over `image.tag`. You can also pin a custom registry or mirror with `image.repository`.
-
-### Variables you are most likely to change
-
-#### Deployment and image
+The values most often changed:
 
 | Value | Default | Purpose |
 |---|---|---|
-| `profile` | `standalone` | `standalone` or `production`. See [Deployment profiles](#deployment-profiles). |
-| `replicaCount` | `1` | Replicas for the standalone collector/API pod. |
-| `image.repository` | `greenkube/greenkube` | Image repository. |
-| `image.tag` | chart app version | Image tag. Must be a tag, not a `sha256:` digest. |
-| `image.digest` | `""` | Pin the exact image with `sha256:<64 hex>`; takes precedence over `image.tag`. |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
-| `apiResources` | 50m/128Mi requests, 250m/1Gi limits | API container resources. The API only queues recommendation scans; it never runs them. |
-| `resources` | 100m/128Mi requests, 500m/1Gi limits | Collector/controller resources. This container runs the scheduled recommendation scans; memory grows with the number of pods. |
-| `tmp.sizeLimit` | `768Mi` | Scratch space for snapshots and renderer streaming. |
+| `api.replicas`, `controller.replicas` | `1`, `1` | High availability (see [HA](#optional-high-availability)). |
+| `api.resources`, `controller.resources`, `renderer.resources` | see above | Component sizing. The controller's memory grows with the number of pods scanned. |
+| `image.tag` / `image.digest` | chart app version / `""` | Pin a release, or the exact bytes with `sha256:<64 hex>` (never put a digest in `image.tag`). |
+| `config.prometheus.url`, `config.opencost.url` | `""` | Empty attempts in-cluster discovery. |
+| `config.recommendations.minSamples` | `36` | Evidence required by every sample gate (recommendations, plan policy, verification). |
+| `automation.repositoryAllowlist` | `["@discovered"]` | Repositories PRs may target; an explicit list narrows it. |
+| `automation.policy.pauseDelivery` | `false` | Change freeze: no PR is opened, everything else keeps running. |
+| `monitoring.serviceMonitor.enabled` | `false` | Prometheus Operator ServiceMonitors for the API and controller metrics. |
 
-#### Runtime configuration
+See the [Configuration reference](configuration.md) for every value, and [GitOps automation](automation.md) for
+providers, policy and webhooks. The chart ships a `values.schema.json`: invalid types and ranges are rejected
+before anything is applied.
 
-| Value | Default | Purpose |
-|---|---|---|
-| `config.environment` | `production` | `production`, `development`, or `test`. Production fails closed if authentication is not configured. |
-| `config.apiAuthMode` | `session` | `session`: dashboard sign-in with accounts and server-side sessions, scoped API keys for machines. `api_key`: Bearer API keys only. `oidc` is reserved and returns `503`. See [Authentication](authentication.md). |
-| `config.trustedProxyIps` | `""` | IPs or CIDRs of reverse proxies whose `X-Forwarded-For`/`X-Forwarded-Proto` are trusted (rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
-| `auth.admin.username` | `admin` | Name of the first account. |
-| `auth.admin.existingSecret` | `""` | Secret holding the first admin password (key `auth.admin.existingSecretKey`, default `password`). Empty: a password is generated once into `<release>-initial-admin` and must be changed at first sign-in. |
-| `auth.session.secureCookie` | `auto` | `auto` (HTTPS, directly or via a trusted proxy), `always`, or `never`. |
-| `auth.session.idleTimeout` | `12h` | Sign out after this much inactivity. |
-| `auth.session.absoluteLifetime` / `rememberLifetime` | `7d` / `30d` | Maximum session lifetime, without and with **Keep me signed in**. |
-| `auth.login.rateLimit` | `5/minute` | Failed sign-ins per username (four times as many per IP) before an exponential lockout. |
-| `config.clusterName` | `""` | Label used in Prometheus metrics. Empty enables auto-detection from the node/cloud provider. |
-| `config.cloudProvider` | `unknown` | `aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, or `unknown`. |
-| `config.defaultZone` | `""` | Fallback grid zone (for example `FR`, `DE`, `US-CAL-CISO`). |
-| `config.defaultIntensity` | `500.0` | Fallback grid intensity in gCO₂e/kWh. |
-| `config.electricityProvider` | `electricity_maps` | `electricity_maps` or `wattnet`. |
-| `config.normalizationGranularity` | `hour` | `hour`, `day`, or `none`. |
-| `config.logLevel` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `config.logFormat` | `json` | `json` for log pipelines or `console` for human-readable logs. |
-| `config.corsOrigins` | `""` | Allowed CORS origins. Empty keeps the API same-origin (the bundled UI needs no CORS). List exact origins for a UI served elsewhere; `*` allows any origin but never with credentials. |
-| `config.rootPath` | `""` | Sub-path when served behind a reverse proxy, for example `/greenkube`. |
-| `config.prometheus.url` | `""` | Empty attempts in-cluster discovery. |
-| `config.prometheus.queryRangeStep` | `5m` | Prometheus range-query step. Must divide 24 hours. |
-| `config.prometheus.scrapeInterval` | `30s` | cAdvisor scrape interval; rate windows span at least four scrapes. |
-| `config.collection.safetyLag` | `1m` | Age a window must reach before it is collected. Raise it for remote-write or Thanos/Mimir setups. |
-| `config.collection.maxBackfill` | `24h` | How far back the controller backfills missing windows after downtime. |
-| `config.opencost.url` | `""` | Empty attempts in-cluster discovery. |
-| `config.kubernetesMetricsApiEnabled` | `true` | Read per-container usage from `metrics.k8s.io` when available. |
-| `config.externalUrl` | `""` | Public URL of the GreenKube UI, for deep links in pull requests. |
+## Optional: connect Git
 
-#### Database and retention
+The Secret of [step 2](#install) is all most installations need. GreenKube infers the provider of each
+discovered repository host: `github.com` is GitHub, `gitlab.com` is GitLab, and a self-hosted host is identified
+by probing `/api/v4/version` (GitLab) or `/api/v1/version` (Gitea). The Secret is read for every inferred
+provider (key `token`). Delete it and delivery becomes dormant again; open pull requests stay tracked through
+webhooks or live-state apply detection.
 
-| Value | Default | Purpose |
-|---|---|---|
-| `config.db.type` | `postgres` | `postgres` (recommended) or `sqlite` (development only). |
-| `postgres.enabled` | `true` | Deploy the bundled PostgreSQL StatefulSet. Set to `false` to use an external database. |
-| `secrets.dbConnectionString` | `""` | Required when `postgres.enabled=false` and you use the chart-managed Secret. With `secrets.existingSecret`, put `DB_CONNECTION_STRING` in that Secret. |
-| `postgres.persistence.size` | `10Gi` | Bundled PostgreSQL volume size. |
-| `config.persistence.enabled` | `false` | Persistent volume for SQLite. Enable it if you use SQLite and want data to survive pod restarts. |
-| `config.metricsCompressionAgeHours` | `24` | Age after which raw metrics are compressed to hourly aggregates. |
-| `config.metricsRawRetentionDays` | `7` | Raw retention after compression. |
-| `config.metricsAggregatedRetentionDays` | `-1` | Hourly retention; `-1` keeps data indefinitely. |
-
-#### Secrets
-
-| Value | Purpose |
-|---|---|
-| `secrets.existingSecret` | Use a pre-created Secret instead of chart-rendered and generated credentials. Recommended for production and GitOps. |
-| `secrets.apiKey` | API bearer key. If empty, the credentials bootstrap hook generates one once; upgrades and GitOps syncs never rotate it. |
-| `secrets.electricityMapsToken` | Electricity Maps token. |
-| `secrets.wattnetEmail`, `secrets.wattnetPassword` | Wattnet credentials when `config.electricityProvider=wattnet`. |
-| `secrets.boaviztaToken` | Optional Boavizta token. |
-| `secrets.prometheus.*` | Optional Prometheus basic-auth or bearer token. |
-
-#### Monitoring and automation
-
-| Value | Default | Purpose |
-|---|---|---|
-| `monitoring.serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor for `/prometheus/metrics`. |
-| `monitoring.prometheusRule.enabled` | `false` | Create alerts for stuck automation operations, sync failures, stale workers and controller loops. |
-| `monitoring.prometheusRule.controllerAlerts` | `true` | Include the controller loop alerts (`GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale`, `GreenKubeNoActiveController`). They render only with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `collector.metricsPort` > 0). |
-| `monitoring.networkPolicy.enabled` | `false` | Restrict component ingress/egress. |
-| `automation.enabled` | `false` | Enable GitOps discovery, planning, pull requests, and apply tracking. |
-| `automation.mode` | profile-dependent | `inline` for standalone (the controller executes plan operations), `worker` for production (dedicated worker pods execute them as well). The API never runs a worker. |
-| `automation.providers` | `[]` | Git provider definitions with Secret references and repository allowlists. |
-| `rendererSandbox.enabled` | `true` | Run Helm/Kustomize rendering in an isolated Pod. Required for automation-backed rendering in production. |
-
-See the [Configuration reference](configuration.md) for every value, and [GitOps automation](automation.md) for the complete automation setup.
-
-## Development mode
-
-Use development mode only for local demonstrations or a protected cluster. It is not a security boundary.
-
-```bash
-helm upgrade --install greenkube-dev greenkube/greenkube \
-  --namespace greenkube-dev \
-  --create-namespace \
-  --set profile=standalone \
-  --set config.environment=development \
-  --set config.clusterName=my-cluster \
-  --set config.defaultZone=FR
-```
-
-Development mode differences:
-
-- The API can start without an API key if the mounted Secret has no `GREENKUBE_API_KEY`; protected API routes are then open.
-- Production configuration would return `503` for the same missing key instead of allowing anonymous access.
-- The chart still generates a key by default, so the simplest development setup is to retrieve and use that key exactly like production. This avoids an accidentally unauthenticated service.
-
-To intentionally run with authentication disabled, use a pre-created Secret that has no `GREENKUBE_API_KEY` and, if you use the bundled PostgreSQL, contains the database keys as well:
-
-```bash
-kubectl create namespace greenkube-dev --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n greenkube-dev create secret generic greenkube-dev-secrets
-
-helm upgrade --install greenkube-dev greenkube/greenkube \
-  --namespace greenkube-dev \
-  --set config.db.type=sqlite \
-  --set config.persistence.enabled=true \
-  --set config.environment=development \
-  --set secrets.existingSecret=greenkube-dev-secrets
-```
-
-With SQLite, no database Secret keys are required. If you keep PostgreSQL, create the Secret with `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING` values (see [Production API-key handling](#production-api-key-handling)).
-
-Access the UI the same way:
-
-```bash
-kubectl -n greenkube-dev port-forward svc/greenkube-dev-api 8000:8000
-# Open http://localhost:8000
-```
-
-Development mode still uses real Prometheus/OpenCost/Kubernetes data. Use the [demo mode](#try-the-demo) when you only want sample data.
-
-## Production mode
-
-### Production values
-
-Start from the chart defaults and override what you need:
+By default every repository referenced by a discovered Argo CD or Flux source is allowed (`@discovered`). Narrow
+it in values, or allow repositories one by one from the setup checklist (stored in the database, applied within
+a minute):
 
 ```yaml
-# production-values.yaml
-profile: production
-
-config:
-  environment: production
-  apiAuthMode: session
-  clusterName: prod-eu-west
-  cloudProvider: aws
-
 automation:
-  enabled: false
-  mode: disabled
-
-production:
-  migration:
-    enabled: true
-  leaderElection:
-    enabled: true
-  components:
-    api:
-      replicas: 2
-    controller:
-      replicas: 1
-
-secrets:
-  existingSecret: greenkube-secrets
-
-postgres:
-  enabled: true
-  persistence:
-    enabled: true
-    size: 20Gi
+  repositoryAllowlist:
+    - acme/gitops
+    - acme/platform-*
 ```
 
-Install with `production-values.yaml` and, when you are ready, enable automation as described in [GitOps automation](automation.md).
-
-Production mode differences:
-
-- The API and controller run separately; enabling automation adds a dedicated worker Deployment (extra plan executors).
-- The API is stateless and runs no background loop, so it can be scaled horizontally. The controller uses the `<release>-leader` Lease, so only one controller runs the loops: collection, scans, discovery, sync observation, plan execution and the automation controller loop.
-- Migrations run as a post-install/post-upgrade Job before the API is considered ready.
-- The automation worker only executes plan operations. It claims them through database leases, so `production.components.automation.replicas` can be raised for large installations.
-- Production never serves anonymous requests: without a session or a valid API key the API answers `401`, and `503` when no authentication can be configured (for example the account store is unavailable and no bootstrap key is set).
-
-### Production API-key handling
-
-For production, create the Secret outside Helm and never put credentials in a values file:
-
-```bash
-export GREENKUBE_API_KEY="$(openssl rand -hex 32)"
-export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
-
-kubectl create namespace greenkube --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n greenkube create secret generic greenkube-secrets \
-  --from-literal=GREENKUBE_API_KEY="${GREENKUBE_API_KEY}" \
-  --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
-  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:${POSTGRES_PASSWORD}@greenkube-postgres:5432/greenkube"
-```
-
-The `DB_CONNECTION_STRING` host must match your PostgreSQL Service (`<release>-postgres` for the bundled database). Add `ELECTRICITY_MAPS_TOKEN`, `WATTNET_EMAIL`, `WATTNET_PASSWORD`, `BOAVIZTA_TOKEN`, or Prometheus credentials as needed.
-
-Then reference it:
+Declare a provider explicitly only for several credentials, a self-hosted URL that cannot be probed, or a
+separate Secret; explicit entries win over inference:
 
 ```yaml
+automation:
+  providers:
+    - id: gitlab-internal
+      type: gitlab
+      apiBaseUrl: https://git.example.com/api/v4
+      secretName: gitlab-token
+      secretKey: token
+      repositoryAllowlist: ["platform/*"]   # optional, defaults to automation.repositoryAllowlist
+```
+
+## Optional: external PostgreSQL
+
+```yaml
+postgres:
+  enabled: false
 secrets:
-  existingSecret: greenkube-secrets
+  dbConnectionString: postgresql://greenkube:<password>@db.example.com:5432/greenkube
+config:
+  db:
+    sslMode: require
 ```
 
-and install:
+With `secrets.existingSecret`, put `DB_CONNECTION_STRING` in that Secret instead. The controller creates and
+migrates the schema (`config.db.schema`, default `public`) under a PostgreSQL advisory lock. SQLite is for
+`greenkube demo` and local development only; the chart no longer offers it (see
+[Upgrading](upgrading.md#from-a-sqlite-install)).
 
-```bash
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  -f production-values.yaml
+## Optional: Ingress and TLS
+
+Route one hostname to the API Service; the dashboard and the API share the origin, so no CORS is needed:
+
+```text
+https://greenkube.example.com/   ->  greenkube-api:8000
 ```
 
-Key-handling rules:
+The proxy must preserve the `/api` prefix and forward the `Authorization`, `Cookie`, `Origin` and `X-CSRF-Token`
+headers. Serve remote access over HTTPS: the session cookie travels with every request. When TLS terminates at
+the Ingress controller, set `config.trustedProxyIps` to its addresses so GreenKube marks the cookie `Secure`, or
+set `auth.session.secureCookie: always`. Set `config.externalUrl` for links in pull requests, and
+`config.rootPath` when served under a sub-path.
 
-- Store the key in a Secret, a password manager, or your secret-management system. Do not commit it.
-- Retrieve it only when needed:
-  ```bash
-  kubectl -n greenkube get secret greenkube-secrets \
-    -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
-  ```
-- Rotate by updating the Secret and restarting the API Deployment:
-  ```bash
-  kubectl -n greenkube create secret generic greenkube-secrets \
-    --from-literal=GREENKUBE_API_KEY="$(openssl rand -hex 32)" \
-    --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
-    --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:${POSTGRES_PASSWORD}@greenkube-postgres:5432/greenkube" \
-    --dry-run=client -o yaml | kubectl apply -f -
+## Optional: high availability
 
-  kubectl -n greenkube rollout restart deploy/greenkube-api
-  ```
-- People do not use this key: they sign in with their account ([Authentication](authentication.md)). Give machines scoped keys from **Settings > API keys** and retire this deprecated bootstrap key.
-- Run the UI and API on the same origin. If they must differ, set `config.corsOrigins` explicitly and make sure the proxy forwards `Authorization` and `OPTIONS`.
+High availability is two numbers, not another install:
 
-### Credentials and GitOps (Argo CD, Flux)
+```yaml
+api:
+  replicas: 2
+controller:
+  replicas: 2       # extra replicas are hot standbys: the Lease hands over within its duration (30 s)
+```
 
-The chart never generates a credential at render time: it uses no `lookup` and no random function, so two
-`helm template` runs with the same values produce identical manifests. This matters for Argo CD, which renders
-charts with `helm template` and cannot see existing Secrets; a chart that generated credentials while rendering
-would rotate the API key and the PostgreSQL password on every sync while the database volume kept the old password.
+API replicas are stateless and share sessions through PostgreSQL. Only the controller holding the
+`greenkube-leader` Lease runs the loops. For very large installations, `worker.replicas` adds dedicated plan
+executors next to the controller.
 
-Credentials come from three places:
+## Optional: SSO and accounts
+
+Browser users sign in with accounts and server-side sessions; machines use scoped API keys created in
+**Settings > API keys** (`read`, `write`, `approve`, `signals:write`, `metrics:read`, `admin`). To provide the first
+admin password yourself (GitOps), set `auth.admin.existingSecret`. SSO through an authentication proxy or OIDC is
+on the roadmap. See [Authentication](authentication.md).
+
+The bootstrap API key `GREENKUBE_API_KEY` (Secret `greenkube`) still works as an admin key for one more minor
+release (deprecated).
+
+## Credentials and GitOps (Argo CD, Flux)
+
+The chart never generates a credential at render time (no `lookup`, no random function), so `helm template`
+output is stable under Argo CD and Flux. Credentials come from three places:
 
 | Source | Secret | Managed by |
 |---|---|---|
-| `secrets.existingSecret` | your Secret | you (recommended for GitOps: create it with External Secrets, Sealed Secrets, SOPS, or `kubectl`) |
-| Values you set (`secrets.*`, `postgres.auth.password`, `config.prometheus.url`, ...) | `<release>-values` | Helm / Argo CD / Flux, as a regular release resource |
-| Generated when not supplied: `GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database | `<release>` | the `<release>-credentials-bootstrap` hook |
+| `secrets.existingSecret` | your Secret | you (recommended for GitOps: External Secrets, Sealed Secrets, SOPS, `kubectl`) |
+| Values you set (`secrets.*`, `postgres.auth.password`, service URLs) | `<release>-values` | Helm / Argo CD / Flux |
+| Generated when not supplied: `GREENKUBE_API_KEY`, the bundled PostgreSQL password | `<release>` | the `<release>-credentials-bootstrap` hook |
 
-The bootstrap hook runs before every install and upgrade (Argo CD runs it as a PreSync hook on every sync). It
-creates the Secret `<release>` only when it is absent and afterwards only adds missing keys, so it never rotates
-a value. That Secret carries no Helm or Argo CD tracking metadata: Argo CD does not report or prune it, and
-`helm uninstall` keeps it, like the PostgreSQL volume whose password it holds. The hook needs `rbac.create=true`;
-with `rbac.create=false`, supply the credentials or use `secrets.existingSecret`.
-
-The hook creates the Secret `<release>` even when you supply every credential in values; it then stays empty.
-It also creates the Secret `<release>-initial-admin` once, with the first admin password, unless you set
-`auth.admin.existingSecret`; with `secrets.existingSecret` it creates only that Secret and never touches yours. The
-API erases the password from it after the first sign-in and keeps it as an empty tombstone, so later runs of the hook
-never issue a new one. The hook's Role
-lets it create Secrets anywhere in the release namespace, because Kubernetes cannot restrict `create` to one
-Secret name; `get` and `patch` are limited to `<release>`. The ServiceAccount, Role and RoleBinding are hook
-resources that are deleted once the hook succeeds.
-
-Before an upgrade rolls any Pod, the `<release>-db-credential-check` hook connects to the bundled PostgreSQL with
-the new credentials and fails the upgrade if the database rejects them. A password set in `postgres.auth.password`
-is checked through a short-lived hook Secret, `<release>-db-credential-check`, because Helm and Argo CD update
-`<release>-values` only after the hooks have run. The check is skipped when no credentials exist yet or when
-PostgreSQL does not answer within about 40 seconds (first install, first Argo CD sync, or a database restart
-during the upgrade). In that case the Pods themselves report `password authentication failed`, as described in
-[Troubleshooting](#troubleshooting).
-
-For a fully declarative setup, set `secrets.existingSecret` and `auth.admin.existingSecret`: the chart then
-renders no Secret and runs no bootstrap hook. See [Production API-key handling](#production-api-key-handling) for the keys it must contain.
-
-Upgrading from 0.3.x keeps the Secret `<release>` created by the earlier chart as-is: the hook finds the existing
-API key and PostgreSQL password and adds nothing.
-
-Breaking change for `rbac.create=false`: chart 0.3.x generated the API key and the PostgreSQL password while
-rendering, so it installed without RBAC. This chart refuses to render that combination. Before you upgrade such an
-install, point the chart at the Secret the earlier chart created, which already holds the generated values:
+The bootstrap hook (an Argo CD PreSync hook) creates `<release>` only when it is absent and afterwards only adds
+missing keys, so it never rotates a value; it also creates `<release>-initial-admin` once. Both survive
+`helm uninstall`, like the PostgreSQL volume. It is the only hook of the chart besides the `helm test` pod: the
+database migrations run in the controller. For a fully declarative setup, set `secrets.existingSecret` and
+`auth.admin.existingSecret`; the chart then renders no Secret and runs no hook.
 
 ```bash
-helm upgrade greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --reuse-values \
-  --set secrets.existingSecret=greenkube
+kubectl -n greenkube create secret generic greenkube-secrets \
+  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
+  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<same password>@greenkube-postgres:5432/greenkube"
+helm upgrade --install greenkube greenkube/greenkube -n greenkube --set secrets.existingSecret=greenkube-secrets
 ```
 
-Alternatively, set `secrets.apiKey` and `postgres.auth.password` to the values stored in that Secret.
-
-`config.boavizta.url` is now empty by default, like the Prometheus and OpenCost URLs, and GreenKube then uses the
-public Boavizta API. A URL you set in values takes precedence over a URL saved by the Settings page of an earlier
-release, which stays in the Secret `<release>` until you remove it. The Settings page no longer edits data sources
-(see [Data sources are configuration as code](configuration.md#data-sources-are-configuration-as-code)).
-
-### Reach the frontend
-
-**Local access with port forwarding**
-
-```bash
-kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
-```
-
-Open <http://localhost:8000>. The API and UI share the origin, so no CORS or frontend build configuration is required. Sign in as `admin` (see [Sign in](#5-sign-in)). Over `localhost` the session cookie works without HTTPS.
-
-**Ingress or Gateway API**
-
-Route the same hostname to the API Service:
-
-```text
-https://greenkube.example.com/            -> greenkube-api:8000
-https://greenkube.example.com/api/v1/...  -> greenkube-api:8000
-```
-
-The proxy must preserve the `/api` prefix, forward the `Authorization`, `Cookie`, `Origin` and `X-CSRF-Token` headers, and allow `GET`, `POST`, `PATCH`, and `DELETE`. Because the UI and API are same-origin, no CORS configuration is required.
-
-Serve remote access over HTTPS: the session cookie and the password travel with every sign-in. When TLS terminates at the Ingress controller, set `config.trustedProxyIps` to its addresses (for example the Pod CIDR, `10.0.0.0/8`) so that GreenKube trusts its `X-Forwarded-Proto: https` and marks the cookie `Secure`, or set `auth.session.secureCookie: always`. Never expose an API key in query strings or logs.
-
-If the installation is served under a sub-path, set `config.rootPath` (for example `/greenkube`) and configure the proxy to forward that prefix.
-
-### Database choices in production
-
-- **Bundled PostgreSQL (default):** Simplest. Persistence is enabled by default with a 10 GiB volume. Set a fixed `postgres.auth.password` only when you manage the Secret yourself; otherwise the chart preserves a generated password across upgrades.
-- **External PostgreSQL:** Set `postgres.enabled=false`. With the chart-managed Secret, provide `secrets.dbConnectionString`; with `secrets.existingSecret`, put `DB_CONNECTION_STRING` in that Secret. Tune `config.db.sslMode`, `config.db.poolMinSize`, `config.db.poolMaxSize`, and `config.db.statementTimeoutMs`.
-- **SQLite:** Acceptable for development only. If you use it, enable `config.persistence.enabled` so the database survives pod restarts. Outside the image (local runs), the Python `sqlite3` library must be SQLite 3.35 or later: the optimization run queue claims runs with `UPDATE ... RETURNING`. The GreenKube image ships 3.40.
-
-## Optional: GitOps automation
-
-Automation is disabled by default. To enable it you need:
-
-1. Argo CD and/or Flux controllers that GreenKube can read.
-2. A CNI that enforces NetworkPolicy (or a cluster where you have validated the renderer sandbox boundary).
-3. A Git provider token in a Kubernetes Secret.
-4. A repository allowlist for that provider.
-
-For provider configuration, Secret handling, PR eligibility, and supported source layouts, see [GitOps automation](automation.md). For production, use `profile: production` and `automation.mode: worker`; keep API/database credentials in a Kubernetes Secret or an external secret manager.
-
-Minimal provider setup:
-
-```bash
-printf 'Git provider token: ' >&2
-IFS= read -r -s GIT_TOKEN
-printf '\n' >&2
-kubectl -n greenkube create secret generic greenkube-git \
-  --from-literal=token="${GIT_TOKEN}" \
-  --dry-run=client -o yaml | kubectl apply -f -
-unset GIT_TOKEN
-```
-
-```yaml
-automation:
-  enabled: true
-  mode: worker          # default in the production profile
-  providers:
-    - id: github-main
-      type: github
-      apiBaseUrl: https://api.github.com
-      secretName: greenkube-git
-      secretKey: token
-      repositoryAllowlist:
-        - "acme/gitops"
-  policy:
-    maxRiskLevel: medium
-    minConfidence: 0.6
-    minSamples: 36
-    minCoverage: 0.5
-  pullRequests:
-    draft: false
-    labels: []
-rendererSandbox:
-  enabled: true
-```
-
-The Secret must be in the Helm release namespace. Credential values are never written to ConfigMaps. Repository allowlists are required; an empty allowlist denies every repository. See [GitOps automation](automation.md) for webhooks, policy, plan lifecycle, rollback, and supported source layouts.
-
-Which processes hold the Git provider tokens: whenever `automation.providers` is set, the provider Secret keys are mounted read-only into the API and into the controller (the `controller` container in the standalone pod, or the controller Deployment in production), even with `automation.enabled=false`, because the controller runs plan expiry, sync observation and pull-request feedback; the optional workers mount them too, since they execute plan operations. To keep the tokens out of every GreenKube pod, leave `automation.providers` empty; to revoke access, rotate or delete the provider Secret.
-
-Verify readiness:
-
-```bash
-# The Secret named after the release; use your secrets.existingSecret name if you set one.
-export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube \
-  -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d)"
-
-curl -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
-  http://localhost:8000/api/v1/automation/status
-```
-
-The **Automation & GitOps** page in the dashboard shows controller capabilities, discovery freshness and coverage, blocked/ambiguous workload bindings, and safe pull-request metadata.
+The Git credentials Secret (`greenkube-git-credentials`, or `automation.credentialsSecret`) is mounted read-only,
+as an optional volume, into the API, the controller and the workers; never into the renderer.
 
 ## Upgrades and uninstallation
 
-`helm upgrade` changes the existing release in place. Keep the release name, namespace, PostgreSQL PVC, and chart-managed Secret; do not uninstall between a source profile and its target. Create the Git provider Secret before changing automation from disabled to enabled. Use `--reuse-values` for the incremental transitions below so unrelated existing overrides are retained.
-
-The following matrix covers standalone/production and automation off/on. For targets with automation enabled, keep your provider configuration and Secret references in a complete values file and change only the target profile and mode.
-
-| Starting configuration | Target configuration | Target values |
-|---|---|---|
-| Standalone, automation off | Production, automation off | `profile=production`, `automation.enabled=false`, `automation.mode=disabled`, and an empty provider list |
-| Standalone, automation off | Standalone, automation on | Provider configuration and Secret references; `automation.enabled=true`, `profile=standalone`, `automation.mode=inline` |
-| Standalone, automation off | Production, automation on | The same provider configuration, with `profile=production`, `automation.mode=worker` |
-| Standalone, automation on | Production, automation off | `profile=production`, `automation.enabled=false`, `automation.mode=disabled`, and an empty provider list |
-| Standalone, automation on | Standalone, automation on | Reapply the same provider values; this is an idempotent upgrade |
-| Standalone, automation on | Production, automation on | Keep the provider configuration; set `profile=production`, `automation.mode=worker` |
-| Production, automation off | Production, automation off | Reapply the same production values; this is an idempotent upgrade |
-| Production, automation off | Standalone, automation on | Add provider configuration and Secret references; set `profile=standalone`, `automation.mode=inline` |
-| Production, automation off | Production, automation on | Add provider configuration and Secret references; set `automation.mode=worker` |
-
-Example: disable automation and switch to the production profile:
-
-```bash
-helm upgrade greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --reuse-values \
-  --set profile=production \
-  --set automation.enabled=false \
-  --set automation.mode=disabled \
-  --set-json automation.providers=[] \
-  --wait \
-  --timeout 10m
-```
-
-Example: enable standalone automation with your provider values:
-
-```bash
-helm upgrade greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --reuse-values \
-  -f automation-values.yaml \
-  --set profile=standalone \
-  --set automation.enabled=true \
-  --set automation.mode=inline \
-  --wait \
-  --timeout 10m
-```
-
-For production automation, use the same provider values file with `--set profile=production --set automation.mode=worker`. Keep existing custom settings in that file when upgrading.
-
-Before relying on an automation upgrade, verify the rollout and runtime readiness:
-
-```bash
-kubectl -n greenkube get pods,jobs
-```
-
-For the standalone profile, check `deployment/greenkube`. For production, check `deployment/greenkube-api` and `deployment/greenkube-controller`; also check `deployment/greenkube-automation` only when automation is enabled. The API health and automation status endpoints must be healthy before using the UI.
-
-```bash
-# Standalone
-kubectl -n greenkube rollout status deployment/greenkube --timeout=10m
-
-# Production
-kubectl -n greenkube rollout status deployment/greenkube-api --timeout=10m
-kubectl -n greenkube rollout status deployment/greenkube-controller --timeout=10m
-# Run only when automation.enabled=true:
-kubectl -n greenkube rollout status deployment/greenkube-automation --timeout=10m
-```
-
-Upgrades never rotate generated API keys or PostgreSQL passwords: the credentials bootstrap hook only adds missing keys to the Secret `<release>`. That Secret also keeps service overrides written by the Settings page of earlier releases; they still apply, values you set in Helm take precedence, and GreenKube no longer writes them.
-
-Upgrading to session sign-in: the first upgrade creates `<release>-initial-admin`; sign in as `admin` with its password and choose a new one. Existing API clients keep working with the bootstrap key `GREENKUBE_API_KEY` (deprecated). The API no longer has RBAC to patch the Secret `<release>` (the former `<release>-secret-writer` Role is removed). If your values set `config.apiAuthMode: api_key` explicitly (or you upgrade with `--reuse-values` from such a release), browser sign-in stays disabled and the UI no longer offers the former API-key dialog: set `config.apiAuthMode: session` to use the UI. API keys that call `POST /api/v1/recommendations/{id}/apply-pr` need the `approve` scope.
-
-Changes to Helm-managed runtime configuration roll the standalone or production component Pods through a ConfigMap checksum. If you update an existing provider Secret or an API key outside Helm, restart the affected API/worker Pods so they reload the changed Secret values.
-
-Uninstall:
+Upgrading from 0.3.x (profiles, `automation.enabled`, SQLite) is covered in [Upgrading](upgrading.md). Within
+0.4, `helm upgrade` with your values file is enough: the controller migrates the schema at startup and the API
+replicas report ready once it is current.
 
 ```bash
 helm uninstall greenkube --namespace greenkube
 ```
 
-The bundled PostgreSQL PVC and the generated-credentials Secret `greenkube` survive uninstallation, so a reinstall reuses the existing password. For a clean reinstall, delete both, then verify whether the storage class removed its PV:
+The PostgreSQL volume and the generated Secret `greenkube` survive uninstallation, so a reinstall reuses the data
+and its password. For a clean reinstall delete both:
 
 ```bash
-kubectl -n greenkube delete pvc data-greenkube-postgres-0 --ignore-not-found --wait=true
-kubectl -n greenkube delete secret greenkube --ignore-not-found
-kubectl -n greenkube get pvc
-kubectl get pv
-```
-
-Only delete a remaining PV after checking its claim reference and reclaim policy. A storage class with reclaim policy `Delete` removes its PV after the claim is released; a class with `Retain` requires the storage administrator's cleanup procedure. If the Secret `greenkube` was deleted but the PostgreSQL PVC was kept, a new password could not authenticate against the existing database, so the credentials bootstrap hook refuses to generate one and the install fails with the recovery command.
-
-Either delete the volume for a clean install, or provide the existing database password before reinstalling:
-
-```bash
-# Clean install (destroys the old data)
 kubectl -n greenkube delete pvc data-greenkube-postgres-0
+kubectl -n greenkube delete secret greenkube greenkube-initial-admin
 ```
 
-```bash
-# Keep the data: recreate the generated-credentials Secret with the old password
-# (the bootstrap hook then only adds a new API key)
-kubectl -n greenkube create secret generic greenkube \
-  --from-literal=POSTGRES_PASSWORD="<the-password-used-by-the-existing-database>" \
-  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<the-password-used-by-the-existing-database>@greenkube-postgres:5432/greenkube"
-```
-
-```bash
-# Or keep the data and manage every credential through an explicit Secret
-kubectl -n greenkube create secret generic greenkube-secrets \
-  --from-literal=GREENKUBE_API_KEY="$(openssl rand -hex 32)" \
-  --from-literal=POSTGRES_PASSWORD="<the-password-used-by-the-existing-database>" \
-  --from-literal=DB_CONNECTION_STRING="postgresql://greenkube:<the-password-used-by-the-existing-database>@greenkube-postgres:5432/greenkube"
-
-helm upgrade --install greenkube greenkube/greenkube \
-  --namespace greenkube \
-  --set secrets.existingSecret=greenkube-secrets
-```
-
-The credentials bootstrap hook rejects an install when a retained PostgreSQL PVC exists without its password, instead of starting a database that cannot authenticate.
+If the Secret was deleted but the volume kept, the bootstrap hook refuses to generate a new password (it could
+not authenticate against the existing database) and prints the recovery command.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Dashboard shows **Sign in to GreenKube** and the initial password is rejected | The initial password was already changed (and erased from `<release>-initial-admin`), or `auth.admin.existingSecret` provides it. | Sign in with the chosen password; see [Authentication](authentication.md#recovery) to reset it. |
-| API returns `401` | No session, or a missing, wrong, revoked or expired API key. | Sign in again in the UI; for scripts send `Authorization: Bearer gk_...` with a valid key. |
-| API returns `403` `CSRF_REJECTED` | A proxy strips `Origin` or `X-CSRF-Token`, or the page is served from another origin. | Forward those headers; list a separate UI origin in `config.corsOrigins`. |
-| API returns `503` with "API authentication is not configured" | `config.environment=production`, the account store is unavailable and no bootstrap key is set. | Check the API logs and database connectivity, or set `GREENKUBE_API_KEY`. |
-| Dashboard shows no data | Prometheus is unreachable or not discovered. | Open **Settings**, check service health, and set `config.prometheus.url` explicitly. |
-| Pod stays in `InvalidImageName` or events show `couldn't parse image name "...:sha256:..."` | A digest was passed through `image.tag`. | Use `--set image.digest=sha256:<64 hex>` instead. `image.repository` must stay a repository name. |
-| Collector/API crash-loop with `password authentication failed for user "greenkube"` | A PostgreSQL PVC from an earlier installation was reused with a different password. | Delete `data-greenkube-postgres-0` for a clean install, or put the password used by the existing database in the Secret `greenkube`, `postgres.auth.password`, or `secrets.existingSecret`. |
-| Install fails in the `<release>-credentials-bootstrap` hook | A retained PostgreSQL PVC has no matching password, or the hook lacks RBAC. | Run `kubectl -n greenkube logs job/<release>-credentials-bootstrap`; it prints the recovery steps. |
-| `helm upgrade` fails with a pre-upgrade hook error for `<release>-db-credential-check` | The database credentials no longer match the existing PostgreSQL volume. | Run `kubectl -n greenkube logs job/<release>-db-credential-check`; it prints the recovery steps. Delete the PVC or provide the original password. |
-| Pod stays in `Init` waiting for PostgreSQL | The bundled database is not ready. | `kubectl -n greenkube logs <pod> -c wait-for-postgres`; check the PostgreSQL pod and PVC. |
-| Migration Job fails | Database credentials or connectivity are wrong. | Read the Job logs; verify `DB_CONNECTION_STRING`, `POSTGRES_PASSWORD`, and the Service name. |
-| Automation page reports discovery unavailable | GreenKube cannot read Kubernetes/GitOps APIs or no controllers are installed. | Check RBAC and controller CRDs; run `POST /api/v1/gitops/refresh`. |
-| Automation is not ready | Worker is disabled, stale, or the renderer is unavailable. | Check `/api/v1/automation/status`, worker logs, and `rendererSandbox`. |
-| No per-container recommendations | Container metrics are unavailable. | Install/enable Metrics Server and verify `metrics.k8s.io`. |
+| `greenkube-api` stays not ready, `/api/v1/health` returns `migrating` | The controller has not migrated the schema yet. | `kubectl -n greenkube logs deploy/greenkube-controller`; a large upgrade can take minutes. |
+| Pods stay in `Init` | The bundled PostgreSQL is not ready. | `kubectl -n greenkube logs <pod> -c wait-for-postgres`; check the PostgreSQL pod and PVC. |
+| Controller crash-loops with `password authentication failed` | A PostgreSQL volume from an earlier install was reused with another password. | Delete `data-greenkube-postgres-0`, or put the original password in the Secret `greenkube` or `secrets.existingSecret`. |
+| `helm install` fails with a values schema error | A value has the wrong type or is out of range. | Fix the value named in the message; see [Configuration](configuration.md). |
+| `helm upgrade` fails with `config.db.type=sqlite is no longer supported` | A 0.3.x SQLite release. | Follow [Upgrading from SQLite](upgrading.md#from-a-sqlite-install). |
+| Setup checklist: delivery `credentials_missing` | No Git credentials are mounted. | Create `greenkube-git-credentials` ([Connect Git](#optional-connect-git)); allow a minute for the kubelet to project it. |
+| Setup checklist: delivery `credentials_host_ambiguous` or `credentials_host_mismatch` | The token is not bound to a host, and repositories use several hosts or a self-hosted one; or the `host` key names a host no repository uses. | Add (or fix) the `host` key of `greenkube-git-credentials`; declare explicit providers for the other hosts. |
+| Setup checklist: `renderer_egress_unenforced` | The network plugin does not enforce NetworkPolicy. | Use a CNI that does, or `--set renderer.egressFirewall.enabled=true`. Previews still work. |
+| Dashboard shows no data | Prometheus is unreachable or not discovered. | Set `config.prometheus.url`. |
+| API returns `401` / `403 CSRF_REJECTED` | No session, a wrong key, or a proxy that strips headers. | Sign in again; forward `Origin` and `X-CSRF-Token`. |
+| Pod in `InvalidImageName` | A digest was passed through `image.tag`. | Use `image.digest=sha256:<64 hex>`. |
 
 ## Try the demo
-
-The Docker image can run a self-contained demo with sample data and no Kubernetes or external services:
 
 ```bash
 docker run --rm -p 9000:9000 greenkube/greenkube demo --no-browser --port 9000
 # Open http://localhost:9000
 ```
 
-The demo uses a temporary SQLite database generated at startup. It includes a two-year sample history, recommendations, nodes, reports, and dashboard summaries.
+The demo uses a temporary SQLite database with a two-year sample history.

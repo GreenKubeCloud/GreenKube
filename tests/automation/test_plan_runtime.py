@@ -399,6 +399,34 @@ async def test_empty_provider_registry_disables_and_clears_removed_providers():
     assert repository.allowlists[configured.config.id] == set()
 
 
+def test_inferred_provider_ids_are_reserved():
+    raw = json.loads(_provider_json())
+    raw["providers"][0]["id"] = "inferred-github.com"
+
+    with pytest.raises(PlanRuntimeConfigurationError, match="reserved"):
+        parse_gitops_providers_json(json.dumps(raw))
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_leaves_inferred_providers_to_the_readiness_reconciler():
+    """F12: a controller restart must not disable the providers inferred from discovery,
+    or previews fail until the next readiness tick."""
+    repository = MemoryGitOpsRepository()
+    inferred = GitOpsProviderConfig(
+        id="inferred-github.com",
+        provider_type="github",
+        secret_name="greenkube-git-credentials",
+        secret_key="token",
+    )
+    await repository.save_provider_config(inferred)
+    repository.allowlists[inferred.id].add("acme/gitops")
+
+    await initialize_gitops_provider_configs(repository=repository, config_json='{"providers":[]}')
+
+    assert repository.configs[inferred.id].enabled is True
+    assert repository.allowlists[inferred.id] == {"acme/gitops"}
+
+
 def test_mounted_secret_resolver_names_the_expected_scoped_mount_without_reading_values():
     resolver = MountedSecretFileResolver(Path("configured-git-secrets"))
     provider = GitOpsProviderConfig(

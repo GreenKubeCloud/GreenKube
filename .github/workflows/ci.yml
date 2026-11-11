@@ -129,7 +129,7 @@ jobs:
             diff -u /tmp/render-1.yaml /tmp/render-2.yaml
           }
           check
-          check --set automation.enabled=true
-          check --set profile=production
-          check -f helm-chart/values-production.yaml
+          check --set api.replicas=2 --set controller.replicas=2
+          check --set worker.replicas=1
+          check --set automation.enabled=true --set profile=production
           check --set secrets.apiKey=ci-api-key --set postgres.auth.password=ci-password

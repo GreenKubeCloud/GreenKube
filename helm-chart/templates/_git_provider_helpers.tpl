@@ -109,7 +109,7 @@ Validate configured Git providers and keep Secret references within the release 
     {{- end -}}
   {{- end -}}
 
-  {{- $allowlist := get $provider "repositoryAllowlist" -}}
+  {{- $allowlist := get $provider "repositoryAllowlist" | default $.Values.automation.repositoryAllowlist -}}
   {{- if or (not (kindIs "slice" $allowlist)) (eq (len $allowlist) 0) -}}
     {{- fail (printf "automation.providers[%d].repositoryAllowlist must contain at least one pattern" $index) -}}
   {{- end -}}
@@ -143,7 +143,7 @@ Serialize the runtime parser's provider schema with Secret references only.
       "type" (get $provider "type")
       "apiBaseUrl" $apiBaseUrl
       "tokenSecret" $tokenSecret
-      "repositories" (get $provider "repositoryAllowlist")
+      "repositories" (get $provider "repositoryAllowlist" | default $.Values.automation.repositoryAllowlist)
   -}}
   {{- if $webBaseUrl -}}
     {{- $_ := set $config "webBaseUrl" $webBaseUrl -}}
@@ -173,6 +173,19 @@ Group Secret keys by Secret name so each referenced Secret is projected once.
   {{- $_ := set $secretKeys $identity (dict "name" $secretName "namespace" $secretNamespace "keys" $keys) -}}
 {{- end -}}
 {{- $sources := list -}}
+{{- /* The default credentials Secret (F12) is optional: creating it later
+activates delivery without a restart, because the kubelet refreshes projected
+Secret volumes. */ -}}
+{{- $defaultSecret := include "greenkube.gitCredentialsSecretName" . -}}
+{{- $defaultIdentity := printf "/%s" $defaultSecret -}}
+{{- $defaultKeys := get $secretKeys $defaultIdentity | default (dict "keys" (list)) -}}
+{{- $keys := get $defaultKeys "keys" | default (list) -}}
+{{- range $key := list "token" "host" "apiBaseUrl" "appId" "privateKey" -}}
+  {{- if not (has $key $keys) -}}
+    {{- $keys = append $keys $key -}}
+  {{- end -}}
+{{- end -}}
+{{- $_ := set $secretKeys $defaultIdentity (dict "name" $defaultSecret "namespace" "" "keys" $keys "optional" true) -}}
 {{- range $identity := keys $secretKeys | sortAlpha -}}
   {{- $secret := get $secretKeys $identity -}}
   {{- $items := list -}}
@@ -186,21 +199,31 @@ Group Secret keys by Secret name so each referenced Secret is projected once.
         "path" $path
       ) -}}
   {{- end -}}
-  {{- $sources = append $sources (dict "secret" (dict "name" (get $secret "name") "items" $items)) -}}
+  {{- $source := dict "name" (get $secret "name") "items" $items -}}
+  {{- if get $secret "optional" -}}
+    {{- $_ := set $source "optional" true -}}
+  {{- end -}}
+  {{- $sources = append $sources (dict "secret" $source) -}}
 {{- end -}}
 {{- toYaml $sources -}}
 {{- end -}}
 
 {{/*
-Read-only mount for the API and automation-capable containers.
+Name of the Secret read for inferred providers (F12).
+*/}}
+{{- define "greenkube.gitCredentialsSecretName" -}}
+{{- .Values.automation.credentialsSecret | default "greenkube-git-credentials" -}}
+{{- end -}}
+
+{{/*
+Read-only mount for the API, controller and worker containers. Always present:
+the default credentials Secret may appear at any time (F12).
 */}}
 {{- define "greenkube.gitProviderVolumeMount" -}}
 {{- include "greenkube.validateAutomationProviders" . -}}
-{{- if .Values.automation.providers }}
 - name: git-provider-secrets
   mountPath: /etc/greenkube/git-providers
   readOnly: true
-{{- end -}}
 {{- end -}}
 
 {{/*
@@ -208,10 +231,8 @@ Projected volume with only the configured Secret keys.
 */}}
 {{- define "greenkube.gitProviderVolume" -}}
 {{- include "greenkube.validateAutomationProviders" . -}}
-{{- if .Values.automation.providers }}
 - name: git-provider-secrets
   projected:
     sources:
       {{- include "greenkube.gitProviderSecretSources" . | nindent 6 }}
-{{- end -}}
 {{- end -}}

@@ -1030,6 +1030,13 @@ class RuntimePlanService:
         return contents
 
     async def approve_plan(self, plan_id: str, digest: str, *, actor: str = "system") -> Plan:
+        # automation.policy.pauseDelivery (F12): the only off switch. Approval is refused
+        # with a policy error; discovery, previews and measurement keep running.
+        if get_config().automation_delivery_paused:
+            raise AutomationPlanError(
+                AutomationErrorCode.DELIVERY_PAUSED,
+                "pull-request delivery is paused by policy (automation.policy.pauseDelivery)",
+            )
         plan = await self._plan_service.read_plan(plan_id)
         additional_excluded_plan_ids: tuple[str, ...] = ()
         policy_source = plan.source if plan is not None else None
@@ -1235,6 +1242,10 @@ def parse_gitops_providers_json(
         if provider.config.id == UNRESOLVED_PROVIDER_ID:
             raise PlanRuntimeConfigurationError(
                 f"provider ID {UNRESOLVED_PROVIDER_ID!r} is reserved for unresolved GitOps sources."
+            )
+        if provider.config.id.startswith("inferred-"):
+            raise PlanRuntimeConfigurationError(
+                "provider IDs starting with 'inferred-' are reserved for providers inferred from discovery."
             )
         if provider.config.id in seen_ids:
             raise PlanRuntimeConfigurationError("GITOPS_PROVIDERS_JSON provider IDs must be unique.")
@@ -1496,7 +1507,9 @@ async def reconcile_gitops_providers(
             await repository.add_provider_allowlist(provider.config.id, pattern)
 
     for provider_id, provider in existing.items():
-        if provider_id in configured_ids:
+        # Inferred providers belong to the readiness reconciler (F12), not to the
+        # configured list: a controller restart must not disable them.
+        if provider_id in configured_ids or provider_id.startswith("inferred-"):
             continue
         if provider.enabled:
             await repository.save_provider_config(
@@ -1588,10 +1601,19 @@ async def create_plan_runtime(
     rollback_renderer: RollbackRenderer | None = None,
     snapshot_limits: SnapshotLimits | None = None,
     connect_db: bool = True,
+    allow_empty: bool = False,
+    reconcile_providers: bool = True,
 ) -> PlanRuntime:
-    """Build repositories, authorized providers, service and plan worker for production."""
+    """Build repositories, authorized providers, service and plan worker for production.
+
+    ``allow_empty`` composes the runtime without explicit providers: automation is
+    always on (F12) and the readiness reconciler infers providers from discovered
+    repositories at run time. ``reconcile_providers=False`` leaves the provider rows
+    to the controller (the API never writes them, and may start before the
+    controller has migrated the schema).
+    """
     raw = config_json if config_json is not None else os.getenv("GITOPS_PROVIDERS_JSON")
-    providers = parse_gitops_providers_json(raw)
+    providers = parse_gitops_providers_json(raw, allow_empty=allow_empty)
     try:
         selected_policy_config = policy_config or AutomationPolicyConfig.from_json(os.getenv("GITOPS_POLICY_JSON"))
     except ValueError as exc:
@@ -1611,7 +1633,8 @@ async def create_plan_runtime(
 
     if gitops_repository is None:
         gitops_repository = _make_gitops_repository(db_manager, config.DB_TYPE)
-    await reconcile_gitops_providers(gitops_repository, providers)
+    if reconcile_providers:
+        await reconcile_gitops_providers(gitops_repository, providers)
 
     if plan_operation_repository is None:
         plan_operation_repository = _make_plan_operation_repository(db_manager, config.DB_TYPE)

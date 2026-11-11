@@ -94,7 +94,7 @@ _APPROVE_PATHS = (
     re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),
     re.compile(r"^/api/v1/recommendations/[^/]+/apply-pr$"),
 )
-_ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users")
+_ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users", "/api/v1/automation/repositories/allowlist")
 # Endpoints any authenticated principal may call for itself.
 SELF_SERVICE_PATHS = frozenset({"/api/v1/auth/me"})
 _SELF_SERVICE_PREFIXES = ("/api/v1/auth/sessions", "/api/v1/auth/password", "/api/v1/auth/logout")

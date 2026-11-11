@@ -1,0 +1,38 @@
+{{- if .Values.rbac.create }}
+{{- /*
+Namespaced rights of the controller: the one Lease used for active/standby
+coordination (leader election is always on, F11). Kubernetes cannot restrict
+"create" by resource name.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "greenkube.fullname" . }}-controller
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ include "greenkube.leaseName" . | quote }}]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "greenkube.fullname" . }}-controller
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "greenkube.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "controller") }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
