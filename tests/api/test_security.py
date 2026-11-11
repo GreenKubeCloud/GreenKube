@@ -18,7 +18,6 @@ from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_node_repository,
     get_recommendation_repository,
-    validate_service_url,
     verify_api_key,
 )
 
@@ -295,24 +294,3 @@ class TestInputValidation:
     def test_namespace_too_long_rejected(self, client):
         resp = client.get(f"/api/v1/metrics/summary?namespace={'a' * 64}")
         assert resp.status_code == 400
-
-    def test_metadata_service_host_rejected(self):
-        with pytest.raises(HTTPException):
-            validate_service_url("http://metadata.google.internal/latest/meta-data")
-
-    def test_service_url_host_must_be_configured_or_allowlisted(self):
-        from greenkube.core.config import Config
-
-        config = Config(
-            PROMETHEUS_URL="http://prometheus:9090",
-            SERVICE_URL_ALLOWLIST="api.example.test",
-        )
-        with patch("greenkube.core.config.get_config", return_value=config):
-            assert validate_service_url("http://prometheus:9090/api/v1/query") == "http://prometheus:9090/api/v1/query"
-            assert validate_service_url("https://api.example.test/v1") == "https://api.example.test/v1"
-            with pytest.raises(HTTPException):
-                validate_service_url("https://untrusted.example.test")
-
-    def test_embedded_credentials_rejected(self):
-        with pytest.raises(HTTPException):
-            validate_service_url("http://user:password@prometheus:9090")

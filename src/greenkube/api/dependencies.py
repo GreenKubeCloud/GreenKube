@@ -8,14 +8,12 @@ concrete implementations.
 """
 
 import hashlib
-import ipaddress
 import logging
 import re
 import secrets
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Optional, Protocol, cast
-from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Query, Request
 
@@ -364,76 +362,6 @@ async def get_gitops_binding_repository() -> GitOpsRepository:
     from greenkube.storage.sqlite.gitops_repository import SQLiteGitOpsRepository
 
     return SQLiteGitOpsRepository(get_db_manager())
-
-
-# Hostnames that resolve to cloud metadata services and must never be configured.
-_BLOCKED_SERVICE_HOSTS = {"metadata", "metadata.google.internal", "metadata.goog"}
-
-
-def validate_service_url(url: str) -> str:
-    """Validate a user-supplied backend service URL.
-
-    Only the configured service hosts and explicit SERVICE_URL_ALLOWLIST hosts
-    are accepted. This prevents a runtime API-key holder from redirecting
-    collectors and their credentials to an arbitrary endpoint.
-    """
-    if not isinstance(url, str) or not url.strip():
-        raise HTTPException(status_code=400, detail="URL must not be empty.")
-    try:
-        parts = urlsplit(url.strip())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="URL is invalid.") from None
-    if parts.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="URL must use the http or https scheme.")
-    if parts.username or parts.password:
-        raise HTTPException(status_code=400, detail="URL must not contain credentials.")
-    try:
-        host = (parts.hostname or "").lower().rstrip(".")
-        _ = parts.port
-    except ValueError:
-        raise HTTPException(status_code=400, detail="URL host or port is invalid.") from None
-    if not host:
-        raise HTTPException(status_code=400, detail="URL must include a host.")
-    if host in _BLOCKED_SERVICE_HOSTS:
-        raise HTTPException(status_code=400, detail="URL host is not allowed.")
-
-    from greenkube.core.config import get_config
-
-    config = get_config()
-    allowed_hosts = {
-        item.strip().lower().rstrip(".")
-        for item in getattr(config, "SERVICE_URL_ALLOWLIST", "").split(",")
-        if item.strip()
-    }
-    for attribute in ("PROMETHEUS_URL", "OPENCOST_API_URL", "BOAVIZTA_API_URL"):
-        configured_url = getattr(config, attribute, None)
-        if not isinstance(configured_url, str) or not configured_url.strip():
-            continue
-        try:
-            configured_host = urlsplit(configured_url).hostname
-        except ValueError:
-            continue
-        if configured_host:
-            allowed_hosts.add(configured_host.lower().rstrip("."))
-    if host not in allowed_hosts:
-        raise HTTPException(
-            status_code=400,
-            detail="URL host must match a configured service host or SERVICE_URL_ALLOWLIST entry.",
-        )
-
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return url
-
-    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-        raise HTTPException(
-            status_code=400,
-            detail="URL must not target loopback, link-local or multicast addresses.",
-        )
-    if not (ip.is_private or ip.is_global):
-        raise HTTPException(status_code=400, detail="URL must target a private or public address.")
-    return url
 
 
 async def get_carbon_repository() -> CarbonIntensityRepository:

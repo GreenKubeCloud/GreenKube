@@ -42,14 +42,3 @@ class HealthCheckResponse(BaseModel):
     status: str = Field(..., description="Overall health status ('ok', 'degraded', 'error').")
     version: str = Field(..., description="Application version.")
     services: Dict[str, ServiceHealth] = Field(default_factory=dict, description="Health status per service.")
-
-
-class ServiceConfigUpdate(BaseModel):
-    """Request body for updating a service URL from the frontend."""
-
-    prometheus_url: Optional[str] = Field(None, description="Prometheus URL to set.")
-    opencost_url: Optional[str] = Field(None, description="OpenCost API URL to set.")
-    electricity_maps_token: Optional[str] = Field(None, description="Electricity Maps API token to set.")
-    boavizta_url: Optional[str] = Field(None, description="Boavizta API URL to set.")
-    wattnet_email: Optional[str] = Field(None, description="Wattnet account email to set.")
-    wattnet_password: Optional[str] = Field(None, description="Wattnet account password to set.")

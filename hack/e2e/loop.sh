@@ -124,22 +124,19 @@ else
     save_json "${prefix}-optimization-run" "${state}"
   }
 
+  # Every recommendation read through the API carries its delivery eligibility
+  # (the same policy evaluator that guards plan creation): no extra call needed.
   eligible_recommendations() {
-    local recs ids id eligibility eligible=()
+    local recs candidates eligible
     recs="$(gk_api GET "/recommendations/active?namespace=${APPS_NAMESPACE}")" || return 1
     save_json "${prefix}-recommendations" "${recs}"
-    ids="$(jq -r --arg name "${workload}" \
-      '.[] | select(.owner_name == $name and .container_name != null
-        and ((.type | ascii_downcase) == "rightsizing_cpu" or (.type | ascii_downcase) == "rightsizing_memory")) | .id' <<<"${recs}")"
-    for id in ${ids}; do
-      eligibility="$(gk_api GET "/recommendations/${id}/apply-pr/eligibility")" || continue
-      save_json "${prefix}-eligibility-${id}" "${eligibility}"
-      if [[ "$(jq -r .eligible <<<"${eligibility}")" == "true" ]]; then
-        eligible+=("${id}")
-      fi
-    done
-    ((${#eligible[@]} > 0)) || return 1
-    printf '%s\n' "${eligible[@]}" >"${E2E_STATE_DIR}/${prefix}-eligible-ids"
+    candidates="$(jq -c --arg name "${workload}" \
+      '[.[] | select(.owner_name == $name and .container_name != null
+        and ((.type | ascii_downcase) == "rightsizing_cpu" or (.type | ascii_downcase) == "rightsizing_memory"))]' <<<"${recs}")"
+    save_json "${prefix}-eligibility" "$(jq -c '[.[] | {id, type, container_name, eligibility}]' <<<"${candidates}")"
+    eligible="$(jq -r '.[] | select(.eligibility.can_open_pr == true) | .id' <<<"${candidates}")"
+    [[ -n "${eligible}" ]] || return 1
+    printf '%s\n' "${eligible}" >"${E2E_STATE_DIR}/${prefix}-eligible-ids"
   }
 
   scan_until_eligible() {
@@ -177,21 +174,21 @@ else
   evidence "${prefix}.approval" ok "$(jq -c '{plan_id, status, operation_id, operation_status}' <<<"${approval}")"
 
   # --- 5. The worker opens the pull request on Gitea ---------------------------------------
+  # The plan reports its operation's state (operation_id, operation_status).
   operation_done() {
-    local op
-    op="$(gk_api GET "/automation/operations/${operation_id}")" || return 1
-    save_json "${prefix}-operation" "${op}"
-    case "$(jq -r .status <<<"${op}")" in
-      succeeded) return 0 ;;
-      failed | cancelled) return 0 ;;
+    local current
+    current="$(gk_api GET "/automation/plans/${plan_id}")" || return 1
+    save_json "${prefix}-operation" "${current}"
+    case "$(jq -r '.operation_status // ""' <<<"${current}")" in
+      succeeded | failed | cancelled) return 0 ;;
     esac
     return 1
   }
-  wait_until "operation ${operation_id}" "${E2E_TIMEOUT_PR}" 5 operation_done ||
-    fail_step pull_request "$(jq -c '{status, attempts, error}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
-  op_status="$(jq -r .status "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+  wait_until "operation ${operation_id} of plan ${plan_id}" "${E2E_TIMEOUT_PR}" 5 operation_done ||
+    fail_step pull_request "$(jq -c '{status, operation_id, operation_status}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+  op_status="$(jq -r .operation_status "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
   [[ "${op_status}" == "succeeded" ]] ||
-    fail_step pull_request "$(jq -c '{status, attempts, error, result}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
+    fail_step pull_request "$(jq -c '{status, operation_id, operation_status}' "${E2E_EVIDENCE_DIR}/${prefix}-operation.json")"
 
   pull_requests="$(gk_api GET /automation/pull-requests)"
   save_json "${prefix}-pull-requests" "${pull_requests}"

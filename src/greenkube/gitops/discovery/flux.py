@@ -177,6 +177,7 @@ def discover_flux_kustomization(
     target_namespace = text(spec.get("targetNamespace"))
     if target_namespace is not None:
         renderer_config["target_namespace"] = target_namespace
+    renderer_config.update(_flux_build_overrides(spec))
 
     candidates: list[WorkloadSource] = []
     seen_inventory_ids: set[str] = set()
@@ -284,6 +285,28 @@ def discover_flux_kustomization(
                 )
             )
     return candidates
+
+
+def _flux_build_overrides(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Report the Kustomization fields that change Flux's build output.
+
+    The Kustomize planner reproduces ``namePrefix``/``nameSuffix`` and guards
+    ``postBuild`` substitution; it fails closed on Flux ``patches``, ``images`` and
+    ``components``, which Flux applies after GreenKube's overlay patch.
+    """
+    overrides: dict[str, Any] = {}
+    for spec_field, key in (("namePrefix", "name_prefix"), ("nameSuffix", "name_suffix")):
+        value = spec.get(spec_field)
+        if value is not None and value != "":
+            overrides[key] = value
+    post_build = spec.get("postBuild")
+    if post_build is not None and post_build != {}:
+        overrides["post_build"] = True
+    for spec_field in ("patches", "images", "components"):
+        value = spec.get(spec_field)
+        if value not in (None, [], {}, ""):
+            overrides[spec_field] = deepcopy(value)
+    return overrides
 
 
 def discover_flux_helm_release_manifest_source(

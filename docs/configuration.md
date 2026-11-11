@@ -32,7 +32,6 @@ image:
 | `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
 | `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `oidc`: reserved (`503`). See [Authentication](authentication.md). |
 | `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
-| `config.serviceUrlAllowlist` | `[]` | Exact service hostnames accepted in addition to the configured Prometheus/OpenCost/Boavizta hosts. |
 | `config.externalUrl` | `""` | `GREENKUBE_EXTERNAL_URL`. Public URL of the GreenKube UI (http(s), no query or fragment), used for deep links in pull requests, commit statuses and status comments. Empty: no links. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |

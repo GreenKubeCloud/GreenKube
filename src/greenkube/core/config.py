@@ -238,7 +238,6 @@ class Config(BaseSettings):
     TRUSTED_HOSTS: str = "*"
     TRUSTED_PROXY_IPS: str = ""
     ENVIRONMENT: str = "development"
-    SERVICE_URL_ALLOWLIST: str = ""
     API_KEY: str = Field(default="", validation_alias="GREENKUBE_API_KEY")
     # session (default): browser sign-in with server-side sessions plus Bearer
     # API keys for machines (F14, F15). api_key: Bearer API keys only.

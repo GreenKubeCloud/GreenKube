@@ -269,9 +269,6 @@ config:
   # api_key: Bearer API keys only, no browser sign-in. See auth.* below and
   # docs/authentication.md.
   apiAuthMode: session
-  # Exact hostnames allowed for service URLs. Existing Prometheus/OpenCost/
-  # Boavizta hosts remain accepted without this list.
-  serviceUrlAllowlist: []
   # Public URL of the GreenKube UI (e.g. https://greenkube.example.com), used for
   # deep links in pull requests and commit statuses. Empty: no links.
   externalUrl: ''

@@ -57,7 +57,6 @@ data:
   LOG_FORMAT: {{ .Values.config.logFormat | quote }}
   ENVIRONMENT: {{ .Values.config.environment | quote }}
   API_AUTH_MODE: {{ .Values.config.apiAuthMode | quote }}
-  SERVICE_URL_ALLOWLIST: {{ join "," (.Values.config.serviceUrlAllowlist | default (list)) | quote }}
   AUTOMATION_ENABLED: {{ and .Values.automation.enabled (eq $automationMode "inline") | quote }}
   AUTOMATION_MODE: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq $automationMode "inline")) | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}

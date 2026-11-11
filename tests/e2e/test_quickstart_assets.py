@@ -54,16 +54,17 @@ def test_quickstart_accelerates_evidence() -> None:
 
 
 @pytest.mark.parametrize(
-    ("path", "name"),
+    ("path", "name", "namespace"),
     [
-        (GITOPS_REPO / "apps" / "oversized-web" / "deployment.yaml", "oversized-web"),
-        (GITOPS_REPO / "flux" / "oversized-worker" / "deployment.yaml", "oversized-worker"),
+        (GITOPS_REPO / "apps" / "oversized-web" / "deployment.yaml", "oversized-web", "greenkube-e2e-apps"),
+        # The Flux sample takes its namespace from the Kustomization's targetNamespace.
+        (GITOPS_REPO / "flux" / "oversized-worker" / "deployment.yaml", "oversized-worker", None),
     ],
 )
-def test_sample_workloads_are_oversized(path: Path, name: str) -> None:
+def test_sample_workloads_are_oversized(path: Path, name: str, namespace: str | None) -> None:
     (deployment,) = [doc for doc in _load(path) if doc["kind"] == "Deployment"]
     assert deployment["metadata"]["name"] == name
-    assert deployment["metadata"]["namespace"] == "greenkube-e2e-apps"
+    assert deployment["metadata"].get("namespace") == namespace
     (container,) = deployment["spec"]["template"]["spec"]["containers"]
     requests = container["resources"]["requests"]
     # Idle containers use a few millicores and MiB: these requests leave room
@@ -84,8 +85,10 @@ def test_gitops_objects_point_at_the_sample_repository() -> None:
     kustomization_path = flux["Kustomization"]["spec"]["path"]
     overlay = yaml.safe_load((GITOPS_REPO / kustomization_path / "kustomization.yaml").read_text())
     assert flux["Kustomization"]["spec"]["sourceRef"]["name"] == flux["GitRepository"]["metadata"]["name"]
-    # GreenKube plans a Flux targetNamespace only when the overlay declares the same namespace.
-    assert overlay["namespace"] == flux["Kustomization"]["spec"]["targetNamespace"]
+    # A plain overlay: Flux's targetNamespace alone places the workload (the planner
+    # renders the overlay as Flux builds it), which is what the e2e loop exercises.
+    assert flux["Kustomization"]["spec"]["targetNamespace"] == "greenkube-e2e-apps"
+    assert "namespace" not in overlay
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
