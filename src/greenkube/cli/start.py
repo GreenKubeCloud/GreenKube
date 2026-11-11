@@ -720,6 +720,7 @@ def _register_controller_loops(
                 PLAN_EXECUTOR_INTERVAL_SECONDS,
                 run_immediately=True,
                 standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+                on_standby=plan_executor.standby,
                 description="Claims and executes queued plan operations (operation leases).",
             )
         )

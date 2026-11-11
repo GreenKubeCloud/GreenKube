@@ -493,6 +493,10 @@ async def test_async_start_registers_automation_loops_only_with_a_plan_runtime(m
         assert "gitops-sync" in registry.names
         assert "automation-controller" in registry.names
         assert ("plan-executor" in registry.names) is delivery, mode
+        if delivery:
+            executor_spec = registry.specs["plan-executor"]
+            # A standby controller stops reporting itself as an up executor.
+            assert executor_spec.on_standby == executor_spec.func.__self__.standby
         controller = registry.specs["automation-controller"].func.__self__
         assert controller.delivery_enabled is delivery
         assert registry.specs["automation-controller"].leader_only

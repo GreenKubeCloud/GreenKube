@@ -222,6 +222,28 @@ async def test_without_delivery_only_expiry_and_retention_run():
 
 
 @pytest.mark.asyncio
+async def test_tick_does_not_touch_the_lease_when_no_step_is_due():
+    calls: list[str] = []
+    clock = _Clock()
+    leases = _Leases()
+    controller = _controller(calls, delivery=False, leases=leases, clock=clock)
+
+    await controller.tick()
+    events_after_first_tick = list(leases.events)
+    clock.advance(5)
+    idle = await controller.tick()
+
+    assert not idle.lease_acquired
+    assert set(idle.steps.values()) == {"not_due"}
+    assert leases.events == events_after_first_tick
+    assert calls == ["operations", "expiry", "retention"]
+
+    clock.advance(60)
+    assert (await controller.tick()).lease_acquired
+    assert leases.events.count("acquire") == 2
+
+
+@pytest.mark.asyncio
 async def test_a_failed_step_does_not_stop_the_others_and_fails_the_loop_tick():
     calls: list[str] = []
     controller = _controller(calls, fail={"operations"})
@@ -295,6 +317,26 @@ async def test_plan_executor_drains_a_bounded_batch_with_one_identity():
     assert AUTOMATION_WORKER_UP._value.get() == 1
     assert len(set(worker_ids)) == 1
     executor.close()
+    assert AUTOMATION_WORKER_UP._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_standby_controller_stops_reporting_its_executor_as_up():
+    from greenkube.core.observability import AUTOMATION_WORKER_UP
+
+    class Worker:
+        async def process_once(self, worker_id):
+            return False
+
+    state = {"leader": True}
+    executor = PlanExecutor(Worker())
+    registry = LoopRegistry(leader=lambda: state["leader"])
+    registry.register(LoopSpec("plan-executor", executor.tick, 5, on_standby=executor.standby))
+
+    assert await registry.run_once("plan-executor") == "success"
+    assert AUTOMATION_WORKER_UP._value.get() == 1
+    state["leader"] = False
+    assert await registry.run_once("plan-executor") == "skipped"
     assert AUTOMATION_WORKER_UP._value.get() == 0
 
 

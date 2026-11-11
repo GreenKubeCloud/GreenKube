@@ -190,6 +190,12 @@ class AutomationController:
 
     async def tick(self) -> AutomationControllerSummary:
         summary = AutomationControllerSummary()
+        steps = self._steps()
+        if not any(self._due(step) for step, _ in steps):
+            # Nothing is due (e.g. delivery off between two expiry passes): do not
+            # write the lease row every 5 s for nothing.
+            summary.steps = {step: "not_due" for step, _ in steps}
+            return summary
         lease = await self.lease_repository.try_acquire_pr_polling_lease(
             self.owner_id,
             lease_seconds=self.lease_seconds,
@@ -199,7 +205,7 @@ class AutomationController:
             return summary
         summary.lease_acquired = True
         try:
-            for step, run in self._steps():
+            for step, run in steps:
                 if not self._due(step):
                     summary.steps[step] = "not_due"
                     continue
@@ -335,6 +341,10 @@ class PlanExecutor:
                 break
             processed += 1
         return processed
+
+    def standby(self) -> None:
+        """This controller no longer holds the Lease: it executes nothing."""
+        set_automation_worker_up(False)
 
     def close(self) -> None:
         set_automation_worker_up(False)
