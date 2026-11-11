@@ -237,8 +237,6 @@ data:
   CHANGE_MEASUREMENT_MIN_COVERAGE: {{ .minCoverage | default 0.8 | quote }}
   CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: {{ .bootstrapSamples | default 1000 | int | quote }}
   CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
-  CHANGE_DRIFT_THRESHOLD: {{ .driftThreshold | default 0.5 | quote }}
-  CHANGE_DRIFT_SUSTAINED_DAYS: {{ .driftSustainedDays | default 3 | int | quote }}
   {{- end }}
   {{- end }}
 

@@ -417,12 +417,6 @@ tests:
       - equal:
           path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
           value: "0.02"
-      - equal:
-          path: data.CHANGE_DRIFT_THRESHOLD
-          value: "0.5"
-      - equal:
-          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
-          value: "3"
 
   - it: should reflect custom change measurement settings
     set:
@@ -430,15 +424,7 @@ tests:
       config.recommendations.changeMeasurement.postWindowDays: 14
       config.recommendations.changeMeasurement.warmupHours: 0
       config.recommendations.changeMeasurement.epsilonRatio: 0
-      config.recommendations.changeMeasurement.driftThreshold: 0.3
-      config.recommendations.changeMeasurement.driftSustainedDays: 5
     asserts:
-      - equal:
-          path: data.CHANGE_DRIFT_THRESHOLD
-          value: "0.3"
-      - equal:
-          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
-          value: "5"
       - equal:
           path: data.CHANGE_MEASUREMENT_ENABLED
           value: "false"
