@@ -66,6 +66,17 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $root.Values.config.api.port }}
+    {{- if $root.Values.sources.krr.job.enabled }}
+    # Allow the optional KRR job to push its report (docs/sources/krr.md).
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
+              app.kubernetes.io/component: krr
+      ports:
+        - protocol: TCP
+          port: {{ $root.Values.config.api.port }}
+    {{- end }}
     {{- end }}
     {{- if $workerIngress }}
     - from:

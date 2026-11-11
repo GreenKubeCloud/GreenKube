@@ -1,0 +1,162 @@
+{
+  "scans": [
+    {
+      "object": {
+        "cluster": "prod-eu",
+        "name": "api",
+        "container": "web",
+        "pods": [
+          {"name": "api-7d9f8b6c5-x2k4p", "deleted": false},
+          {"name": "api-7d9f8b6c5-q8w2z", "deleted": false}
+        ],
+        "hpa": null,
+        "namespace": "shop",
+        "kind": "Deployment",
+        "allocations": {
+          "requests": {"cpu": 1.0, "memory": 1073741824.0},
+          "limits": {"cpu": null, "memory": 1073741824.0},
+          "info": {}
+        },
+        "warnings": [],
+        "labels": {"app": "api"},
+        "annotations": {}
+      },
+      "recommended": {
+        "requests": {
+          "cpu": {"value": 0.25, "severity": "CRITICAL"},
+          "memory": {"value": 536870912.0, "severity": "WARNING"}
+        },
+        "limits": {
+          "cpu": {"value": null, "severity": "OK"},
+          "memory": {"value": 536870912.0, "severity": "WARNING"}
+        },
+        "info": {"cpu": null, "memory": null}
+      },
+      "severity": "CRITICAL"
+    },
+    {
+      "object": {
+        "cluster": "prod-eu",
+        "name": "postgres",
+        "container": "postgres",
+        "pods": [{"name": "postgres-0", "deleted": false}],
+        "hpa": null,
+        "namespace": "shop",
+        "kind": "StatefulSet",
+        "allocations": {
+          "requests": {"cpu": 0.5, "memory": 268435456.0},
+          "limits": {"cpu": null, "memory": 268435456.0},
+          "info": {}
+        },
+        "warnings": ["NoPrometheusCPUMetrics"],
+        "labels": {},
+        "annotations": {},
+        "future_field": {"added_by": "a newer KRR"}
+      },
+      "recommended": {
+        "requests": {
+          "cpu": {"value": "?", "severity": "UNKNOWN"},
+          "memory": {"value": 805306368.0, "severity": "CRITICAL"}
+        },
+        "limits": {
+          "cpu": {"value": null, "severity": "UNKNOWN"},
+          "memory": {"value": 805306368.0, "severity": "CRITICAL"}
+        },
+        "info": {"cpu": "Not enough data", "memory": "OOMKill detected"}
+      },
+      "severity": "CRITICAL"
+    },
+    {
+      "object": {
+        "cluster": "prod-eu",
+        "name": "node-exporter",
+        "container": "exporter",
+        "pods": [{"name": "node-exporter-abcde", "deleted": false}],
+        "hpa": null,
+        "namespace": "monitoring",
+        "kind": "DaemonSet",
+        "allocations": {
+          "requests": {"cpu": 0.1, "memory": 52428800.0},
+          "limits": {"cpu": null, "memory": null},
+          "info": {}
+        },
+        "warnings": [],
+        "labels": {},
+        "annotations": {}
+      },
+      "recommended": {
+        "requests": {
+          "cpu": {"value": 0.1, "severity": "GOOD"},
+          "memory": {"value": 41943040.0, "severity": "OK"}
+        },
+        "limits": {
+          "cpu": {"value": null, "severity": "GOOD"},
+          "memory": {"value": 41943040.0, "severity": "OK"}
+        },
+        "info": {"cpu": null, "memory": null}
+      },
+      "severity": "OK"
+    },
+    {
+      "object": {
+        "cluster": "prod-eu",
+        "name": "nightly-report",
+        "container": "report",
+        "pods": [],
+        "hpa": null,
+        "namespace": "batch",
+        "kind": "CronJob",
+        "allocations": {
+          "requests": {"cpu": null, "memory": null},
+          "limits": {"cpu": null, "memory": null},
+          "info": {}
+        },
+        "warnings": [],
+        "labels": {},
+        "annotations": {}
+      },
+      "recommended": {
+        "requests": {
+          "cpu": {"value": 0.05, "severity": "WARNING"},
+          "memory": {"value": 104857600.0, "severity": "WARNING"}
+        },
+        "limits": {
+          "cpu": {"value": null, "severity": "WARNING"},
+          "memory": {"value": 104857600.0, "severity": "WARNING"}
+        },
+        "info": {"cpu": null, "memory": null}
+      },
+      "severity": "WARNING"
+    }
+  ],
+  "score": 46,
+  "resources": ["cpu", "memory"],
+  "description": "[b]Simple Strategy[/b]\n\nCPU request: 95.0% percentile, limit: unset\nMemory request: max + 15.0%, limit: max + 15.0%\nHistory: 336.0 hours\nStep: 1.25 minutes",
+  "strategy": {
+    "name": "simple",
+    "settings": {
+      "history_duration": 336.0,
+      "timeframe_duration": 1.25,
+      "cpu_percentile": 95.0,
+      "memory_buffer_percentage": 15.0,
+      "points_required": 100,
+      "allow_hpa": false,
+      "use_oomkill_data": true,
+      "oom_memory_buffer_percentage": 25.0
+    }
+  },
+  "errors": [],
+  "clusterSummary": {},
+  "config": {
+    "quiet": false,
+    "verbose": false,
+    "clusters": null,
+    "namespaces": "*",
+    "resources": "*",
+    "selector": null,
+    "cpu_min_value": 10,
+    "memory_min_value": 100,
+    "format": "json",
+    "strategy": "simple"
+  }
+}

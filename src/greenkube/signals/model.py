@@ -328,6 +328,10 @@ class SourceSignal(BaseModel):
     source_version: Optional[str] = None
     #: Connector-specific reference (``ns/vpa-name``, a KRR run id...).
     source_ref: Optional[str] = None
+    #: Recommendation engine behind the proposal when several sources share one
+    #: (``vpa`` for VPA and Goldilocks VPAs). Consensus counts one vote per engine
+    #: family; None means the source is its own engine (see :attr:`engine`).
+    engine_family: Optional[str] = Field(None, min_length=1, max_length=64)
     target: TargetRef
     capability: Capability
     #: Finding kind; GreenKube sources use the v1 recommendation type (``RIGHTSIZING_CPU``...).
@@ -358,3 +362,8 @@ class SourceSignal(BaseModel):
     @property
     def target_key(self) -> str:
         return self.target.key()
+
+    @property
+    def engine(self) -> str:
+        """Engine family consensus votes by: ``engine_family``, else the source id."""
+        return self.engine_family or self.source_id

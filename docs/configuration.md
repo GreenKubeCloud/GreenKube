@@ -154,18 +154,37 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 ### Recommendation sources (`sources`)
 
-Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa`, `greenkube.nodepool` and third-party plugins. `GET /api/v1/sources` lists them with their status. See [Recommendation sources](sources.md).
+Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa` (with Goldilocks provenance), `greenkube.nodepool`, the signal-only connectors `krr`, `kubecost` and `push`, and third-party plugins. `GET /api/v1/sources` lists them with their status. See [Recommendation sources](sources.md).
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
 | `sources.pluginsEnabled` | `SOURCES_PLUGINS_ENABLED` | `true` | Load third-party sources installed in the image and registered under the `greenkube.sources` Python entry points. A plugin that fails to load is reported in `GET /api/v1/sources` (`problems`) and never stops the other sources. |
 | `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected) and overrides `config.recommendations.vpaEnabled`/`karpenterEnabled`; other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. |
 
+| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:write`) and `config.api.enabled`. |
+| `sources.krr.job.schedule` | — | `17 3 * * *` | Cron schedule of the KRR job. |
+| `sources.krr.job.strategy` | — | `simple` | KRR strategy (`krr <strategy>`). |
+| `sources.krr.job.image.*` | — | `robustadev/krr` v1.31.1 by digest | KRR image; `digest` is required (`sha256:<64 hex>`). |
+| `sources.krr.job.prometheusUrl` | — | `""` | Prometheus URL passed to KRR (`-p`); empty lets KRR discover it. |
+| `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
+| `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
+| `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
+| `sources.krr.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's ServiceAccount and read-only ClusterRole, or use an existing ServiceAccount. |
+
+Connector settings in `sources.settings` (all optional, validated by each source):
+
+| Source | Keys |
+|---|---|
+| `krr`, `push` | `max_age_hours` (default `168`): pushed signals older than this are no longer used. |
+| `kubecost` | `url` (default: the chart service `kubecost-cost-analyzer.kubecost`, probed in-cluster only), `version` (`"2"`/`"3"`, probed), `window` (`7d`), `algorithm_cpu`/`algorithm_ram` (`max`/`quantile`), `q_cpu`/`q_ram`, `target_cpu_utilization`/`target_ram_utilization` (`0.7`), `filter`, `cluster_id` (required when Kubecost reports several clusters), `abandoned_workloads`/`node_group_sizing` (`true`), `paths` (per-endpoint overrides), `timeout_seconds` (`30`). See [Kubecost](sources/kubecost.md). |
+
 ```yaml
 sources:
   settings:
     greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off (its active advice goes stale)
     vpa: { enabled: auto }
+    kubecost: { url: "http://kubecost-cost-analyzer.kubecost:9090", cluster_id: "prod-eu" }
+    push: { max_age_hours: 72 }
 ```
 
 ### Impact Model (`impact`)

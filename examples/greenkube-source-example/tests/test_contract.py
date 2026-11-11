@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from greenkube_source_example import FileSource, FileSourceSettings
+from greenkube_source_example import FileSource, FileSourceSettings  # pyrefly: ignore[missing-import]
 
 from greenkube.core.config import Config
 from greenkube.signals import CollectContext, ContainerResourcesProposal, SourceDeps, TargetRef, WorkloadInventory

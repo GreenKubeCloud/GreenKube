@@ -27,6 +27,8 @@ class NodePoolInfo:
     name: str
     node_names: List[str] = field(default_factory=list)
     consolidation_policy: Optional[str] = None
+    #: ``spec.disruption.consolidateAfter`` (``30s``, ``1h``, ``Never``).
+    consolidate_after: Optional[str] = None
     limits: dict = field(default_factory=dict)
     requirements: List[dict] = field(default_factory=list)
     status_resources: dict = field(default_factory=dict)
@@ -101,11 +103,15 @@ class KarpenterCollector:
             spec = item.get("spec") or {}
             disruption = spec.get("disruption") or {}
             status = item.get("status") or {}
+            template_spec = (spec.get("template") or {}).get("spec") or {}
+            consolidate_after = disruption.get("consolidateAfter")
             pools[name] = NodePoolInfo(
                 name=name,
                 consolidation_policy=disruption.get("consolidationPolicy"),
+                consolidate_after=str(consolidate_after) if consolidate_after is not None else None,
                 limits=spec.get("limits") or {},
-                requirements=spec.get("requirements") or [],
+                # NodePool requirements live under spec.template.spec (v1 and v1beta1).
+                requirements=template_spec.get("requirements") or spec.get("requirements") or [],
                 status_resources=status.get("resources") or {},
             )
 

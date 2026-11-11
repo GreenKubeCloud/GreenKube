@@ -6,7 +6,9 @@
 * Karpenter NodePools (consolidation policy and disruption budgets);
 * nodes (Karpenter pool labels, ``do-not-disrupt`` / ``scale-down-disabled`` annotations);
 * running pods (``do-not-disrupt`` / ``safe-to-evict`` annotations, labels for PDB selectors);
-* PodDisruptionBudgets (``status.disruptionsAllowed``).
+* PodDisruptionBudgets (``status.disruptionsAllowed``);
+* when Karpenter runs: NodeClaims (claim → pool) and the ``DisruptionBlocked`` /
+  ``Unconsolidatable`` events of NodePools, NodeClaims and Nodes (roadmap G5).
 
 Every read is read-only and already allowed by the chart's ClusterRole. A read
 that fails (missing CRD, RBAC, timeout) is reported in
@@ -18,14 +20,17 @@ the previous realization context stays in use.
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api, get_custom_objects_api, get_policy_v1_api
 from greenkube.impact.realization import (
+    BLOCKING_KARPENTER_EVENTS,
+    NOTED_KARPENTER_EVENTS,
     UNAVAILABLE_CLUSTER_AUTOSCALER,
     UNAVAILABLE_KARPENTER_POOLS,
     ClusterAutoscalerObservation,
+    KarpenterEventObservation,
     KarpenterPoolObservation,
     NodeObservation,
     PdbObservation,
@@ -39,6 +44,7 @@ CA_STATUS_NAMESPACE = "kube-system"
 CA_STATUS_CONFIGMAP = "cluster-autoscaler-status"
 KARPENTER_GROUP = "karpenter.sh"
 KARPENTER_VERSIONS = ("v1", "v1beta1")
+UNAVAILABLE_KARPENTER_EVENTS = "Karpenter events"
 
 
 def _timeout() -> Optional[float]:
@@ -126,12 +132,14 @@ class AutoscalerCollector:
         pods = await self._pods(core, unavailable)
         pdbs = await self._pdbs(unavailable)
         karpenter_pools = await self._karpenter_pools(unavailable)
+        karpenter_events = await self._karpenter_events(core, unavailable) if karpenter_pools else []
         return RealizationInputs(
             nodes=nodes,
             pods=pods,
             pdbs=pdbs,
             karpenter_pools=karpenter_pools,
             cluster_autoscaler=cluster_autoscaler,
+            karpenter_events=karpenter_events,
             unavailable=tuple(unavailable),
         )
 
@@ -200,3 +208,70 @@ class AutoscalerCollector:
             items = (result or {}).get("items", []) if isinstance(result, dict) else []
             return [pool for pool in (karpenter_pool_from_item(item) for item in items) if pool]
         return []
+
+    async def _karpenter_claim_pools(self) -> Dict[str, str]:
+        """NodeClaim name → NodePool (``karpenter.sh/nodepool`` label); empty when unreadable."""
+        api = await get_custom_objects_api()
+        if api is None:
+            return {}
+        for version in KARPENTER_VERSIONS:
+            try:
+                result = await api.list_cluster_custom_object(
+                    group=KARPENTER_GROUP, version=version, plural="nodeclaims", _request_timeout=_timeout()
+                )
+            except Exception as error:
+                if getattr(error, "status", None) == 404:
+                    continue
+                logger.debug("Could not list Karpenter NodeClaims (%s): %s", version, error)
+                return {}
+            items = (result or {}).get("items", []) if isinstance(result, dict) else []
+            return karpenter_claim_pools(items)
+        return {}
+
+    async def _karpenter_events(self, core: Any, unavailable: List[str]) -> Optional[List[KarpenterEventObservation]]:
+        claim_pools = await self._karpenter_claim_pools()
+        events: List[KarpenterEventObservation] = []
+        for reason in sorted(BLOCKING_KARPENTER_EVENTS | NOTED_KARPENTER_EVENTS):
+            try:
+                event_list = await core.list_event_for_all_namespaces(
+                    field_selector=f"reason={reason}", _request_timeout=_timeout()
+                )
+            except Exception as error:
+                logger.warning("Could not list Karpenter %s events: %s", reason, error)
+                unavailable.append(UNAVAILABLE_KARPENTER_EVENTS)
+                return None
+            for item in getattr(event_list, "items", None) or []:
+                event = karpenter_event_from_object(item, claim_pools)
+                if event is not None:
+                    events.append(event)
+        return events
+
+
+def karpenter_claim_pools(items: List[Any]) -> Dict[str, str]:
+    pools: Dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or {}
+        name = metadata.get("name")
+        pool = (metadata.get("labels") or {}).get("karpenter.sh/nodepool")
+        if name and pool:
+            pools[str(name)] = str(pool)
+    return pools
+
+
+def karpenter_event_from_object(event: Any, claim_pools: Dict[str, str]) -> Optional[KarpenterEventObservation]:
+    """A Karpenter event about a NodePool, NodeClaim or Node; None for other objects."""
+    kind = _get(event, "involved_object", "kind") or _get(event, "involvedObject", "kind")
+    name = _get(event, "involved_object", "name") or _get(event, "involvedObject", "name")
+    reason = _get(event, "reason")
+    if not kind or not name or not reason or kind not in ("NodePool", "NodeClaim", "Node"):
+        return None
+    pool = str(name) if kind == "NodePool" else claim_pools.get(str(name)) if kind == "NodeClaim" else None
+    return KarpenterEventObservation(
+        reason=str(reason),
+        kind=str(kind),
+        name=str(name),
+        pool=pool,
+        message=str(_get(event, "message") or "")[:300],
+    )

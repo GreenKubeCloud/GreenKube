@@ -114,7 +114,7 @@ def required_scope(method: str, path: str) -> str | None:
         return None
     if path.startswith(_ADMIN_PREFIXES):
         return Scope.ADMIN.value
-    if path.startswith("/api/v1/signals") and method not in SAFE_METHODS:
+    if (path.startswith("/api/v1/signals") or path == "/api/v1/sources/krr/reports") and method not in SAFE_METHODS:
         return Scope.SIGNALS_WRITE.value
     if method in SAFE_METHODS:
         return Scope.READ.value

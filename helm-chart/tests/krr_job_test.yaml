@@ -1,0 +1,160 @@
+suite: krr job (roadmap G2)
+templates:
+  - templates/krr-cronjob.yaml
+  - templates/clusterrole.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: renders nothing by default
+    templates:
+      - templates/krr-cronjob.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: requires an API key Secret
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "sources.krr.job.apiKeySecret.name is required"
+
+  - it: requires a digest-pinned KRR image
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+      sources.krr.job.image.digest: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "sources.krr.job.image.digest must pin the KRR image"
+
+  - it: requires the API
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+      config.api.enabled: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "requires config.api.enabled"
+
+  - it: runs KRR pinned by digest and uploads with a signals:write key
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+      sources.krr.job.prometheusUrl: http://prometheus.monitoring:9090
+      sources.krr.job.extraArgs: ["--namespace", "shop"]
+    asserts:
+      - hasDocuments:
+          count: 4
+      - isKind:
+          of: CronJob
+        documentIndex: 3
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.initContainers[0].image
+          pattern: "^robustadev/krr@sha256:[0-9a-f]{64}$"
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.initContainers[0].command
+          value:
+            - python
+            - krr.py
+            - simple
+            - -f
+            - json
+            - --fileoutput
+            - /report/krr.json
+            - --logtostderr
+            - -p
+            - http://prometheus.monitoring:9090
+            - --namespace
+            - shop
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[0].value
+          value: http://RELEASE-NAME-greenkube-api.NAMESPACE.svc:8000/api/v1/sources/krr/reports
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value:
+            name: gk-krr
+            key: api-key
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-greenkube-krr
+        documentIndex: 3
+
+  - it: gives KRR a read-only ClusterRole without Secrets
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+    asserts:
+      - isKind:
+          of: ClusterRole
+        documentIndex: 1
+      - notContains:
+          path: rules[0].resources
+          content: secrets
+        documentIndex: 1
+      - notContains:
+          path: rules[0].verbs
+          content: create
+        documentIndex: 1
+
+  - it: can use an existing ServiceAccount
+    templates:
+      - templates/krr-cronjob.yaml
+    set:
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+      sources.krr.job.rbac.create: false
+      sources.krr.job.serviceAccountName: krr-reader
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: krr-reader
+
+  - it: lets GreenKube read Karpenter events for the realization factor
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["events"]
+            verbs: ["list"]
+
+  - it: lets the KRR job reach the API through the NetworkPolicy
+    templates:
+      - templates/networkpolicy.yaml
+    set:
+      monitoring.networkPolicy.enabled: true
+      sources.krr.job.enabled: true
+      sources.krr.job.apiKeySecret.name: gk-krr
+    asserts:
+      - contains:
+          path: spec.ingress
+          content:
+            from:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: greenkube
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: krr
+            ports:
+              - protocol: TCP
+                port: 8000
+        documentIndex: 0

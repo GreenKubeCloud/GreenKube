@@ -135,7 +135,11 @@ class TestVpaContract(SourceContract):
             memory_target_bytes=512 * MIB,
         )
         connector = VpaSource(Config(), collector=_FakeVpaCollector([vpa]))
-        return VpaSignalSource(SourceSettings(), deps(), connector=connector)
+
+        async def no_goldilocks_namespaces():
+            return []
+
+        return VpaSignalSource(SourceSettings(), deps(), connector=connector, namespace_lister=no_goldilocks_namespaces)
 
     def make_context(self):
         return collect_context(_vpa_context())
@@ -192,7 +196,8 @@ class TestNodePoolContract(SourceContract):
 
         assert type(source).id == "greenkube.nodepool"
         assert type(source).tier == SourceTier.NATIVE
-        [signal] = batch.signals
+        # The consolidation signal; NodePool policy advice (G5) comes as signal-only advisories.
+        [signal] = [s for s in batch.signals if s.kind == "OVERPROVISIONED_NODE"]
         assert signal.provenance.origin == SignalOrigin.NATIVE
         assert signal.target.kind == "NodePool" and signal.target.name == "default"
         assert signal.target.key() == "contract-cluster/karpenter.sh.NodePool/_/default"

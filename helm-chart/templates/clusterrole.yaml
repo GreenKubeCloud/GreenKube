@@ -155,4 +155,10 @@ rules:
   verbs:
   - get
   - list
+  # Karpenter DisruptionBlocked/Unconsolidatable events feed the realization factor. Read-only.
+- apiGroups: [""]
+  resources:
+  - events
+  verbs:
+  - list
   {{- end }}

@@ -29,6 +29,8 @@ NATIVE_IDS = [
     "greenkube.orphaned_pv",
     "greenkube.orphaned_lb",
 ]
+#: Signal-only connectors (roadmap G), after the native analyzers.
+CONNECTOR_IDS = ["krr", "kubecost", "push"]
 
 
 class AcmeSettings(SourceSettings):
@@ -70,15 +72,20 @@ def _config(**overrides) -> Config:
 class TestBuiltins:
     def test_builtins_in_execution_order(self):
         registry, configured = build_source_registry(Config(), entry_points=lambda: [])
-        assert [item.id for item in configured] == ["vpa", "greenkube.nodepool", *NATIVE_IDS]
+        assert [item.id for item in configured] == ["vpa", "greenkube.nodepool", *NATIVE_IDS, *CONNECTOR_IDS]
         assert all(item.descriptor.origin == "builtin" for item in configured)
         assert registry.problems == []
 
     def test_engine_runs_the_sdk_sources_by_default(self):
         engine = OptimizationEngine(config=Config(), sources=build_signal_sources(Config(), entry_points=lambda: []))
-        assert [source.source_id for source in engine.sources] == ["vpa", "greenkube.nodepool", *NATIVE_IDS]
-        # v1 run records still count three sources: vpa, karpenter and greenkube.
-        assert engine.source_group_count == 3
+        assert [source.source_id for source in engine.sources] == [
+            "vpa",
+            "greenkube.nodepool",
+            *NATIVE_IDS,
+            *CONNECTOR_IDS,
+        ]
+        # Run records count vpa, karpenter, greenkube and each signal-only connector.
+        assert engine.source_group_count == 3 + len(CONNECTOR_IDS)
 
     def test_legacy_flags_disable_vpa_and_the_nodepool_heuristic(self):
         config = _config(RECOMMENDATION_VPA_ENABLED=False, RECOMMENDATION_KARPENTER_ENABLED=False)
@@ -88,7 +95,7 @@ class TestBuiltins:
         assert enabled["greenkube.nodepool"] == EnabledMode.FALSE
         assert enabled["greenkube.rightsizing_cpu"] == EnabledMode.AUTO
         ids = [s.source_id for s in build_signal_sources(config, entry_points=lambda: [])]
-        assert ids == NATIVE_IDS
+        assert ids == [*NATIVE_IDS, *CONNECTOR_IDS]
 
     def test_sources_config_overrides_flags_and_disables_one_analyzer(self):
         config = _config(

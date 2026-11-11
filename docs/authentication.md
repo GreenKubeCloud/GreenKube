@@ -147,7 +147,7 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 | `read` | Every `GET` under `/api/v1` and `/api/v2` (changes and measurements) |
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
 | `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` and the compatibility endpoint `POST /api/v1/recommendations/{id}/apply-pr` (including its `dry_run` form) |
-| `signals:write` | The push API for recommendation signals (`/api/v1/signals`, roadmap G6) |
+| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)) and `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 

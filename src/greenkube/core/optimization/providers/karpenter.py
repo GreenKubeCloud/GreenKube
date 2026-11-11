@@ -1,14 +1,27 @@
 # src/greenkube/core/optimization/providers/karpenter.py
-"""Karpenter recommendation source (Phase 6).
+"""Karpenter recommendation source (Phase 6) and NodePool policy advice (roadmap G5).
 
 Reads Karpenter NodePools and NodeClaims and emits node-pool consolidation
 recommendations when a multi-node pool is consistently under-utilized. The
 connector is optional: it degrades gracefully when the Karpenter CRDs are not
 installed.
+
+The ``greenkube.nodepool`` source also emits **policy signals**, high-risk and
+advisory only (no v1 recommendation, no pull request until NodePool actions
+exist, roadmap H7):
+
+* ``consolidationPolicy: WhenEmpty`` -> ``WhenEmptyOrUnderutilized``;
+* ``consolidateAfter`` above :data:`EXCESSIVE_CONSOLIDATE_AFTER` (or ``Never``);
+* on-demand only capacity on a pool whose observed workloads are all stateless -> allow spot;
+* a single architecture (amd64) -> allow arm64 where every image is multi-arch.
+
+Each carries the suggested NodePool patch in ``evidence.data.suggested_patch``.
 """
 
 import logging
 import math
+import re
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, FrozenSet, List, Optional, Protocol, Tuple
 
 from greenkube.collectors.karpenter_collector import KarpenterCollector, NodePoolInfo
@@ -21,8 +34,17 @@ from greenkube.models.metrics import (
 )
 from greenkube.models.metrics import RecommendationSource as Source
 from greenkube.signals.adapters import RecommendationSourceAdapter
-from greenkube.signals.model import Capability, SignalOrigin
-from greenkube.signals.sdk import SourceDeps, SourceTier
+from greenkube.signals.model import (
+    AdvisoryProposal,
+    AlgorithmInfo,
+    Capability,
+    SignalEvidence,
+    SignalOrigin,
+    SignalProvenance,
+    SourceSignal,
+    TargetRef,
+)
+from greenkube.signals.sdk import CollectContext, SourceBatch, SourceDeps, SourceTier
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -47,6 +69,8 @@ class KarpenterSource(RecommendationSource):
         self.config = config
         self._collector = collector if collector is not None else KarpenterCollector()
         self._available: Optional[bool] = None
+        #: NodePools read by the last ``collect()`` (policy signals).
+        self.last_pools: List[NodePoolInfo] = []
 
     async def is_available(self) -> bool:
         """Checks for the Karpenter CRD once and caches the result.
@@ -73,6 +97,7 @@ class KarpenterSource(RecommendationSource):
         return self._available
 
     async def collect(self, context: "OptimizationContext") -> List[Recommendation]:
+        self.last_pools = []
         try:
             pools = await self._collector.collect()
         except Exception as exc:
@@ -80,6 +105,7 @@ class KarpenterSource(RecommendationSource):
             return []
         if not pools:
             return []
+        self.last_pools = list(pools)
 
         threshold = float(getattr(self.config, "NODE_UTILIZATION_THRESHOLD", 0.2))
         recs: List[Recommendation] = []
@@ -195,6 +221,167 @@ def _removable_nodes(
     return removable, [name for _price, name in priced[:removable]]
 
 
+#: ``consolidateAfter`` above this delays consolidation enough to matter.
+EXCESSIVE_CONSOLIDATE_AFTER = timedelta(hours=1)
+#: ``consolidateAfter`` suggested instead.
+SUGGESTED_CONSOLIDATE_AFTER = "5m"
+CAPACITY_TYPE_KEY = "karpenter.sh/capacity-type"
+ARCH_KEY = "kubernetes.io/arch"
+#: Workload kinds that make a pool stateful (no spot suggestion).
+_STATEFUL_KINDS = frozenset({"StatefulSet"})
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(h|m|s)")
+
+
+def parse_duration(value: Optional[str]) -> Optional[timedelta]:
+    """A Go duration (``90s``, ``1h30m``); ``Never`` is infinite (``timedelta.max``); None when unreadable."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "Never":
+        return timedelta.max
+    parts = _DURATION_PART.findall(text)
+    if not parts or "".join(f"{number}{unit}" for number, unit in parts) != text:
+        return None
+    scale = {"h": 3600, "m": 60, "s": 1}
+    return timedelta(seconds=sum(float(number) * scale[unit] for number, unit in parts))
+
+
+def _requirement(pool: NodePoolInfo, key: str) -> Optional[Dict[str, Any]]:
+    for requirement in pool.requirements or []:
+        if isinstance(requirement, dict) and requirement.get("key") == key:
+            return requirement
+    return None
+
+
+def _allowed_values(pool: NodePoolInfo, key: str, default: Tuple[str, ...]) -> Optional[Tuple[str, ...]]:
+    """Values a requirement allows (``In``), the Karpenter default when absent; None when not a plain list."""
+    requirement = _requirement(pool, key)
+    if requirement is None:
+        return default
+    if requirement.get("operator") != "In":
+        return None
+    return tuple(sorted(str(value) for value in requirement.get("values") or []))
+
+
+def _pool_workload_kinds(pool: NodePoolInfo, context: "OptimizationContext") -> Optional[set]:
+    """Owner kinds observed on the pool's nodes in this scan; None when nothing was observed."""
+    nodes = set(pool.node_names)
+    kinds = {str(metric.owner_kind) for metric in (context.metrics or []) if metric.node in nodes and metric.owner_kind}
+    return kinds or None
+
+
+def _requirements_patch(key: str, values: List[str]) -> Dict[str, Any]:
+    return {"spec": {"template": {"spec": {"requirements": [{"key": key, "operator": "In", "values": values}]}}}}
+
+
+def nodepool_policy_findings(pool: NodePoolInfo, context: "OptimizationContext") -> List[Dict[str, Any]]:
+    """Policy advice for one NodePool: ``kind``, ``text``, ``patch`` and ``facts`` per finding."""
+    findings: List[Dict[str, Any]] = []
+    if pool.consolidation_policy == "WhenEmpty":
+        findings.append(
+            {
+                "kind": "NODEPOOL_CONSOLIDATION_POLICY",
+                "text": (
+                    f"NodePool {pool.name} only removes empty nodes (consolidationPolicy: WhenEmpty). "
+                    "WhenEmptyOrUnderutilized also consolidates under-utilized nodes, so request cuts free nodes."
+                ),
+                "patch": {"spec": {"disruption": {"consolidationPolicy": "WhenEmptyOrUnderutilized"}}},
+                "facts": {"consolidation_policy": pool.consolidation_policy},
+            }
+        )
+    delay = parse_duration(pool.consolidate_after)
+    if delay is not None and delay > EXCESSIVE_CONSOLIDATE_AFTER:
+        findings.append(
+            {
+                "kind": "NODEPOOL_CONSOLIDATE_AFTER",
+                "text": (
+                    f"NodePool {pool.name} waits {pool.consolidate_after} before consolidating "
+                    f"(consolidateAfter); {SUGGESTED_CONSOLIDATE_AFTER} lets freed capacity become removed nodes."
+                ),
+                "patch": {"spec": {"disruption": {"consolidateAfter": SUGGESTED_CONSOLIDATE_AFTER}}},
+                "facts": {"consolidate_after": pool.consolidate_after},
+            }
+        )
+    capacity = _allowed_values(pool, CAPACITY_TYPE_KEY, ("on-demand",))
+    kinds = _pool_workload_kinds(pool, context)
+    if capacity == ("on-demand",) and kinds is not None and not (kinds & _STATEFUL_KINDS):
+        findings.append(
+            {
+                "kind": "NODEPOOL_CAPACITY_TYPE",
+                "text": (
+                    f"NodePool {pool.name} runs on-demand capacity only while its observed workloads are "
+                    "stateless; allowing spot capacity cuts node prices. Spot nodes can be reclaimed at short "
+                    "notice: check that the workloads tolerate interruptions."
+                ),
+                "patch": _requirements_patch(CAPACITY_TYPE_KEY, ["on-demand", "spot"]),
+                "facts": {"capacity_types": ["on-demand"], "workload_kinds": sorted(kinds)},
+            }
+        )
+    arch = _allowed_values(pool, ARCH_KEY, ("amd64",))
+    if arch == ("amd64",):
+        findings.append(
+            {
+                "kind": "NODEPOOL_ARCHITECTURE",
+                "text": (
+                    f"NodePool {pool.name} only allows amd64 nodes. Allowing arm64 usually lowers node prices and "
+                    "energy use, but only if every image running on the pool is multi-arch, which GreenKube "
+                    "cannot verify."
+                ),
+                "patch": _requirements_patch(ARCH_KEY, ["amd64", "arm64"]),
+                "facts": {"architectures": ["amd64"], "requirement_set": _requirement(pool, ARCH_KEY) is not None},
+            }
+        )
+    return findings
+
+
+def nodepool_policy_signals(
+    pools: List[NodePoolInfo], context: "OptimizationContext", ctx: CollectContext, fetched_at: Any
+) -> List[SourceSignal]:
+    """High-risk advisory signals of the NodePool policy findings (roadmap G5)."""
+    algorithm = AlgorithmInfo(
+        name="greenkube.nodepool.policy",
+        params={
+            "excessive_consolidate_after_seconds": int(EXCESSIVE_CONSOLIDATE_AFTER.total_seconds()),
+            "suggested_consolidate_after": SUGGESTED_CONSOLIDATE_AFTER,
+        },
+        window=ctx.window,
+    )
+    signals: List[SourceSignal] = []
+    for pool in pools:
+        for finding in nodepool_policy_findings(pool, context):
+            signals.append(
+                SourceSignal(
+                    source_id=NodePoolSignalSource.id,
+                    source_ref=pool.name,
+                    target=TargetRef.for_kind(ctx.cluster_uid, "NodePool", pool.name),
+                    capability=Capability.NODE_POOL,
+                    kind=finding["kind"],
+                    proposal=AdvisoryProposal(text=finding["text"]),
+                    algorithm=algorithm,
+                    evidence=SignalEvidence(
+                        summary=finding["text"],
+                        details=(
+                            "High risk: a NodePool change affects every workload on the pool. Advisory only: "
+                            "review it and apply it in Git yourself; GreenKube does not open pull requests for "
+                            "NodePools yet."
+                        ),
+                        data={
+                            "risk_class": "high",
+                            "advisory": True,
+                            "suggested_patch": finding["patch"],
+                            "facts": finding["facts"],
+                            "nodes": len(pool.node_names),
+                        },
+                    ),
+                    observed_window=ctx.window,
+                    provenance=SignalProvenance(origin=SignalOrigin.NATIVE),
+                    raw={"nodepool": pool.name},
+                    fetched_at=fetched_at,
+                )
+            )
+    return signals
+
+
 class NodePoolSignalSource(RecommendationSourceAdapter):
     """GreenKube's NodePool consolidation heuristic over Karpenter objects (roadmap E5, G5).
 
@@ -210,10 +397,20 @@ class NodePoolSignalSource(RecommendationSourceAdapter):
     legacy_source: ClassVar[Optional[str]] = Source.KARPENTER.value
     algorithm_name: ClassVar[Optional[str]] = "greenkube.nodepool"
     signal_origin: ClassVar[SignalOrigin] = SignalOrigin.NATIVE
-    description: ClassVar[str] = "Under-utilized Karpenter NodePools that could consolidate onto fewer nodes."
+    description: ClassVar[str] = (
+        "Under-utilized Karpenter NodePools that could consolidate onto fewer nodes, and NodePool policy advice "
+        "(consolidation, capacity type, architecture)."
+    )
 
     def build_connector(self, deps: SourceDeps) -> RecommendationSource:
         return KarpenterSource(deps.config)
 
     def raw_payload(self, rec: Recommendation) -> Optional[Dict[str, Any]]:
         return {"nodepool": rec.source_ref}
+
+    async def collect(self, ctx: CollectContext) -> SourceBatch:
+        batch = await super().collect(ctx)
+        pools = list(getattr(self.connector, "last_pools", None) or [])
+        if pools and ctx.optimization is not None and ctx.namespace is None:
+            batch.signals.extend(nodepool_policy_signals(pools, ctx.optimization, ctx, self.deps.clock()))
+        return batch

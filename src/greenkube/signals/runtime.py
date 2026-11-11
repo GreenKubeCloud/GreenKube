@@ -28,6 +28,7 @@ from greenkube.signals.sdk import (
     SourceHealth,
     SourceHealthStatus,
     accepts_v1_recommendations,
+    emits_source_id,
 )
 
 if TYPE_CHECKING:
@@ -355,7 +356,7 @@ class SourceRunner:
             if not isinstance(signal, SourceSignal):
                 invalid += 1
                 continue
-            if signal.source_id != source.source_id:
+            if not emits_source_id(cls, signal.source_id):
                 foreign += 1
                 continue
             if signal.capability not in cls.capabilities:
