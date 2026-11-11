@@ -16,7 +16,7 @@ from greenkube.gitops.contracts import (
     PlanStatus,
     RendererKind,
 )
-from greenkube.gitops.sha import SHA256_DIGEST
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 from greenkube.models.node import NodeInfo
 
@@ -269,7 +269,7 @@ class AutomationPlanDeliveryRequest(GitOpsResponseModel):
 
     pr_url: StrictStr = Field(min_length=8, max_length=2048)
     #: Head commit of the pull request; required in ``ci`` mode, optional for a ``patch`` link-back.
-    head_sha: Optional[StrictStr] = Field(default=None, pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+    head_sha: Optional[StrictStr] = Field(default=None, pattern=rf"^(?:{GIT_OBJECT_SHA.pattern})$")
 
 
 class AutomationPlanDeliveryPullRequest(GitOpsResponseModel):
