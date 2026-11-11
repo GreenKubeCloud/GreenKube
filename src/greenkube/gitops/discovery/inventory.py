@@ -102,6 +102,41 @@ class ResourceBinding:
         )
 
 
+#: Cluster-scoped kinds by (group, kind). Argo CD lists them without a namespace; any other
+#: namespace-less entry is namespaced in the destination namespace. A cluster-scoped kind
+#: missing here is recorded under that namespace, so a cluster-scoped lookup finds it
+#: unmanaged and fails closed.
+CLUSTER_SCOPED_KINDS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("", "Namespace"),
+        ("", "Node"),
+        ("", "PersistentVolume"),
+        ("admissionregistration.k8s.io", "MutatingWebhookConfiguration"),
+        ("admissionregistration.k8s.io", "ValidatingAdmissionPolicy"),
+        ("admissionregistration.k8s.io", "ValidatingAdmissionPolicyBinding"),
+        ("admissionregistration.k8s.io", "ValidatingWebhookConfiguration"),
+        ("apiextensions.k8s.io", "CustomResourceDefinition"),
+        ("apiregistration.k8s.io", "APIService"),
+        ("cert-manager.io", "ClusterIssuer"),
+        ("certificates.k8s.io", "CertificateSigningRequest"),
+        ("flowcontrol.apiserver.k8s.io", "FlowSchema"),
+        ("flowcontrol.apiserver.k8s.io", "PriorityLevelConfiguration"),
+        ("karpenter.k8s.aws", "EC2NodeClass"),
+        ("karpenter.sh", "NodePool"),
+        ("networking.k8s.io", "IngressClass"),
+        ("node.k8s.io", "RuntimeClass"),
+        ("rbac.authorization.k8s.io", "ClusterRole"),
+        ("rbac.authorization.k8s.io", "ClusterRoleBinding"),
+        ("scheduling.k8s.io", "PriorityClass"),
+        ("snapshot.storage.k8s.io", "VolumeSnapshotClass"),
+        ("storage.k8s.io", "CSIDriver"),
+        ("storage.k8s.io", "CSINode"),
+        ("storage.k8s.io", "StorageClass"),
+        ("storage.k8s.io", "VolumeAttachment"),
+    }
+)
+
+
 def argo_application_inventory(application: Mapping[str, Any]) -> list[ManagedResource]:
     """Every resource an Argo CD Application lists in ``status.resources``."""
     metadata = as_mapping(application.get("metadata")) or {}
@@ -111,6 +146,8 @@ def argo_application_inventory(application: Mapping[str, Any]) -> list[ManagedRe
     raw_resources = status.get("resources")
     if name is None or namespace is None or not isinstance(raw_resources, list):
         return []
+    spec = as_mapping(application.get("spec")) or {}
+    destination_namespace = text((as_mapping(spec.get("destination")) or {}).get("namespace")) or ""
     controller: ControllerIdentity = (ControllerKind.ARGOCD, namespace, name)
     resources: list[ManagedResource] = []
     for raw in raw_resources:
@@ -122,10 +159,16 @@ def argo_application_inventory(application: Mapping[str, Any]) -> list[ManagedRe
         version = text(resource.get("version"))
         if kind is None or resource_name is None or version is None:
             continue
+        group = text(resource.get("group")) or ""
+        resource_namespace = text(resource.get("namespace"))
+        if resource_namespace is None and (group, kind) not in CLUSTER_SCOPED_KINDS:
+            # Like workload discovery: a namespaced resource Argo CD lists without a
+            # namespace lives in the Application's destination namespace.
+            resource_namespace = destination_namespace
         resources.append(
             ManagedResource(
-                gvk=GroupVersionKind(group=text(resource.get("group")) or "", version=version, kind=kind),
-                namespace=text(resource.get("namespace")) or "",
+                gvk=GroupVersionKind(group=group, version=version, kind=kind),
+                namespace=resource_namespace or "",
                 name=resource_name,
                 controller=controller,
             )

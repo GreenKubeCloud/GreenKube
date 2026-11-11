@@ -62,6 +62,29 @@ def test_argo_inventory_lists_every_kind_including_cluster_scoped_resources() ->
     ]
 
 
+def test_argo_inventory_places_namespace_less_namespaced_resources_in_the_destination_namespace() -> None:
+    application = {
+        **APPLICATION,
+        "status": {
+            "resources": [
+                {"group": "apps", "version": "v1", "kind": "Deployment", "name": "api"},
+                {"group": "autoscaling", "version": "v2", "kind": "HorizontalPodAutoscaler", "name": "api"},
+                {"version": "v1", "kind": "PersistentVolume", "name": "pv-orphan"},
+                {"group": "karpenter.sh", "version": "v1", "kind": "NodePool", "name": "default"},
+            ]
+        },
+    }
+
+    refs = [resource.ref for resource in argo_application_inventory(application)]
+
+    assert refs == [
+        ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="payments", name="api"),
+        HPA,
+        PV,
+        NODEPOOL,
+    ]
+
+
 def test_flux_inventory_parses_namespaced_and_cluster_scoped_ids() -> None:
     resources = flux_kustomization_inventory(KUSTOMIZATION)
 
