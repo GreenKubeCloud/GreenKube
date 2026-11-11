@@ -1,13 +1,13 @@
 """Drift assessment of realized changes (C8) on synthetic series with a known drift."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from greenkube.verify.drift import MIN_DAY_HOURS, DriftSettings, assess_drift
-from greenkube.verify.model import TimeWindow
+from greenkube.verify.drift import MIN_DAY_HOURS, DriftSettings, assess_drift, detect_spec_drift
+from greenkube.verify.model import TimeWindow, WorkloadSpecObservation
 from greenkube.verify.series import hourly_buckets
-from tests.verify.fixtures import hour_now, workload_rows  # pyrefly: ignore[missing-import]
+from tests.verify.fixtures import change_event, hour_now, workload_rows  # pyrefly: ignore[missing-import]
 
 STEP = 300
 SETTINGS = DriftSettings(threshold=0.5, sustained_days=3)
@@ -103,3 +103,42 @@ def test_settings_follow_the_configuration():
         CHANGE_DRIFT_SUSTAINED_DAYS = 5
 
     assert DriftSettings.from_config(Cfg()) == DriftSettings(threshold=0.3, sustained_days=5)
+
+
+def _observation(at, digest="digest-after", uid="uid-api"):
+    return WorkloadSpecObservation(
+        namespace="prod", kind="Deployment", name="api", workload_uid=uid, spec_digest=digest, observed_at=at
+    )
+
+
+def test_spec_drift_ends_at_the_first_observation_of_the_trailing_difference():
+    completed = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    change = change_event(completed)
+    observations = [
+        _observation(completed - timedelta(hours=1), digest="digest-before"),
+        _observation(completed + timedelta(days=1), digest="digest-image-1"),
+        _observation(completed + timedelta(days=2), digest="digest-after"),
+        _observation(completed + timedelta(days=3), digest="digest-image-2"),
+        _observation(completed + timedelta(days=4), digest="digest-image-3"),
+    ]
+    drift = detect_spec_drift(change, observations)
+    assert drift is not None and drift.event_type == "spec_drift"
+    assert drift.accrual_end == completed + timedelta(days=3)
+    assert drift.latest.spec_digest == "digest-image-3"
+
+
+def test_a_template_back_to_the_change_is_no_drift():
+    completed = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    observations = [
+        _observation(completed + timedelta(days=1), digest="digest-image-1"),
+        _observation(completed + timedelta(days=2), digest="digest-after"),
+    ]
+    assert detect_spec_drift(change_event(completed), observations) is None
+    assert detect_spec_drift(change_event(completed), []) is None
+
+
+def test_a_recreated_workload_is_reported_as_such():
+    completed = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    drift = detect_spec_drift(change_event(completed), [_observation(completed + timedelta(hours=5), uid="uid-api-2")])
+    assert drift is not None and drift.event_type == "workload_recreated"
+    assert drift.accrual_end == completed + timedelta(hours=5)

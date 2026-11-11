@@ -16,19 +16,27 @@ watches it after the measurement and acts when the saving is lost:
   ``regressed`` (``realized → regressed``, event ``regressed`` with the daily
   evidence) and its verified recommendations ``regressed``, which stops their
   accrual.
-* **Reversal.** The measured accruals written from the drift onset (the first
-  day of the sustained run) until accrual stopped are reversed by one signed
-  ``measured`` ledger row per recommendation covering ``[onset, last accrued
-  slot)``. It is written once the accrual has settled (two hours after the
-  regression), keyed by recommendation and period so it is written once, and
-  recorded on the change as a ``savings_reversed`` event. The savings
-  counters report it as reversed.
 * **Spec drift.** A pod template that differs from the change's own
   (``spec_digest_after``) or a recreated workload, observed after the
   measurement without a newer recorded change, closes the change
   (``realized → closed``, event ``spec_drift`` or ``workload_recreated``):
-  the measured saving no longer describes what runs. A newer recorded change
-  closes it at record time (``superseded``).
+  the measured saving no longer describes what runs, so its verified
+  recommendations become ``regressed`` too and stop accruing from the first
+  differing observation. The usage drift is assessed first, so a revert in git
+  whose usage has already drifted for the sustained period is a regression. A
+  template change is acted on only :data:`SPEC_DRIFT_GRACE` after it was
+  observed, and a newer recorded change on the workload closes the change as
+  ``superseded`` instead (each change keeps accruing its own measured step).
+* **Reversal.** Both paths store where the measured saving ended on the
+  change (``details.accrual_end``: the drift onset, the first day of the
+  sustained run, or the first differing observation). The measured accruals
+  written after it are reversed by one signed ``measured`` ledger row per
+  recommendation covering ``[accrual end, last accrued slot)``, written once
+  the accrual has settled (two hours after the state change) and recorded on
+  the change as a ``savings_reversed`` event. A later pass reverses only what
+  no earlier ``savings_reversed`` entry covers, so a late accrual gets an
+  adjacent entry, never an overlapping one. The savings counters report it as
+  reversed. The whole measured rate is reversed, not only the lost share.
 
 Fail closed: a day with fewer than :data:`MIN_DAY_HOURS` hours of trusted cost
 does not count either way, a change whose post-window shows no per-replica
@@ -51,6 +59,7 @@ from greenkube.verify.model import (
     HourBucket,
     MeasurementState,
     TimeWindow,
+    WorkloadSpecObservation,
 )
 from greenkube.verify.series import hourly_buckets
 
@@ -65,6 +74,12 @@ DRIFT_LOOKBACK_DAYS = 7
 MIN_DAY_HOURS = 18
 #: The reversal waits this long after the regression, so an accrual run in flight has finished.
 REVERSAL_SETTLE = timedelta(hours=2)
+#: A template change is acted on only once it is this old, so a GreenKube change detected in the same
+#: pass (or recorded late by the lifecycle job) closes the change as superseded instead.
+SPEC_DRIFT_GRACE = timedelta(hours=2)
+#: Ended changes are checked for unreversed accruals for this long after their state changed (accrual
+#: stops at the state change, so only a run already in flight can write after it).
+REVERSAL_HORIZON = timedelta(days=14)
 #: Interval of the drift monitor loop.
 DRIFT_MONITOR_INTERVAL_SECONDS = 3600.0
 _SECONDS_PER_YEAR = 365.25 * 24 * 3600
@@ -201,6 +216,51 @@ def assess_drift(
     )
 
 
+@dataclass(frozen=True)
+class SpecDrift:
+    """A pod template (or workload UID) that no longer matches a realized change."""
+
+    event_type: str
+    reason: str
+    #: First observation of the trailing run that differs: the measured saving ends there.
+    accrual_end: datetime
+    latest: WorkloadSpecObservation
+
+
+def _differs(change: ChangeEvent, observation: WorkloadSpecObservation) -> Optional[str]:
+    if change.workload_uid and observation.workload_uid and observation.workload_uid != change.workload_uid:
+        return "workload_recreated"
+    if change.spec_digest_after and observation.spec_digest and observation.spec_digest != change.spec_digest_after:
+        return "spec_drift"
+    return None
+
+
+def detect_spec_drift(change: ChangeEvent, observations: Sequence[WorkloadSpecObservation]) -> Optional[SpecDrift]:
+    """The spec drift of ``change`` in its observations, or ``None`` while its latest one still matches."""
+    completed = ensure_utc(change.rollout_completed_at)
+    later = sorted(
+        (item for item in observations if ensure_utc(item.observed_at) > completed),
+        key=lambda item: ensure_utc(item.observed_at),
+    )
+    if not later:
+        return None
+    latest = later[-1]
+    kind = _differs(change, latest)
+    if kind is None:
+        return None
+    first = latest
+    for item in reversed(later[:-1]):
+        if _differs(change, item) is None:
+            break
+        first = item
+    reason = (
+        "the workload was deleted and recreated after the measurement"
+        if kind == "workload_recreated"
+        else "the pod template no longer matches the measured change"
+    )
+    return SpecDrift(event_type=kind, reason=reason, accrual_end=ensure_utc(first.observed_at), latest=latest)
+
+
 class DriftMonitor:
     """Watches realized changes and regresses or closes those whose saving no longer holds (C8)."""
 
@@ -227,6 +287,9 @@ class DriftMonitor:
         result: Dict[str, List[str]] = {"regressed": [], "closed": [], "reversed": []}
         if not self.service.enabled:
             return result
+        today = _day(moment)
+        for memo in [key for key, day in self._assessed.items() if day != today]:
+            self._assessed.pop(memo, None)
         for status in await self.changes.list_statuses([MeasurementState.REALIZED.value]):
             try:
                 outcome = await self._watch(status, moment)
@@ -235,7 +298,10 @@ class DriftMonitor:
                 continue
             if outcome is not None:
                 result[outcome].append(status.change_id)
-        for status in await self.changes.list_statuses([MeasurementState.REGRESSED.value]):
+        ended = await self.changes.list_statuses([MeasurementState.REGRESSED.value, MeasurementState.CLOSED.value])
+        for status in ended:
+            if _accrual_end(status) is None or moment - ensure_utc(status.updated_at) > REVERSAL_HORIZON:
+                continue
             try:
                 if await self._reverse(status, moment):
                     result["reversed"].append(status.change_id)
@@ -251,19 +317,35 @@ class DriftMonitor:
         change = await self.changes.get_change(status.change_id)
         if change is None or status.post_window_end is None:
             return None
-        if await self._close_on_spec_drift(change, status, now):
-            return "closed"
+        drift = await self._spec_drift(change)
+        # A sustained usage drift is a regression even when the template moved too (a revert in git).
+        if await self._assess(change, status, now):
+            return "regressed"
+        if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
+            return None
+        return await self._close_on_spec_drift(change, status, drift, now)
+
+    async def _spec_drift(self, change: ChangeEvent) -> Optional[SpecDrift]:
+        observations = await self.changes.spec_observations(
+            *change.target.key, since=ensure_utc(change.rollout_completed_at)
+        )
+        return detect_spec_drift(change, observations)
+
+    async def _assess(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
+        """Assess the usage drift once per complete day; regress the change when it is sustained."""
+        if status.post_window_end is None:
+            return False
         post_end = ensure_utc(status.post_window_end)
-        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = _day(now)
         start = max(post_end, today - timedelta(days=DRIFT_LOOKBACK_DAYS))
         if today - start < timedelta(days=self.settings.sustained_days):
-            return None
+            return False
         memo = (status.change_id, status.latest_measurement_id)
         if self._assessed.get(memo) == today:
-            return None
+            return False
         snapshot = await self.changes.get_snapshot_for_change(change.change_id)
         if snapshot is None:
-            return None
+            return False
         step = self.service._step()
         post_window = TimeWindow(
             start=ensure_utc(status.post_window_start or change.rollout_completed_at), end=post_end
@@ -273,8 +355,8 @@ class DriftMonitor:
         monitored = hourly_buckets(await self.service._read_workload(change.target, window), window, step)
         assessment = assess_drift(snapshot.hours, post, monitored, self.settings)
         self._assessed[memo] = today
-        if not assessment.regressed:
-            return None
+        if not assessment.regressed or assessment.onset is None:
+            return False
         await self.changes.transition(
             status,
             MeasurementState.REGRESSED,
@@ -282,44 +364,61 @@ class DriftMonitor:
             actor="drift-monitor",
             reason=assessment.reason,
             payload=assessment.payload(self.settings),
+            details=_ending(status, assessment.onset, assessment.reason),
             now=now,
         )
-        await self._regress_members(change, assessment.reason)
+        await self._end_members(change, assessment.reason)
         logger.info("Change %s regressed: %s", change.change_id, assessment.reason)
-        return "regressed"
+        return True
 
-    async def _close_on_spec_drift(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
-        observations = await self.changes.spec_observations(
-            *change.target.key, since=ensure_utc(change.rollout_completed_at)
-        )
-        later = [
-            item for item in observations if ensure_utc(item.observed_at) > ensure_utc(change.rollout_completed_at)
+    async def _close_on_spec_drift(
+        self, change: ChangeEvent, status: ChangeStatus, drift: SpecDrift, now: datetime
+    ) -> Optional[str]:
+        """Close a change whose template drifted and end its members' measured accrual there."""
+        newer = [
+            other
+            for other in await self.changes.changes_for_workload(*change.target.key)
+            if other.change_id != change.change_id
+            and ensure_utc(other.rollout_completed_at) > ensure_utc(change.rollout_completed_at)
         ]
-        if not later:
-            return False
-        latest = max(later, key=lambda item: ensure_utc(item.observed_at))
-        if change.workload_uid and latest.workload_uid and latest.workload_uid != change.workload_uid:
-            event, reason = "workload_recreated", "the workload was deleted and recreated after the measurement"
-        elif change.spec_digest_after and latest.spec_digest and latest.spec_digest != change.spec_digest_after:
-            event, reason = "spec_drift", "the pod template no longer matches the measured change"
-        else:
-            return False
+        if newer:
+            # A later GreenKube change moved the template: it supersedes this one (the recorder's own
+            # close lost a race), and each change keeps accruing its own measured step.
+            await self.changes.transition(
+                status,
+                MeasurementState.CLOSED,
+                event_type="superseded",
+                actor="drift-monitor",
+                reason=f"change {newer[-1].change_id} landed on the same workload",
+                payload={"superseded_by": newer[-1].change_id},
+                now=now,
+            )
+            return "closed"
+        reason = (
+            f"{drift.reason}: the measured saving no longer describes what runs and stops accruing "
+            f"from {drift.accrual_end.isoformat()}"
+        )
         await self.changes.transition(
             status,
             MeasurementState.CLOSED,
-            event_type=event,
+            event_type=drift.event_type,
             actor="drift-monitor",
             reason=reason,
             payload={
-                "observed_at": ensure_utc(latest.observed_at).isoformat(),
-                "spec_digest": latest.spec_digest,
-                "workload_uid": latest.workload_uid,
+                "observed_at": ensure_utc(drift.latest.observed_at).isoformat(),
+                "accrual_end": drift.accrual_end.isoformat(),
+                "spec_digest": drift.latest.spec_digest,
+                "workload_uid": drift.latest.workload_uid,
             },
+            details=_ending(status, drift.accrual_end, reason),
             now=now,
         )
-        return True
+        await self._end_members(change, reason)
+        logger.info("Change %s closed: %s", change.change_id, reason)
+        return "closed"
 
-    async def _regress_members(self, change: ChangeEvent, reason: str) -> None:
+    async def _end_members(self, change: ChangeEvent, reason: str) -> None:
+        """Stop the measured accrual of the change's verified recommendations (``verified → regressed``)."""
         for record in await self.service._records(change.recommendation_ids):
             if record.id is None or str(getattr(record.status, "value", record.status)) != "verified":
                 continue
@@ -329,25 +428,36 @@ class DriftMonitor:
                 logger.warning("Could not mark recommendation %s regressed: %s", record.id, exc)
 
     # ------------------------------------------------------------------
-    # Regressed changes: reversal entries
+    # Ended changes: reversal entries
     # ------------------------------------------------------------------
 
     async def _reverse(self, status: ChangeStatus, now: datetime) -> bool:
-        """Reverse the measured accruals written since the drift onset (once accrual has settled)."""
+        """Reverse the measured accruals written after the change's accrual end, once accrual has settled.
+
+        Each pass reverses only what no earlier ``savings_reversed`` event of the change covers, so an
+        accrual written late (by a run that read the recommendation before it was regressed) gets a
+        second, adjacent entry rather than an overlapping one.
+        """
         if self.savings_repo is None:
             return False
-        events = await self.changes.list_events(status.change_id)
-        regressed = next((event for event in reversed(events) if event.event_type == "regressed"), None)
-        if regressed is None or not regressed.payload.get("onset"):
-            return False
-        if now - ensure_utc(regressed.created_at) < REVERSAL_SETTLE:
+        accrual_end = _accrual_end(status)
+        if accrual_end is None or now - ensure_utc(status.updated_at) < REVERSAL_SETTLE:
             return False
         change = await self.changes.get_change(status.change_id)
         if change is None:
             return False
-        # A crash between the transition and the members' regression is repaired here.
-        await self._regress_members(change, regressed.reason)
-        onset = ensure_utc(regressed.payload["onset"])
+        # A crash between the transition and the members' update is repaired here.
+        await self._end_members(change, str((status.details or {}).get(_ACCRUAL_END_REASON) or "saving ended"))
+        reversed_until: Dict[int, datetime] = {}
+        for event in await self.changes.list_events(status.change_id):
+            if event.event_type != "savings_reversed":
+                continue
+            for entry in event.payload.get("entries") or []:
+                end = _parse_time(entry.get("period_end"))
+                rec_id = entry.get("recommendation_id")
+                if end is not None and rec_id is not None:
+                    previous = reversed_until.get(int(rec_id))
+                    reversed_until[int(rec_id)] = end if previous is None else max(previous, end)
         records = await self.service._records(change.recommendation_ids)
         ids = [record.id for record in records if record.id is not None]
         floors = await self.savings_repo.get_accrual_floors(ids) if ids else {}
@@ -356,7 +466,8 @@ class DriftMonitor:
         for record in records:
             if record.id is None or str(getattr(record.status, "value", record.status)) != "regressed":
                 continue
-            row = self._reversal(record, onset, floors.get(record.id))
+            start = max(accrual_end, reversed_until.get(record.id, accrual_end))
+            row = self._reversal(record, start, floors.get(record.id))
             if row is not None:
                 rows.append(row)
                 entries.append(
@@ -377,24 +488,22 @@ class DriftMonitor:
             status.change_id,
             "savings_reversed",
             actor="drift-monitor",
-            reason=f"measured accruals since {onset.isoformat()} reversed",
+            reason=f"measured accruals since {accrual_end.isoformat()} reversed",
             payload={"entries": entries},
             now=now,
         )
         return True
 
-    def _reversal(self, record: Any, onset: datetime, floor: Optional[datetime]):
-        from greenkube.models.savings import METHOD_MEASURED, SavingsLedgerRecord
+    def _reversal(self, record: Any, start: datetime, floor: Optional[datetime]):
+        from greenkube.models.savings import METHOD_MEASURED, SavingsLedgerRecord, floor_to_slot
 
         if floor is None:
             return None
-        start = onset
         if record.verified_at is not None:
             # Measured accrual starts at verification; earlier slots accrued the projection.
             start = max(start, ensure_utc(record.verified_at))
         end = ensure_utc(floor)
-        # A one-slot period would take the slot's idempotency key, which its accrual holds.
-        if end - start <= _SLOT:
+        if end <= start:
             return None
         seconds = (end - start).total_seconds()
         factor = seconds / _SECONDS_PER_YEAR
@@ -402,6 +511,12 @@ class DriftMonitor:
         co2e = float(record.measured_co2e_saved_grams or 0.0)
         if cost == 0.0 and co2e == 0.0:
             return None
+        label_start = start
+        if floor_to_slot(start) + _SLOT >= end:
+            # Within one slot the period could equal an accrual's key (a whole slot, or the measured
+            # segment from verified_at), which the unique index would drop: the label is widened by
+            # one second. The amount is computed on the exact period.
+            label_start = start - timedelta(seconds=1)
         return SavingsLedgerRecord(
             recommendation_id=record.id,
             cluster_name=self.cluster_name,
@@ -409,15 +524,44 @@ class DriftMonitor:
             recommendation_type=str(getattr(record.type, "value", record.type)),
             co2e_saved_grams=-co2e * factor,
             cost_saved_dollars=-cost * factor,
-            period_seconds=max(1, math.ceil(seconds)),
+            period_seconds=max(1, math.ceil((end - label_start).total_seconds())),
             timestamp=end,
-            period_start=start,
+            period_start=label_start,
             period_end=end,
             slot_start=None,
             measurement_method=METHOD_MEASURED,
             baseline_value=record.potential_savings_co2e_grams,
             actual_value=-co2e,
         )
+
+
+#: Change details keys: where (and why) a change's measured accrual ended (drift onset or spec drift).
+_ACCRUAL_END = "accrual_end"
+_ACCRUAL_END_REASON = "accrual_end_reason"
+
+
+def _day(moment: datetime) -> datetime:
+    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _parse_time(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return ensure_utc(value)
+    if not value:
+        return None
+    try:
+        return ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _ending(status: ChangeStatus, accrual_end: datetime, reason: str) -> Dict[str, Any]:
+    """The change's details with where (and why) its measured accrual ended."""
+    return {**(status.details or {}), _ACCRUAL_END: ensure_utc(accrual_end).isoformat(), _ACCRUAL_END_REASON: reason}
+
+
+def _accrual_end(status: ChangeStatus) -> Optional[datetime]:
+    return _parse_time((status.details or {}).get(_ACCRUAL_END))
 
 
 async def run_drift_monitor() -> None:
@@ -454,4 +598,12 @@ async def run_drift_monitor() -> None:
         )
 
 
-__all__ = ["DriftAssessment", "DriftMonitor", "DriftSettings", "assess_drift", "run_drift_monitor"]
+__all__ = [
+    "DriftAssessment",
+    "DriftMonitor",
+    "DriftSettings",
+    "SpecDrift",
+    "assess_drift",
+    "detect_spec_drift",
+    "run_drift_monitor",
+]

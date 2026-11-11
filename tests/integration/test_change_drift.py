@@ -85,6 +85,8 @@ def _monitor(scenario: Scenario, repo) -> DriftMonitor:
         savings_repo=repo,
         settings=DriftSettings(threshold=0.5, sustained_days=3),
         cluster_name=CLUSTER,
+        # Its own memo: the tests share change ids.
+        assessed={},
     )
 
 
@@ -169,3 +171,114 @@ async def test_a_spec_drift_after_the_measurement_closes_the_change(database):  
     status = await scenario.changes.get_status(change.change_id)
     assert status is not None and status.state is MeasurementState.CLOSED
     assert (await scenario.changes.list_events(change.change_id))[-1].event_type == "spec_drift"
+
+
+async def _observe(scenario: Scenario, digest: str, observed_at: datetime, uid: str = "uid-api") -> None:
+    await scenario.changes.insert_spec_observations(
+        [
+            WorkloadSpecObservation(
+                namespace="prod",
+                kind="Deployment",
+                name="api",
+                workload_uid=uid,
+                generation=7,
+                spec_digest=digest,
+                observed_at=observed_at,
+            )
+        ]
+    )
+
+
+async def _reversed(repo, records) -> dict:
+    counters = {row.recommendation_type: row for row in await repo.get_lifetime_counters(CLUSTER)}
+    return {record.id: counters[record.type.value].reversed_cost_dollars for record in records}
+
+
+def _hours_of(record, start: datetime, end: datetime) -> float:
+    return record.measured_cost_saved / HOURS_PER_YEAR * (end - start).total_seconds() / 3600
+
+
+async def test_a_reverted_template_with_drifted_usage_regresses_and_reverses(database):  # noqa: F811
+    """Requests reverted in git: a new template digest and usage back near the baseline."""
+    scenario, change, _, decided_at = await _realized(database, drift_days=4)
+    onset = hour_now().replace(hour=0) - timedelta(days=4)
+    await _observe(scenario, "digest-reverted", onset + timedelta(minutes=13))
+    repo = _savings_repo(database)
+    records = await scenario.records()
+    for record in records:
+        await _accrue(repo, record, decided_at.replace(minute=0) + timedelta(hours=1), hour_now())
+    monitor = _monitor(scenario, repo)
+    now = hour_now() + timedelta(minutes=30)
+
+    result = await monitor.run(now=now)
+
+    assert result["regressed"] == [change.change_id] and result["closed"] == []
+    assert not [record for record in await scenario.records() if record_status(record) == "verified"]
+    later = now + REVERSAL_SETTLE + timedelta(minutes=1)
+    assert (await monitor.run(now=later))["reversed"] == [change.change_id]
+    reversed_cost = await _reversed(repo, records)
+    for record in records:
+        assert reversed_cost[record.id] == pytest.approx(_hours_of(record, onset, hour_now()), rel=1e-6)
+
+
+async def test_a_spec_drift_ends_the_measured_accrual_and_reverses_what_followed(database):  # noqa: F811
+    """A template change while the saving holds: accrual stops at the change and what followed is reversed."""
+    from greenkube.core.savings_attributor import accrual_components
+
+    scenario, change, _, decided_at = await _realized(database, drift_days=0)
+    observed_at = hour_now() - timedelta(days=1) + timedelta(minutes=17)
+    await _observe(scenario, "digest-image-bump", observed_at)
+    repo = _savings_repo(database)
+    records = await scenario.records()
+    for record in records:
+        await _accrue(repo, record, decided_at.replace(minute=0) + timedelta(hours=1), hour_now())
+    monitor = _monitor(scenario, repo)
+    now = hour_now() + timedelta(minutes=30)
+
+    result = await monitor.run(now=now)
+
+    assert result["closed"] == [change.change_id] and result["regressed"] == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.CLOSED
+    assert status.details["accrual_end"] == observed_at.isoformat()
+    event = (await scenario.changes.list_events(change.change_id))[-1]
+    assert event.event_type == "spec_drift" and event.payload["accrual_end"] == observed_at.isoformat()
+    members = await scenario.records()
+    assert members and all(record_status(record) == "regressed" for record in members)
+    # The attributor no longer accrues anything for them.
+    assert all(accrual_components(record) == [] for record in members)
+
+    assert (await monitor.run(now=now + REVERSAL_SETTLE / 2))["reversed"] == []
+    later = now + REVERSAL_SETTLE + timedelta(minutes=1)
+    assert (await monitor.run(now=later))["reversed"] == [change.change_id]
+    reversed_cost = await _reversed(repo, records)
+    for record in records:
+        assert reversed_cost[record.id] == pytest.approx(_hours_of(record, observed_at, hour_now()), rel=1e-6)
+
+    # A late accrual (a run that read the record before it was regressed) is reversed next to the first entry.
+    horizon = hour_now() + timedelta(hours=1)
+    for record in records:
+        await _accrue(repo, record, hour_now(), horizon)
+    assert (await monitor.run(now=later + timedelta(hours=1)))["reversed"] == [change.change_id]
+    assert (await monitor.run(now=later + timedelta(hours=2)))["reversed"] == []
+    reversed_cost = await _reversed(repo, records)
+    for record in records:
+        assert reversed_cost[record.id] == pytest.approx(_hours_of(record, observed_at, horizon), rel=1e-6)
+    events = [e for e in await scenario.changes.list_events(change.change_id) if e.event_type == "savings_reversed"]
+    assert len(events) == 2
+    first = {entry["recommendation_id"]: entry for entry in events[0].payload["entries"]}
+    for entry in events[1].payload["entries"]:
+        # Adjacent, not overlapping (a one-slot label is widened by one second).
+        start = datetime.fromisoformat(entry["period_start"]) + timedelta(seconds=1)
+        assert start == datetime.fromisoformat(first[entry["recommendation_id"]]["period_end"])
+
+
+async def test_a_fresh_template_change_waits_for_its_grace(database):  # noqa: F811
+    scenario, change, _, _ = await _realized(database, drift_days=0)
+    now = hour_now() + timedelta(minutes=30)
+    await _observe(scenario, "digest-new", now - timedelta(minutes=20))
+    result = await _monitor(scenario, _savings_repo(database)).run(now=now)
+    assert result["closed"] == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    assert all(record_status(record) == "verified" for record in await scenario.records())
