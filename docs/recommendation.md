@@ -100,7 +100,7 @@ Each finished run records:
 
 | Field | Meaning |
 |---|---|
-| `recommendation_count` | Recommendations written by the run (an incomplete source's last known advice that was kept instead of a lower-priority replacement is not counted). |
+| `recommendation_count` | Recommendations written by the run (a last known record kept while one of its sources is incomplete is not counted). |
 | `sources` | Per-source health: `succeeded`, `incomplete`, `failed` (with `error`, e.g. `timeout`) or `unavailable`, plus the number of recommendations and the duration. |
 | `failed_source_count` | Sources that failed or returned a partial result. A run with some failed sources is still `succeeded` (degraded, with `error` naming them); it is `failed` only when every attempted source failed, or when loading metrics or persisting failed. |
 | `new_count`, `changed_count`, `resolved_count`, `unchanged_count` | Diff against the active set of the scanned scope just before the run (for a namespaced run, that namespace only; cluster-scoped output of such a run is not counted). *Changed* means the proposal changed (winning source, current or recommended requests, schedule, node); projected-savings drift alone is not a change. *Resolved* recommendations became `stale`. |
@@ -146,13 +146,15 @@ Proposals that are not numeric (schedules, deletions, HPA settings) are compared
 
 **Signal-only sources.** A third-party connector or a pushed signal has no v1 recommendation of its own: it becomes a recommendation only through consensus, under its own source id, and goes through the same enrichment (evidence, risk, eligibility) as any other recommendation.
 
+**No empty changes.** A request recommendation whose consolidated value equals the current request is not emitted. Under `safest`, a source that reports the current value for a container (KRR reports a value for every container) therefore means "keep it": there is no recommendation, and reconciliation handles an existing record as usual. The same applies when the minimum floor (`RECOMMENDATION_MIN_CPU_MILLICORES`, `RECOMMENDATION_MIN_MEMORY_BYTES`) lands on the current request.
+
 ### Identity and revisions
 
 Every recommendation has a cluster-qualified identity, `fingerprint_v4` = SHA-256 of the cluster (`CLUSTER_NAME`), the target key (`cluster/group.Kind/namespace/name[/container]`), the capability and the finding kind. The finding kind is part of the identity because CPU and memory requests of one container are still separate records sharing the `container_requests` capability; once one record carries both (roadmap H1) the identity reduces to the target and the capability. The fingerprint does not depend on the source or on the proposed value.
 
-`revision` starts at 1 and increases each time the consolidated proposal changes (the proposed values, schedule or typed proposal, not the observed requests, projections or wording). The replaced proposal is kept in `recommendation_revisions` (`superseded`, with the proposal, the consensus and a v1 snapshot).
+`revision` starts at 1 and increases each time the consolidated proposal changes (the proposed values, schedule or typed proposal, not the observed requests, projections or wording). The replaced proposal is kept in `recommendation_revisions` (`superseded`, with the proposal, the consensus and a v1 snapshot). The 20 most recent superseded revisions of a recommendation are kept, plus any revision a plan pins; older ones are pruned.
 
-A recommendation never changes under an open plan (action status `plan_ready`, `pr_open`, `merged` or `sync_pending`, or the `pr_open` status): a scan that computes different advice stores it as the next revision with state `queued`, and the record keeps the revision the plan implements. Each persisted plan pins `(recommendation_id, revision)` (`recommendation_plan_pins`); the plan's pull-request status comment then shows "Newer advice available" with the newer revision and its values. Once the plan is closed, the next scan promotes the queued advice to the record. `GET /api/v2/recommendations/{id}` lists the revisions and `queued_revision`.
+A recommendation never changes under an open plan (action status `plan_ready`, `pr_open`, `merged` or `sync_pending`, or the `pr_open` status): a scan that computes different advice stores it as the next revision with state `queued`, and the record keeps the revision the plan implements. Each persisted plan pins `(recommendation_id, revision)` (`recommendation_plan_pins`); the plan's pull-request status comment then shows "Newer advice available" with the newer revision and its values. Once the plan is closed, the next scan promotes the queued advice to the record. A scan that still sees the target refreshes the frozen record's `expires_at`, so it does not expire while its plan is open. The revising write is conditional on no plan being open, so a plan opened between the scan's read and its write still freezes the record. `GET /api/v2/recommendations/{id}` lists the revisions and `queued_revision`.
 
 Rows written before revisions (migration `0068`) start at revision 1; the scan fills their `target`, `proposal` and `fingerprint_v4` from their flat columns, and readers derive the same values meanwhile.
 
@@ -311,9 +313,15 @@ Ignored records are left untouched by normal upsert so a user decision is not ov
 
 At the end of each scan, reconciliation compares the latest generated identities with currently active records. An active record missing from the generated set becomes `stale` **only when every source that supported it** (its `sources` provenance, or its `source` for older rows) completed the scan. A source that failed, timed out, was unavailable or reported an incomplete result never causes staleness and never blocks persistence of the other sources: its previous recommendations stay active as "last known" until it completes again or their TTL expires. Recommendations from a source that is no longer configured reconcile normally.
 
-When a source that supported an active recommendation (for example VPA) did not complete and is missing from the new consensus, the remaining sources (for example KRR and native rightsizing) do not overwrite the last known advice, so the consensus does not flap during a transient connector outage.
+When a source that supported an active recommendation (for example KRR) did not complete and is missing from the new consensus, its last known vote (kept in the record's `consensus.votes`) still counts, so the consensus does not flap during a transient connector outage, but it never holds back safer advice. A higher request is always the safer one (a smaller decrease, or an increase that protects reliability):
 
-A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and keep suppressing the native replacement for their targets, until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
+- when the new proposal of the remaining sources is at least the last known one (for example native rightsizing now asks for 400m, or for an increase, where the record said 280m), the new proposal is written;
+- under `safest`, when every incomplete supporter's last known value is at most the new proposal, `safest` of the new and last known votes is the new proposal, which is written;
+- otherwise (the new proposal is more aggressive than what the last known votes support, or the proposal is not numeric) the last known record stays until the source completes again or the record expires.
+
+A record written this way keeps the incomplete sources in `sources` and their last known values in `consensus.last_known` (`{source_id: value}`).
+
+A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and their last known VPA votes keep counting in the consensus for their targets (a more aggressive native value does not replace them), until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
 
 Connectors that degrade gracefully (return a partial list instead of raising) report an incomplete result by setting `last_collect_complete = False` on the source instance during `collect()`. The engine resets the flag to `True` before every `collect()` call, so a connector only sets it when the current call is partial.
 

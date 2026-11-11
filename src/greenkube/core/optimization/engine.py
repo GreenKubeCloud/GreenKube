@@ -408,8 +408,9 @@ class OptimizationEngine:
         """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
 
         Returns the diff against the active set of the scanned scope and the
-        recommendations actually written (an incomplete winner's last known
-        advice is kept instead of a lower-priority replacement). Raises on
+        recommendations actually written (a last known record is kept instead
+        of a more aggressive proposal while one of its sources is incomplete,
+        see :meth:`_preserve_last_known`). Raises on
         repository errors so the run can be recorded as failed.
         """
         # Expire actives whose TTL elapsed before reconciling so they are not
