@@ -172,17 +172,11 @@ class ContainerResourcesSpec(ActionKindSpec):
                     )
 
     def owns_patch_field(self, kind: str, segments: Sequence[PathSegment], value: Any) -> bool:
-        pod_spec_path = POD_SPEC_PATHS.get(kind)
-        if pod_spec_path is None or len(segments) != len(pod_spec_path) + 5:
-            return False
-        prefix, rest = tuple(segments[: len(pod_spec_path)]), tuple(segments[len(pod_spec_path) :])
+        field_ref = container_resource_field(kind, segments)
         return (
-            prefix == pod_spec_path
-            and rest[0] == "containers"
-            and isinstance(rest[1], ListSelector)
-            and rest[1].key == "name"
-            and rest[2:4] == ("resources", "requests")
-            and rest[4] in _PATCHABLE_REQUESTS
+            field_ref is not None
+            and field_ref.section == "requests"
+            and field_ref.resource in _PATCHABLE_REQUESTS
             and isinstance(value, str)
             and bool(value)
             and value == value.strip()
@@ -322,6 +316,40 @@ def order_by_container(
     return sorted(
         operations, key=lambda operation: (positions.get(operation.container, len(positions)), operation.container)
     )
+
+
+# -- field paths -----------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class ContainerResourceField:
+    """A ``<pod spec>/containers/[name=c]/resources/<section>/<resource>`` field of a workload."""
+
+    container: str
+    section: str
+    resource: str
+
+
+def container_resource_field(kind: str, segments: Sequence[PathSegment]) -> ContainerResourceField | None:
+    """The container resource a field path of a ``kind`` workload addresses, or ``None``.
+
+    Renderers that map container resources rather than arbitrary fields (Helm values,
+    Flux post-renderer patches) use this to decide which primitives they can express.
+    """
+    pod_spec_path = POD_SPEC_PATHS.get(kind)
+    if pod_spec_path is None or len(segments) != len(pod_spec_path) + 5:
+        return None
+    prefix, rest = tuple(segments[: len(pod_spec_path)]), tuple(segments[len(pod_spec_path) :])
+    selector, section, resource = rest[1], rest[3], rest[4]
+    if (
+        prefix != pod_spec_path
+        or rest[0] != "containers"
+        or not isinstance(selector, ListSelector)
+        or selector.key != "name"
+        or rest[2] != "resources"
+        or section not in {"requests", "limits"}
+        or not isinstance(resource, str)
+    ):
+        return None
+    return ContainerResourceField(container=selector.value, section=str(section), resource=resource)
 
 
 # -- manifest helpers ------------------------------------------------------------------------

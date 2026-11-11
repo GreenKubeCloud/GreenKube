@@ -21,8 +21,8 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import LiteralScalarString
 
-from greenkube.automation.actions import CONTAINER_RESOURCES, ActionKindError
-from greenkube.automation.actions.container_resources import container_operations
+from greenkube.automation.actions import CONTAINER_RESOURCES, ActionKindError, PrimitiveOp, SetField, Support
+from greenkube.automation.actions.container_resources import container_operations, container_resource_field
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     AutomationErrorCode,
@@ -206,6 +206,32 @@ class _FluxHelmReleaseContext:
 class HelmValuesPlanner:
     """Plan an explicit values-file mapping after render validation."""
 
+    renderer_kind = RendererKind.HELM_VALUES
+
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Container resource fields only; a values path must be mapped for the container.
+
+        An explicit ``values_mapping`` on the binding names that path. Without one, ``plan``
+        infers it by a render probe and fails with ``needs_chart_mapping`` when it cannot.
+        """
+        support, container = _helm_primitive_support(op, "Helm values")
+        if not support.ok:
+            return support
+        config = binding.renderer_config if isinstance(binding, WorkloadSource) else {}
+        mapping = config.get("values_mapping")
+        if isinstance(mapping, HelmValuesMapping):
+            mapped_container = mapping.container
+        elif isinstance(mapping, Mapping):
+            mapped_container = mapping.get("container")
+        else:
+            return Support.needs_mapping(
+                f"no explicit values mapping for container {container!r}; "
+                "the values path is inferred by a render probe at plan time"
+            )
+        if mapped_container != container:
+            return Support.unsupported(f"the explicit values mapping does not name container {container!r}")
+        return Support.supported()
+
     def __init__(
         self,
         *,
@@ -327,6 +353,14 @@ class HelmValuesPlanner:
 
 class FluxHelmReleasePlanner:
     """Add one exact, managed post-renderer patch to a Git-owned Flux HelmRelease."""
+
+    renderer_kind = RendererKind.HELM_RELEASE
+
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Container resource fields only, written as a managed post-renderer patch."""
+        del binding
+        support, _ = _helm_primitive_support(op, "Flux HelmRelease")
+        return support
 
     def __init__(
         self,
@@ -596,6 +630,16 @@ def _prepare_flux_helm_release_context(
         helm=helm,
         temporary_values=temporary_values,
     )
+
+
+def _helm_primitive_support(op: PrimitiveOp, label: str) -> tuple[Support, str | None]:
+    """Helm planners express container resource ``SetField`` edits only (and name the container)."""
+    if not isinstance(op, SetField):
+        return Support.unsupported(f"{label} planning does not support {op.op!r} primitives"), None
+    field_ref = container_resource_field(op.ref.kind, op.segments)
+    if field_ref is None:
+        return Support.unsupported(f"{label} planning maps container resources only; {op.path} is not one"), None
+    return Support.supported(), field_ref.container
 
 
 def plan_helm_values(
