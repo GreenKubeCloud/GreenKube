@@ -86,7 +86,7 @@ A **recommendation** is one proposed change on one target. It contains:
 | `applied` | The change is live in the cluster (also the state of a measured change whose saving was not realized or inconclusive) |
 | `verifying` | The post-change observation window is running |
 | `verified` | The measured saving was realized and no health check failed |
-| `regressed` | Reserved for drift detection: a realized saving that no longer holds (nothing sets it yet) |
+| `regressed` | A realized saving that no longer holds: the drift monitor stops its accrual and reverses the accruals since the drift began |
 | `rollback_review` | A health check failed after the change |
 | `reverted` | A rollback reached the cluster |
 | `failed` | The pull request was closed without merge, or the change could not be completed |

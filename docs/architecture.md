@@ -153,7 +153,7 @@ flowchart LR
         Lease --> Registry
         Registry --> L1["collection · carbon-intensity · node-analysis"]
         Registry --> L2["recommendation-scan · recommendation-lifecycle<br/>(apply detection, measurement)"]
-        Registry --> L3["savings-attribution · metrics-compression · dashboard-summary"]
+        Registry --> L3["savings-attribution · savings-drift · metrics-compression · dashboard-summary"]
         Registry --> L4["gitops-discovery · gitops-sync"]
         Registry --> L5["automation-controller<br/>(one DB lease: webhook outbox,<br/>PR polling, branch cleanup,<br/>plan expiry, retention)"]
         Registry --> L6["plan-executor · session-purge"]
@@ -193,6 +193,7 @@ flowchart LR
 | `node-analysis` | `NODE_ANALYSIS_INTERVAL` | yes | 10 min |
 | `savings-attribution` | `PROMETHEUS_QUERY_RANGE_STEP` | yes | 30 min |
 | `recommendation-lifecycle` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | yes | 30 min |
+| `savings-drift` | 1 h (drift monitor, C8) | yes | 30 min |
 | `recommendation-scan` | 15 s poll (scans every `RECOMMENDATION_SCAN_INTERVAL`) | yes | — (run leases) |
 | `metrics-compression`, `dashboard-summary` | 1 h | yes | 60 / 30 min |
 | `gitops-discovery` | `GITOPS_DISCOVERY_INTERVAL` | yes | 10 min |

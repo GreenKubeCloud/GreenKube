@@ -382,16 +382,16 @@ The same model produces the projection and the measured rows (product principle 
 | `idle_share` | `idle_operational` | CPU reservation |
 | `embodied` | `embodied` | CPU reservation |
 
-Stored metric rows carry the operational CO₂e (`co2e_grams`: operational energy and idle share, allocated by the same model) and the embodied emissions apart (`embodied_co2e_grams`). Change measurement (`greenkube.verify`) reads `co2e_grams` only, so it **sees `operational_energy` and `idle_share`, not `embodied`**.
+Stored metric rows carry the operational CO₂e (`co2e_grams`: operational energy and idle share, allocated by the same model) and the embodied emissions apart (`embodied_co2e_grams`). Change measurement (`greenkube.verify`) reads `co2e_grams` and, in baseline snapshots frozen since embodied emissions are measured, `embodied_co2e_grams`: it **sees `operational_energy` and `idle_share`, plus `embodied` when both windows carry it** (the estimate lists the components it measured).
 
 **Rule:** a measured value is only ever compared with the projected value of the components the measurement sees. `co2e_measurable_expected_annual_g` is that value (the measurable components × the realization factor, the basis of `co2e_expected_annual_g`); `greenkube.impact.comparison.measurable_co2e_projection` derives it from any stored projection, including projections written before model 2.0.0 (from `co2e_breakdown_annual_g`). Without a projection that models CO₂e there is nothing to compare with, and no projection accuracy is reported (fail closed).
 
 In change measurement:
 
 - the `co2e_g` quantity is the workload's operational CO₂e per hour. Because idle and memory power are allocated by reservation, request changes move it, so it is claimed (`claimed_annualized`, `measured_co2e_saved_grams`) when the change is realized **and** its own 90% interval shows a saving;
-- its `projected_annual` and `projection_accuracy` use the measurable projection, never the total that includes embodied emissions;
+- its `projected_annual` and `projection_accuracy` use the projection of the measured components only: the measurable projection, or the total with embodied emissions when the measurement carries them;
 - it is split between the recommendations of a change by their measurable projections (equal shares when none was projected), so a CPU and a memory recommendation on the same container never both claim the whole CO₂e saving;
-- the projected embodied share is reported in the projection but is not measured, so it is never claimed as measured.
+- a measurement whose snapshot predates embodied measurement compares operational CO₂e only and never claims the projected embodied share.
 
 ## SCI mapping
 
@@ -416,7 +416,7 @@ The Software Carbon Intensity specification (ISO/IEC 21031) defines `SCI = (E ×
 - **List prices.** Catalogs contain on-demand list prices with no discounts, savings plans or spot prices. Observed OpenCost costs take precedence when available.
 - **Unsplit observed totals.** OpenCost's `totalCost` can include volume, network and load-balancer cost. While rows carry only the total, the apportioning attributes those to CPU and RAM. Request-cut projections can then be high by that amount, but never above the observed total.
 - **Annualization assumes the observed coverage repeats.** Short or unusual coverage extrapolates its pattern; coverage below one week is flagged and lowers the confidence.
-- **Embodied emissions are projected, not measured.** Change measurement compares and claims operational CO₂e only.
+- **Embodied emissions are measured by allocation.** Change measurement measures the embodied CO₂e allocated by reservation (Boavizta values), not a physical quantity; older snapshots compare operational CO₂e only.
 - **Rows written before model 1.1.0** (`model_version` empty) follow the previous usage-based policy until they are recomputed. Hourly aggregates are never recomputed.
 - **Realization is a heuristic.** It does not yet measure pool headroom or the node-hours actually removed (`realize()`, roadmap C).
 
