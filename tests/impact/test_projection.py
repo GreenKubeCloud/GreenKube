@@ -658,10 +658,30 @@ class TestScheduleAndDeletionAnalyzers:
         from greenkube.core.optimization.analyzers import IdleNamespaceAnalyzer
 
         rows = [
-            CombinedMetric(pod_name="a", namespace="sandbox", node="n1", cpu_request=200, total_cost=0.5, joules=1.0),
-            CombinedMetric(pod_name="b", namespace="sandbox", node="n1", cpu_request=300, total_cost=0.25, joules=1.0),
+            CombinedMetric(
+                pod_name="a",
+                namespace="sandbox",
+                node="n1",
+                cpu_request=200,
+                total_cost=0.5,
+                joules=1.0,
+                timestamp=START,
+            ),
+            CombinedMetric(
+                pod_name="b",
+                namespace="sandbox",
+                node="n1",
+                cpu_request=300,
+                total_cost=0.25,
+                joules=1.0,
+                timestamp=START,
+            ),
         ]
-        (rec,) = IdleNamespaceAnalyzer(Config()).analyze(self._context(rows))
+        from greenkube.collectors.deletion_candidates import NamespaceInfo
+
+        # Two samples cover one hour: drop the observed-idle minimum (tested in test_deletion_safety.py).
+        context = self._context(rows, namespace_info={"sandbox": NamespaceInfo(name="sandbox")})
+        (rec,) = IdleNamespaceAnalyzer(Config(DELETION_MIN_UNUSED_DAYS=0)).analyze(context)
         impact = _impact(rec)
         assert impact["kind"] == "workload_deletion"
         assert _savings(rec) == pytest.approx(0.75 * HOURS_PER_YEAR / 24)
@@ -672,10 +692,13 @@ class TestScheduleAndDeletionAnalyzers:
 
         from greenkube.core.optimization.analyzers import OrphanedLBAnalyzer, OrphanedPVAnalyzer
 
+        unused = {"evidence": ["no consumer"], "first_seen_at": datetime.now(timezone.utc) - timedelta(days=30)}
         context = self._context(
             [],
-            persistent_volumes=[SimpleNamespace(name="pv-1", phase="Released", capacity_bytes=10 * GIB)],
-            load_balancers=[SimpleNamespace(name="lb-1", namespace="web", endpoint_count=0, annual_cost=120.0)],
+            persistent_volumes=[SimpleNamespace(name="pv-1", phase="Released", capacity_bytes=10 * GIB, **unused)],
+            load_balancers=[
+                SimpleNamespace(name="lb-1", namespace="web", endpoint_count=0, annual_cost=120.0, **unused)
+            ],
         )
         (pv,) = OrphanedPVAnalyzer(Config()).analyze(context)
         (lb,) = OrphanedLBAnalyzer(Config()).analyze(context)
