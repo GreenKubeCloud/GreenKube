@@ -627,3 +627,60 @@ async def test_branch_linkage_ignores_direct_plans_and_unverified_pull_requests(
     provider.open_pull_request(head_ref=plan_branch_name(plans.plans["plan-1"]))
     assert await worker.link_external_deliveries() == 0
     assert plans.plans["plan-1"].status is PlanStatus.APPROVED and pull_requests.records == []
+
+
+@pytest.mark.asyncio
+async def test_approved_external_plans_wait_for_their_pull_request_beyond_the_preview_ttl(monkeypatch):
+    """F4: a person or a scheduled CI job delivers a patch/ci plan; it does not expire with the 30-minute TTL."""
+    from datetime import timedelta
+
+    from greenkube.automation.delivery import EXTERNAL_DELIVERY_GRACE
+    from greenkube.core.config import Config
+    from tests.automation.test_plan_service import (  # pyrefly: ignore[missing-import]
+        MemoryPlanRepository,
+        _action,
+        _archive_snapshot,
+        _service,
+        _source,
+    )
+
+    now = [NOW]
+    repository = MemoryPlanRepository()
+    service = _service(repository, clock=lambda: now[0])
+    source = _source()
+    for mode in ("ci", "direct"):
+        monkeypatch.setattr("greenkube.core.config.get_config", lambda mode=mode: Config(AUTOMATION_DELIVERY_MODE=mode))
+        plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+        assert plan.digest is not None
+        await service.approve_plan(plan.plan_id, plan.digest)
+        assert plan.expires_at is not None
+        now[0] = plan.expires_at + timedelta(minutes=1)
+        expired = await service.expire_due_plans(now=now[0])
+        if mode == "ci":
+            assert expired == [] and (await repository.get_plan(plan.plan_id)).status is PlanStatus.APPROVED
+            now[0] = plan.expires_at + EXTERNAL_DELIVERY_GRACE + timedelta(minutes=1)
+            assert [item.plan_id for item in await service.expire_due_plans(now=now[0])] == [plan.plan_id]
+        else:
+            assert [item.plan_id for item in expired] == [plan.plan_id]
+        now[0] = NOW
+
+
+@pytest.mark.asyncio
+async def test_a_browser_url_on_another_origin_names_the_same_pull_request():
+    """Gitea behind webBaseUrl: the provider answers with its API origin, people paste the browser URL."""
+    worker, _, plans, _, provider = _external_worker("ci")
+    provider.open_pull_request(
+        head_ref=plan_branch_name(plans.plans["plan-1"]), url="http://gitea-http.gitea:3000/acme/gitops/pulls/42"
+    )
+
+    result = await worker.record_external_delivery(
+        "plan-1", pr_url="https://git.example.com/acme/gitops/pulls/42", head_sha=HEAD_SHA, actor="apikey:ci"
+    )
+
+    assert result.created
+    with pytest.raises(ExternalDeliveryError):
+        other, _, other_plans, _, other_provider = _external_worker("ci")
+        other_provider.open_pull_request(head_ref=plan_branch_name(other_plans.plans["plan-1"]))
+        await other.record_external_delivery(
+            "plan-1", pr_url="https://github.com/evil/gitops/pull/42", head_sha=HEAD_SHA, actor="apikey:ci"
+        )

@@ -36,7 +36,7 @@ import email.utils
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.header import Header
 from typing import Literal
 
@@ -51,6 +51,11 @@ DELIVERY_CI: DeliveryMode = "ci"
 DELIVERY_MODES: tuple[DeliveryMode, ...] = (DELIVERY_DIRECT, DELIVERY_PATCH, DELIVERY_CI)
 #: Modes in which a person or a CI job, not GreenKube, writes to Git.
 EXTERNAL_DELIVERY_MODES: frozenset[str] = frozenset({DELIVERY_PATCH, DELIVERY_CI})
+
+#: How long an approved ``patch`` or ``ci`` plan waits for its pull request after the plan TTL:
+#: a person or a scheduled CI job delivers it, not GreenKube within seconds. The delivery
+#: report is verified against the plan's files, so a moved base cannot slip through.
+EXTERNAL_DELIVERY_GRACE = timedelta(days=7)
 
 #: The trailer that links a commit or a pull request body to its plan.
 PLAN_TRAILER = "GreenKube-Plan"
@@ -316,3 +321,14 @@ def _verify_section(operation: str, original_sha: str | None, content: str | Non
     object_format = "sha256" if len(original_sha) == 64 else "sha1"
     if git_blob_id(original, object_format=object_format) != original_sha.lower():
         raise PatchUnavailableError(f"the stored diff does not reproduce the original blob of {original_sha[:12]}")
+
+
+def effective_expiry(plan: Plan) -> datetime | None:
+    """When ``plan`` expires: its TTL, plus :data:`EXTERNAL_DELIVERY_GRACE` once approved for patch or ci."""
+    from greenkube.gitops.contracts import PlanStatus
+
+    if plan.expires_at is None:
+        return None
+    if plan.status is PlanStatus.APPROVED and is_external(plan.delivery_mode):
+        return plan.expires_at + EXTERNAL_DELIVERY_GRACE
+    return plan.expires_at

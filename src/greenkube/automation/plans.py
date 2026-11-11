@@ -12,7 +12,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode, effective_expiry
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
@@ -597,7 +597,8 @@ class AutomationPlanService:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, f"plan {plan_id!r} was not found")
 
         now = ensure_utc(self.clock())
-        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and ensure_utc(plan.expires_at) <= now:
+        expiry = effective_expiry(plan)
+        if plan.status in _EXPIREABLE_STATUSES and expiry is not None and ensure_utc(expiry) <= now:
             await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="plan_expired")
             raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
         if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED}:
@@ -703,7 +704,8 @@ class AutomationPlanService:
         if plan is None or plan.expires_at is None or plan.status not in _EXPIREABLE_STATUSES:
             return plan
         current_time = ensure_utc(now if now is not None else self.clock())
-        if ensure_utc(plan.expires_at) > current_time:
+        expiry = effective_expiry(plan)
+        if expiry is None or ensure_utc(expiry) > current_time:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
@@ -730,7 +732,8 @@ class AutomationPlanService:
                 for plan in candidates
                 if plan.status in _EXPIREABLE_STATUSES
                 and plan.expires_at is not None
-                and ensure_utc(plan.expires_at) <= current_time
+                # Approved patch/ci plans wait longer for their pull request (F4).
+                and ensure_utc(cast(datetime, effective_expiry(plan))) <= current_time
             ),
             key=lambda item: (ensure_utc(cast(datetime, item.expires_at)), item.plan_id),
         )[:limit]

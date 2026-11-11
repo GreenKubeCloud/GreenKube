@@ -2016,7 +2016,12 @@ class PlanWorker:
             ) from exc
         if not isinstance(pull_request, PullRequestInfo) or pull_request.number != number:
             raise _not_verified("The Git provider returned another pull request.")
-        if normalized_url(pull_request.url) != normalized_url(pr_url):
+        # The request was read by number from the plan's own repository; the reported URL must
+        # name it. Only the path is compared when the hosts differ, because a Gitea provider may
+        # answer with its in-cluster API origin while people use its browser origin (webBaseUrl).
+        if normalized_url(pull_request.url) != normalized_url(pr_url) and _url_path(pull_request.url) != _url_path(
+            pr_url
+        ):
             raise _not_verified("pr_url does not belong to the plan repository.")
         raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
         head_data = raw.get("head")
@@ -2438,3 +2443,10 @@ def _repository_name(repo_url: str) -> str:
 
     ref = repository_ref(repo_url)
     return ref.repository if ref is not None else repo_url
+
+
+def _url_path(url: str | None) -> str:
+    """Path of a normalized web URL (``/owner/repo/pull/12``)."""
+    text = normalized_url(url)
+    _, separator, rest = text.partition("://")
+    return "/" + rest.partition("/")[2] if separator else text
