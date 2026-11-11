@@ -314,6 +314,74 @@ export function getSourceTrackRecord({ signal } = {}) {
 	return request(`${BASE}/sources/track-record`, {}, { signal });
 }
 
+// ---------------------------------------------------------------------------
+// Sources, setup, changes (K1, K3, K6, F1, F2)
+// ---------------------------------------------------------------------------
+
+const BASE_V2 = '/api/v2';
+
+/**
+ * Every registered recommendation source with its status, health, last run
+ * and counts, plus registry problems (E5).
+ * @returns {Promise<{sources: Object[], problems: Object[]}>}
+ */
+export function listSources({ signal } = {}) {
+	return request(`${BASE}/sources`, {}, { signal });
+}
+
+/**
+ * A source's runs, newest first.
+ * @param {string} sourceId
+ * @param {{limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<Object[]>}
+ */
+export function listSourceRuns(sourceId, { limit, signal } = {}) {
+	return request(`${BASE}/sources/${encodeURIComponent(sourceId)}/runs`, { limit }, { signal });
+}
+
+/**
+ * Guided setup checklist and capability state (F1):
+ * `{complete, checks: [{id, category, title, status, reason, fix, docs_url}], capabilities}`.
+ */
+export function getSetupStatus({ signal } = {}) {
+	return request(`${BASE}/setup/status`, {}, { signal });
+}
+
+/** Repositories found by GitOps discovery with their inferred provider and allowlist state (F2). */
+export function getRepositorySuggestions({ signal } = {}) {
+	return request(`${BASE}/automation/repositories/suggestions`, {}, { signal });
+}
+
+/**
+ * Add discovered repositories to the delivery allowlist (admin scope, F2).
+ * @param {string[]} repoUrls
+ */
+export function allowlistRepositories(repoUrls) {
+	return request(
+		`${BASE}/automation/repositories/allowlist`,
+		{},
+		jsonOptions('POST', { repo_urls: repoUrls })
+	);
+}
+
+/**
+ * Applied changes, newest first (C2): `{items, next_cursor}`.
+ * @param {{namespace?: string, state?: string[], limit?: number, cursor?: string, signal?: AbortSignal}} [opts]
+ */
+export function listChanges({ namespace, state, limit, cursor, signal } = {}) {
+	return request(`${BASE_V2}/changes`, { namespace, state, limit, cursor }, { signal });
+}
+
+/** One change with its state, baseline snapshot and lifecycle events. */
+export function getChange(changeId, { signal } = {}) {
+	return request(`${BASE_V2}/changes/${encodeURIComponent(changeId)}`, {}, { signal });
+}
+
+/** Decided measurements of one change, oldest first, with their per-recommendation split. */
+export function getChangeMeasurements(changeId, { signal } = {}) {
+	return request(`${BASE_V2}/changes/${encodeURIComponent(changeId)}/measurements`, {}, { signal });
+}
+
 /**
  * Ranked active recommendations.
  * @param {Object} opts
@@ -336,8 +404,8 @@ export function getTopRecommendations({ namespace, limit, metric, profile, refre
  * @param {number} id
  * @returns {Promise<Object>}
  */
-export function getRecommendation(id) {
-	return request(`${BASE}/recommendations/${id}`);
+export function getRecommendation(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}`, {}, { signal });
 }
 
 /**
@@ -522,8 +590,8 @@ export function previewAutomationPlanRollback(planId) {
  * @param {number} id
  * @returns {Promise<Object[]>}
  */
-export function getRecommendationPullRequests(id) {
-	return request(`${BASE}/recommendations/${id}/pull-requests`);
+export function getRecommendationPullRequests(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/pull-requests`, {}, { signal });
 }
 
 /** Pending or open pull requests (cluster-wide: the API has no namespace filter). */
@@ -535,8 +603,8 @@ export function getOpenPullRequests({ signal } = {}) {
  * @param {number} id
  * @returns {Promise<Object[]>}
  */
-export function getRecommendationEvents(id) {
-	return request(`${BASE}/recommendations/${id}/events`);
+export function getRecommendationEvents(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/events`, {}, { signal });
 }
 
 /** @returns {Promise<Object>} */

@@ -34,7 +34,15 @@ import {
 	getGitOpsCoverage,
 	getGitOpsBindings,
 	clearCsrfToken,
-	setCsrfToken
+	setCsrfToken,
+	listSources,
+	listSourceRuns,
+	getSetupStatus,
+	getRepositorySuggestions,
+	allowlistRepositories,
+	listChanges,
+	getChange,
+	getChangeMeasurements
 } from '$lib/api.js';
 
 
@@ -626,5 +634,45 @@ describe('cursor contracts', () => {
 
 		await getMetricsPage({ namespace: 'prod', limit: 1, cursor: 'next' });
 		expect(fetch.mock.calls[1][0]).toContain('cursor=next');
+	});
+});
+
+describe('setup, sources and changes contracts', () => {
+	it('reads sources, runs and setup status from /api/v1', async () => {
+		globalThis.fetch = mockFetchOk({});
+		await listSources();
+		await listSourceRuns('builtin.vpa/x', { limit: 5 });
+		await getSetupStatus();
+		await getRepositorySuggestions();
+		const urls = fetch.mock.calls.map(([url]) => url);
+		expect(urls[0]).toContain('/api/v1/sources');
+		expect(urls[1]).toContain('/api/v1/sources/builtin.vpa%2Fx/runs');
+		expect(urls[1]).toContain('limit=5');
+		expect(urls[2]).toContain('/api/v1/setup/status');
+		expect(urls[3]).toContain('/api/v1/automation/repositories/suggestions');
+	});
+
+	it('posts the repositories to allowlist with the CSRF token', async () => {
+		globalThis.fetch = mockFetchOk({ allowlisted: 2 });
+		setCsrfToken('csrf-token');
+		await allowlistRepositories(['https://github.com/acme/a', 'https://github.com/acme/b']);
+		const [url, options] = fetch.mock.calls[0];
+		expect(url).toContain('/api/v1/automation/repositories/allowlist');
+		expect(options.method).toBe('POST');
+		expect(JSON.parse(options.body)).toEqual({ repo_urls: ['https://github.com/acme/a', 'https://github.com/acme/b'] });
+		expect(options.headers['X-CSRF-Token']).toBe('csrf-token');
+	});
+
+	it('reads changes from /api/v2 with repeated state filters', async () => {
+		globalThis.fetch = mockFetchOk({ items: [], next_cursor: null });
+		await listChanges({ namespace: 'shop', state: ['applied', 'measuring'], limit: 10, cursor: 'a|b' });
+		await getChange('chg-1');
+		await getChangeMeasurements('chg-1');
+		const urls = fetch.mock.calls.map(([url]) => url);
+		expect(urls[0]).toContain('/api/v2/changes?');
+		expect(urls[0]).toContain('state=applied&state=measuring');
+		expect(urls[0]).toContain('cursor=a%7Cb');
+		expect(urls[1]).toContain('/api/v2/changes/chg-1');
+		expect(urls[2]).toContain('/api/v2/changes/chg-1/measurements');
 	});
 });

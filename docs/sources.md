@@ -7,6 +7,7 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 - API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals`, and the push endpoints `POST /api/v1/signals` and `POST /api/v1/sources/krr/reports` ([API reference](api.md)).
 - Connectors: [VPA and Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [NodePools and autoscalers](sources/nodepool.md).
 - Public signal schema: [`schemas/signal.v1alpha1.json`](../schemas/signal.v1alpha1.json) and [`schemas/signal-batch.v1alpha1.json`](../schemas/signal-batch.v1alpha1.json).
+- UI: the **Sources** page lists every source with its status, last run, counts, track record and recent runs ([Web UI](ui.md#sources)).
 - Configuration: `sources.pluginsEnabled`, `sources.settings` ([configuration](configuration.md#recommendation-sources-sources)).
 
 ## Concepts

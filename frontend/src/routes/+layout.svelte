@@ -9,12 +9,15 @@
 		getHealth,
 		getMe,
 		getServicesHealth,
+		getSetupStatus,
 		logout
 	} from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import HealthPopup from '$lib/components/HealthPopup.svelte';
 	import LoginForm from '$lib/components/LoginForm.svelte';
 	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
+	import SetupBanner from '$lib/components/SetupBanner.svelte';
+	import { normalizeSetupStatus, setupBannerDismissed, setupStatus } from '$lib/setup.js';
 
 	let health = null;
 	let healthError = false;
@@ -30,9 +33,12 @@
 	const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 	const navItems = [
-		{ href: '/', label: 'Dashboard' },
+		{ href: '/', label: 'Overview' },
 		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/ledger', label: 'Ledger' },
 		{ href: '/automation', label: 'Automation' },
+		{ href: '/sources', label: 'Sources' },
+		{ href: '/setup', label: 'Setup' },
 		{ href: '/report', label: 'Report' },
 		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/settings', label: 'Settings' }
@@ -55,6 +61,15 @@
 		}
 	}
 
+	async function refreshSetupStatus() {
+		try {
+			setupStatus.set(normalizeSetupStatus(await getSetupStatus()));
+		} catch {
+			// An older server (404) or a transient error: no banner rather than a wrong one.
+			setupStatus.set(null);
+		}
+	}
+
 	function enter(principal) {
 		currentUser.set(principal);
 		authError = '';
@@ -65,6 +80,7 @@
 		authState = 'ready';
 		authEpoch += 1;
 		refreshServicesHealth();
+		refreshSetupStatus();
 	}
 
 	async function loadPrincipal() {
@@ -239,6 +255,8 @@
 			{#each navItems as item}
 				<a
 					href={item.href}
+					aria-label={item.label}
+					aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}
 					class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200
 					       {isActive(item.href, $page.url.pathname)
 								? 'bg-green-600/15 text-green-400 font-medium'
@@ -362,6 +380,9 @@
 			<div class="border-b border-green-700/40 bg-green-900/30 px-4 py-2 text-center text-xs text-green-300" role="status">
 				Password changed. The initial admin password was erased from its Kubernetes Secret.
 			</div>
+		{/if}
+		{#if !$setupBannerDismissed && !$page.url.pathname.startsWith('/setup')}
+			<SetupBanner status={$setupStatus} on:dismiss={() => setupBannerDismissed.set(true)} />
 		{/if}
 		{#key authEpoch}
 			<slot />

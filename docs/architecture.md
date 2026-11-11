@@ -571,10 +571,13 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - **Charts:** ECharts for interactive visualizations
 - **Deployment:** Static build served by FastAPI at `/`
 
-**Pages:**
-- `/` — Dashboard (KPIs, charts, breakdown)
+**Pages** (see [Web UI](ui.md)):
+- `/` — Overview: realized savings, pending verification and projected opportunity side by side (never summed), changes in flight, top recommendations, then footprint KPIs and charts
 - `/nodes` — Node inventory
 - `/recommendations` — Optimization recommendations, evidence, plan preview, pull requests
+- `/recommendations/{id}` — Recommendation detail (target of pull-request links): eligibility, projected impact, consensus, evidence, pull requests, measurement, timeline
+- `/changes/{plan_id}` and `/ledger` — Plan, pull request, applied change and measurement; savings ledger (`?change=` opens one change)
+- `/sources` and `/setup` — Recommendation sources with their runs; setup checklist, capability states and repository suggestions
 - `/automation` — GitOps discovery, workload binding coverage, manual resolution, automation readiness
 - `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
 - `/settings` — Configuration, service health overview with color-coded status indicators, and runtime service configuration
