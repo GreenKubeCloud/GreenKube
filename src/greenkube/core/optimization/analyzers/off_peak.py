@@ -2,6 +2,12 @@
 
 from typing import TYPE_CHECKING, List
 
+from greenkube.core.deletion_safety import (
+    NON_SCALABLE_KINDS,
+    is_infrastructure_namespace,
+    looks_event_driven,
+    opt_out_reason,
+)
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
@@ -41,6 +47,12 @@ class OffPeakAnalyzer(Analyzer):
 
     Reads the pod-level average CPU per UTC hour of day of each target, from
     the usage snapshot (roadmap E3).
+
+    Scaling to zero stops a workload, so it is never proposed for workloads
+    that cannot be scaled (DaemonSets, bare pods, Jobs, CronJobs), workloads
+    an HPA owns (its minReplicas would fight the schedule), operators,
+    controllers and webhooks (they stop reconciling), infrastructure
+    namespaces, or namespaces opted out with ``greenkube.io/ignore``.
     """
 
     capability = "off_peak"
@@ -49,9 +61,12 @@ class OffPeakAnalyzer(Analyzer):
         recs: List[Recommendation] = []
         cfg = self.config
         snapshot = context.usage_snapshot()
+        hpa_targets = context.hpa_targets or set()
 
         for target, _summary in context.workload_summaries():
             ns, target_kind, target_name = target
+            if self._unsafe_to_stop(context, target, hpa_targets):
+                continue
             profile = snapshot.hour_profiles.get(target)
             if not profile or snapshot.hour_profile_samples.get(target, 0) < MIN_PROFILE_SAMPLES:
                 continue
@@ -105,3 +120,13 @@ class OffPeakAnalyzer(Analyzer):
                     )
                 )
         return recs
+
+    @staticmethod
+    def _unsafe_to_stop(context: "OptimizationContext", target, hpa_targets) -> bool:
+        ns, target_kind, target_name = target
+        if target_kind in NON_SCALABLE_KINDS or target in hpa_targets:
+            return True
+        if is_infrastructure_namespace(ns) or looks_event_driven(target_name):
+            return True
+        info = (context.namespace_info or {}).get(ns)
+        return info is not None and opt_out_reason(getattr(info, "metadata", None)) is not None

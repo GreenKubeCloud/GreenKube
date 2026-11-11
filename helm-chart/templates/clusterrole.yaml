@@ -114,4 +114,45 @@ rules:
   verbs:
   - get
   - list
+  # Deletion evidence (docs/recommendation.md, "Why GreenKube thinks a resource
+  # is unused"): a LoadBalancer Service or PersistentVolume is only reported as
+  # unused when GreenKube can read everything that could still use it. A missing
+  # permission makes the evidence unprovable, so nothing is recommended. Read-only.
+- apiGroups: ["discovery.k8s.io"]
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources:
+  - gateways
+  - httproutes
+  - grpcroutes
+  - tlsroutes
+  - tcproutes
+  - udproutes
+  verbs:
+  - get
+  - list
+- apiGroups: ["batch"]
+  resources:
+  - cronjobs
+  verbs:
+  - get
+  - list
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources:
+  - volumesnapshots
+  - volumesnapshotcontents
+  verbs:
+  - get
+  - list
   {{- end }}

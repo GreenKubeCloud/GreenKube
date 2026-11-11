@@ -10,7 +10,7 @@ For the full values reference, see the [Configuration reference](configuration.m
 
 | Requirement | Details |
 |---|---|
-| Kubernetes cluster | A cluster you can administer. The chart creates a `ClusterRole`/`ClusterRoleBinding` so GreenKube can read nodes, pods, workloads, and supported GitOps resources. |
+| Kubernetes cluster | A cluster you can administer. The chart creates a `ClusterRole`/`ClusterRoleBinding` so GreenKube can read (never write) nodes, pods, workloads, Services, EndpointSlices, Ingresses, Gateway API objects, volumes and snapshots, and supported GitOps resources. |
 | Helm | Helm 3.10 or later (the upgrade examples use `--set-json`). |
 | kubectl | A version compatible with your cluster. |
 | Prometheus | Strongly recommended. GreenKube reads CPU, memory, network, disk, and restart metrics from Prometheus. Auto-discovery is attempted when `config.prometheus.url` is empty. |

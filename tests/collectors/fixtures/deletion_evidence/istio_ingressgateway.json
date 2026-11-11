@@ -1,0 +1,41 @@
+{
+    "apiVersion": "v1",
+    "kind": "List",
+    "metadata": {"resourceVersion": ""},
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {"meta.helm.sh/release-name": "istio-ingress", "meta.helm.sh/release-namespace": "istio-ingress"},
+                "labels": {
+                    "app": "istio-ingressgateway",
+                    "app.kubernetes.io/managed-by": "Helm",
+                    "app.kubernetes.io/name": "istio-ingressgateway",
+                    "istio": "ingressgateway",
+                    "istio.io/rev": "default"
+                },
+                "name": "istio-ingressgateway",
+                "namespace": "istio-ingress",
+                "uid": "1f6b2d7e-3c4a-4f5b-9e8d-0a1b2c3d4e5f"
+            },
+            "spec": {
+                "clusterIP": "10.96.33.7",
+                "externalTrafficPolicy": "Cluster",
+                "ports": [
+                    {"name": "status-port", "nodePort": 30021, "port": 15021, "protocol": "TCP", "targetPort": 15021},
+                    {"name": "http2", "nodePort": 30080, "port": 80, "protocol": "TCP", "targetPort": 80},
+                    {"name": "https", "nodePort": 30443, "port": 443, "protocol": "TCP", "targetPort": 443}
+                ],
+                "selector": {"app": "istio-ingressgateway", "istio": "ingressgateway"},
+                "type": "LoadBalancer"
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "192.168.10.241", "ipMode": "VIP"}]}}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Endpoints",
+            "metadata": {"name": "istio-ingressgateway", "namespace": "istio-ingress"}
+        }
+    ]
+}

@@ -37,6 +37,8 @@ async def db(request, tmp_path, monkeypatch):
     dsn = None
     # Fixtures cover two days: the one-week decrease gate is tested elsewhere.
     monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
+    # Likewise for the observed-idle span of zombie deletions (test_deletion_safety.py).
+    monkeypatch.setenv("DELETION_MIN_UNUSED_DAYS", "0")
     if backend == "postgres":
         dsn = os.getenv("GREENKUBE_TEST_POSTGRES_DSN")
         if not dsn:

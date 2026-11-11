@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from greenkube.collectors.deletion_candidates import NamespaceInfo
+from greenkube.collectors.lb_collector import OrphanedLoadBalancer
 from greenkube.collectors.pv_collector import OrphanedPV
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 
@@ -18,6 +20,31 @@ from .optimization.helpers import NativeRecommender  # pyrefly: ignore[missing-i
 # ---------------------------------------------------------------------------
 # Helpers to build test metrics
 # ---------------------------------------------------------------------------
+
+
+#: Deletion candidates need evidence and a first-seen time older than DELETION_MIN_UNUSED_DAYS.
+_EVIDENCE = ["selector app=x matches no pod in namespace legacy"]
+
+
+def _unused_since(days: float = 8.0) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _lb(**kwargs) -> OrphanedLoadBalancer:
+    kwargs.setdefault("evidence", list(_EVIDENCE))
+    kwargs.setdefault("first_seen_at", _unused_since())
+    return OrphanedLoadBalancer(**kwargs)
+
+
+def _orphan_pv(**kwargs) -> OrphanedPV:
+    kwargs.setdefault("evidence", ["phase Released: its claim default/gone-claim was deleted"])
+    kwargs.setdefault("first_seen_at", _unused_since())
+    return OrphanedPV(**kwargs)
+
+
+def _namespaces(*names: str) -> dict:
+    created = datetime.now(timezone.utc) - timedelta(days=90)
+    return {name: NamespaceInfo(name=name, created_at=created) for name in names}
 
 
 def _ts(hour: int = 12, day: int = 1, month: int = 1, year: int = 2026) -> datetime:
@@ -709,6 +736,8 @@ class TestOffPeakScaling:
             usages=usages,
             interval_minutes=60,  # 1 per hour
             start_hour=0,
+            owner_kind="Deployment",
+            owner_name="business-app",
         )
         recs = recommender.generate_recommendations(metrics)
         offpeak_recs = [r for r in recs if r.type == RecommendationType.OFF_PEAK_SCALING]
@@ -760,10 +789,18 @@ class TestIdleNamespace:
             _make_metric(pod_name="pod-b", namespace="idle-ns", joules=200, total_cost=0.03, co2e_grams=0.01),
             _make_metric(pod_name="active-pod", namespace="active-ns", joules=500000, total_cost=5.0, co2e_grams=50.0),
         ]
-        recs = recommender.generate_recommendations(metrics)
+        recs = recommender.generate_recommendations(metrics, namespace_info=_namespaces("idle-ns", "active-ns"))
         idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
         assert len(idle_recs) == 1
         assert idle_recs[0].namespace == "idle-ns"
+        assert "appears idle" in idle_recs[0].description
+        assert "Evidence that it is unused" in idle_recs[0].reason
+
+    def test_no_idle_namespace_when_namespaces_are_unreadable(self, recommender):
+        """Fail closed: without namespace metadata (opt-outs, age) nothing is recommended."""
+        metrics = [_make_metric(pod_name="pod-a", namespace="idle-ns", joules=100, total_cost=0.05)]
+        recs = recommender.generate_recommendations(metrics)
+        assert [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE] == []
 
     def test_no_idle_for_active_namespace(self, recommender):
         """Active namespace should not be flagged."""
@@ -1136,13 +1173,13 @@ class TestSystemNamespaceExclusion:
                 total_cost=0.01,
             )
         ]
-        recs = recommender.generate_recommendations(metrics)
+        recs = recommender.generate_recommendations(metrics, namespace_info=_namespaces("my-custom-ns"))
         idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
         assert len(idle_recs) == 1
         assert idle_recs[0].namespace == "my-custom-ns"
 
-    def test_system_namespace_included_when_flag_enabled(self):
-        """When recommend_system_namespaces=True, system namespaces CAN be flagged."""
+    def test_system_namespace_never_decommissioned_even_when_flag_enabled(self):
+        """RECOMMEND_SYSTEM_NAMESPACES never makes a system namespace a deletion candidate."""
         from greenkube.core.config import Config
 
         cfg = Config()
@@ -1157,10 +1194,9 @@ class TestSystemNamespaceExclusion:
                 total_cost=0.05,
             )
         ]
-        recs = recommender_with_sys.generate_recommendations(metrics)
+        recs = recommender_with_sys.generate_recommendations(metrics, namespace_info=_namespaces("kube-system"))
         idle_recs = [r for r in recs if r.type == RecommendationType.IDLE_NAMESPACE]
-        assert len(idle_recs) == 1
-        assert idle_recs[0].namespace == "kube-system"
+        assert idle_recs == []
 
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1285,7 @@ class TestOrphanedPersistentVolume:
     def test_detects_released_volume(self, recommender):
         """A released PV with a deleted claim should be flagged with estimated cost savings."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-dead",
                 phase="Released",
                 capacity_bytes=100 * 1024**3,
@@ -1266,7 +1302,8 @@ class TestOrphanedPersistentVolume:
         assert rec.scope == "cluster"
         assert rec.priority == "medium"
         assert "100.0GiB" in rec.description
-        assert "Released" in rec.reason
+        assert "appears unused" in rec.description
+        assert "Released" in rec.reason and "Evidence that it is unused" in rec.reason
         # 100 GiB at $0.10/GiB-month → $120/year in annualized cost savings
         assert rec.potential_savings_cost == pytest.approx(100 * 0.10 * 12)
         assert "120.00" in rec.description
@@ -1276,7 +1313,7 @@ class TestOrphanedPersistentVolume:
     def test_no_cost_savings_when_capacity_unknown(self, recommender):
         """A PV with unknown capacity should not report fabricated cost savings."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-no-cap",
                 phase="Released",
                 capacity_bytes=0,
@@ -1297,7 +1334,7 @@ class TestOrphanedPersistentVolume:
         custom_recommender = NativeRecommender(config=cfg)
 
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-pricey",
                 phase="Released",
                 capacity_bytes=10 * 1024**3,
@@ -1318,7 +1355,7 @@ class TestOrphanedPersistentVolume:
     def test_prefers_real_opencost_cost_when_available(self, recommender):
         """A real OpenCost annual cost must take precedence over the capacity estimate."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-real",
                 phase="Released",
                 capacity_bytes=100 * 1024**3,
@@ -1333,27 +1370,28 @@ class TestOrphanedPersistentVolume:
         assert "OpenCost-reported cost savings: $87.50/year" in recs[0].description
         assert "$0.10/GiB-month" not in recs[0].description
 
-    def test_detects_volume_with_missing_claim(self, recommender):
-        """A PV whose claim no longer exists should be flagged regardless of phase."""
+    def test_reason_lists_the_collector_evidence(self, recommender):
+        """The recommendation shows the evidence gathered by the collector and the unused duration."""
         volumes = [
-            OrphanedPV(
+            _orphan_pv(
                 name="pvc-stale",
-                phase="Bound",
+                phase="Released",
                 capacity_bytes=50 * 1024**3,
                 claim_namespace="prod",
                 claim_name="deleted-pvc",
+                evidence=["no PVC named prod/deleted-pvc exists"],
             )
         ]
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 1
-        assert "prod/deleted-pvc" in recs[0].reason
-        assert "no longer exists" in recs[0].reason
+        assert "no PVC named prod/deleted-pvc exists" in recs[0].reason
+        assert "unused continuously since" in recs[0].reason
 
     def test_multiple_volumes_produce_separate_recommendations(self, recommender):
         """Each orphaned PV should produce its own recommendation."""
         volumes = [
-            OrphanedPV(name="pvc-a", phase="Released", capacity_bytes=10 * 1024**3),
-            OrphanedPV(name="pvc-b", phase="Released", capacity_bytes=20 * 1024**3),
+            _orphan_pv(name="pvc-a", phase="Released", capacity_bytes=10 * 1024**3),
+            _orphan_pv(name="pvc-b", phase="Released", capacity_bytes=20 * 1024**3),
         ]
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 2
@@ -1373,6 +1411,8 @@ class TestOrphanedPersistentVolume:
         mock_pv.claim_namespace = "default"
         mock_pv.claim_name = "gone"
         mock_pv.reclaim_policy = "Retain"
+        mock_pv.evidence = ["phase Released"]
+        mock_pv.first_seen_at = _unused_since()
         recs = self._pv_recs(recommender, [mock_pv])
         assert len(recs) == 1
         assert recs[0].pod_name == "pvc-mocked"
@@ -1396,10 +1436,8 @@ class TestOrphanedLoadBalancer:
 
     def test_detects_orphaned_load_balancer(self, recommender):
         """A LoadBalancer Service with no endpoints should be flagged with estimated cost savings."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(
+            _lb(
                 name="dead-lb",
                 namespace="legacy",
                 endpoint_count=0,
@@ -1413,9 +1451,10 @@ class TestOrphanedLoadBalancer:
         assert rec.namespace == "legacy"
         assert rec.scope == "cluster"
         assert rec.priority == "medium"
-        assert "no backing endpoints" in rec.description
+        assert "appears unused" in rec.description
         assert "1.2.3.4" in rec.description
-        assert "has 0 ready endpoints" in rec.reason
+        assert "selector app=x matches no pod" in rec.reason
+        assert 'greenkube.io/ignore="true"' in rec.reason
         # Flat estimate at $18.00/month → $216/year
         assert rec.potential_savings_cost == pytest.approx(216.0)
         assert "216.00" in rec.description
@@ -1429,10 +1468,8 @@ class TestOrphanedLoadBalancer:
 
     def test_prefers_real_opencost_cost_when_available(self, recommender):
         """A real OpenCost annual cost must take precedence over the flat estimate."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(
+            _lb(
                 name="lb-real",
                 namespace="default",
                 endpoint_count=0,
@@ -1447,14 +1484,13 @@ class TestOrphanedLoadBalancer:
 
     def test_cost_savings_use_configured_lb_price(self):
         """The LoadBalancer price per month must be configurable."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
         from greenkube.core.config import Config
 
         cfg = Config()
         cfg.LOAD_BALANCER_COST_PER_MONTH = 25.0
         custom_recommender = NativeRecommender(config=cfg)
 
-        services = [OrphanedLoadBalancer(name="lb-pricey", namespace="default", endpoint_count=0)]
+        services = [_lb(name="lb-pricey", namespace="default", endpoint_count=0)]
         metrics = [_make_metric(pod_name="unrelated-pod")]
         recs = [
             r
@@ -1467,11 +1503,9 @@ class TestOrphanedLoadBalancer:
 
     def test_multiple_services_produce_separate_recommendations(self, recommender):
         """Each orphaned LoadBalancer should produce its own recommendation."""
-        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
-
         services = [
-            OrphanedLoadBalancer(name="lb-a", namespace="default", endpoint_count=0),
-            OrphanedLoadBalancer(name="lb-b", namespace="default", endpoint_count=0),
+            _lb(name="lb-a", namespace="default", endpoint_count=0),
+            _lb(name="lb-b", namespace="default", endpoint_count=0),
         ]
         recs = self._lb_recs(recommender, services)
         assert len(recs) == 2
@@ -1485,6 +1519,8 @@ class TestOrphanedLoadBalancer:
         mock_lb.endpoint_count = 0
         mock_lb.external_ip = ""
         mock_lb.ports = "80/TCP"
+        mock_lb.evidence = list(_EVIDENCE)
+        mock_lb.first_seen_at = _unused_since()
         recs = self._lb_recs(recommender, [mock_lb])
         assert len(recs) == 1
         assert recs[0].pod_name == "lb-mocked"
@@ -1495,3 +1531,6 @@ def _no_decrease_coverage_gate(monkeypatch):
     """These fixtures span hours, not weeks: disable the one-week coverage gate for
     request decreases (E9), which tests/core/optimization/test_two_way_rightsizing.py covers."""
     monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
+    # Likewise for the observed-idle span of zombie and idle-namespace deletions, covered by
+    # tests/core/optimization/test_deletion_safety.py (persisted LB/PV ages still apply).
+    monkeypatch.setenv("DELETION_MIN_UNUSED_DAYS", "0")

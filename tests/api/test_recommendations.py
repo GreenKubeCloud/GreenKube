@@ -1,7 +1,7 @@
 # tests/api/test_recommendations.py
 """Tests for the recommendations endpoint."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -174,6 +174,8 @@ class TestRecommendationsEndpoint:
                 claim_namespace="default",
                 claim_name="gone-claim",
                 reclaim_policy="Retain",
+                evidence=["phase Released: its claim default/gone-claim was deleted"],
+                first_seen_at=datetime.now(timezone.utc) - timedelta(days=8),
             )
         ]
 
@@ -212,6 +214,8 @@ class TestRecommendationsEndpoint:
                 namespace="legacy",
                 endpoint_count=0,
                 external_ip="1.2.3.4",
+                evidence=["selector app=dead matches no pod in namespace legacy"],
+                first_seen_at=datetime.now(timezone.utc) - timedelta(days=8),
             )
         ]
 

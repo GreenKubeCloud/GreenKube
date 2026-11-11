@@ -1,0 +1,103 @@
+{
+    "apiVersion": "v1",
+    "kind": "List",
+    "metadata": {"resourceVersion": ""},
+    "items": [
+        {
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {
+                "creationTimestamp": "2026-03-02T09:12:44Z",
+                "generation": 1,
+                "name": "cluster-gateway",
+                "namespace": "gateway",
+                "uid": "5c1e3f0a-8a5e-4d0e-9a51-2b4c7c6f0e11"
+            },
+            "spec": {
+                "gatewayClassName": "cilium",
+                "listeners": [
+                    {"allowedRoutes": {"namespaces": {"from": "All"}}, "name": "http", "port": 80, "protocol": "HTTP"},
+                    {
+                        "allowedRoutes": {"namespaces": {"from": "All"}},
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "HTTPS",
+                        "tls": {"certificateRefs": [{"group": "", "kind": "Secret", "name": "wildcard-tls"}], "mode": "Terminate"}
+                    }
+                ]
+            },
+            "status": {
+                "addresses": [{"type": "IPAddress", "value": "192.168.10.240"}],
+                "conditions": [
+                    {"lastTransitionTime": "2026-03-02T09:12:50Z", "message": "Gateway successfully scheduled", "observedGeneration": 1, "reason": "Accepted", "status": "True", "type": "Accepted"},
+                    {"lastTransitionTime": "2026-03-02T09:12:51Z", "message": "Gateway successfully reconciled", "observedGeneration": 1, "reason": "Programmed", "status": "True", "type": "Programmed"}
+                ]
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "creationTimestamp": "2026-03-02T09:12:45Z",
+                "labels": {
+                    "gateway.networking.k8s.io/gateway-name": "cluster-gateway",
+                    "io.cilium.gateway/owning-gateway": "cluster-gateway"
+                },
+                "name": "cilium-gateway-cluster-gateway",
+                "namespace": "gateway",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "gateway.networking.k8s.io/v1",
+                        "controller": true,
+                        "kind": "Gateway",
+                        "name": "cluster-gateway",
+                        "uid": "5c1e3f0a-8a5e-4d0e-9a51-2b4c7c6f0e11"
+                    }
+                ],
+                "resourceVersion": "2214",
+                "uid": "9b0d2c4e-6f1a-4b8e-8d3c-7a1e5f2b9c40"
+            },
+            "spec": {
+                "allocateLoadBalancerNodePorts": true,
+                "clusterIP": "10.96.120.14",
+                "clusterIPs": ["10.96.120.14"],
+                "externalTrafficPolicy": "Cluster",
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": ["IPv4"],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {"name": "port-80", "nodePort": 31080, "port": 80, "protocol": "TCP", "targetPort": 80},
+                    {"name": "port-443", "nodePort": 31443, "port": 443, "protocol": "TCP", "targetPort": 443}
+                ],
+                "sessionAffinity": "None",
+                "type": "LoadBalancer"
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "192.168.10.240", "ipMode": "VIP"}]}}
+        },
+        {
+            "addressType": "IPv4",
+            "apiVersion": "discovery.k8s.io/v1",
+            "endpoints": [{"addresses": ["192.192.192.192"], "conditions": {"ready": true}}],
+            "kind": "EndpointSlice",
+            "metadata": {
+                "labels": {
+                    "endpointslice.kubernetes.io/managed-by": "endpointslicemirroring-controller.k8s.io",
+                    "kubernetes.io/service-name": "cilium-gateway-cluster-gateway"
+                },
+                "name": "cilium-gateway-cluster-gateway-7xq2p",
+                "namespace": "gateway"
+            },
+            "ports": [{"name": "", "port": 9999, "protocol": "TCP"}]
+        },
+        {
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "HTTPRoute",
+            "metadata": {"name": "web", "namespace": "apps"},
+            "spec": {
+                "hostnames": ["www.example.internal"],
+                "parentRefs": [{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "cluster-gateway", "namespace": "gateway"}],
+                "rules": [{"backendRefs": [{"kind": "Service", "name": "web", "port": 80}]}]
+            }
+        }
+    ]
+}

@@ -1,188 +1,149 @@
 # tests/collectors/test_pv_collector.py
 """
-Tests for the PVCollector that detects orphaned PersistentVolumes.
-TDD: Tests written before implementation.
+Tests for the PVCollector: a PersistentVolume is reported only with evidence
+that it is unused (its claim is gone and nothing depends on it).
+
+Fixtures are kubectl-shaped manifests (``tests/collectors/fixtures/deletion_evidence``).
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
+from greenkube.collectors.k8s_object_reader import STATUS_ABSENT, STATUS_UNREADABLE, StaticObjectReader
 from greenkube.collectors.pv_collector import OrphanedPV, PVCollector, enrich_orphaned_pv_costs
 
+from .deletion_fixtures import load_objects  # pyrefly: ignore[missing-import]
 
-@pytest.fixture
-def pv_collector():
-    """Returns a PVCollector instance."""
-    return PVCollector()
-
-
-def _make_pv(name, phase="Bound", capacity="100Gi", claim_ref=None, reclaim_policy="Delete"):
-    """Helper to create a mock PersistentVolume object."""
-    pv = MagicMock()
-    pv.metadata = MagicMock()
-    pv.metadata.name = name
-    pv.spec = MagicMock()
-    pv.spec.capacity = {"storage": capacity}
-    pv.spec.claim_ref = claim_ref
-    pv.spec.persistent_volume_reclaim_policy = reclaim_policy
-    pv.spec.storage_class_name = "standard"
-    pv.status = MagicMock()
-    pv.status.phase = phase
-    return pv
+RETAINED = "pvc-0b7f6c1e-3d2a-4e9b-a1c8-5f4d3e2b1a09"
+PREBOUND = "nfs-reserved-for-ci"
+STATEFULSET_REPLICA = "pvc-5a5a5a5a-6b6b-4c7c-8d8d-9e9e9e9e9e9e"
+SNAPSHOT_SOURCE = "pvc-6c6c6c6c-7d7d-4e8e-9f9f-0a0a0a0a0a0a"
+LOCAL_PATH = "pvc-7e7e7e7e-8f8f-4a9a-8b0b-1c1c1c1c1c1c"
+BOUND = "pvc-8f8f8f8f-9a9a-4b0b-8c1c-2d2d2d2d2d2d"
 
 
-def _make_pvc(namespace, name):
-    """Helper to create a mock PersistentVolumeClaim object."""
-    pvc = MagicMock()
-    pvc.metadata = MagicMock()
-    pvc.metadata.namespace = namespace
-    pvc.metadata.name = name
-    return pvc
+def _reader(statuses=None, mutate=None):
+    objects = load_objects("persistent_volumes.json")
+    if mutate:
+        mutate(objects)
+    return StaticObjectReader(objects, statuses=statuses)
 
 
-def _claim_ref(namespace, name):
-    """Helper to create a mock claimRef object."""
-    ref = MagicMock()
-    ref.namespace = namespace
-    ref.name = name
-    return ref
+async def _scan(reader):
+    return await PVCollector(reader=reader).scan()
 
 
-def _mock_api(pvs, pvcs):
-    """Creates a mock CoreV1Api returning the given PV and PVC lists."""
-    api = AsyncMock()
-    pv_list = MagicMock()
-    pv_list.items = pvs
-    pvc_list = MagicMock()
-    pvc_list.items = pvcs
-    api.list_persistent_volume = AsyncMock(return_value=pv_list)
-    api.list_persistent_volume_claim_for_all_namespaces = AsyncMock(return_value=pvc_list)
-    return api
+def _pv(objects, name):
+    return next(item for item in objects["persistentvolumes"] if item["metadata"]["name"] == name)
 
 
 class TestPVCollector:
-    """Tests for PVCollector.collect()."""
+    @pytest.mark.asyncio
+    async def test_only_the_released_volume_without_dependants_is_a_candidate(self):
+        result = await _scan(_reader())
+
+        assert result.complete is True
+        assert [c.name for c in result.candidates] == [RETAINED]
+        candidate = result.candidates[0]
+        assert isinstance(candidate, OrphanedPV)
+        assert candidate.phase == "Released"
+        assert candidate.capacity_bytes == 100 * 1024**3
+        assert (candidate.claim_namespace, candidate.claim_name) == ("finance", "reports-archive")
+        assert candidate.reclaim_policy == "Retain"
+        assert candidate.storage_class == "gp3-retain"
+        evidence = " | ".join(candidate.evidence)
+        assert "no PVC named finance/reports-archive exists" in evidence
+        assert "does not delete the disk" in evidence  # Retain: the cloud disk must be released manually
 
     @pytest.mark.asyncio
-    async def test_collect_detects_released_volume(self, pv_collector):
-        """A PV in Released phase with a missing claim should be flagged."""
-        pv = _make_pv(
-            "pvc-dead",
-            phase="Released",
-            capacity="100Gi",
-            claim_ref=_claim_ref("default", "gone-claim"),
-            reclaim_policy="Retain",
+    async def test_false_positive_paths_are_skipped_with_a_reason(self):
+        skipped = (await _scan(_reader())).skipped
+
+        # Regression: a pre-bound Available volume whose claim is not created yet was reported before.
+        assert skipped[PREBOUND].startswith("phase Available")
+        assert skipped[BOUND].startswith("phase Bound")
+        assert skipped[STATEFULSET_REPLICA] == "its claim belongs to StatefulSet db/postgres, which may scale up again"
+        assert skipped[SNAPSHOT_SOURCE] == "VolumeSnapshot finance/ledger-2026-10-31 was taken from its claim"
+        assert skipped[LOCAL_PATH].startswith("local or hostPath volume")
+
+    @pytest.mark.asyncio
+    async def test_snapshot_content_on_the_volume_handle_protects_it(self):
+        def mutate(objects):
+            objects["volumesnapshots"] = []
+            objects["volumesnapshotcontents"] = [
+                {
+                    "kind": "VolumeSnapshotContent",
+                    "metadata": {"name": "snapcontent-pre-provisioned"},
+                    "spec": {"source": {"volumeHandle": "vol-0a1b2c3d4e5f60718"}},
+                }
+            ]
+
+        result = await _scan(_reader(mutate=mutate))
+        assert RETAINED not in [c.name for c in result.candidates]
+        assert "VolumeSnapshotContent snapcontent-pre-provisioned" in result.skipped[RETAINED]
+
+    @pytest.mark.asyncio
+    async def test_recreated_claim_with_the_same_name_protects_it(self):
+        def mutate(objects):
+            objects["persistentvolumeclaims"].append(
+                {"kind": "PersistentVolumeClaim", "metadata": {"name": "reports-archive", "namespace": "finance"}}
+            )
+
+        result = await _scan(_reader(mutate=mutate))
+        assert result.candidates == []
+        assert "exists again" in result.skipped[RETAINED]
+
+    @pytest.mark.parametrize("annotation", [{"greenkube.io/ignore": "true"}, {"greenkube.io/keep": "audit"}])
+    @pytest.mark.asyncio
+    async def test_opt_out_annotations(self, annotation):
+        def mutate(objects):
+            _pv(objects, RETAINED)["metadata"]["annotations"].update(annotation)
+
+        result = await _scan(_reader(mutate=mutate))
+        assert result.candidates == []
+        assert "opted out" in result.skipped[RETAINED]
+
+    @pytest.mark.asyncio
+    async def test_failed_phase_is_a_candidate(self):
+        def mutate(objects):
+            _pv(objects, RETAINED)["status"]["phase"] = "Failed"
+
+        result = await _scan(_reader(mutate=mutate))
+        assert [c.name for c in result.candidates] == [RETAINED]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_api_not_installed_is_evidence(self):
+        result = await _scan(
+            _reader(statuses={"volumesnapshots": STATUS_ABSENT, "volumesnapshotcontents": STATUS_ABSENT})
         )
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=_mock_api([pv], []),
-        ):
-            orphaned = await pv_collector.collect()
+        # The snapshot no longer protects the ledger volume: the API is absent, so no snapshot exists.
+        assert sorted(c.name for c in result.candidates) == sorted([RETAINED, SNAPSHOT_SOURCE])
 
-        assert len(orphaned) == 1
-        result = orphaned[0]
-        assert result.name == "pvc-dead"
-        assert result.phase == "Released"
-        assert result.capacity_bytes == 100 * 1024**3
-        assert result.claim_namespace == "default"
-        assert result.claim_name == "gone-claim"
-        assert result.reclaim_policy == "Retain"
+    @pytest.mark.parametrize("kind", ["statefulsets", "volumesnapshots", "volumesnapshotcontents"])
+    @pytest.mark.asyncio
+    async def test_unreadable_evidence_means_no_candidate(self, kind):
+        result = await _scan(_reader(statuses={kind: STATUS_UNREADABLE}))
+        assert result.candidates == []
+        assert "cannot prove it is unused" in result.skipped[RETAINED]
+
+    @pytest.mark.parametrize("kind", ["persistentvolumes", "persistentvolumeclaims"])
+    @pytest.mark.asyncio
+    async def test_unreadable_volumes_or_claims_return_none(self, kind):
+        assert await PVCollector(reader=_reader(statuses={kind: STATUS_UNREADABLE})).collect() is None
 
     @pytest.mark.asyncio
-    async def test_collect_detects_bound_volume_with_missing_claim(self, pv_collector):
-        """A PV whose claimRef points to a non-existent PVC should be flagged."""
-        pv = _make_pv(
-            "pvc-stale",
-            phase="Bound",
-            capacity="50Gi",
-            claim_ref=_claim_ref("prod", "deleted-pvc"),
-        )
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=_mock_api([pv], [_make_pvc("prod", "other-pvc")]),
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert len(orphaned) == 1
-        assert orphaned[0].name == "pvc-stale"
-        assert orphaned[0].capacity_bytes == 50 * 1024**3
+    async def test_reader_exception_returns_none(self):
+        reader = AsyncMock()
+        reader.list = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await PVCollector(reader=reader).collect() is None
 
     @pytest.mark.asyncio
-    async def test_collect_skips_volume_with_live_claim(self, pv_collector):
-        """A bound PV whose PVC still exists should NOT be flagged."""
-        pv = _make_pv(
-            "pvc-alive",
-            phase="Bound",
-            capacity="10Gi",
-            claim_ref=_claim_ref("default", "live-claim"),
-        )
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=_mock_api([pv], [_make_pvc("default", "live-claim")]),
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert orphaned == []
-
-    @pytest.mark.asyncio
-    async def test_collect_skips_available_volume_without_claim(self, pv_collector):
-        """An Available PV without claimRef (static provisioning) should NOT be flagged."""
-        pv = _make_pv("static-volume", phase="Available", capacity="500Gi", claim_ref=None)
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=_mock_api([pv], []),
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert orphaned == []
-
-    @pytest.mark.asyncio
-    async def test_collect_returns_empty_when_no_volumes(self, pv_collector):
-        """Should return an empty list if no PVs exist."""
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=_mock_api([], []),
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert orphaned == []
-
-    @pytest.mark.asyncio
-    async def test_collect_returns_empty_when_api_unavailable(self, pv_collector):
-        """Should return an empty list if the K8s API is unavailable."""
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert orphaned == []
-
-    @pytest.mark.asyncio
-    async def test_collect_handles_exception_gracefully(self, pv_collector):
-        """Should return an empty list on exception without crashing."""
-        mock_api = AsyncMock()
-        mock_api.list_persistent_volume = AsyncMock(side_effect=Exception("API timeout"))
-
-        with patch(
-            "greenkube.collectors.pv_collector.get_core_v1_api",
-            new_callable=AsyncMock,
-            return_value=mock_api,
-        ):
-            orphaned = await pv_collector.collect()
-
-        assert orphaned == []
+    async def test_no_volumes_returns_empty_list(self):
+        assert await PVCollector(reader=StaticObjectReader({})).collect() == []
 
 
 # ---------------------------------------------------------------------------
-# enrich_orphaned_pv_costs
 # ---------------------------------------------------------------------------
 
 

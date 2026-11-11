@@ -300,6 +300,10 @@ class Config(BaseSettings):
     # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
+    # Days a resource must look unused continuously (LoadBalancer, PersistentVolume)
+    # or be observed idle (zombie workload, idle namespace) before its deletion is
+    # recommended. Never below 0.
+    DELETION_MIN_UNUSED_DAYS: float = 7.0
 
     # --- Impact Model (docs/methodology/impact-model.md) ---
     # CustomRates of the cost fallback chain (observed -> pricing catalog ->

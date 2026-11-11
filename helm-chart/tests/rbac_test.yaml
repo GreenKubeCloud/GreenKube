@@ -209,6 +209,41 @@ tests:
           path: rules[10].verbs
           value: ["get", "list"]
 
+  - it: ClusterRole should grant read-only access to deletion evidence
+    templates:
+      - templates/clusterrole.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["discovery.k8s.io"]
+            resources: ["endpointslices"]
+            verbs: ["get", "list", "watch"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["networking.k8s.io"]
+            resources: ["ingresses"]
+            verbs: ["get", "list"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["gateway.networking.k8s.io"]
+            resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "tcproutes", "udproutes"]
+            verbs: ["get", "list"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["batch"]
+            resources: ["cronjobs"]
+            verbs: ["get", "list"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["snapshot.storage.k8s.io"]
+            resources: ["volumesnapshots", "volumesnapshotcontents"]
+            verbs: ["get", "list"]
+
   - it: ClusterRole should never grant Secret access
     templates:
       - templates/clusterrole.yaml

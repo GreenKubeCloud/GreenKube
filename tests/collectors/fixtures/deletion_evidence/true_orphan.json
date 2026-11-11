@@ -1,0 +1,58 @@
+{
+    "apiVersion": "v1",
+    "kind": "List",
+    "metadata": {"resourceVersion": ""},
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {"argocd.argoproj.io/tracking-id": "legacy:/Service:legacy/old-api"},
+                "labels": {"app.kubernetes.io/name": "old-api"},
+                "name": "old-api",
+                "namespace": "legacy",
+                "uid": "7e3d9a1c-0b2f-4c6d-8e5a-1f9b3c7d2e80"
+            },
+            "spec": {
+                "clusterIP": "10.96.200.31",
+                "ports": [{"name": "http", "nodePort": 30931, "port": 80, "protocol": "TCP", "targetPort": 8080}],
+                "selector": {"app.kubernetes.io/name": "old-api"},
+                "type": "LoadBalancer"
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "203.0.113.10", "ipMode": "VIP"}]}}
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Endpoints",
+            "metadata": {"labels": {"app.kubernetes.io/name": "old-api"}, "name": "old-api", "namespace": "legacy"}
+        },
+        {
+            "addressType": "IPv4",
+            "apiVersion": "discovery.k8s.io/v1",
+            "endpoints": null,
+            "kind": "EndpointSlice",
+            "metadata": {
+                "labels": {"endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io", "kubernetes.io/service-name": "old-api"},
+                "name": "old-api-wq7rf",
+                "namespace": "legacy"
+            },
+            "ports": null
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "new-api", "namespace": "legacy"},
+            "spec": {
+                "replicas": 2,
+                "selector": {"matchLabels": {"app.kubernetes.io/name": "new-api"}},
+                "template": {"metadata": {"labels": {"app.kubernetes.io/name": "new-api"}}, "spec": {"containers": [{"image": "registry.example/new-api:2.4.1", "name": "api"}]}}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"labels": {"app.kubernetes.io/name": "new-api", "pod-template-hash": "5f8d7c9b6"}, "name": "new-api-5f8d7c9b6-x4k2l", "namespace": "legacy"},
+            "status": {"phase": "Running"}
+        }
+    ]
+}

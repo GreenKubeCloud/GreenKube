@@ -47,6 +47,7 @@ class NativeRecommender:
         persistent_volumes: Optional[List] = None,
         load_balancers: Optional[List] = None,
         analysis_window_seconds: Optional[float] = None,
+        namespace_info: Optional[dict] = None,
     ) -> List[Recommendation]:
         if not metrics:
             return []
@@ -59,6 +60,7 @@ class NativeRecommender:
             persistent_volumes=persistent_volumes,
             load_balancers=load_balancers,
             analysis_window_seconds=analysis_window_seconds,
+            namespace_info=namespace_info,
         )
         recommendations = _run_coroutine(NativeSource(self.config).collect(context))
         return finalize_recommendations(recommendations, self.config)
