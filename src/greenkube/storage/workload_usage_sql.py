@@ -104,8 +104,7 @@ def _hourly_columns(raw: Tuple[Tuple[str, str], ...]) -> Tuple[Tuple[str, str], 
         "memory_usage_bytes": "memory_usage_avg",
         "cpu_usage_max_millicores": "cpu_usage_max",
         "memory_usage_max_bytes": "memory_usage_max",
-        # The compressed hourly tables do not keep the DCGM GPU power (B5).
-        "gpu_power_watts": "NULL",
+        # ``gpu_power_watts`` is the hour's duration-weighted average (migration 0064).
     }
     columns = [(renamed.get(expr, expr), name) for expr, name in raw]
     names = {name for _, name in columns}

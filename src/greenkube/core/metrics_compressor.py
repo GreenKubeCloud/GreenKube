@@ -73,6 +73,19 @@ def _mode(column: str, backend: str) -> str:
     return column  # SQLite returns a value from the group for bare columns.
 
 
+#: Duration-weighted average GPU power of an hour (B5, migration 0064): times
+#: the hourly ``duration_seconds`` it gives back the GPU energy of the raw
+#: rows, which the workload usage rollup re-reads once raw rows are pruned.
+#: Rows without GPU power count as 0 W when others in the hour have some, and
+#: rows without a duration fall back to the plain average (one step each).
+_GPU_POWER_AVERAGE = (
+    "CASE WHEN COUNT(gpu_power_watts) = 0 THEN NULL "
+    "WHEN SUM(COALESCE(duration_seconds, 0)) > 0 THEN "
+    "SUM(COALESCE(gpu_power_watts, 0) * COALESCE(duration_seconds, 0)) * 1.0 / SUM(COALESCE(duration_seconds, 0)) "
+    "ELSE SUM(COALESCE(gpu_power_watts, 0)) * 1.0 / COUNT(*) END"
+)
+
+
 @dataclass(frozen=True)
 class _MetricsTable:
     raw: str
@@ -126,6 +139,7 @@ class _MetricsTable:
             ("power_source", _source_aggregate("power_source")),
             ("intensity_source", _source_aggregate("intensity_source")),
             ("emaps_zone", _mode("emaps_zone", backend)),
+            ("gpu_power_watts", _GPU_POWER_AVERAGE),
         ]
         if self.pod_scope:
             columns += [
