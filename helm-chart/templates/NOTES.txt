@@ -51,7 +51,7 @@ Welcome to
 
 4. Connect Git (optional): GitOps discovery is already running. To let
    GreenKube open pull requests, create one Secret; delivery activates within
-   about a minute, with no upgrade and no restart:
+   one to two minutes, with no upgrade and no restart:
      kubectl -n {{ .Release.Namespace }} create secret generic {{ include "greenkube.gitCredentialsSecretName" . }} \
        --from-literal=token=<token with write access to your GitOps repositories>
 {{- if $v.pauseDelivery }}

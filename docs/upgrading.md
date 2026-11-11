@@ -52,15 +52,21 @@ opened*. To keep the Git tokens out of every pod, also remove `automation.provid
 
 ### From a standalone or production install with PostgreSQL
 
+Use `--reset-then-reuse-values` (Helm 3.14 or later) or pass your values file again: the new chart defaults
+then apply, plus only the values you set. `--reuse-values` also carries over every 0.3.x *default*, so the
+install notes list all of them as deprecated, and the 0.3.x default `automation.enabled: false` pauses delivery
+until you drop it.
+
 ```bash
 helm repo update
-helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values --wait --timeout 10m
+helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values --wait --timeout 10m
 kubectl -n greenkube rollout status deployment/greenkube-controller
 kubectl -n greenkube rollout status deployment/greenkube-api
 ```
 
 Helm replaces the standalone Deployment `<release>` (or the production `<release>-automation`) with the new
-components; the StatefulSet `<release>-postgres`, its claim `data-<release>-postgres-0` and the Secret `<release>`
+components (checked on kind: a 0.3.1 standalone release with data reached Ready in under a minute, schema 37 to
+71, rows preserved); the StatefulSet `<release>-postgres`, its claim `data-<release>-postgres-0` and the Secret `<release>`
 are unchanged. The old hook ConfigMap `<release>` is no longer used; delete it once the upgrade succeeded:
 
 ```bash
@@ -79,7 +85,7 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
 1. Switch to the bundled PostgreSQL, keeping the old claim and the controller stopped:
 
    ```bash
-   helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \
+   helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \
      --set config.db.type=postgres --set controller.replicas=0
    ```
 
@@ -142,7 +148,7 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
 3. Start the controller:
 
    ```bash
-   helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values --set controller.replicas=1
+   helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values --set controller.replicas=1
    ```
 
 4. Once you have checked the data, drop the old claim and the deprecated values:
@@ -150,7 +156,7 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
    ```bash
    kubectl -n greenkube delete job greenkube-db-copy
    kubectl -n greenkube delete pvc greenkube
-   helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \
+   helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \
      --set config.persistence.enabled=false
    ```
 

@@ -127,7 +127,7 @@ worker:
 # GitOps automation (always on; see docs/automation.md)
 # ---------------------------------------------------------------------------
 # Discovery runs whenever Argo CD or Flux CRDs are present. Pull-request
-# delivery activates within about a minute of creating the credentials Secret,
+# delivery activates within one to two minutes of creating the credentials Secret,
 # with no upgrade and no restart:
 #
 #   kubectl -n <namespace> create secret generic greenkube-git-credentials \

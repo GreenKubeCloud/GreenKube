@@ -114,7 +114,7 @@ helm install greenkube greenkube/greenkube -n greenkube --create-namespace
 kubectl -n greenkube get secret greenkube-initial-admin -o jsonpath='{.data.password}' | base64 -d; echo
 kubectl -n greenkube port-forward svc/greenkube-api 8000:8000   # open http://localhost:8000
 
-# Optional: let GreenKube open pull requests. Delivery activates within a minute, no upgrade, no restart.
+# Optional: let GreenKube open pull requests. Delivery activates within two minutes, no upgrade, no restart.
 kubectl -n greenkube create secret generic greenkube-git-credentials --from-literal=token=<git token>
 ```
 

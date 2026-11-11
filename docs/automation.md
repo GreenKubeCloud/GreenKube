@@ -22,7 +22,7 @@ The controller's `automation-readiness` loop reconciles every 60 seconds:
 The result is stored in `automation_capabilities`, exported as `greenkube_capability_active{capability}`, and shown
 by `GET /api/v1/setup/status` (the setup checklist). The plan executor runs only while delivery is active; the
 webhook outbox and PR polling only while tracking is active. Creating or deleting the credentials Secret switches
-them within about a minute (the kubelet refreshes the optional projected volume), with no restart.
+them within one to two minutes (the kubelet refreshes the optional projected volume, about a minute on a default kubelet, then one reconciler tick), with no restart.
 
 ### Provider inference
 

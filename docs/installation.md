@@ -23,7 +23,7 @@ kubectl -n greenkube get secret greenkube-initial-admin -o jsonpath='{.data.pass
 ```
 
 **2. Connect Git (optional).** GitOps discovery already runs. To let GreenKube open pull requests against the
-repositories your Argo CD or Flux sources point at, create one Secret. Delivery activates within about a minute,
+repositories your Argo CD or Flux sources point at, create one Secret. Delivery activates within one to two minutes,
 with no upgrade and no restart:
 
 ```bash

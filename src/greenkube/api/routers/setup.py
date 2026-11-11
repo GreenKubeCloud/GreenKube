@@ -409,7 +409,7 @@ def _credentials_check(
             "No Git credentials are mounted: previews and pull requests wait for them."
             if reason == "credentials_missing"
             else "GitHub App credentials were found; use a token until GitHub App delivery is available.",
-            "Create one Secret; delivery activates within about a minute, without upgrade or restart.",
+            "Create one Secret; delivery activates within one to two minutes, without upgrade or restart.",
             docs,
             snippet=secret_snippet,
         )
