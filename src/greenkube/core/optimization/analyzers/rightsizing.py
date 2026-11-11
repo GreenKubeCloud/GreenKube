@@ -267,7 +267,8 @@ def _cpu_limit_advice(
 
 
 def _round_up_mib(value: float) -> int:
-    return int(math.ceil(value / MIB)) * MIB
+    # The epsilon absorbs float noise (900MiB x 1.1 is 990.0000000001MiB, not 991MiB).
+    return int(math.ceil(value / MIB - 1e-6)) * MIB
 
 
 def memory_proposal(config: "Config", summary: "WorkloadUsageSummary") -> Optional[RightsizingProposal]:
