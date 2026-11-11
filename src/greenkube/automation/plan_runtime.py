@@ -1215,6 +1215,10 @@ def parse_gitops_providers_json(
             raise PlanRuntimeConfigurationError(
                 f"provider ID {UNRESOLVED_PROVIDER_ID!r} is reserved for unresolved GitOps sources."
             )
+        if provider.config.id.startswith("inferred-"):
+            raise PlanRuntimeConfigurationError(
+                "provider IDs starting with 'inferred-' are reserved for providers inferred from discovery."
+            )
         if provider.config.id in seen_ids:
             raise PlanRuntimeConfigurationError("GITOPS_PROVIDERS_JSON provider IDs must be unique.")
         seen_ids.add(provider.config.id)
@@ -1475,7 +1479,9 @@ async def reconcile_gitops_providers(
             await repository.add_provider_allowlist(provider.config.id, pattern)
 
     for provider_id, provider in existing.items():
-        if provider_id in configured_ids:
+        # Inferred providers belong to the readiness reconciler (F12), not to the
+        # configured list: a controller restart must not disable them.
+        if provider_id in configured_ids or provider_id.startswith("inferred-"):
             continue
         if provider.enabled:
             await repository.save_provider_config(

@@ -118,7 +118,7 @@
             "type": "object",
             "required": ["id", "type"],
             "properties": {
-              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "not": {"pattern": "^inferred-"}, "description": "IDs starting with inferred- are reserved for providers inferred from discovery."},
               "type": {"type": "string", "enum": ["github", "gitlab", "gitea", "GitHub", "GitLab", "Gitea"]},
               "apiBaseUrl": {"type": "string"},
               "webBaseUrl": {"type": "string"},
