@@ -111,7 +111,7 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 
 | Metric | Meaning |
 | --- | --- |
-| `greenkube_loop_runs_total{loop,outcome}` | Ticks by outcome: `success`, `failure` (the job raised or reported a failure), `timeout` (the tick exceeded the loop timeout), `skipped` (leader-only loop on a standby replica). |
+| `greenkube_loop_runs_total{loop,outcome}` | Ticks by outcome: `success`, `failure` (the job raised or reported a failure), `timeout` (the tick exceeded the loop timeout; a `TimeoutError` raised by the job itself counts as `failure`), `skipped` (leader-only loop on a standby replica). |
 | `greenkube_loop_duration_seconds{loop}` | Duration of executed ticks (histogram). |
 | `greenkube_loop_last_success_timestamp_seconds{loop}` | Unix time of the last successful tick. |
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
@@ -123,7 +123,7 @@ The same listener serves three more endpoints:
 
 - `/healthz`: liveness.
 - `/readyz`: `503` when a loop task died or a loop heartbeat is older than its staleness bound (interval × maximum backoff + timeout + 60 s).
-- `/loops`: a JSON snapshot with each loop's state (`idle`, `running`, `standby`, `backoff`, `crashed`), last success, last duration, consecutive failures and last error code. It requires the API key when the controller has one.
+- `/loops`: a JSON snapshot with each loop's state (`idle`, `running`, `standby`, `failing` (the last tick failed), `crashed`), last success, last duration, consecutive failures and last error code. It requires the API key when the controller has one.
 
 Standby replicas report their leader-only loops as `standby`, which counts as healthy.
 

@@ -567,6 +567,8 @@ rendererSandbox:
 
 The Secret must be in the Helm release namespace. Credential values are never written to ConfigMaps. Repository allowlists are required; an empty allowlist denies every repository. See [GitOps automation](automation.md) for webhooks, policy, plan lifecycle, rollback, and supported source layouts.
 
+Which processes hold the Git provider tokens: whenever `automation.providers` is set, the provider Secret keys are mounted read-only into the API and into the controller (the `controller` container in the standalone pod, or the controller Deployment in production), even with `automation.enabled=false`, because the controller runs plan expiry, sync observation and pull-request feedback; the optional workers mount them too, since they execute plan operations. To keep the tokens out of every GreenKube pod, leave `automation.providers` empty; to revoke access, rotate or delete the provider Secret.
+
 Verify readiness:
 
 ```bash
