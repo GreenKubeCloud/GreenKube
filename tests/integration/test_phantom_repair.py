@@ -217,3 +217,72 @@ async def test_without_recent_usage_evidence_nothing_is_retired(world: World):
     assert result.retired == [] and result.unproven == [phantom.id]
     record = await world.repo.get_recommendation_by_id(int(phantom.id or 0))
     assert record is not None and record.status == RecommendationStatus.APPLIED
+
+
+class _FlakyChanges(ChangeRepository):
+    """Fails the first measurement transition, as a dropped connection would."""
+
+    failures = 1
+
+    async def transition(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        if self.failures > 0:
+            self.failures -= 1
+            raise ConnectionError("connection dropped")
+        return await super().transition(*args, **kwargs)
+
+
+async def _phantom_with_change(world: World, now: datetime) -> int:
+    applied_at = floor_hour(now - timedelta(hours=5))
+    phantom = await world.detected(
+        _rec("phantom", current=20 * MIB, recommended=23 * MIB, created_at=now - timedelta(days=3)),
+        actual=20 * MIB,
+        applied_at=applied_at,
+        rollout_at=applied_at,
+    )
+    rec_id = int(phantom.id or 0)
+    await world.changes.insert_change(
+        change_event(applied_at, change_id="change-phantom", recommendation_ids=[rec_id], name="phantom").model_copy(
+            update={"workload_uid": "uid-phantom"}
+        )
+    )
+    await world.live_requests({"phantom": 20 * MIB}, applied_at + timedelta(hours=1), hours=3)
+    return rec_id
+
+
+async def test_a_failed_measurement_close_is_retried_with_the_retirement(world: World):
+    now = datetime.now(timezone.utc)
+    rec_id = await _phantom_with_change(world, now)
+    changes = _FlakyChanges(world.manager)
+    repair = PhantomChangeRepair(world.repo, usage=world.usage, savings=world.savings, changes=changes)
+
+    first = await repair.run(now=now)
+    # The measurement could not be closed: the row stays a candidate, untouched.
+    assert first.retired == [] and first.closed_changes == []
+    record = await world.repo.get_recommendation_by_id(rec_id)
+    assert record is not None and record.status == RecommendationStatus.APPLIED
+    assert await world.ledger_superseded(rec_id) == [False]
+
+    second = await repair.run(now=now)
+    assert second.retired == [rec_id] and second.closed_changes == ["change-phantom"]
+    status = await world.changes.get_status("change-phantom")
+    assert status is not None and status.state is MeasurementState.CLOSED
+    assert await world.ledger_superseded(rec_id) == [True]
+
+
+async def test_a_phantom_under_rollback_review_is_left_to_the_operator(world: World):
+    now = datetime.now(timezone.utc)
+    rec_id = await _phantom_with_change(world, now)
+    await world.lifecycle.mark_rollback_review(rec_id, reasons=["oom_kills_increased"])
+    repair = PhantomChangeRepair(world.repo, usage=world.usage, savings=world.savings, changes=world.changes)
+
+    result = await repair.run(now=now)
+    assert result.retired == [] and result.review_pending == [rec_id] and result.closed_changes == []
+    record = await world.repo.get_recommendation_by_id(rec_id)
+    assert record is not None and record.status == RecommendationStatus.ROLLBACK_REVIEW
+    status = await world.changes.get_status("change-phantom")
+    assert status is not None and status.state is not MeasurementState.CLOSED
+
+    # The operator dismisses the review: the next run retires the phantom with its measurement.
+    await world.lifecycle.dismiss_rollback_review(rec_id, reason="no change was made", actor="operator")
+    after = await repair.run(now=now)
+    assert after.retired == [rec_id] and after.closed_changes == ["change-phantom"]

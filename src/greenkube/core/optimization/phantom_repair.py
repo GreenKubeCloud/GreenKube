@@ -17,10 +17,14 @@ left detected rows alone for that reason), so the repair needs evidence:
   newest rolled-up request of the container, observed after ``applied_at``,
   is still the baseline request.
 
-A phantom moves to ``stale`` with a ``retired`` event (code
-``phantom_apply_detection``) and its realized savings cleared; its savings
-ledger rows are superseded and its change measurement is closed (``retired``)
-when every member of the change is a phantom. Without evidence nothing is
+A phantom's savings ledger rows are superseded and its change measurement is
+closed (``retired``) when every member of the change is a phantom; then the
+phantom moves to ``stale`` with a ``retired`` event (code
+``phantom_apply_detection``) and its realized savings cleared. The row is
+retired last, so a failure on the ledger or the measurement leaves it a
+candidate and the next run retries the whole step. A phantom under
+``rollback_review`` is left to the operator (dismissing the review returns it
+to ``applied``, and the next run retires it). Without evidence nothing is
 changed. Running it again changes nothing.
 """
 
@@ -44,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 #: Statuses of a recorded change (the "applied family").
 APPLIED_FAMILY = ("applied", "verifying", "verified", "rollback_review", "regressed")
+#: Statuses with an operator decision pending: never retired by the repair.
+REVIEW_PENDING = ("rollback_review",)
 #: Event code of a retired phantom.
 PHANTOM_CODE = "phantom_apply_detection"
 #: How far back the newest rolled-up request is read.
@@ -59,6 +65,8 @@ class PhantomRepairResult:
     superseded_ledger_rows: int = 0
     #: Candidates left alone for lack of evidence (no recent usage, or a moved request).
     unproven: List[int] = field(default_factory=list)
+    #: Proven phantoms left alone because an operator review is pending.
+    review_pending: List[int] = field(default_factory=list)
 
 
 def _value(raw: Any) -> str:
@@ -174,12 +182,24 @@ class PhantomChangeRepair:
             evidence = self._evidence(record, observed)
             if evidence is None:
                 result.unproven.append(int(record.id or 0))
+            elif _value(record.status) in REVIEW_PENDING:
+                result.review_pending.append(int(record.id or 0))
             else:
                 phantoms.append((record, evidence))
+        if result.review_pending:
+            logger.info(
+                "Phantom detected change(s) %s await an operator rollback review; left as is until it is resolved.",
+                ", ".join(str(item) for item in result.review_pending),
+            )
+        if not phantoms:
+            return result
+        blocked = await self._close_changes([int(record.id or 0) for record, _ in phantoms], result)
         for record, evidence in phantoms:
+            rec_id = int(record.id or 0)
+            if rec_id in blocked or not await self._supersede(rec_id, result):
+                continue
             if await self._retire(record, evidence):
-                result.retired.append(int(record.id or 0))
-        await self._settle(result)
+                result.retired.append(rec_id)
         if result.retired:
             logger.warning(
                 "Retired %d phantom detected change(s) (%s): the live request never moved to the proposal.",
@@ -263,35 +283,37 @@ class PhantomChangeRepair:
             return False
         return updated is not None
 
-    async def _settle(self, result: PhantomRepairResult) -> None:
-        """Supersede the retired rows' ledger and close changes made only of phantoms."""
-        if not result.retired:
-            return
-        if self.savings is not None:
-            for rec_id in result.retired:
-                try:
-                    result.superseded_ledger_rows += int(await self.savings.supersede_for_recommendation(rec_id) or 0)
-                except Exception as exc:
-                    logger.warning("Could not supersede the savings of phantom change %s: %s", rec_id, exc)
-        if self.changes is not None:
-            await self._close_changes(result)
+    async def _supersede(self, rec_id: int, result: PhantomRepairResult) -> bool:
+        """Supersede a phantom's savings ledger rows (idempotent); False when it failed."""
+        if self.savings is None:
+            return True
+        try:
+            result.superseded_ledger_rows += int(await self.savings.supersede_for_recommendation(rec_id) or 0)
+        except Exception as exc:
+            logger.warning("Could not supersede the savings of phantom change %s: %s", rec_id, exc)
+            return False
+        return True
 
-    async def _close_changes(self, result: PhantomRepairResult) -> None:
+    async def _close_changes(self, phantom_ids: Sequence[int], result: PhantomRepairResult) -> set[int]:
+        """Close the open changes made only of phantoms; returns the phantoms to keep for a retry."""
         from greenkube.verify.model import MeasurementState
 
-        assert self.changes is not None
+        if self.changes is None:
+            return set()
         try:
-            by_recommendation = await self.changes.change_ids_for_recommendations(result.retired)
+            by_recommendation = await self.changes.change_ids_for_recommendations(list(phantom_ids))
         except Exception as exc:
             logger.warning("Could not read the changes of phantom recommendations: %s", exc)
-            return
+            return set(phantom_ids)
+        blocked: set[int] = set()
         for change_id in sorted(set(by_recommendation.values())):
+            members = {rec_id for rec_id, owner in by_recommendation.items() if owner == change_id}
             try:
                 change = await self.changes.get_change(change_id)
                 status = await self.changes.get_status(change_id)
                 if change is None or status is None or status.state is MeasurementState.CLOSED:
                     continue
-                if not await self._only_phantoms(change.recommendation_ids, result.retired):
+                if not await self._only_phantoms(change.recommendation_ids, phantom_ids):
                     continue
                 await self.changes.transition(
                     status,
@@ -302,11 +324,14 @@ class PhantomChangeRepair:
                 )
                 result.closed_changes.append(change_id)
             except Exception as exc:
+                # Retire these members on a later run, together with their measurement.
                 logger.warning("Could not close the measurement of phantom change %s: %s", change_id, exc)
+                blocked |= members
+        return blocked
 
-    async def _only_phantoms(self, members: Iterable[int], retired: Sequence[int]) -> bool:
+    async def _only_phantoms(self, members: Iterable[int], phantoms: Sequence[int]) -> bool:
         for member in members:
-            if member in retired:
+            if member in phantoms:
                 continue
             record = await self.recommendations.get_recommendation_by_id(member)
             if record is None:
