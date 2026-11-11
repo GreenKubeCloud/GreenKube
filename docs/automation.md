@@ -229,8 +229,10 @@ when it is approved, so a later change of the setting never re-routes an approva
 | `ci` | Approval queues nothing. A CI job lists `GET /api/v1/automation/plans?status=approved&delivery=ci`, applies each patch with the CI's own token, opens the PR and reports it (`POST /api/v1/automation/plans/{id}/delivery`). | Read only |
 
 All three modes then follow the same lifecycle: `pr_open` → `merged` → `synced` → `applied`, tracked by PR polling or
-webhooks, then the controller sync and apply detection. GreenKube never deletes the branch of an externally delivered
-plan.
+webhooks, then the controller sync and apply detection. The controller also links, at the PR poll interval, a pull
+request opened from the plan branch without any report. An approved `patch` or `ci` plan waits for its pull request
+up to 7 days after the preview TTL, then becomes `stale` (cancel it earlier to preview the workload again). GreenKube
+never deletes the branch of an externally delivered plan.
 
 **Patch.** With `GREENKUBE_API_URL` and a `GREENKUBE_API_KEY` (`read` scope; never passed on the command line):
 
