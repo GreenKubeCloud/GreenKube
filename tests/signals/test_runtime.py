@@ -189,6 +189,33 @@ class TestSignalValidation:
         assert trimmed.raw["truncated"] is True
         assert {d.code for d in report.run.diagnostics} == {"duplicate_signal", "raw_trimmed"}
 
+    async def test_oversized_evidence_and_estimates_are_bounded(self):
+        from greenkube.signals.model import SignalEvidence
+        from greenkube.signals.runtime import MAX_EVIDENCE_TEXT
+
+        huge = _signal(name="pv-huge").model_copy(
+            update={
+                "evidence": SignalEvidence(
+                    summary="s" * (MAX_EVIDENCE_TEXT * 2),
+                    details="d" * (MAX_EVIDENCE_TEXT + 1),
+                    data={"blob": "x" * (MAX_RAW_BYTES * 2)},
+                ),
+                "source_estimate": {"blob": "y" * (MAX_RAW_BYTES * 2)},
+            }
+        )
+        small = _signal(name="pv-small")
+        report = await _run(AcmeSource([huge, small]))
+        assert report.run.status == SourceRunStatus.SUCCEEDED
+        bounded = next(s for s in report.signals if s.target.name == "pv-huge")
+        assert len(bounded.evidence.summary) == MAX_EVIDENCE_TEXT
+        assert len(bounded.evidence.details) == MAX_EVIDENCE_TEXT
+        assert bounded.evidence.data["truncated"] is True
+        assert bounded.source_estimate is not None and bounded.source_estimate["truncated"] is True
+        assert bounded.signal_id == huge.signal_id
+        assert next(s for s in report.signals if s.target.name == "pv-small") == small
+        [diagnostic] = report.run.diagnostics
+        assert (diagnostic.code, diagnostic.count) == ("evidence_trimmed", 1)
+
     async def test_signals_over_the_limit_are_dropped(self):
         class Tiny(AcmeSource):
             limits: ClassVar[SourceLimits] = SourceLimits(max_signals=1)

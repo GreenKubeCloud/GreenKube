@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Upper bound on the evidence summary and details a signal keeps (characters).
+MAX_EVIDENCE_TEXT = 4096
+
 
 class SourceRunStatus(StrEnum):
     """Outcome of one source within one scan."""
@@ -105,6 +108,28 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _bounded_payloads(signal: SourceSignal) -> Optional[SourceSignal]:
+    """``signal`` with its evidence and source estimate within bounds, or None when they already are.
+
+    Storage keeps one row per distinct signal: a source must not be able to grow
+    it without bound through free-form payloads. The identity is unchanged.
+    """
+    evidence = signal.evidence
+    evidence_update: Dict[str, object] = {}
+    if raw_size(evidence.data) > MAX_RAW_BYTES:
+        evidence_update["data"] = trim_raw(evidence.data)
+    for name in ("summary", "details"):
+        text = getattr(evidence, name)
+        if len(text) > MAX_EVIDENCE_TEXT:
+            evidence_update[name] = text[: MAX_EVIDENCE_TEXT - 1] + "…"
+    update: Dict[str, object] = {}
+    if evidence_update:
+        update["evidence"] = evidence.model_copy(update=evidence_update)
+    if signal.source_estimate is not None and raw_size(signal.source_estimate) > MAX_RAW_BYTES:
+        update["source_estimate"] = trim_raw(signal.source_estimate)
+    return signal.model_copy(update=update) if update else None
 
 
 def _finished(record: SourceRunRecord) -> datetime:
@@ -325,7 +350,7 @@ class SourceRunner:
         diagnostics = list(batch.diagnostics)
         kept: List[SourceSignal] = []
         seen: set[str] = set()
-        foreign = outside = duplicates = trimmed = invalid = 0
+        foreign = outside = duplicates = trimmed = bounded = invalid = 0
         for signal in batch.signals:
             if not isinstance(signal, SourceSignal):
                 invalid += 1
@@ -342,6 +367,10 @@ class SourceRunner:
             if raw_size(signal.raw) > MAX_RAW_BYTES:
                 signal = signal.model_copy(update={"raw": trim_raw(signal.raw)})
                 trimmed += 1
+            within_bounds = _bounded_payloads(signal)
+            if within_bounds is not None:
+                signal = within_bounds
+                bounded += 1
             seen.add(signal.signal_id)
             kept.append(signal)
         rejected = False
@@ -370,6 +399,14 @@ class SourceRunner:
         if trimmed:
             diagnostics.append(
                 Diagnostic(code="raw_trimmed", message="raw payloads over 8 KiB were trimmed", count=trimmed)
+            )
+        if bounded:
+            diagnostics.append(
+                Diagnostic(
+                    code="evidence_trimmed",
+                    message="evidence or source estimates over the size bounds were trimmed",
+                    count=bounded,
+                )
             )
         return kept, diagnostics, rejected
 
