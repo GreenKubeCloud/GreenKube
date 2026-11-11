@@ -355,13 +355,20 @@ class ChangeRepository:
         states: Optional[Sequence[str]] = None,
         limit: int = 50,
         before: Optional[Tuple[datetime, str]] = None,
+        plan_id: Optional[str] = None,
     ) -> List[Tuple[ChangeEvent, ChangeStatus]]:
-        """Changes newest first, with their state. ``before`` is a ``(created_at, change_id)`` cursor."""
+        """Changes newest first, with their state. ``before`` is a ``(created_at, change_id)`` cursor.
+
+        ``plan_id`` keeps the changes of one GitOps plan (the ledger deep link of a PR, J1).
+        """
         clauses: List[str] = []
         params: List[Any] = []
         if namespace:
             clauses.append("e.namespace = ?")
             params.append(namespace)
+        if plan_id:
+            clauses.append("e.plan_id = ?")
+            params.append(plan_id)
         if states:
             clauses.append(f"s.state IN ({', '.join('?' for _ in states)})")
             params.extend(states)

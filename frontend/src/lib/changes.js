@@ -5,10 +5,6 @@
  */
 import { ApiError, getChange, listChanges } from '$lib/api.js';
 
-/** Pages of 200 changes scanned when looking a plan's change up. */
-export const CHANGE_SCAN_PAGES = 5;
-const PAGE_SIZE = 200;
-
 /** Measurement states with a label; status words are always shown as text. */
 export const CHANGE_STATES = {
 	applied: { label: 'Applied, waiting for measurement', tone: 'blue' },
@@ -49,7 +45,7 @@ function isNotFound(error) {
 
 /**
  * Find the change a deep link points at: a change id, or a plan id whose
- * change is looked up among recent changes (at most CHANGE_SCAN_PAGES pages).
+ * change the server filters (`GET /changes?plan_id=`, one request, J1).
  * @returns {Promise<Object|null>} the full change (`GET /changes/{id}`), or null
  */
 export async function resolveChange(id, { signal, preferPlan = false } = {}) {
@@ -66,15 +62,17 @@ export async function resolveChange(id, { signal, preferPlan = false } = {}) {
 		const change = await direct();
 		if (change) return change;
 	}
-	let cursor;
-	for (let page = 0; page < CHANGE_SCAN_PAGES; page += 1) {
-		const result = await listChanges({ limit: PAGE_SIZE, cursor, signal });
-		const items = Array.isArray(result?.items) ? result.items : [];
-		const match = items.find((item) => item?.plan_id === id);
-		if (match) return getChange(match.change_id, { signal });
-		cursor = result?.next_cursor;
-		if (!cursor) break;
+	let items = [];
+	try {
+		const result = await listChanges({ planId: id, limit: 1, signal });
+		items = Array.isArray(result?.items) ? result.items : [];
+	} catch (error) {
+		// An id that cannot be a plan id is rejected with 422: it is not a plan.
+		if (!isNotFound(error)) throw error;
 	}
+	// Never trust a server that ignored the filter: the change must name this plan.
+	const match = items.find((item) => item?.plan_id === id);
+	if (match) return getChange(match.change_id, { signal });
 	return preferPlan ? direct() : null;
 }
 

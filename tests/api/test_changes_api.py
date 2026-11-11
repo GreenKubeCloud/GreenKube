@@ -113,3 +113,22 @@ async def test_change_api_reports_storage_failures_as_503(measured):
 
     with _client(scenario) as client, patch.object(scenario.changes, "list_changes", broken):
         assert client.get("/api/v2/changes").status_code == 503
+
+
+async def test_list_changes_filters_by_plan_id_on_the_server(measured):
+    """``/ledger?change=<plan_id>`` reads one plan's change, never a scan of recent changes (J1)."""
+    scenario, change, _ = measured
+    calls = []
+    original = scenario.changes.list_changes
+
+    async def recording(**kwargs):
+        calls.append(kwargs)
+        return await original(**kwargs)
+
+    with _client(scenario) as client, patch.object(scenario.changes, "list_changes", recording):
+        assert client.get("/api/v2/changes", params={"plan_id": "pln-unknown"}).json()["items"] == []
+        assert calls[-1]["plan_id"] == "pln-unknown"
+        assert client.get("/api/v2/changes", params={"plan_id": "bad id"}).status_code == 422
+        everything = client.get("/api/v2/changes").json()["items"]
+        assert [item["change_id"] for item in everything] == [change.change_id]
+        assert calls[-1]["plan_id"] is None

@@ -365,11 +365,12 @@ export function allowlistRepositories(repoUrls) {
 }
 
 /**
- * Applied changes, newest first (C2): `{items, next_cursor}`.
- * @param {{namespace?: string, state?: string[], limit?: number, cursor?: string, signal?: AbortSignal}} [opts]
+ * Applied changes, newest first (C2): `{items, next_cursor}`. `planId` keeps
+ * the changes of one GitOps plan (the ledger link of a pull request, J1).
+ * @param {{namespace?: string, state?: string[], planId?: string, limit?: number, cursor?: string, signal?: AbortSignal}} [opts]
  */
-export function listChanges({ namespace, state, limit, cursor, signal } = {}) {
-	return request(`${BASE_V2}/changes`, { namespace, state, limit, cursor }, { signal });
+export function listChanges({ namespace, state, planId, limit, cursor, signal } = {}) {
+	return request(`${BASE_V2}/changes`, { namespace, state, plan_id: planId, limit, cursor }, { signal });
 }
 
 /** One change with its state, baseline snapshot and lifecycle events. */

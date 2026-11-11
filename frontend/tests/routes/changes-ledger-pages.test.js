@@ -201,6 +201,8 @@ describe('/ledger', () => {
 		expect(selected).toHaveTextContent('Load-normalized against requests per second.');
 		expect(within(selected).getByRole('link', { name: '#12' })).toHaveAttribute('href', '/recommendations/12');
 		expect(within(selected).getByRole('link', { name: /Plan and pull request/ })).toHaveAttribute('href', '/changes/plan-1');
+		// The plan's change is filtered on the server (GET /changes?plan_id=), not scanned.
+		expect(api.listChanges).toHaveBeenCalledWith(expect.objectContaining({ planId: 'plan-1', limit: 1 }));
 	});
 
 	it('explains a change that is not recorded yet', async () => {
