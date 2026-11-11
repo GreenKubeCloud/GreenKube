@@ -295,6 +295,9 @@ class TestAutomationEndpoints:
         assert "provider" in body
         assert body["mode"] in {"paused", "controller"}
         assert body["delivery_paused"] is False
+        # Delivery mode (F4) and auto-approval (F5) are reported for the UI's Open PR flow.
+        assert body["delivery_mode"] == "direct"
+        assert body["auto_approve"] is False
         assert "ready" in body
         assert "worker" in body
         assert "queue" in body

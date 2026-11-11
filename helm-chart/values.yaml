@@ -142,8 +142,9 @@ worker:
 # to pin a self-hosted URL.
 automation:
   # Secret in the release namespace read for inferred providers: key "token",
-  # optional key "host" (or "apiBaseUrl") binding it to one Git host (keys
-  # "appId" and "privateKey" are mounted for GitHub App authentication).
+  # or keys "appId" + "privateKey" for a GitHub App (installation tokens scoped
+  # to each repository, bot identity: docs/automation.md#github-app), and an
+  # optional key "host" (or "apiBaseUrl") binding them to one Git host.
   credentialsSecret: greenkube-git-credentials
   # Repositories automation may open pull requests against, for inferred
   # providers and for providers without their own repositoryAllowlist.
@@ -175,7 +176,7 @@ automation:
   #     type: github
   #     apiBaseUrl: https://api.github.com
   #     secretName: github-token
-  #     secretKey: token
+  #     secretKey: token          # "privateKey" for a GitHub App (appId in the same Secret)
   #     repositoryAllowlist:      # optional, defaults to automation.repositoryAllowlist
   #       - "acme/*"
   policy:
@@ -194,6 +195,27 @@ automation:
     # not collect their live evidence: "fail" rejects the plan, "warn" allows it
     # with a warning.
     missingEvidence: fail
+  # How approved plans become pull requests (docs/automation.md#delivery-modes):
+  #   direct: GreenKube commits and opens the PR (write credentials).
+  #   patch:  nobody in the cluster writes to Git; download the approved plan as a
+  #           git format-patch or run "greenkube plan apply-patch <id>", open the
+  #           PR yourself; GreenKube links it by branch name or GreenKube-Plan trailer.
+  #   ci:     a CI job polls GET /api/v1/automation/plans?status=approved&delivery=ci,
+  #           opens the PR with its own token and reports it back
+  #           (docs/examples/github-actions-greenkube-delivery.yaml).
+  # patch and ci need only read access to the repositories.
+  delivery:
+    mode: direct
+  # Policy-based auto-approval (opt-in): a preview whose recommendations are all at
+  # or below maxRisk and at or above minConfidence is approved without the extra
+  # click; it is still a pull request, still reviewed in Git. Contested consensus
+  # is never auto-approved (contested must stay false), and a decrease also needs
+  # GreenKube's own usage evidence or two independent agreeing sources.
+  autoApprove:
+    enabled: false
+    maxRisk: low
+    minConfidence: 0.8
+    contested: false
   pullRequests:
     draft: false
     labels: [] # Optional extra labels; missing labels are created where the provider allows it.

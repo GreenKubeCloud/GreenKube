@@ -811,3 +811,53 @@ tests:
       - equal:
           path: data.GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS
           value: "7"
+
+  # --------------------------------------------------------------------------
+  # Delivery modes (F4) and auto-approval (F5)
+  # --------------------------------------------------------------------------
+  - it: delivers directly and never auto-approves by default
+    asserts:
+      - equal:
+          path: data.AUTOMATION_DELIVERY_MODE
+          value: "direct"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_ENABLED
+          value: "false"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MAX_RISK
+          value: "low"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE
+          value: "0.8"
+
+  - it: passes the delivery mode and the auto-approval policy
+    set:
+      automation.delivery.mode: ci
+      automation.autoApprove.enabled: true
+      automation.autoApprove.maxRisk: medium
+      automation.autoApprove.minConfidence: 0.9
+    asserts:
+      - equal:
+          path: data.AUTOMATION_DELIVERY_MODE
+          value: "ci"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_ENABLED
+          value: "true"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MAX_RISK
+          value: "medium"
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE
+          value: "0.9"
+
+  - it: rejects an unknown delivery mode
+    set:
+      automation.delivery.mode: push
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects auto-approval of contested consensus
+    set:
+      automation.autoApprove.contested: true
+    asserts:
+      - failedTemplate: {}

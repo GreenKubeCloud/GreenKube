@@ -147,6 +147,23 @@
             "missingEvidence": {"type": "string", "enum": ["fail", "warn"]}
           }
         },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["direct", "patch", "ci"]}
+          }
+        },
+        "autoApprove": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "maxRisk": {"type": "string", "enum": ["low", "medium", "high"]},
+            "minConfidence": {"$ref": "#/definitions/ratio"},
+            "contested": {"type": "boolean", "enum": [false], "description": "Contested consensus is never auto-approved; only false is accepted."}
+          }
+        },
         "pullRequests": {
           "type": "object",
           "properties": {

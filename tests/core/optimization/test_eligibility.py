@@ -143,6 +143,13 @@ class TestEligibility:
         assert result["recommendation_ids"] == [7]
         assert result["eligible_at"] is None
 
+    @pytest.mark.parametrize("mode", ["patch", "ci"])
+    def test_delivery_modes_name_the_configured_delivery_mode(self, mode):
+        """F4: an eligible recommendation is delivered by patch or by CI when so configured."""
+        result = assess_eligibility(_record(), _ctx(delivery_mode=mode))
+        assert result["can_open_pr"] is True
+        assert result["delivery_modes"] == [mode, "manual"]
+
     def test_contested_consensus_is_a_warning_that_names_the_disagreement(self):
         contested = {"policy": "safest", "contested": True, "reasons": ["agreement 0.25 is below 0.5"]}
         result = assess_eligibility(_record(consensus=contested), _ctx())

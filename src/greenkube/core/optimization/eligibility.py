@@ -6,7 +6,7 @@ and, when it cannot, why and what would make it eligible (principle 6, fail
 closed, explain why)::
 
     {"can_open_pr": false,
-     "delivery_modes": ["manual"],
+     "delivery_modes": ["manual"],   # "direct", "patch" or "ci" first when a PR can be opened
      "blockers": [{"code": "warming_up", "message": "...", "fix": "..."}],
      "warnings": [{"code": "...", "message": "...", "fix": "..."}],
      "eligible_at": "2026-11-09T12:00:00+00:00",
@@ -212,6 +212,15 @@ CODES: Dict[str, Tuple[str, str]] = {
 }
 
 
+def _configured_delivery_mode() -> str:
+    from greenkube.automation.delivery import configured_delivery_mode
+
+    try:
+        return configured_delivery_mode()
+    except Exception:  # configuration errors surface elsewhere; eligibility stays readable
+        return DELIVERY_DIRECT
+
+
 def _entry(code: str, message: Optional[str] = None, fix: Optional[str] = None) -> Dict[str, str]:
     default_message, default_fix = CODES.get(code, ("", ""))
     return {"code": code, "message": message or default_message, "fix": fix or default_fix}
@@ -242,6 +251,8 @@ class EligibilityContext:
     #: evaluation failed, which blocks the recommendation (fail closed).
     policy_results: Mapping[int, Optional[AutomationPolicyResult]] = field(default_factory=dict)
     step_seconds: int = 300
+    #: Delivery mode of new approvals (F4): ``direct``, ``patch`` or ``ci``.
+    delivery_mode: str = field(default_factory=lambda: _configured_delivery_mode())
 
 
 def workload_key(record: Any) -> Optional[Tuple[str, str, str]]:
@@ -576,7 +587,9 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
 
     blockers = _dedupe(blockers)
     can_open_pr = not blockers
-    delivery_modes = ([DELIVERY_DIRECT] if can_open_pr else []) + ([DELIVERY_MANUAL] if active else [])
+    delivery_modes = ([ctx.delivery_mode or DELIVERY_DIRECT] if can_open_pr else []) + (
+        [DELIVERY_MANUAL] if active else []
+    )
     return {
         "can_open_pr": can_open_pr,
         "delivery_modes": delivery_modes,

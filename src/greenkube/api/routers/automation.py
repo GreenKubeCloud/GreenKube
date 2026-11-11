@@ -20,6 +20,7 @@ from greenkube.api.dependencies import (
     get_pull_request_repository,
     get_recommendation_repository,
 )
+from greenkube.automation.delivery import configured_delivery_mode
 from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
 from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
@@ -191,6 +192,10 @@ async def automation_status(
         # optionally helped by dedicated workers (worker.replicas).
         "mode": "paused" if paused else "controller",
         "delivery_paused": paused,
+        # Who opens the pull request of an approved plan (F4): direct, patch or ci.
+        "delivery_mode": configured_delivery_mode(config),
+        # Whether previews meeting automation.autoApprove skip the approval click (F5).
+        "auto_approve": bool(config.AUTOMATION_AUTO_APPROVE_ENABLED),
         "worker": {
             "healthy": worker_healthy,
             "heartbeat_at": latest_heartbeat,
