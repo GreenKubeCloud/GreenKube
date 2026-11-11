@@ -415,10 +415,21 @@ def rollup_rows(
             groups[(bucket, key)] = accumulator
         return accumulator
 
+    # A pod's workload owner, from any of its rows: pod rows written before
+    # owners were stored on them would otherwise make every StatefulSet replica
+    # its own target, and its containers with it.
+    owners: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    for row in [*pod_rows, *container_rows]:
+        owner_kind, owner_name = getattr(row, "owner_kind", None), getattr(row, "owner_name", None)
+        if owner_kind and owner_name:
+            owners.setdefault((row.namespace, row.pod_name), (owner_kind, owner_name))
+
+    def _target(row: Any) -> Tuple[str, str, str]:
+        owner = owners.get((row.namespace, row.pod_name))
+        return resolve_target(row.namespace, row.pod_name, *(owner or (None, None)))
+
     for row in [*pod_rows, *synthetic.values()]:
-        namespace, kind, name = resolve_target(
-            row.namespace, row.pod_name, getattr(row, "owner_kind", None), getattr(row, "owner_name", None)
-        )
+        namespace, kind, name = _target(row)
         node = getattr(row, "node", None) or ""
         _group(_bucket(row), (namespace, kind, name, POD_LEVEL, node)).add(row, step_seconds)
 
@@ -431,13 +442,7 @@ def rollup_rows(
         pod = pods_at.get((row.namespace, row.pod_name, timestamp)) or pods_in_hour.get(
             (row.namespace, row.pod_name, bucket)
         )
-        owner_source = pod if pod is not None else row
-        namespace, kind, name = resolve_target(
-            row.namespace,
-            row.pod_name,
-            getattr(owner_source, "owner_kind", None),
-            getattr(owner_source, "owner_name", None),
-        )
+        namespace, kind, name = _target(row)
         node = (getattr(pod, "node", None) if pod is not None else None) or getattr(row, "node", None) or ""
         _group(bucket, (namespace, kind, name, container, node)).add(row, step_seconds)
 
