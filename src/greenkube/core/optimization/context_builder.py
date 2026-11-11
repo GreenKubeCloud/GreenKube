@@ -135,6 +135,9 @@ class ContextBuilder:
         pod_rows, container_rows = await usage_repo.read_baseline_rows(
             start, read_end, namespace=namespace, snapshot=snapshot, namespaces=active_namespaces
         )
+        # OOM kills, CPU throttling and JVM hints of the summaries (E9): rightsizing
+        # sizes increases and judges decreases with them.
+        await self._attach_reliability_signals(snapshot, start, end)
 
         # Annualize over the span actually observed: a cluster with three days
         # of history is not extrapolated as if it had fourteen.
@@ -161,6 +164,14 @@ class ContextBuilder:
             usage=snapshot,
             **side_inputs,
         )
+
+    async def _attach_reliability_signals(self, snapshot, start: datetime, end: datetime) -> None:
+        from greenkube.core.reliability_signals import attach_reliability_signals
+
+        try:
+            await attach_reliability_signals(snapshot, self.config, start=start, end=end)
+        except Exception as error:  # signals stay unknown; the scan goes on
+            logger.warning("Could not attach reliability signals to the usage summaries: %s", error)
 
     async def _build_from_rows(
         self,

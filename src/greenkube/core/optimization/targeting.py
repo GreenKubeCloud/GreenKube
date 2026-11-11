@@ -3,7 +3,7 @@
 
 import re
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 
 from greenkube.models.metrics import CombinedMetric
 
@@ -34,6 +34,38 @@ def resolve_target(
         return (namespace, target_kind, target_name)
 
     return (namespace, "Pod", pod_name)
+
+
+#: Pod-name patterns of controllers whose pods are not named after a ReplicaSet.
+_STATEFULSET_POD_RE = re.compile(r"^(?P<name>.+)-\d+$")
+_DAEMONSET_POD_RE = re.compile(r"^(?P<name>.+)-[a-z0-9]{5}$")
+
+
+def target_for_pod(
+    namespace: str,
+    pod_name: str,
+    known: Collection[Tuple[str, str, str]],
+    owner_kind: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> Optional[Tuple[str, str, str]]:
+    """The known recommendation target a pod belongs to, or None.
+
+    The pod's owner wins when given; otherwise the Deployment, StatefulSet and
+    DaemonSet naming patterns and the bare pod are tried against ``known``
+    (series from Prometheus carry no owner).
+    """
+    candidates: List[Tuple[str, str, str]] = []
+    if owner_kind and owner_name:
+        candidates.append((namespace, owner_kind, owner_name))
+    inferred = infer_deployment_target(pod_name)
+    if inferred:
+        candidates.append((namespace, *inferred))
+    for kind, pattern in (("StatefulSet", _STATEFULSET_POD_RE), ("DaemonSet", _DAEMONSET_POD_RE)):
+        match = pattern.match(pod_name)
+        if match:
+            candidates.append((namespace, kind, match.group("name")))
+    candidates.append((namespace, "Pod", pod_name))
+    return next((candidate for candidate in candidates if candidate in known), None)
 
 
 def target_key(metric: CombinedMetric) -> Tuple[str, str, str]:
