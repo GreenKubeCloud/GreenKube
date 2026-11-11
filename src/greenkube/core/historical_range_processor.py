@@ -169,20 +169,50 @@ class HistoricalRangeProcessor:
         return by_sample
 
     @classmethod
+    def _deduplicated_samples(
+        cls, results, chunk: CollectionWindow
+    ) -> tuple[dict[int, dict[tuple[str, str, str], float]], dict[int, dict[tuple[str, str], str]]]:
+        """One value per ``(namespace, pod, container)`` and sample; ``container`` is ``""`` for a pod cgroup.
+
+        Several series of one container (``/metrics/resource`` next to
+        ``/metrics/cadvisor``, two scrape jobs, two cgroup paths, or variants of
+        the ``node`` label) are duplicates, not parts: they are merged with
+        ``max``, never summed (USER BUG 2). Also returns the node of each pod.
+        """
+        values: dict[int, dict[tuple[str, str, str], float]] = defaultdict(dict)
+        nodes: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
+        for series in results or []:
+            namespace, pod, container, node = cls._series_identity(series)
+            if not namespace or not pod:
+                continue
+            key = (namespace, pod, container)
+            for sample_start, value in cls._iter_window_samples(series, chunk):
+                current = values[sample_start].get(key)
+                values[sample_start][key] = value if current is None else max(current, value)
+                if node:
+                    nodes[sample_start].setdefault((namespace, pod), node)
+        return values, nodes
+
+    @classmethod
     def _container_series_by_sample(
         cls, results, chunk: CollectionWindow
     ) -> tuple[dict[int, dict[tuple[str, str], float]], dict[int, dict[tuple[str, str, str], float]]]:
-        """Return pod sums and per-container values for every sample of the chunk."""
+        """Return pod sums and per-container values for every sample of the chunk.
+
+        A pod's value is the sum of its (deduplicated) containers, or its pod
+        cgroup value when only pod-level series exist.
+        """
+        values, _nodes = cls._deduplicated_samples(results, chunk)
         pods: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
         containers: dict[int, dict[tuple[str, str, str], float]] = defaultdict(lambda: defaultdict(float))
-        for series in results or []:
-            namespace, pod, container, _node = cls._series_identity(series)
-            if not namespace or not pod:
-                continue
-            for sample_start, value in cls._iter_window_samples(series, chunk):
-                pods[sample_start][(namespace, pod)] += value
+        for sample_start, by_key in values.items():
+            named_pods = {(namespace, pod) for namespace, pod, container in by_key if container}
+            for (namespace, pod, container), value in by_key.items():
                 if container:
-                    containers[sample_start][(namespace, pod, container)] += value
+                    containers[sample_start][(namespace, pod, container)] = value
+                    pods[sample_start][(namespace, pod)] += value
+                elif (namespace, pod) not in named_pods:
+                    pods[sample_start][(namespace, pod)] = value
         return pods, containers
 
     async def _query_range(self, chunk: CollectionWindow, query: str):
@@ -208,6 +238,17 @@ class HistoricalRangeProcessor:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
+
+    async def _collect_memory(self, chunk: CollectionWindow):
+        """Container working-set series, or the pod cgroup series when no container series exist.
+
+        The pod cgroup fallback gives the pod-level working set only: it never
+        becomes container usage (rightsizing reports ``pod_level_usage_only``).
+        """
+        results = await self._query_range(chunk, self._promql.container_memory_working_set())
+        if results:
+            return results
+        return await self._query_range(chunk, self._promql.pod_cgroup_memory_working_set())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
@@ -421,8 +462,12 @@ class HistoricalRangeProcessor:
             pod_request_map_agg = defaultdict(int)
             pod_mem_map_agg = defaultdict(int)
             pod_ephemeral_storage_map_agg = defaultdict(int)
+            pod_owner_map: dict[tuple[str, str], tuple[str, str]] = {}
             for p in pod_metrics_list:
                 key = (p.namespace, p.pod_name)
+                if p.owner_kind and p.owner_name:
+                    # Pod rows carry their workload owner so replicas share one usage target.
+                    pod_owner_map.setdefault(key, (p.owner_kind, p.owner_name))
                 pod_request_map_agg[key] += p.cpu_request
                 pod_mem_map_agg[key] += p.memory_request
                 pod_ephemeral_storage_map_agg[key] += p.ephemeral_storage_request
@@ -431,6 +476,7 @@ class HistoricalRangeProcessor:
             pod_ephemeral_storage_map = pod_ephemeral_storage_map_agg
         except Exception:
             pod_metrics_list = []
+            pod_owner_map = {}
             pod_request_map = {}
             pod_mem_map = {}
             pod_ephemeral_storage_map = {}
@@ -530,7 +576,7 @@ class HistoricalRangeProcessor:
                     self._query_range(chunk, promql.pod_disk_read()),
                     self._query_range(chunk, promql.pod_disk_write()),
                     self._query_range(chunk, promql.pod_restarts()),
-                    self._query_range(chunk, promql.container_memory_working_set()),
+                    self._collect_memory(chunk),
                     self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
                 )
@@ -567,20 +613,25 @@ class HistoricalRangeProcessor:
                 lambda: defaultdict(float)
             )
             pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
-            for series in results:
-                series_ns, pod, container, node = self._series_identity(series)
-                if not series_ns or not pod:
-                    continue
-                key = (series_ns, pod)
-                for sample_start, usage in self._iter_window_samples(series, chunk):
-                    samples[sample_start][key] += usage
+            # Duplicate series of one container are merged with max (USER BUG 2).
+            cpu_values, cpu_nodes = self._deduplicated_samples(results, chunk)
+            for sample_start, by_key in cpu_values.items():
+                named_pods = {(series_ns, pod) for series_ns, pod, container in by_key if container}
+                for (series_ns, pod, container), usage in by_key.items():
+                    key = (series_ns, pod)
                     if container:
-                        normalized_container_samples[sample_start][(series_ns, pod, container)] += usage
+                        samples[sample_start][key] += usage
+                        normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
+                    elif key not in named_pods:
+                        samples[sample_start][key] = usage
                     resolved_node = (
-                        node or pod_info_node_by_sample.get(sample_start, {}).get(key) or pod_info_node_latest.get(key)
+                        cpu_nodes.get(sample_start, {}).get(key)
+                        or pod_info_node_by_sample.get(sample_start, {}).get(key)
+                        or pod_info_node_latest.get(key)
                     )
                     if resolved_node:
                         pod_node_map_by_ts[sample_start][key] = resolved_node
+            del cpu_values, cpu_nodes
 
             del results
 
@@ -686,10 +737,13 @@ class HistoricalRangeProcessor:
                     if fallback_reasons:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
+                    owner = pod_owner_map.get(pod_key)
                     node_rows.append(
                         CombinedMetric(
                             pod_name=pod_name,
                             namespace=em_namespace,
+                            owner_kind=owner[0] if owner else None,
+                            owner_name=owner[1] if owner else None,
                             period=None,
                             **costs,
                             usage_source=UsageSource.PROMETHEUS.value,

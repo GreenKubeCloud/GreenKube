@@ -9,6 +9,13 @@ Scoping rules (BUG-01 / roadmap A1):
   container (``container="POD"``).  Summing them by pod counts the same CPU
   seconds twice, so every container-scoped selector carries
   ``container!="",container!="POD"``.
+* **Duplicate series of one container** (USER BUG 2): the same container can be
+  exported several times, with labels the ``by`` clause drops: kubelet
+  ``/metrics/resource`` scraped next to ``/metrics/cadvisor``, two scrape jobs,
+  or two cgroup paths (``id``) of one container (systemd/cgroupfs driver
+  mismatch, the old and new cgroup of a restarted container).  CPU and memory
+  usage are therefore aggregated with ``max`` per container, never ``sum``: a
+  sum doubled the usage and the rightsizing increases built on it.
 * **Pod-scoped series** (network) are only exported on the pod sandbox, never
   per application container, so they are intentionally left unfiltered.
 * **kube-state-metrics series** (restarts, pod info) describe Kubernetes
@@ -111,20 +118,30 @@ class PromQLCatalog:
     # ------------------------------------------------------------------
 
     def container_cpu_usage(self) -> str:
-        """CPU cores per container: ``sum by (namespace,pod,container,node)``."""
+        """CPU cores per container: ``max by (namespace,pod,container,node)`` (duplicate series counted once)."""
         return (
-            f"sum(rate({self._container('container_cpu_usage_seconds_total')}[{self.rate_window}])) "
+            f"max(rate({self._container('container_cpu_usage_seconds_total')}[{self.rate_window}])) "
             "by (namespace,pod,container,node)"
         )
 
     def pod_cgroup_cpu_usage(self) -> str:
         """Fallback when no container series exist: the pod cgroup series only, counted once."""
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
-        return f"sum(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (namespace,pod,node)"
+        return f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (namespace,pod,node)"
 
     def container_memory_working_set(self) -> str:
-        """Working-set bytes per container."""
-        return f"sum({self._container('container_memory_working_set_bytes')}) by (namespace,pod,container,node)"
+        """Working-set bytes per container (duplicate series counted once)."""
+        return f"max({self._container('container_memory_working_set_bytes')}) by (namespace,pod,container,node)"
+
+    def pod_cgroup_memory_working_set(self) -> str:
+        """Fallback when no container series exist: the pod cgroup working set, counted once.
+
+        Some kubelets (e.g. Minikube with the Docker driver) only export pod-level
+        cgroups, without a ``container`` label. The value is the whole pod's
+        working set: it is never attributed to a container.
+        """
+        selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
+        return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,node)"
 
     def pod_disk_read(self) -> str:
         """Filesystem read rate summed over the pod's containers."""
