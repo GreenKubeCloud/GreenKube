@@ -190,6 +190,29 @@ class PullRequestPollingRuntime:
                 record_automation_failure("polling")
             record_pr_poll_cycle(outcome, elapsed(timer))
 
+    async def poll_with_lease(self, lease: PullRequestPollingLease) -> PullRequestPollingSummary:
+        """Poll one bounded page under a lease the caller already holds.
+
+        The automation controller loop (M8) holds the singleton lease for its whole
+        tick (webhook outbox, polling, branch cleanup, expiry, retention) and calls
+        this instead of :meth:`poll_once`, which would contend with itself.
+        """
+        timer = start_timer()
+        outcome = "error"
+        try:
+            async with self._poll_lock:
+                summary = await self._poll_owned_page(lease)
+            outcome = "completed"
+            return summary
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            if outcome == "error":
+                record_pr_poll_error()
+                record_automation_failure("polling")
+            record_pr_poll_cycle(outcome, elapsed(timer))
+
     async def run(self, stop_event: asyncio.Event) -> None:
         """Poll immediately, then retry failed cycles after the configured interval."""
         while not stop_event.is_set():
