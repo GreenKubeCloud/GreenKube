@@ -742,18 +742,20 @@ class ChangeRepository:
         self, namespace: str, kind: str, name: str, *, since: Optional[datetime] = None
     ) -> List[WorkloadSpecObservation]:
         """Observations of one workload, oldest first (the last one before ``since`` included)."""
-        rows = await self._select(
-            "SELECT * FROM workload_spec_observations WHERE namespace = ? AND workload_kind = ? "
-            "AND workload_name = ? ORDER BY id ASC",
-            [namespace, kind, name],
+        workload = (
+            "SELECT * FROM workload_spec_observations WHERE namespace = ? AND workload_kind = ? AND workload_name = ?"
         )
-        observations = [self._observation_from_row(row) for row in rows]
         if since is None:
-            return observations
-        threshold = ensure_utc(since)
-        earlier = [item for item in observations if ensure_utc(item.observed_at) < threshold]
-        later = [item for item in observations if ensure_utc(item.observed_at) >= threshold]
-        return ([earlier[-1]] if earlier else []) + later
+            rows = await self._select(f"{workload} ORDER BY id ASC", [namespace, kind, name])
+            return [self._observation_from_row(row) for row in rows]
+        threshold = self._ts(ensure_utc(since))
+        earlier = await self._select(
+            f"{workload} AND observed_at < ? ORDER BY id DESC LIMIT 1", [namespace, kind, name, threshold]
+        )
+        later = await self._select(
+            f"{workload} AND observed_at >= ? ORDER BY id ASC", [namespace, kind, name, threshold]
+        )
+        return [self._observation_from_row(row) for row in [*earlier, *later]]
 
 
 def get_change_repository(db_manager=None) -> ChangeRepository:
