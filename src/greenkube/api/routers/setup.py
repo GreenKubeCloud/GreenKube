@@ -180,7 +180,7 @@ def _data_source_checks(services: Optional[Dict[str, Any]], available: bool) -> 
             "Prometheus answers." if status == "healthy" else f"Prometheus is {status or 'not found'}.",
             "GreenKube discovers Prometheus in the cluster. If discovery fails, set its URL.",
             "configuration.md#prometheus--opencost-integration-configprometheus-configopencost",
-            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \\\n"
+            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n"
             "  --set config.prometheus.url=http://prometheus-server.monitoring.svc:80",
         )
     )
@@ -211,7 +211,7 @@ def _data_source_checks(services: Optional[Dict[str, Any]], available: bool) -> 
             else "No intensity provider is configured: the default grid intensity is used (optional).",
             "Set an Electricity Maps token (or Wattnet credentials) for live grid intensity.",
             "configuration.md#general-configuration-config",
-            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \\\n"
+            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n"
             "  --set secrets.electricityMapsToken=<token>",
         )
     )
@@ -379,7 +379,8 @@ def _credentials_check(
     docs = "installation.md#optional-connect-git"
     secret_snippet = (
         f"kubectl -n {namespace} create secret generic {secret_name} \\\n"
-        "  --from-literal=token=<token with write access to the repositories>"
+        "  --from-literal=token=<token with write access to the repositories> \\\n"
+        "  --from-literal=host=<the Git host the token belongs to, e.g. github.com>"
     )
     if delivery is None or not snapshot_fresh:
         return _check("git_credentials", "credentials", title, "pending", "Readiness not reported yet.", "Wait.", docs)
@@ -397,7 +398,7 @@ def _credentials_check(
             "Delivery is paused by policy (automation.policy.pauseDelivery).",
             "Set pauseDelivery back to false once the change freeze is over.",
             "automation.md#pause-delivery",
-            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \\\n"
+            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n"
             "  --set automation.policy.pauseDelivery=false",
         )
     if reason in {"credentials_missing", "github_app_not_supported"}:
@@ -412,6 +413,22 @@ def _credentials_check(
             "Create one Secret; delivery activates within one to two minutes, without upgrade or restart.",
             docs,
             snippet=secret_snippet,
+        )
+    if reason in {"credentials_host_ambiguous", "credentials_host_mismatch"}:
+        return _check(
+            "git_credentials",
+            "credentials",
+            title,
+            "action_needed",
+            "The Git token is not bound to a host, and the discovered repositories use several hosts "
+            "or a self-hosted one: GreenKube never sends it to a host it cannot attribute it to."
+            if reason == "credentials_host_ambiguous"
+            else "The Git token is bound (key 'host') to a host that none of the discovered repositories use.",
+            "Add the host key to the Secret, naming the one Git host the token belongs to; "
+            "configure automation.providers for any other host.",
+            docs,
+            snippet=f"kubectl -n {namespace} patch secret {secret_name} --type merge \\\n"
+            '  -p \'{"stringData":{"host":"<git host, e.g. github.com>"}}\'',
         )
     if reason in {"no_repository_discovered", "provider_unknown", "not_allowlisted"}:
         return _check(
@@ -461,7 +478,7 @@ def _renderer_check(row: Optional[CapabilityRow], snapshot_fresh: bool) -> Setup
             "NetworkPolicy. Previews still work, with a warning.",
             "Use a CNI that enforces NetworkPolicy, or enable the init-container firewall (needs NET_ADMIN).",
             docs,
-            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reuse-values \\\n"
+            snippet="helm upgrade greenkube greenkube/greenkube -n greenkube --reset-then-reuse-values \\\n"
             "  --set renderer.egressFirewall.enabled=true",
         )
     return _check(

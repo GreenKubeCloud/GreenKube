@@ -144,6 +144,19 @@ def test_missing_credentials_offer_the_one_secret_fix(client, inputs):
     assert _checks(body)["executor"]["status"] == "not_applicable"
 
 
+@pytest.mark.parametrize("reason", ["credentials_host_ambiguous", "credentials_host_mismatch"])
+def test_unbound_credentials_ask_for_the_host_key(client, inputs, reason):
+    inputs.rows = [*_globals(delivery=("dormant", reason)), _repo_row()]
+
+    body = client.get("/api/v1/setup/status").json()
+
+    check = _checks(body)["git_credentials"]
+    assert body["complete"] is False
+    assert check["status"] == "action_needed"
+    assert "patch secret greenkube-git-credentials" in check["fix"]["snippet"]
+    assert '"host"' in check["fix"]["snippet"]
+
+
 def test_paused_delivery_is_blocked_by_policy(client, inputs):
     inputs.rows = [*_globals(delivery=("dormant", "delivery_paused")), _repo_row()]
 

@@ -180,7 +180,7 @@ Secret volumes. */ -}}
 {{- $defaultIdentity := printf "/%s" $defaultSecret -}}
 {{- $defaultKeys := get $secretKeys $defaultIdentity | default (dict "keys" (list)) -}}
 {{- $keys := get $defaultKeys "keys" | default (list) -}}
-{{- range $key := list "token" "appId" "privateKey" -}}
+{{- range $key := list "token" "host" "apiBaseUrl" "appId" "privateKey" -}}
   {{- if not (has $key $keys) -}}
     {{- $keys = append $keys $key -}}
   {{- end -}}

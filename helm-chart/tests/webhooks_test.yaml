@@ -96,6 +96,10 @@ tests:
                     items:
                       - key: token
                         path: greenkube-git-credentials/token
+                      - key: host
+                        path: greenkube-git-credentials/host
+                      - key: apiBaseUrl
+                        path: greenkube-git-credentials/apiBaseUrl
                       - key: appId
                         path: greenkube-git-credentials/appId
                       - key: privateKey

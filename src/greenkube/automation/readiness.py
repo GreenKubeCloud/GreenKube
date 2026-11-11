@@ -25,10 +25,15 @@ loop). Each tick:
    ``automation.providers`` entry serves: ``github.com`` and ``gitlab.com`` by
    name, self-hosted hosts by probing ``/api/v4/version`` (GitLab) and
    ``/api/v1/version`` (Gitea);
-3. gives inferred providers the default credentials Secret
-   (``greenkube-git-credentials``, key ``token``) and enables them only while that
+3. binds the default credentials Secret (``greenkube-git-credentials``, key
+   ``token``) to exactly one inferred host and enables that provider only while the
    Secret is mounted, so creating or deleting it activates or deactivates delivery
-   without a restart (the kubelet refreshes the optional projected volume);
+   without a restart (the kubelet refreshes the optional projected volume). The
+   token goes to the host named by the Secret's optional ``host`` key, or, without
+   that key, to github.com or gitlab.com when that is the only inferred host. It
+   is never sent to a probe-inferred self-hosted host the key does not name, so a
+   GitOps source pointing at a host someone else controls cannot receive it
+   (``credentials_host_ambiguous`` / ``credentials_host_mismatch``);
 4. expands the ``@discovered`` allowlist into the discovered repositories (plus the
    repositories an administrator allowed, F2), then asks discovery to re-resolve
    bindings when a provider changed;
@@ -74,6 +79,11 @@ READINESS_INTERVAL_SECONDS = 60.0
 INFERRED_PROVIDER_PREFIX = "inferred-"
 UNRESOLVED_PROVIDER_ID = "unresolved"
 DEFAULT_CREDENTIALS_KEY = "token"
+#: Optional keys of the default Secret naming the one host its token belongs to.
+DEFAULT_CREDENTIALS_HOST_KEYS = ("host", "apiBaseUrl")
+CREDENTIALS_HOST_AMBIGUOUS = "credentials_host_ambiguous"
+CREDENTIALS_HOST_MISMATCH = "credentials_host_mismatch"
+_MAX_HOST_VALUE_BYTES = 512
 #: A failed self-hosted probe is retried after this delay; a success is kept.
 PROBE_RETRY_SECONDS = 600.0
 PROBE_TIMEOUT_SECONDS = 5.0
@@ -200,6 +210,21 @@ def provider_host(config: GitOpsProviderConfig) -> str | None:
     return "github.com" if provider_type == "github" and host == "api.github.com" else host
 
 
+def normalize_credentials_host(value: str | None) -> str | None:
+    """Host named by the default Secret's ``host``/``apiBaseUrl`` key, as repositories are keyed."""
+    text = (value or "").strip()
+    if not text or any(character.isspace() for character in text):
+        return None
+    try:
+        host = urlsplit(text if "://" in text else f"https://{text}").hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host.lower().rstrip(".")
+    return "github.com" if host == "api.github.com" else host
+
+
 def allowlist_matches(repository: str, patterns: Iterable[str]) -> bool:
     from greenkube.automation.git.base import repository_matches_allowlist
 
@@ -232,6 +257,22 @@ class CredentialsInspector:
             return "token"
         if self._present(None, secret_name, "appId") and self._present(None, secret_name, "privateKey"):
             return "github_app"
+        return None
+
+    def default_credentials_host(self, secret_name: str) -> str | None:
+        """Host the default token is bound to (``host`` key, else ``apiBaseUrl``); not a secret."""
+        for key in DEFAULT_CREDENTIALS_HOST_KEYS:
+            try:
+                path = self._resolver.path_for_reference(None, secret_name, key)
+                if not path.is_file():
+                    continue
+                with path.open("rb") as handle:
+                    raw = handle.read(_MAX_HOST_VALUE_BYTES)
+            except Exception:
+                continue
+            host = normalize_credentials_host(raw.decode("utf-8", errors="replace"))
+            if host:
+                return host
         return None
 
     def provider_has_credentials(self, config: GitOpsProviderConfig) -> bool:
@@ -337,6 +378,9 @@ class _HostPlan:
     refs: dict[str, RepositoryRef] = field(default_factory=dict)
     explicit: list[GitOpsProviderConfig] = field(default_factory=list)
     inference: ProviderInference | None = None
+    #: The default credentials may be sent to this host (see ``_bind_default_credentials``).
+    credentials_bound: bool = False
+    credentials_reason: str | None = None
 
 
 class AutomationReadiness:
@@ -404,11 +448,15 @@ class AutomationReadiness:
         bindings = await self._repository.list_workload_bindings(cluster=self._cluster)
         providers = await self._repository.list_provider_configs()
         hosts = await self._plan_hosts(bindings, providers, allowed)
+        credentials_host = (
+            self._credentials.default_credentials_host(default_secret) if default_secret and default_kind else None
+        )
+        _bind_default_credentials(hosts, credentials_host)
 
         changed = await self._apply_inferred_providers(
             hosts, providers, default_secret, default_kind, patterns, allowed
         )
-        changed = await self._expand_explicit_allowlists(hosts) or changed
+        changed = await self._expand_explicit_allowlists(hosts, allowed) or changed
         if changed and self._request_discovery is not None:
             try:
                 await self._request_discovery()
@@ -417,7 +465,7 @@ class AutomationReadiness:
             bindings = await self._repository.list_workload_bindings(cluster=self._cluster)
             providers = await self._repository.list_provider_configs()
 
-        snapshot = await self._compute(hosts, bindings, providers, allowed, patterns, default_kind)
+        snapshot = await self._compute(hosts, bindings, providers, patterns, default_kind)
         await self._store.replace_snapshot(snapshot.rows(), now=snapshot.refreshed_at)
         for name in CAPABILITIES:
             CAPABILITY_ACTIVE.labels(capability=name).set(1 if snapshot.capabilities[name].active else 0)
@@ -491,13 +539,16 @@ class AutomationReadiness:
                 continue
             provider_id = inferred_provider_id(plan.host)
             wanted.add(provider_id)
+            # An unbound host gets no Secret reference at all: its provider stays
+            # disabled and nothing can send the default token there.
+            bound = plan.credentials_bound
             desired = GitOpsProviderConfig(
                 id=provider_id,
                 provider_type=plan.inference.provider_type,
                 api_base_url=plan.inference.api_base_url,
-                secret_name=default_secret,
-                secret_key=DEFAULT_CREDENTIALS_KEY,
-                enabled=default_kind is not None,
+                secret_name=default_secret if bound else None,
+                secret_key=DEFAULT_CREDENTIALS_KEY if bound else None,
+                enabled=bound and default_kind is not None,
             )
             previous = existing.get(provider_id)
             if previous is None or _connection(previous) != _connection(desired):
@@ -528,16 +579,27 @@ class AutomationReadiness:
             changed = await self._reconcile_allowlist(provider_id, set(), exact=True) or changed
         return changed
 
-    async def _expand_explicit_allowlists(self, hosts: Mapping[str, _HostPlan]) -> bool:
-        """``@discovered`` in an explicit provider's allowlist adds the discovered repositories."""
+    async def _expand_explicit_allowlists(
+        self, hosts: Mapping[str, _HostPlan], allowed: Sequence[AllowedRepository]
+    ) -> bool:
+        """Add discovered (``@discovered``) and administrator-allowed repositories to explicit providers.
+
+        Entries are only added, never removed. ``reconcile_gitops_providers``
+        drops the patterns that are not in the Helm values when the controller
+        restarts; the next readiness tick (within 60 s) adds these again, so the
+        registry and the snapshot agree after one tick.
+        """
         changed = False
+        allowed_urls = {entry.repo_url for entry in allowed}
         for plan in hosts.values():
+            admin_names = {ref.repository for ref in plan.refs.values() if ref.repo_url in allowed_urls}
             for config in plan.explicit:
                 current = set(await self._repository.list_provider_allowlists(config.id))
-                if DISCOVERED_REPOSITORIES not in current:
-                    continue
-                names = {ref.repository for ref in plan.refs.values()} | current
-                changed = await self._reconcile_allowlist(config.id, names, exact=False) or changed
+                names = set(admin_names)
+                if DISCOVERED_REPOSITORIES in current:
+                    names.update(ref.repository for ref in plan.refs.values())
+                if names - current:
+                    changed = await self._reconcile_allowlist(config.id, names | current, exact=False) or changed
         return changed
 
     async def _reconcile_allowlist(self, provider_id: str, desired: set[str], *, exact: bool) -> bool:
@@ -557,7 +619,6 @@ class AutomationReadiness:
         hosts: Mapping[str, _HostPlan],
         bindings: Sequence[WorkloadBinding],
         providers: Sequence[GitOpsProviderConfig],
-        allowed: Sequence[AllowedRepository],
         patterns: Sequence[str],
         default_kind: str | None,
     ) -> ReadinessSnapshot:
@@ -566,7 +627,6 @@ class AutomationReadiness:
         by_id = {p.id: p for p in providers}
         resolved_urls = _resolved_repository_urls(bindings)
         discovered_urls = set(_repository_urls(bindings))
-        allowed_urls = {entry.repo_url for entry in allowed}
         allowlists: dict[str, set[str]] = {}
 
         async def allowlist_of(provider_id: str) -> set[str]:
@@ -584,14 +644,12 @@ class AutomationReadiness:
                 else:
                     provider = by_id.get(inferred_provider_id(plan.host)) if plan.inference else None
                     inferred_from = plan.inference.inferred_from if plan.inference else "unknown"
-                allowlisted = (
-                    ref.repo_url in allowed_urls
-                    or (DISCOVERED_REPOSITORIES in patterns and ref.repo_url in discovered_urls)
-                    or allowlist_matches(ref.repository, patterns)
-                )
-                if provider is not None and plan.explicit:
-                    allowlisted = allowlist_matches(ref.repository, await allowlist_of(provider.id)) or (
-                        ref.repo_url in allowed_urls
+                if provider is not None:
+                    # The allowlist the provider registry actually enforces.
+                    allowlisted = allowlist_matches(ref.repository, await allowlist_of(provider.id))
+                else:
+                    allowlisted = (DISCOVERED_REPOSITORIES in patterns and ref.repo_url in discovered_urls) or (
+                        allowlist_matches(ref.repository, patterns)
                     )
                 credentials = bool(
                     provider and provider.enabled and self._credentials.provider_has_credentials(provider)
@@ -603,6 +661,7 @@ class AutomationReadiness:
                     credentials=credentials,
                     default_kind=default_kind,
                     resolved=ref.repo_url in resolved_urls,
+                    credentials_reason=None if plan.explicit else plan.credentials_reason,
                 )
                 if paused:
                     delivery = CapabilityState(STATE_DORMANT, "delivery_paused")
@@ -637,7 +696,7 @@ class AutomationReadiness:
                 if paused
                 else _aggregate(repositories, "delivery", empty_reason="no_repository_discovered")
             ),
-            "sync_tracking": self._tracking_state(providers, default_kind),
+            "sync_tracking": self._tracking_state(providers, default_kind, hosts),
             "webhooks": (
                 CapabilityState(STATE_ACTIVE)
                 if self._webhooks_configured()
@@ -659,7 +718,9 @@ class AutomationReadiness:
             return CapabilityState(STATE_PENDING, "discovery_not_run")
         return CapabilityState(STATE_DORMANT, "no_gitops_controller")
 
-    def _tracking_state(self, providers: Sequence[GitOpsProviderConfig], default_kind: str | None) -> CapabilityState:
+    def _tracking_state(
+        self, providers: Sequence[GitOpsProviderConfig], default_kind: str | None, hosts: Mapping[str, _HostPlan]
+    ) -> CapabilityState:
         credentialed = [
             p.id
             for p in providers
@@ -669,7 +730,8 @@ class AutomationReadiness:
             return CapabilityState(STATE_ACTIVE, details={"providers": credentialed})
         if default_kind is not None:
             # Credentials are mounted, but no discovered repository uses them yet.
-            return CapabilityState(STATE_DORMANT, "no_repository_discovered")
+            unbound = sorted({plan.credentials_reason for plan in hosts.values() if plan.credentials_reason})
+            return CapabilityState(STATE_DORMANT, unbound[0] if unbound else "no_repository_discovered")
         return CapabilityState(STATE_DORMANT, "credentials_missing")
 
     async def _renderer_state(self) -> CapabilityState:
@@ -687,6 +749,28 @@ class AutomationReadiness:
         if enforced is False:
             return CapabilityState(STATE_ACTIVE, "renderer_egress_unenforced", details)
         return CapabilityState(STATE_ACTIVE, None, details)
+
+
+def _bind_default_credentials(hosts: Mapping[str, _HostPlan], credentials_host: str | None) -> None:
+    """Decide which inferred host may receive the default token (at most one).
+
+    The token belongs to one Git host. Sending it to every host a GitOps source
+    references would hand it to whoever can create an Argo CD Application or a
+    Flux GitRepository pointing at a server they control. So:
+
+    * the Secret names its host (``host`` or ``apiBaseUrl`` key): only that host;
+    * otherwise: only when github.com or gitlab.com is the single inferred host.
+      A probe-inferred self-hosted host always needs the ``host`` key.
+    """
+    candidates = [plan for plan in hosts.values() if not plan.explicit and plan.inference is not None]
+    for plan in candidates:
+        if credentials_host is not None:
+            plan.credentials_bound = plan.host == credentials_host
+            plan.credentials_reason = None if plan.credentials_bound else CREDENTIALS_HOST_MISMATCH
+        elif len(candidates) == 1 and plan.host in _WELL_KNOWN_HOSTS:
+            plan.credentials_bound, plan.credentials_reason = True, None
+        else:
+            plan.credentials_bound, plan.credentials_reason = False, CREDENTIALS_HOST_AMBIGUOUS
 
 
 def _connection(config: GitOpsProviderConfig) -> tuple[Any, ...]:
@@ -736,12 +820,15 @@ def _preview_state(
     credentials: bool,
     default_kind: str | None,
     resolved: bool,
+    credentials_reason: str | None = None,
 ) -> CapabilityState:
     if not known:
         return CapabilityState(STATE_DORMANT, "provider_unknown")
     if not allowlisted:
         return CapabilityState(STATE_DORMANT, "not_allowlisted")
     if provider is None or not credentials:
+        if default_kind is not None and credentials_reason:
+            return CapabilityState(STATE_DORMANT, credentials_reason)
         if provider is not None and provider.id.startswith(INFERRED_PROVIDER_PREFIX) and default_kind == "github_app":
             return CapabilityState(STATE_DORMANT, "github_app_not_supported")
         return CapabilityState(STATE_DORMANT, "credentials_missing")

@@ -13,6 +13,7 @@ from greenkube.automation.readiness import (
     CredentialsInspector,
     ProviderInference,
     inferred_provider_id,
+    normalize_credentials_host,
     repository_ref,
 )
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, RendererKind, WorkloadSource
@@ -236,6 +237,7 @@ async def test_pause_delivery_is_the_only_off_switch(tmp_path):
 
 async def test_self_hosted_hosts_are_probed_once(tmp_path):
     _write_token(tmp_path)
+    _write_token(tmp_path, key="host", value="gitea.internal")
     probes: list[str] = []
 
     async def prober(base_url):
@@ -408,3 +410,155 @@ async def test_reenabling_keeps_last_verified_status_only_when_unchanged(tmp_pat
 
     # Nothing changed: the provider row (and what a real call verified) is left alone.
     assert repository.providers[provider.id].status == existing_status
+
+
+# --------------------------------------------------------------- default credentials host binding
+
+GITLAB_REPO = "https://gitlab.com/acme/infra.git"
+ATTACKER_REPO = "https://evil.example/x/y.git"
+
+
+async def _gitlab_prober(base_url):
+    return ProviderInference("gitlab", f"{base_url}/api/v4", "probe")
+
+
+def _secret_ref(provider: GitOpsProviderConfig) -> tuple:
+    return (provider.secret_name, provider.secret_key, provider.enabled)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("github.com", "github.com"),
+        ("https://api.github.com", "github.com"),
+        ("https://GitLab.Example.com:8443/api/v4\n", "gitlab.example.com"),
+        ("", None),
+        ("two words", None),
+    ],
+)
+def test_credentials_host_is_normalized_like_repository_hosts(value, expected):
+    assert normalize_credentials_host(value) == expected
+
+
+async def test_token_is_never_sent_to_an_attacker_controlled_host(tmp_path):
+    """A GitOps source pointing at a host someone else controls must not receive the token."""
+    _write_token(tmp_path)
+    repository = FakeGitOpsRepository([GITHUB_REPO, ATTACKER_REPO])
+
+    snapshot = await _readiness(repository, tmp_path, prober=_gitlab_prober).run_once()
+
+    attacker = repository.providers["inferred-evil.example"]
+    github = repository.providers["inferred-github.com"]
+    assert _secret_ref(attacker) == (None, None, False)
+    assert _secret_ref(github) == (None, None, False)
+    states = {repo.host: repo for repo in snapshot.repositories}
+    assert states["evil.example"].preview.reason == "credentials_host_ambiguous"
+    assert states["github.com"].preview.reason == "credentials_host_ambiguous"
+    assert snapshot.capabilities["delivery"].reason == "credentials_host_ambiguous"
+    assert snapshot.capabilities["sync_tracking"].reason == "credentials_host_ambiguous"
+
+
+async def test_host_key_binds_the_token_to_one_host(tmp_path):
+    _write_token(tmp_path)
+    _write_token(tmp_path, key="host", value="github.com")
+    repository = FakeGitOpsRepository([GITHUB_REPO, ATTACKER_REPO])
+
+    snapshot = await _readiness(repository, tmp_path, prober=_gitlab_prober).run_once()
+
+    assert _secret_ref(repository.providers["inferred-github.com"]) == ("greenkube-git-credentials", "token", True)
+    assert _secret_ref(repository.providers["inferred-evil.example"]) == (None, None, False)
+    states = {repo.host: repo for repo in snapshot.repositories}
+    assert states["github.com"].delivery.active
+    assert states["evil.example"].preview.reason == "credentials_host_mismatch"
+    assert snapshot.capabilities["delivery"].active
+
+
+async def test_github_token_is_not_sent_to_gitlab(tmp_path):
+    _write_token(tmp_path)
+    repository = FakeGitOpsRepository([GITHUB_REPO, GITLAB_REPO])
+    readiness = _readiness(repository, tmp_path)
+
+    await readiness.run_once()
+    assert _secret_ref(repository.providers["inferred-github.com"]) == (None, None, False)
+    assert _secret_ref(repository.providers["inferred-gitlab.com"]) == (None, None, False)
+
+    _write_token(tmp_path, key="host", value="https://gitlab.com")
+    snapshot = await readiness.run_once()
+    assert _secret_ref(repository.providers["inferred-github.com"]) == (None, None, False)
+    assert _secret_ref(repository.providers["inferred-gitlab.com"]) == ("greenkube-git-credentials", "token", True)
+    states = {repo.host: repo for repo in snapshot.repositories}
+    assert states["gitlab.com"].delivery.active
+    assert states["github.com"].preview.reason == "credentials_host_mismatch"
+
+
+async def test_a_previously_bound_provider_loses_the_token_when_a_second_host_appears(tmp_path):
+    _write_token(tmp_path)
+    repository = FakeGitOpsRepository([GITHUB_REPO])
+    readiness = _readiness(repository, tmp_path, prober=_gitlab_prober)
+    await readiness.run_once()
+    assert repository.providers["inferred-github.com"].enabled
+
+    repository.repo_urls = [GITHUB_REPO, ATTACKER_REPO]
+    await readiness.run_once()
+
+    assert _secret_ref(repository.providers["inferred-github.com"]) == (None, None, False)
+    assert readiness.delivery_active is False
+
+
+async def test_self_hosted_host_needs_the_host_key(tmp_path):
+    _write_token(tmp_path)
+    repository = FakeGitOpsRepository([GITEA_REPO])
+
+    async def prober(base_url):
+        return ProviderInference("gitea", f"{base_url}/api/v1", "probe")
+
+    snapshot = await _readiness(repository, tmp_path, prober=prober).run_once()
+
+    assert _secret_ref(repository.providers["inferred-gitea.internal"]) == (None, None, False)
+    assert snapshot.repositories[0].preview.reason == "credentials_host_ambiguous"
+
+
+async def test_administrator_allowed_repository_reaches_an_explicit_provider_allowlist(tmp_path):
+    _write_token(tmp_path, secret="github-token")
+    other = "https://github.com/acme/other.git"
+    explicit = GitOpsProviderConfig(
+        id="gh",
+        provider_type="github",
+        api_base_url="https://api.github.com",
+        secret_name="github-token",
+        secret_key="token",
+    )
+    repository = FakeGitOpsRepository([GITHUB_REPO, other], [explicit])
+    repository.allowlists["gh"] = {"acme/gitops"}
+    allowed = [
+        AllowedRepository(other, "github.com", "acme/other", "user:admin", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    ]
+    triggered: list[bool] = []
+
+    snapshot = await _readiness(repository, tmp_path, store=FakeStore(allowed), triggered=triggered).run_once()
+
+    # The registry enforces the provider allowlist: the snapshot reports exactly that.
+    assert repository.allowlists["gh"] == {"acme/gitops", "acme/other"}
+    assert triggered == [True]
+    assert all(repo.allowlisted for repo in snapshot.repositories)
+
+
+async def test_explicit_provider_snapshot_follows_its_database_allowlist(tmp_path):
+    _write_token(tmp_path, secret="github-token")
+    other = "https://github.com/acme/other.git"
+    explicit = GitOpsProviderConfig(
+        id="gh",
+        provider_type="github",
+        api_base_url="https://api.github.com",
+        secret_name="github-token",
+        secret_key="token",
+    )
+    repository = FakeGitOpsRepository([GITHUB_REPO, other], [explicit])
+    repository.allowlists["gh"] = {"acme/gitops"}
+
+    snapshot = await _readiness(repository, tmp_path).run_once()
+
+    states = {repo.repository: repo for repo in snapshot.repositories}
+    assert states["acme/gitops"].allowlisted is True
+    assert states["acme/other"].allowlisted is False
+    assert states["acme/other"].preview.reason == "not_allowlisted"
