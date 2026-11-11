@@ -113,6 +113,23 @@ tests:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 2Gi
 
+  - it: ignores the production block of a standalone release reused with --reuse-values
+    set:
+      profile: standalone
+      production.components.api.replicas: 2
+      production.components.controller.resources.limits.memory: 2Gi
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        equal:
+          path: spec.replicas
+          value: 1
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 1Gi
+
   - it: maps the standalone resources and apiResources
     set:
       resources.requests.cpu: 300m

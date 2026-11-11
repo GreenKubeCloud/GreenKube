@@ -242,7 +242,7 @@ def test_sqlite_upgrade_fails_with_the_exact_migration_commands(legacy_chart: Pa
     assert result.returncode != 0
     assert "config.db.type=sqlite is no longer supported" in result.stderr
     assert 'greenkube db copy --from sqlite:///data/greenkube_data.db --to "$DB_CONNECTION_STRING"' in result.stderr
-    assert "--set config.db.type=postgres --set controller.replicas=0" in result.stderr
+    assert "--reset-then-reuse-values --set config.db.type=postgres --set controller.replicas=0" in result.stderr
 
 
 def test_sqlite_claim_survives_the_switch_to_postgres(legacy_chart: Path):

@@ -356,6 +356,7 @@ tests:
 
   - it: maps the 0.3.x production.leaderElection values
     set:
+      profile: production
       production.leaderElection.leaseName: my-lease
       production.leaderElection.leaseDurationSeconds: 45
     templates:

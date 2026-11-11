@@ -66,8 +66,16 @@ minor release.
   {{- $deprecations = append $deprecations "config.api.enabled is ignored: the API is always deployed (it serves the UI)." -}}
 {{- end -}}
 
-{{- /* Production profile block. */ -}}
-{{- with $values.production -}}
+{{- /* Production profile block: it only shaped the 0.3.x production profile, so a
+standalone release reused with --reuse-values (which carries the old chart defaults,
+production block included) keeps the single-replica sizes. */ -}}
+{{- $production := dict -}}
+{{- if eq (toString ($values.profile | default "")) "production" -}}
+  {{- $production = $values.production | default dict -}}
+{{- else if hasKey $values "production" -}}
+  {{- $deprecations = append $deprecations "production.* is ignored: it only applied to profile=production." -}}
+{{- end -}}
+{{- with $production -}}
   {{- $components := .components | default dict -}}
   {{- range $pair := list (list "api" $api) (list "controller" $controller) -}}
     {{- $legacy := get $components (index $pair 0) | default dict -}}
@@ -92,8 +100,8 @@ minor release.
   {{- with .leaderElection -}}
     {{- $election := deepCopy ($controller.leaderElection | default dict) -}}
     {{- range $key := list "leaseName" "leaseDurationSeconds" -}}
-      {{- if hasKey $.Values.production.leaderElection $key -}}
-        {{- $_ := set $election $key (get $.Values.production.leaderElection $key) -}}
+      {{- if hasKey $production.leaderElection $key -}}
+        {{- $_ := set $election $key (get $production.leaderElection $key) -}}
       {{- end -}}
     {{- end -}}
     {{- $_ := set $controller "leaderElection" $election -}}
@@ -122,7 +130,7 @@ minor release.
 {{- $legacyEnabled := and (hasKey $automation "enabled") $automation.enabled -}}
 {{- if and $legacyEnabled (or (eq $legacyMode "worker") (and (eq $legacyMode "") (eq $legacyProfile "production"))) -}}
   {{- $replicas := 1 -}}
-  {{- with (($values.production | default dict).components | default dict).automation -}}
+  {{- with ($production.components | default dict).automation -}}
     {{- if hasKey . "replicas" -}}
       {{- $replicas = int .replicas -}}
     {{- end -}}
@@ -221,9 +229,9 @@ with the exact commands, before Helm touches anything.
 {{- $path := ((.Values.config | default dict).db | default dict).path | default "/data/greenkube_data.db" -}}
 config.db.type=sqlite is no longer supported: the chart runs on PostgreSQL only (GreenKube 0.4).
 Your SQLite data stays on the PersistentVolumeClaim {{ $fullname }}. Migrate in three steps (docs/upgrading.md#from-a-sqlite-install):
-  1. helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values --set config.db.type=postgres --set controller.replicas=0
+  1. helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reset-then-reuse-values --set config.db.type=postgres --set controller.replicas=0
      (keep config.persistence.enabled=true: the claim is then kept, never deleted)
   2. run the one-shot Job of docs/upgrading.md, which mounts the claim at /data and runs:
      greenkube db copy --from sqlite://{{ $path }} --to "$DB_CONNECTION_STRING"
-  3. helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values --set controller.replicas=1
+  3. helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reset-then-reuse-values --set controller.replicas=1
 {{- end -}}
