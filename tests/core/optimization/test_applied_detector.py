@@ -1109,10 +1109,111 @@ class TestNoPhantomAppliedChanges:
         )
 
         assert await detector.detect() == []
+        # Its proposal is already live: retired as no_effective_change, never offered again.
+        assert await repo.get_active_recommendations() == []
+        (record,) = await repo.get_recommendations_by_statuses([RecommendationStatus.STALE.value])
+        events = await repo.get_events(record.id)
+        assert [(e.event_type, e.payload.model_dump().get("reason")) for e in events] == [
+            ("stale", "no_effective_change")
+        ]
 
-        snapshot.rollout_completed_at = now - timedelta(minutes=1)
+    @pytest.mark.asyncio
+    async def test_rollout_completed_after_the_recommendation_existed_is_its_application(self, repo):
+        now = datetime.now(timezone.utc)
+        await repo.save_recommendations([_cpu_record().model_copy(update={"created_at": now - timedelta(minutes=5)})])
+        snapshot = WorkloadSnapshot(
+            "prod",
+            "Deployment",
+            "api",
+            300,
+            0,
+            generation=3,
+            observed_generation=3,
+            desired_replicas=1,
+            current_replicas=1,
+            updated_replicas=1,
+            available_replicas=1,
+            rollout_completed_at=now - timedelta(minutes=1),
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): snapshot}),
+            config=Config(),
+        )
+
         applied = await detector.detect()
         assert len(applied) == 1 and applied[0].applied_at == snapshot.rollout_completed_at
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "recorded_status",
+        [
+            RecommendationStatus.APPLIED,
+            RecommendationStatus.VERIFYING,
+            RecommendationStatus.VERIFIED,
+            RecommendationStatus.ROLLBACK_REVIEW,
+        ],
+    )
+    @pytest.mark.parametrize("recorded_actual", [300, None])
+    async def test_regenerated_recommendation_never_records_a_recorded_change_twice(
+        self, repo, recorded_status, recorded_actual
+    ):
+        """A scan within the rollup lag regenerates 1000m -> 300m while 300m is live and recorded.
+
+        Without a rollout completion time (StatefulSet, DaemonSet, or a
+        Deployment without its Progressing condition) the created_at guard
+        cannot tell, so the duplicate used to become a second applied change
+        with its own change_id, measurement and savings.
+        """
+        now = datetime.now(timezone.utc)
+        recorded = _cpu_record(status=recorded_status).model_copy(
+            update={
+                "applied_at": now - timedelta(minutes=10),
+                "application_method": "pr_merge",
+                "actual_cpu_request_millicores": recorded_actual,
+                "created_at": now - timedelta(hours=1),
+            }
+        )
+        regenerated = _cpu_record().model_copy(update={"created_at": now - timedelta(minutes=2)})
+        await repo.save_recommendations([recorded, regenerated])
+        snapshot = WorkloadSnapshot(
+            "prod", "StatefulSet", "api", 300, 0, generation=4, observed_generation=4, desired_replicas=1
+        )
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): snapshot}),
+            config=Config(),
+        )
+
+        assert await detector.detect() == []
+
+        assert await repo.get_active_recommendations() == []
+        (stale,) = await repo.get_recommendations_by_statuses([RecommendationStatus.STALE.value])
+        assert stale.id == 2 and stale.applied_at is None and stale.actual_cpu_request_millicores is None
+        (event,) = await repo.get_events(2)
+        assert event.event_type == "stale"
+        assert event.payload.model_dump()["reason"] == "no_effective_change"
+        assert event.payload.model_dump()["recorded_recommendation_id"] == 1
+        untouched = await repo.get_recommendation_by_id(1)
+        assert untouched.status == recorded_status
+        assert untouched.actual_cpu_request_millicores == recorded_actual
+
+    @pytest.mark.asyncio
+    async def test_regenerated_recommendation_after_a_revert_stays_active(self, repo):
+        """The live request went back to the baseline: the advice is genuinely needed again."""
+        now = datetime.now(timezone.utc)
+        recorded = _cpu_record(status=RecommendationStatus.VERIFIED).model_copy(
+            update={"applied_at": now - timedelta(days=9), "actual_cpu_request_millicores": 300}
+        )
+        await repo.save_recommendations([recorded, _cpu_record()])
+        detector = AppliedDetector(
+            RecommendationLifecycle(repo),
+            reader=FakeReader({("prod", "Deployment", "api"): WorkloadSnapshot("prod", "Deployment", "api", 1000, 0)}),
+            config=Config(),
+        )
+
+        assert await detector.detect() == []
+        assert [r.id for r in await repo.get_active_recommendations()] == [2]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("action_status", [ActionStatus.NONE, ActionStatus.FAILED, ActionStatus.CLOSED])

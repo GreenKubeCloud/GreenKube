@@ -436,6 +436,32 @@ class RecommendationLifecycle:
                 logger.info("Recommendation %s changed before it could expire: %s", record.id, exc)
         return expired
 
+    async def mark_no_effective_change(
+        self,
+        rec_id: int,
+        *,
+        payload: Optional[dict] = None,
+        actor: str = "detector",
+    ) -> RecommendationRecord:
+        """Retire an active recommendation whose proposal is already live (``no_effective_change``).
+
+        The live request already equals the proposal, but not because this
+        recommendation was applied: the change is already recorded on another
+        recommendation of the same target, or it landed before this one was
+        generated (a scan built from the lagging usage rollup). Applying it
+        again would open a no-op pull request, and recording it would count
+        the same change twice, so it is marked ``stale`` (compare-and-swap from
+        ``active``) with a ``stale`` audit event carrying the reason.
+        """
+        return await self.transition(
+            rec_id,
+            RecommendationStatus.STALE,
+            event_type=RecommendationEventType.STALE,
+            actor=actor,
+            payload={"reason": "no_effective_change", **(payload or {})},
+            expected_statuses=(RecommendationStatus.ACTIVE,),
+        )
+
     async def ignore(
         self,
         rec_id: int,
