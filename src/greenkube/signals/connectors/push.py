@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from greenkube.signals.model import (
+    CLUSTER_SCOPED_KINDS,
+    KIND_API_VERSIONS,
     AlgorithmInfo,
     Capability,
     Proposal,
@@ -199,6 +201,15 @@ def parse_batch(
         return None, [], pointer_errors(document, exc)
     errors: List[PointerError] = []
     for index, pushed in enumerate(batch.signals):
+        kind = pushed.target.kind
+        if kind in KIND_API_VERSIONS and kind not in CLUSTER_SCOPED_KINDS and not pushed.target.namespace:
+            errors.append(
+                PointerError(
+                    pointer=f"/signals/{index}/target/namespace",
+                    message=f"a {kind} target needs its namespace",
+                    type="missing_namespace",
+                )
+            )
         uid = pushed.target.cluster_uid
         if uid is not None and uid != cluster_uid:
             errors.append(

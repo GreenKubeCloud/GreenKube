@@ -20,7 +20,7 @@ from pydantic import Field
 
 from greenkube.signals.connectors.inbox import InboxBatch, SignalInboxRepository, create_signal_inbox_repository
 from greenkube.signals.connectors.push import PUSH_PREFIX
-from greenkube.signals.model import CLUSTER_SCOPED_KINDS, Capability, SourceSignal
+from greenkube.signals.model import Capability, SourceSignal
 from greenkube.signals.sdk import (
     CollectContext,
     Diagnostic,
@@ -110,12 +110,7 @@ class InboxSource(Source):
                 other_cluster += 1
                 continue
             target = signal.target
-            if (
-                known
-                and target.kind in _WORKLOAD_KINDS
-                and target.kind not in CLUSTER_SCOPED_KINDS
-                and (target.namespace, target.kind, target.name) not in known
-            ):
+            if known and target.kind in _WORKLOAD_KINDS and (target.namespace, target.kind, target.name) not in known:
                 unknown_targets += 1
             signals.append(signal)
         diagnostics: List[Diagnostic] = []

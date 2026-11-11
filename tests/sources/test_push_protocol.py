@@ -126,6 +126,19 @@ class TestParseBatch:
             ("/signals/1/target/cluster_uid", "unknown_cluster")
         ]
 
+    def test_namespaced_kinds_need_a_namespace(self):
+        no_namespace = _signal(target={"kind": "Deployment", "name": "api"})
+        node = _signal(
+            target={"kind": "NodePool", "name": "general"},
+            capability="node_pool",
+            kind="NODEPOOL_ARCHITECTURE",
+            proposal={"kind": "advisory", "text": "allow arm64"},
+        )
+        _batch_, signals, errors = parse_batch(_batch(no_namespace), cluster_uid=CLUSTER, received_at=_now())
+        assert signals == [] and [e.pointer for e in errors] == ["/signals/0/target/namespace"]
+        batch, signals, errors = parse_batch(_batch(node), cluster_uid=CLUSTER, received_at=_now())
+        assert errors == [] and signals[0].target.namespace is None
+
     def test_pointer_escapes_tokens(self):
         assert json_pointer({"a/b": {"c~d": 1}}, ("a/b", "c~d")) == "/a~1b/c~0d"
         assert json_pointer({"signals": []}, ("signals", 3, "kind")) == "/signals/3/kind"
@@ -207,6 +220,28 @@ class TestPushSource:
         assert stored.withdrawn == 1
         batch = await _push_source(inbox).collect(collect_context(None))
         assert [signal.kind for signal in batch.signals] == ["RIGHTSIZING_CPU"]
+
+    async def test_targets_without_usage_are_kept_and_reported(self):
+        from greenkube.core.optimization.context import OptimizationContext
+        from greenkube.models.metrics import CombinedMetric
+
+        inbox = MemoryInbox()
+        await _accept(inbox, _batch(), _now())
+        metric = CombinedMetric(
+            pod_name="worker-1",
+            namespace="shop",
+            owner_kind="Deployment",
+            owner_name="worker",
+            container_name="main",
+            cpu_request=100,
+            timestamp=_now() - timedelta(hours=1),
+        )
+        context = OptimizationContext(config=Config(), metrics=[metric])
+
+        batch = await _push_source(inbox).collect(collect_context(context))
+
+        assert len(batch.signals) == 1
+        assert {d.code: d.count for d in batch.diagnostics} == {"targets_without_usage": 1}
 
     def test_settings_reject_unknown_keys(self):
         with pytest.raises(ValueError):
