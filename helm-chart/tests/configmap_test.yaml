@@ -297,6 +297,18 @@ tests:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
 
+  - it: should disable the VPA and Karpenter connectors when set to false
+    set:
+      config.recommendations.vpaEnabled: false
+      config.recommendations.karpenterEnabled: false
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_VPA_ENABLED
+          value: "false"
+      - equal:
+          path: data.RECOMMENDATION_KARPENTER_ENABLED
+          value: "false"
+
   - it: should schedule recommendation scans hourly by default
     asserts:
       - equal:
