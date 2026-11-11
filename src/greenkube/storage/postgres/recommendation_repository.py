@@ -39,11 +39,14 @@ from ..recommendation_mapper import (
     to_json,
 )
 from ..recommendation_revisions import (
+    NO_OPEN_PLAN_SQL,
     QUEUED,
     SUPERSEDED,
+    RevisionDecision,
     backfill_update,
     decide,
     is_frozen,
+    prune_superseded_sql,
     revision_from_row,
     revision_values,
 )
@@ -235,13 +238,37 @@ class PostgresRecommendationRepository(RecommendationRepository):
                 if existing is not None:
                     stored = row_to_record(existing)
                     decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
+                    if decision.action == "revise":
+                        update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                            decision.revision,
+                            now,
+                            existing["id"],
+                        ]
+                        async with conn.transaction():
+                            # Guarded: a plan opened since the read freezes the record (E7).
+                            result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
+                            revised = not str(result).endswith(" 0")
+                            if revised:
+                                await self._settle_revision(conn, stored, True, now)
+                        if revised:
+                            count += 1
+                            continue
+                        decision = RevisionDecision("queue", decision.revision)
                     if decision.action == "queue":
-                        # A record never changes under an open plan (E7).
+                        # A record never changes under an open plan (E7), but the scan still saw its
+                        # target: keep it alive so it does not expire while the plan is open.
                         await self._queue_revision(conn, stored, r, decision.revision, now)
+                        await conn.execute(
+                            "UPDATE recommendation_history SET expires_at = COALESCE($1, expires_at), updated_at = $2 "
+                            "WHERE id = $3",
+                            values["expires_at"],
+                            now,
+                            existing["id"],
+                        )
                         count += 1
                         continue
                     async with conn.transaction():
-                        await self._settle_revision(conn, stored, decision.action == "revise", now)
+                        await self._settle_revision(conn, stored, False, now)
                         update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
                             decision.revision,
                             now,
@@ -362,6 +389,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
             stored.updated_at or stored.created_at or now,
             now,
         )
+        await conn.execute(prune_superseded_sql(lambda index: f"${index}"), stored.id, stored.id, stored.id)
 
     async def get_revisions(self, rec_id: int) -> List[RecommendationRevision]:
         """Revisions the record no longer carries (superseded and queued), newest first (E7)."""

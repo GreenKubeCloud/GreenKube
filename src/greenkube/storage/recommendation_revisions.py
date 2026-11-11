@@ -37,8 +37,36 @@ logger = logging.getLogger(__name__)
 #: Action statuses of a recommendation whose plan is open: its record is frozen.
 OPEN_PLAN_ACTION_STATUSES = frozenset({"plan_ready", "pr_open", "merged", "sync_pending"})
 
+#: SQL condition (both backends) true when no plan is open on a ``recommendation_history`` row.
+#: A revising UPDATE carries it so a plan opened between the read and the write still freezes the record.
+NO_OPEN_PLAN_SQL = "status = 'active' AND COALESCE(action_status, '') NOT IN ({})".format(
+    ", ".join(f"'{status}'" for status in sorted(OPEN_PLAN_ACTION_STATUSES))
+)
+
 SUPERSEDED = "superseded"
 QUEUED = "queued"
+
+#: Superseded revisions kept per recommendation (newest first). Older ones are pruned
+#: unless a plan pins them, so a drifting proposal cannot grow the table without bound.
+MAX_SUPERSEDED_REVISIONS = 20
+
+
+def prune_superseded_sql(placeholder) -> str:
+    """DELETE of the superseded revisions beyond :data:`MAX_SUPERSEDED_REVISIONS` (unpinned only).
+
+    ``placeholder(n)`` renders the n-th bind parameter (``?`` on SQLite, ``$n``
+    on PostgreSQL); every parameter is the recommendation id.
+    """
+    return (
+        "DELETE FROM recommendation_revisions "
+        f"WHERE recommendation_id = {placeholder(1)} AND state = '{SUPERSEDED}' "
+        "AND revision NOT IN ("
+        "SELECT revision FROM recommendation_revisions "
+        f"WHERE recommendation_id = {placeholder(2)} AND state = '{SUPERSEDED}' "
+        f"ORDER BY revision DESC LIMIT {MAX_SUPERSEDED_REVISIONS}) "
+        "AND revision NOT IN ("
+        f"SELECT revision FROM recommendation_plan_pins WHERE recommendation_id = {placeholder(3)})"
+    )
 
 
 @dataclass(frozen=True)

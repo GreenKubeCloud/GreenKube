@@ -41,11 +41,14 @@ from greenkube.storage.recommendation_mapper import (
     to_json,
 )
 from greenkube.storage.recommendation_revisions import (
+    NO_OPEN_PLAN_SQL,
     QUEUED,
     SUPERSEDED,
+    RevisionDecision,
     backfill_update,
     decide,
     is_frozen,
+    prune_superseded_sql,
     revision_from_row,
     revision_values,
 )
@@ -288,12 +291,30 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 if existing:
                     stored = row_to_record(existing)
                     decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
-                    if decision.action == "queue":
-                        # A record never changes under an open plan (E7).
-                        await self._queue_revision(conn, stored, r, decision.revision, now)
-                        continue
-                    await self._settle_revision(conn, stored, decision.action == "revise", now)
                     values = record_values(r, encode_datetime=to_iso_z)
+                    if decision.action == "revise":
+                        params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                            decision.revision,
+                            now,
+                            existing["id"],
+                        ]
+                        # Guarded: a plan opened since the read freezes the record (E7).
+                        cursor = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", params)
+                        if cursor.rowcount:
+                            await self._settle_revision(conn, stored, True, now)
+                            continue
+                        decision = RevisionDecision("queue", decision.revision)
+                    if decision.action == "queue":
+                        # A record never changes under an open plan (E7), but the scan still saw its
+                        # target: keep it alive so it does not expire while the plan is open.
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                        await conn.execute(
+                            "UPDATE recommendation_history SET expires_at = COALESCE(?, expires_at), updated_at = ? "
+                            "WHERE id = ?",
+                            (values["expires_at"], now, existing["id"]),
+                        )
+                        continue
+                    await self._settle_revision(conn, stored, False, now)
                     params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
                         decision.revision,
                         now,
@@ -426,6 +447,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 now,
             ),
         )
+        await conn.execute(prune_superseded_sql(lambda _index: "?"), (stored.id, stored.id, stored.id))
 
     async def get_revisions(self, rec_id: int) -> List[RecommendationRevision]:
         """Revisions the record no longer carries (superseded and queued), newest first (E7)."""

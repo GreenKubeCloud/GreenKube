@@ -279,6 +279,57 @@ class TestRevisions:
         assert (promoted.revision, promoted.recommended_cpu_request_millicores) == (2, 180)
         assert [(r.revision, r.state) for r in await repo.get_revisions(rec_id)] == [(1, "superseded")]
 
+    async def test_a_frozen_record_with_queued_advice_stays_alive_while_its_plan_is_open(self, db):
+        repo = _repo(db)
+        now = datetime.now(timezone.utc)
+        await repo.upsert_recommendations([_cpu(300, expires_at=now + timedelta(days=1))])
+        [record] = await repo.get_active_recommendations()
+        rec_id = _id(record)
+        await _set_action_status(db, rec_id, "pr_open")
+
+        # The next scans still see the target (with drifting advice): its liveness is refreshed.
+        await repo.upsert_recommendations([_cpu(240, expires_at=now + timedelta(days=14))])
+
+        assert await repo.expire_recommendations(now + timedelta(days=2)) == []
+        frozen = await _get(repo, rec_id)
+        assert (frozen.status, frozen.recommended_cpu_request_millicores) == (RecommendationStatus.ACTIVE, 300)
+        assert frozen.expires_at is not None and frozen.expires_at > now + timedelta(days=13)
+        assert (await repo.get_queued_revisions([rec_id]))[rec_id].revision == 2
+
+    async def test_a_plan_opened_after_the_read_still_freezes_the_record(self, db, monkeypatch):
+        repo = _repo(db)
+        await repo.upsert_recommendations([_cpu(300)])
+        [record] = await repo.get_active_recommendations()
+        rec_id = _id(record)
+        await _set_action_status(db, rec_id, "plan_ready")
+        # The read saw no open plan (the plan opened between the read and the write).
+        monkeypatch.setattr(type(repo).__module__ + ".is_frozen", lambda status, action_status: False)
+
+        await repo.upsert_recommendations([_cpu(200)])
+
+        frozen = await _get(repo, rec_id)
+        assert (frozen.revision, frozen.recommended_cpu_request_millicores) == (1, 300)
+        assert (await repo.get_queued_revisions([rec_id]))[rec_id].revision == 2
+        assert await repo.get_revisions(rec_id) == [(await repo.get_queued_revisions([rec_id]))[rec_id]]
+
+    async def test_superseded_revisions_are_bounded_except_pinned_ones(self, db):
+        from greenkube.storage.recommendation_revisions import MAX_SUPERSEDED_REVISIONS
+
+        repo = _repo(db)
+        await repo.upsert_recommendations([_cpu(300)])
+        [record] = await repo.get_active_recommendations()
+        rec_id = _id(record)
+        await repo.pin_plan_revisions("plan-old", {rec_id: 1})
+
+        changes = MAX_SUPERSEDED_REVISIONS + 5
+        for step in range(1, changes + 1):
+            await repo.upsert_recommendations([_cpu(300 - step)])
+
+        assert (await _get(repo, rec_id)).revision == changes + 1
+        kept = [revision.revision for revision in await repo.get_revisions(rec_id)]
+        newest = list(range(changes, changes - MAX_SUPERSEDED_REVISIONS, -1))
+        assert kept == newest + [1]
+
     async def test_newer_advice_on_a_pr_open_record_is_queued(self, db):
         repo = _repo(db)
         await repo.upsert_recommendations([_cpu(300)])
