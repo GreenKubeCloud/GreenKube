@@ -107,6 +107,10 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def _finished(record: SourceRunRecord) -> datetime:
+    return _aware(record.finished_at) or datetime.min.replace(tzinfo=timezone.utc)
+
+
 class SourceRunner:
     """Runs sources with their limits; ``*_cap`` bound every source's own timeouts."""
 
@@ -136,7 +140,13 @@ class SourceRunner:
     ) -> List[SourceReport]:
         """Run sources one after the other (native analyzers share the scan context)."""
         history = dict(self.memory)
-        history.update(previous or {})
+        for source_id, record in (previous or {}).items():
+            # Keep the newer of the persisted and in-process runs: when recording
+            # runs fails, the persisted one stops advancing and would otherwise
+            # hide fresher failures from the circuit breaker.
+            known = history.get(source_id)
+            if known is None or _finished(record) >= _finished(known):
+                history[source_id] = record
         reports = []
         for source in sources:
             report = await self.run(source, ctx, history.get(source.source_id))

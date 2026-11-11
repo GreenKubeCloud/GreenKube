@@ -295,6 +295,43 @@ class TestCircuitBreakerAndRateLimit:
         [report] = await runner.run_all([source], _ctx())
         assert report.run.status == SourceRunStatus.SKIPPED
 
+    async def test_a_stale_persisted_run_does_not_hide_fresher_in_process_failures(self):
+        # Recording runs fails, so the persisted latest run stays the old success:
+        # the circuit must still open from the failures seen in this process.
+        clock = Clock()
+        runner = SourceRunner(clock=clock)
+        source = AcmeSource(error=RuntimeError("down"))
+        persisted = SourceRunRecord(
+            source_id="acme",
+            status=SourceRunStatus.SUCCEEDED,
+            complete=True,
+            started_at=clock.now - timedelta(hours=1),
+            finished_at=clock.now - timedelta(hours=1),
+        )
+        for _ in range(2):
+            clock.advance(seconds=10)
+            [report] = await runner.run_all([source], _ctx(), {"acme": persisted})
+            assert report.run.status == SourceRunStatus.FAILED
+        clock.advance(seconds=10)
+        [report] = await runner.run_all([source], _ctx(), {"acme": persisted})
+        assert (report.run.status, report.run.error_code) == (SourceRunStatus.SKIPPED, "circuit_open")
+        assert source.calls == 2
+
+    async def test_a_newer_persisted_run_wins_over_in_process_memory(self):
+        # Another controller (leader change) ran the source more recently.
+        clock = Clock()
+        runner = SourceRunner(clock=clock)
+        source = AcmeSource(error=RuntimeError("down"))
+        await runner.run_all([source], _ctx())
+        await runner.run_all([source], _ctx())
+        clock.advance(seconds=30)
+        newer = SourceRunRecord(
+            source_id="acme", status=SourceRunStatus.SUCCEEDED, started_at=clock.now, finished_at=clock.now
+        )
+        [report] = await runner.run_all([source], _ctx(), {"acme": newer})
+        assert report.run.status == SourceRunStatus.FAILED
+        assert report.run.consecutive_failures == 1
+
 
 def _report(
     source_id: str, status: SourceRunStatus, legacy: Optional[str], error: Optional[str] = None
