@@ -18,8 +18,13 @@ applied recommendation gets **one fixed-horizon measurement**:
   signal is reported ``not_available``, never silently passed (C0.9, BUG-35);
 * CPU and memory records of one container changed by one plan are measured
   once and the cost delta is split (C0.10, BUG-36);
-* rightsizing never claims a CO2e saving: the carbon model is usage-based, so
-  the measured CO2e delta is reported but not claimed;
+* rightsizing never claims a CO2e saving here: the measured CO2e delta is
+  reported but not claimed (change measurement, :mod:`greenkube.verify`,
+  claims it against a counterfactual). The CO2e delta is compared component
+  by component with the projection (``measurable_co2e_projection``: never with
+  embodied emissions the rows do not carry) and split between records
+  measured together by their projected measurable CO2e, as change
+  measurement does;
 * the projection is not a gate: a change is ``realized`` when the measured
   saving clears the noise floor, and projection accuracy is only reported;
 * every decision is an immutable ``savings_measurements`` row (C0.13);
@@ -42,6 +47,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, cast
 
+from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.models.measurement import (
     MeasurementOutcome,
     QuantityEstimate,
@@ -539,6 +545,20 @@ def _projected_share(record: RecommendationRecord, group: Sequence[Recommendatio
     if total <= 0:
         return 1.0 / len(group)
     return max(float(record.potential_savings_cost or 0.0), 0.0) / total
+
+
+def _projected_co2e_share(record: RecommendationRecord, group: Sequence[RecommendationRecord]) -> float:
+    """Share of the measured CO2e of ``record``: its projected measurable CO2e in the group's.
+
+    The same split as change measurement (``greenkube.verify.service.co2e_shares``):
+    one workload's CO2e is never counted twice, and records without a comparable
+    projection share it equally.
+    """
+    weights = [max(measurable_co2e_projection(getattr(member, "impact", None)) or 0.0, 0.0) for member in group]
+    total = math.fsum(weights)
+    if total <= 0:
+        return 1.0 / len(group)
+    return max(measurable_co2e_projection(getattr(record, "impact", None)) or 0.0, 0.0) / total
 
 
 # ----------------------------------------------------------------------
@@ -1180,7 +1200,7 @@ class RecommendationVerifier:
         min_samples: int,
     ) -> QuantityEstimate:
         before, after = observation.before, observation.after
-        share = _projected_share(record, group) if len(group) > 1 else 1.0
+        share = _projected_co2e_share(record, group) if len(group) > 1 else 1.0
         before_rate = before.co2e_per_hour * share if before.co2e_per_hour is not None else None
         after_rate = after.co2e_per_hour * share if after.co2e_per_hour is not None else None
         enough = min(before.co2e_steps, after.co2e_steps) >= min_samples
@@ -1189,7 +1209,7 @@ class RecommendationVerifier:
         return _estimate(
             "co2e_g",
             "gCO2e",
-            "projected_share" if len(group) > 1 else "total",
+            "projected_co2e_share" if len(group) > 1 else "total",
             share,
             before_rate,
             after_rate,
@@ -1197,7 +1217,8 @@ class RecommendationVerifier:
             after.co2e_steps,
             enough,
             claimed=record.type not in _RIGHTSIZING_TYPES,
-            projected=record.potential_savings_co2e_grams,
+            # Component-matched: the rows carry operational CO2e only, never embodied emissions.
+            projected=measurable_co2e_projection(getattr(record, "impact", None)),
         )
 
     # ------------------------------------------------------------------

@@ -7,21 +7,32 @@ of the observed delta. Each finding has a severity:
 * ``severe`` — the measurement cannot be attributed to the change; the outcome
   becomes ``contaminated`` (another change on the same workload between the
   merge and the end of the post-window, a pod-template change that is not
-  this change, the workload recreated);
+  this change, the workload recreated, an HPA edit during the measurement,
+  the node pool's hardware replaced or its capacity reshaped, a unit price or
+  instance-type shift large enough to explain a typical rightsizing effect on
+  its own);
 * ``moderate`` — lowers confidence (a change inside the baseline window, an
-  HPA edit, replica counts beyond what the load explains, a price-card change
-  seen on a resource whose requests the change did not touch, a node
-  instance-type change);
-* ``mild`` — lowers confidence slightly.
+  HPA edit in the baseline, replica counts beyond what the load explains, a
+  price-card change seen on a resource whose requests the change did not
+  touch, a node instance-type change, the node pool's capacity scaled by the
+  cluster autoscaler, a change to another workload running in the same pool);
+* ``mild`` — lowers confidence slightly (nodes added or removed in the pool
+  without a capacity shift).
 
-Pool-level confounders (changes to other workloads sharing the node pool) are
-not detected yet: they belong to the pool-level realization allocator (C10).
+Pool-level checks (C4) read the workload's node pools from the node
+snapshots (:class:`PoolContext`, sampled every few hours over both windows):
+they need nodes labeled with a pool. Allocated cost is requests x unit price,
+so other workloads' changes and autoscaling only move this workload's idle
+share of CO2e (moderate), whereas new hardware in the pool changes its unit
+prices and power profile (severe).
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, List, Optional, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.counterfactual import HourOfWeekCounterfactual, align
@@ -41,6 +52,16 @@ REPLICA_SHIFT_TOLERANCE = 0.25
 PRICE_CHANGE_TOLERANCE = 0.05
 #: Instance-type mixes further apart than this (total-variation distance) are flagged.
 INSTANCE_MIX_TOLERANCE = 0.25
+#: Unit price changes beyond this share can explain a typical rightsizing effect on their own (severe).
+PRICE_CHANGE_SEVERE = 0.20
+#: The workload's instance-type mix moved by more than this share of its pod-hours (severe).
+INSTANCE_MIX_SEVERE = 0.5
+#: The node pool's capacity-weighted instance-type mix moved by more than this (severe: new hardware).
+POOL_INSTANCE_MIX_TOLERANCE = 0.25
+#: The node pool's mean CPU capacity moved by more than this between the windows (autoscaling).
+POOL_CAPACITY_TOLERANCE = 0.25
+#: ... and by more than this, the pool was reshaped (severe).
+POOL_CAPACITY_SEVERE = 0.5
 
 _PENALTY = {"mild": 0.05, "moderate": 0.15}
 #: Confidence penalty when the counterfactual has no load driver or only the weak CPU-usage driver.
@@ -83,6 +104,74 @@ def _instance_mix(buckets: Sequence[HourBucket]) -> Dict[str, float]:
     return {key: value / total for key, value in totals.items()} if total > 0 else {}
 
 
+@dataclass(frozen=True)
+class PoolNode:
+    """One active node of the workload's node pools at a sample time."""
+
+    name: str
+    pool: str
+    instance_type: Optional[str]
+    cpu_cores: float
+
+
+@dataclass(frozen=True)
+class PoolSample:
+    """The active nodes of the workload's node pools at ``at``."""
+
+    at: datetime
+    nodes: Tuple[PoolNode, ...]
+
+
+@dataclass(frozen=True)
+class PoolContext:
+    """The workload's node pools over both windows, and the changes that landed in them (C4).
+
+    ``other_changes`` are changes to other workloads whose pods ran on the
+    pools' nodes and that landed between the decision and the end of the
+    post-window.
+    """
+
+    pools: Tuple[str, ...]
+    pre: Tuple[PoolSample, ...]
+    post: Tuple[PoolSample, ...]
+    other_changes: Tuple[ChangeEvent, ...] = ()
+    #: More changes landed during the measurement than were read: the later ones were not checked.
+    truncated: bool = False
+
+
+def _pool_mix(samples: Sequence[PoolSample]) -> Dict[str, float]:
+    """Capacity-weighted instance-type mix of the pool over the samples."""
+    totals: Dict[str, float] = {}
+    for sample in samples:
+        for node in sample.nodes:
+            key = node.instance_type or "unknown"
+            totals[key] = totals.get(key, 0.0) + max(node.cpu_cores, 0.0)
+    total = math.fsum(totals.values())
+    return {key: value / total for key, value in totals.items()} if total > 0 else {}
+
+
+def _pool_capacity(samples: Sequence[PoolSample]) -> Optional[float]:
+    return _mean(math.fsum(max(node.cpu_cores, 0.0) for node in sample.nodes) for sample in samples)
+
+
+def _distance(before: Dict[str, float], after: Dict[str, float]) -> float:
+    """Total-variation distance between two mixes."""
+    return 0.5 * math.fsum(abs(before.get(key, 0.0) - after.get(key, 0.0)) for key in before.keys() | after)
+
+
+def _churn(samples: Sequence[PoolSample]) -> Tuple[Set[str], Set[str]]:
+    """Nodes that appeared or disappeared between consecutive samples."""
+    added: Set[str] = set()
+    removed: Set[str] = set()
+    ordered = sorted(samples, key=lambda sample: sample.at)
+    for previous, current in zip(ordered, ordered[1:]):
+        before = {node.name for node in previous.nodes}
+        after = {node.name for node in current.nodes}
+        added |= after - before
+        removed |= before - after
+    return added, removed
+
+
 class ConfounderDetector:
     """Detects confounders of one change measurement."""
 
@@ -96,6 +185,7 @@ class ConfounderDetector:
         pre: Sequence[HourBucket] = (),
         post: Sequence[HourBucket] = (),
         load: Optional[ResolvedLoad] = None,
+        pool: Optional[PoolContext] = None,
     ) -> List[Confounder]:
         findings: List[Confounder] = []
         findings.extend(self._other_changes(change, plan, other_changes))
@@ -103,6 +193,8 @@ class ConfounderDetector:
         findings.extend(self._replica_shift(pre, post, load))
         findings.extend(self._price_change(pre, post))
         findings.extend(self._instance_types(pre, post))
+        if pool is not None:
+            findings.extend(self._pool(change, pool))
         return findings
 
     @staticmethod
@@ -188,11 +280,15 @@ class ConfounderDetector:
                         )
                     )
             if seen_hpa and observation.hpa_digest != previous_hpa:
+                during = moment > completed
                 findings.append(
                     Confounder(
                         kind="hpa_change",
-                        severity="moderate",
-                        detail="the HorizontalPodAutoscaler of the workload changed",
+                        # Replicas follow the HPA: an edit during the measurement moves the
+                        # allocated cost by itself, one in the baseline only shifts its level.
+                        severity="severe" if during else "moderate",
+                        detail="the HorizontalPodAutoscaler of the workload changed "
+                        + ("during the measurement" if during else "in the baseline window"),
                         evidence={"observed_at": moment.isoformat()},
                     )
                 )
@@ -253,7 +349,7 @@ class ConfounderDetector:
                 findings.append(
                     Confounder(
                         kind="price_card_change",
-                        severity="moderate",
+                        severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
                         detail=f"{resource} unit price changed {deviation:+.0%} between the windows",
                         evidence={"resource": resource, "before": before, "after": after},
                     )
@@ -266,17 +362,93 @@ class ConfounderDetector:
         after = _instance_mix(post)
         if not before or not after:
             return []
-        distance = 0.5 * math.fsum(abs(before.get(key, 0.0) - after.get(key, 0.0)) for key in before.keys() | after)
+        distance = _distance(before, after)
         if distance <= INSTANCE_MIX_TOLERANCE:
             return []
         return [
             Confounder(
                 kind="instance_type_change",
-                severity="moderate",
+                severity="severe" if distance > INSTANCE_MIX_SEVERE else "moderate",
                 detail=f"the node instance types running the workload changed ({distance:.0%} of pod-hours)",
                 evidence={"before": before, "after": after},
             )
         ]
+
+    @staticmethod
+    def _pool(change: ChangeEvent, pool: PoolContext) -> List[Confounder]:
+        findings: List[Confounder] = []
+        pools = ", ".join(pool.pools)
+        before, after = _pool_mix(pool.pre), _pool_mix(pool.post)
+        if before and after:
+            distance = _distance(before, after)
+            if distance > POOL_INSTANCE_MIX_TOLERANCE:
+                findings.append(
+                    Confounder(
+                        kind="pool_instance_type_change",
+                        severity="severe",
+                        detail=f"node pool {pools} changed hardware ({distance:.0%} of its CPU capacity moved to "
+                        "other instance types): unit prices and power profiles changed under the workload",
+                        evidence={"pools": list(pool.pools), "before": before, "after": after},
+                    )
+                )
+        capacity_before, capacity_after = _pool_capacity(pool.pre), _pool_capacity(pool.post)
+        shifted = False
+        if capacity_before and capacity_after is not None and capacity_before > 0:
+            deviation = capacity_after / capacity_before - 1.0
+            if abs(deviation) > POOL_CAPACITY_TOLERANCE:
+                shifted = True
+                findings.append(
+                    Confounder(
+                        kind="pool_capacity_change",
+                        severity="severe" if abs(deviation) > POOL_CAPACITY_SEVERE else "moderate",
+                        detail=f"node pool {pools} CPU capacity changed {deviation:+.0%} between the windows "
+                        "(cluster autoscaler): the idle share allocated to the workload moved",
+                        evidence={
+                            "pools": list(pool.pools),
+                            "before_cores": round(capacity_before, 4),
+                            "after_cores": round(capacity_after, 4),
+                        },
+                    )
+                )
+        if not shifted:
+            added, removed = _churn(pool.post)
+            if added or removed:
+                findings.append(
+                    Confounder(
+                        kind="autoscaler_activity",
+                        severity="mild",
+                        detail=f"{len(added)} node(s) added and {len(removed)} removed in node pool {pools} "
+                        "during the post-window",
+                        evidence={"added": sorted(added), "removed": sorted(removed)},
+                    )
+                )
+        for other in pool.other_changes:
+            if other.change_id == change.change_id or other.target.key == change.target.key:
+                continue
+            findings.append(
+                Confounder(
+                    kind="pool_change",
+                    severity="moderate",
+                    detail=f"change {other.change_id} to {'/'.join(other.target.key)} landed in node pool "
+                    f"{pools} during the measurement",
+                    evidence={
+                        "change_id": other.change_id,
+                        "target": "/".join(other.target.key),
+                        "rollout_completed_at": ensure_utc(other.rollout_completed_at).isoformat(),
+                    },
+                )
+            )
+        if pool.truncated:
+            findings.append(
+                Confounder(
+                    kind="pool_check_truncated",
+                    severity="mild",
+                    detail=f"more changes landed during the measurement than were checked for node pool {pools}: "
+                    "a later change in the pool may be missed",
+                    evidence={"checked": len(pool.other_changes), "limit_reached": True},
+                )
+            )
+        return findings
 
 
 def is_contaminated(confounders: Sequence[Confounder]) -> bool:

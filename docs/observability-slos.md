@@ -118,7 +118,7 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
 | `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
 
-`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
 
 The same listener serves three more endpoints:
 

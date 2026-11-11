@@ -42,7 +42,7 @@ def seed_for(*parts: object) -> int:
     return int(digest[:16], 16)
 
 
-def _percentile(ordered: Sequence[float], q: float) -> float:
+def percentile(ordered: Sequence[float], q: float) -> float:
     if len(ordered) == 1:
         return ordered[0]
     position = q * (len(ordered) - 1)
@@ -89,8 +89,8 @@ def moving_block_bootstrap(
     tail = (1.0 - confidence) / 2.0
     return BootstrapInterval(
         mean=mean,
-        low=_percentile(means, tail),
-        high=_percentile(means, 1.0 - tail),
+        low=percentile(means, tail),
+        high=percentile(means, 1.0 - tail),
         samples=samples,
         block=size,
     )

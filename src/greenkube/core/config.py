@@ -402,6 +402,10 @@ class Config(BaseSettings):
     CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: int = Field(1000, ge=100, le=100000)
     # Noise floor: not realized when the CI upper bound is at most this share of the counterfactual.
     CHANGE_MEASUREMENT_EPSILON_RATIO: float = Field(0.02, ge=0, le=1)
+    # Drift monitor (C8): a realized change regresses when at least this share of its per-replica
+    # saving is lost on each of CHANGE_DRIFT_SUSTAINED_DAYS consecutive days.
+    CHANGE_DRIFT_THRESHOLD: float = Field(0.5, gt=0, le=1)
+    CHANGE_DRIFT_SUSTAINED_DAYS: int = Field(3, ge=1, le=7)
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the

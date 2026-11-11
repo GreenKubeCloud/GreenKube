@@ -329,6 +329,15 @@ class ChangeRepository:
         )
         return await self._changes(rows)
 
+    async def changes_landed_between(self, start: datetime, end: datetime, *, limit: int = 200) -> List[ChangeEvent]:
+        """Changes whose rollout completed in ``(start, end)``, oldest first (pool confounders, C4)."""
+        rows = await self._select(
+            "SELECT * FROM change_events WHERE rollout_completed_at > ? AND rollout_completed_at < ? "
+            "ORDER BY rollout_completed_at, change_id LIMIT ?",
+            [self._ts(start), self._ts(end), int(limit)],
+        )
+        return await self._changes(rows)
+
     async def change_ids_for_recommendations(self, recommendation_ids: Sequence[int]) -> Dict[int, str]:
         if not recommendation_ids:
             return {}
@@ -506,6 +515,31 @@ class ChangeRepository:
                 self._ts(event.created_at),
             ],
         )
+
+    async def record_event(
+        self,
+        change_id: str,
+        event_type: str,
+        *,
+        actor: str = "system",
+        reason: str = "",
+        payload: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """Append an event that does not change the state (e.g. ``savings_reversed``, C8)."""
+        moment = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        async with self.db_manager.transaction() as conn:
+            await self._insert_event(
+                conn,
+                ChangeStateEvent(
+                    change_id=change_id,
+                    event_type=event_type,
+                    actor=actor,
+                    reason=reason,
+                    payload=payload or {},
+                    created_at=moment,
+                ),
+            )
 
     async def list_events(self, change_id: str) -> List[ChangeStateEvent]:
         rows = await self._select(
@@ -708,18 +742,20 @@ class ChangeRepository:
         self, namespace: str, kind: str, name: str, *, since: Optional[datetime] = None
     ) -> List[WorkloadSpecObservation]:
         """Observations of one workload, oldest first (the last one before ``since`` included)."""
-        rows = await self._select(
-            "SELECT * FROM workload_spec_observations WHERE namespace = ? AND workload_kind = ? "
-            "AND workload_name = ? ORDER BY id ASC",
-            [namespace, kind, name],
+        workload = (
+            "SELECT * FROM workload_spec_observations WHERE namespace = ? AND workload_kind = ? AND workload_name = ?"
         )
-        observations = [self._observation_from_row(row) for row in rows]
         if since is None:
-            return observations
-        threshold = ensure_utc(since)
-        earlier = [item for item in observations if ensure_utc(item.observed_at) < threshold]
-        later = [item for item in observations if ensure_utc(item.observed_at) >= threshold]
-        return ([earlier[-1]] if earlier else []) + later
+            rows = await self._select(f"{workload} ORDER BY id ASC", [namespace, kind, name])
+            return [self._observation_from_row(row) for row in rows]
+        threshold = self._ts(ensure_utc(since))
+        earlier = await self._select(
+            f"{workload} AND observed_at < ? ORDER BY id DESC LIMIT 1", [namespace, kind, name, threshold]
+        )
+        later = await self._select(
+            f"{workload} AND observed_at >= ? ORDER BY id ASC", [namespace, kind, name, threshold]
+        )
+        return [self._observation_from_row(row) for row in [*earlier, *later]]
 
 
 def get_change_repository(db_manager=None) -> ChangeRepository:

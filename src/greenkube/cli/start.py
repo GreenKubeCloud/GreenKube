@@ -355,6 +355,8 @@ async def run_recommendation_lifecycle() -> None:
             measurement_repo=get_savings_measurement_repository(),
         )
         # Change measurement (C1-C5): the detector records changes, run_due measures them.
+        from ..core.factory import get_node_repository as _node_repo
+
         changes = ChangeMeasurementService(
             lifecycle,
             combined_repo,
@@ -362,6 +364,7 @@ async def run_recommendation_lifecycle() -> None:
             verifier=verifier,
             load_reader=load_reader,
             pull_request_repo=_pr_repo(),
+            node_repo=_node_repo(),
         )
         try:
             detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo(), change_recorder=changes)
@@ -396,6 +399,17 @@ async def run_recommendation_lifecycle() -> None:
         logger.error("Recommendation lifecycle task failed: %s", e)
         report_loop_failure(e)
     logger.info("--- Finished recommendation lifecycle task ---")
+
+
+async def _run_drift_monitor() -> None:
+    """Drift monitor pass (C8); errors are logged and mark the tick failed."""
+    from ..verify.drift import run_drift_monitor
+
+    try:
+        await run_drift_monitor()
+    except Exception as e:
+        logger.error("Drift monitor task failed: %s", e)
+        report_loop_failure(e)
 
 
 def _collection_offset_seconds(cfg) -> float:
@@ -625,6 +639,7 @@ def _register_controller_loops(
     from ..core.loops import LoopSpec
     from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
     from ..core.scheduler import parse_interval_seconds
+    from ..verify.drift import DRIFT_MONITOR_INTERVAL_SECONDS
 
     step = parse_interval_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP)
 
@@ -671,6 +686,13 @@ def _register_controller_loops(
             parse_interval_seconds(getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m")),
             timeout_seconds=_TIMEOUT_LONG,
             description="TTL expiry, apply detection, verification and change measurement.",
+        ),
+        LoopSpec(
+            "savings-drift",
+            _run_drift_monitor,
+            DRIFT_MONITOR_INTERVAL_SECONDS,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Drift monitor: regresses realized changes whose saving no longer holds (C8).",
         ),
         LoopSpec(
             "recommendation-scan",

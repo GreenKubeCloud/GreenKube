@@ -246,7 +246,8 @@ def test_spec_hpa_and_recreation_confounders():
         (item.kind, item.severity) for item in ConfounderDetector().detect(change, plan, observations=observations)
     }
     assert kinds == {
-        ("hpa_change", "moderate"),
+        # The HPA edit landed after the rollout: replicas, so the allocated cost, moved without the change.
+        ("hpa_change", "severe"),
         ("spec_change", "severe"),
         ("workload_recreated", "severe"),
     }
@@ -257,10 +258,10 @@ def test_replica_price_and_instance_type_confounders_lower_confidence():
     change = change_event(completed)
     plan = _plan(change)
     pre = hourly_buckets(workload_rows(plan.pre, instance_type="m5.large"), plan.pre, STEP)
-    # Twice the replicas, a 20% higher RAM price (RAM requests unchanged) and new instance types.
+    # Twice the replicas, a 15% higher RAM price (RAM requests unchanged) and half the pods on new instance types.
     post_rows = workload_rows(
-        plan.post, pods=("a", "b", "c", "d"), cpu_request=400, ram_price=0.012, instance_type="c6g.large"
-    )
+        plan.post, pods=("a", "b"), cpu_request=400, ram_price=0.0115, instance_type="m5.large"
+    ) + workload_rows(plan.post, pods=("c", "d"), cpu_request=400, ram_price=0.0115, instance_type="c6g.large")
     post = hourly_buckets(post_rows, plan.post, STEP)
     findings = ConfounderDetector().detect(change, plan, pre=pre, post=post)
     assert sorted((item.kind, item.evidence.get("resource")) for item in findings) == [
@@ -270,6 +271,44 @@ def test_replica_price_and_instance_type_confounders_lower_confidence():
     ]
     assert not is_contaminated(findings)
     assert confidence_score(findings, 1.0, None) == pytest.approx(1.0 - 3 * 0.15 - 0.10)
+
+
+def test_hpa_edit_in_the_baseline_only_lowers_confidence():
+    completed = hour_now() - timedelta(days=9)
+    change = change_event(completed)
+    plan = _plan(change)
+    base = {"namespace": "prod", "kind": "Deployment", "name": "api", "workload_uid": "uid-api"}
+    observations = [
+        WorkloadSpecObservation(
+            **base, spec_digest="digest-before", hpa_digest="h1", observed_at=completed - timedelta(days=5)
+        ),
+        WorkloadSpecObservation(
+            **base, spec_digest="digest-before", hpa_digest="h2", observed_at=completed - timedelta(days=3)
+        ),
+        WorkloadSpecObservation(
+            **base, spec_digest="digest-after", hpa_digest="h2", observed_at=completed + timedelta(minutes=5)
+        ),
+    ]
+    findings = ConfounderDetector().detect(change, plan, observations=observations)
+    assert [(item.kind, item.severity) for item in findings] == [("hpa_change", "moderate")]
+    assert not is_contaminated(findings)
+
+
+def test_large_price_or_instance_type_shifts_contaminate_the_measurement():
+    completed = hour_now() - timedelta(days=9)
+    change = change_event(completed)
+    plan = _plan(change)
+    pre = hourly_buckets(workload_rows(plan.pre, instance_type="m5.large"), plan.pre, STEP)
+    # A 30% higher RAM price on untouched RAM requests, and every pod on new hardware.
+    post = hourly_buckets(
+        workload_rows(plan.post, cpu_request=400, ram_price=0.013, instance_type="c6g.large"), plan.post, STEP
+    )
+    findings = ConfounderDetector().detect(change, plan, pre=pre, post=post)
+    assert sorted((item.kind, item.severity) for item in findings) == [
+        ("instance_type_change", "severe"),
+        ("price_card_change", "severe"),
+    ]
+    assert is_contaminated(findings)
 
 
 def test_steady_workload_has_no_confounders():
