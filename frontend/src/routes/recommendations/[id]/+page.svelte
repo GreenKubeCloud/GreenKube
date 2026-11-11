@@ -363,38 +363,40 @@
 					<div><dt class="text-dark-500">Restarts / OOM kills</dt><dd class="text-dark-200">{evidence.restarts ?? '—'} / {evidence.oomEvents ?? '—'}</dd></div>
 				</dl>
 				{#if evidence.cpu || evidence.memory}
-					<table class="w-full text-xs">
-						<caption class="sr-only">Observed usage</caption>
-						<thead>
-							<tr class="text-left text-dark-500">
-								<th scope="col" class="py-1 font-medium">Usage</th>
-								<th scope="col" class="py-1 font-medium">p50</th>
-								<th scope="col" class="py-1 font-medium">p95</th>
-								<th scope="col" class="py-1 font-medium">p99</th>
-								<th scope="col" class="py-1 font-medium">max</th>
-							</tr>
-						</thead>
-						<tbody>
-							{#if evidence.cpu}
-								<tr class="border-t border-dark-700/50">
-									<th scope="row" class="py-1 text-left font-normal text-dark-400">CPU</th>
-									<td class="text-dark-200">{cores(evidence.cpu.p50)}</td>
-									<td class="text-dark-200">{cores(evidence.cpu.p95)}</td>
-									<td class="text-dark-200">{cores(evidence.cpu.p99)}</td>
-									<td class="text-dark-200">{cores(evidence.cpu.max)}</td>
+					<div class="overflow-x-auto">
+						<table class="w-full text-xs">
+							<caption class="sr-only">Observed usage</caption>
+							<thead>
+								<tr class="text-left text-dark-500">
+									<th scope="col" class="py-1 font-medium">Usage</th>
+									<th scope="col" class="py-1 font-medium">p50</th>
+									<th scope="col" class="py-1 font-medium">p95</th>
+									<th scope="col" class="py-1 font-medium">p99</th>
+									<th scope="col" class="py-1 font-medium">max</th>
 								</tr>
-							{/if}
-							{#if evidence.memory}
-								<tr class="border-t border-dark-700/50">
-									<th scope="row" class="py-1 text-left font-normal text-dark-400">Memory</th>
-									<td class="text-dark-200">{mib(evidence.memory.p50)}</td>
-									<td class="text-dark-200">{mib(evidence.memory.p95)}</td>
-									<td class="text-dark-200">{mib(evidence.memory.p99)}</td>
-									<td class="text-dark-200">{mib(evidence.memory.max)}</td>
-								</tr>
-							{/if}
-						</tbody>
-					</table>
+							</thead>
+							<tbody>
+								{#if evidence.cpu}
+									<tr class="border-t border-dark-700/50">
+										<th scope="row" class="py-1 text-left font-normal text-dark-400">CPU</th>
+										<td class="text-dark-200">{cores(evidence.cpu.p50)}</td>
+										<td class="text-dark-200">{cores(evidence.cpu.p95)}</td>
+										<td class="text-dark-200">{cores(evidence.cpu.p99)}</td>
+										<td class="text-dark-200">{cores(evidence.cpu.max)}</td>
+									</tr>
+								{/if}
+								{#if evidence.memory}
+									<tr class="border-t border-dark-700/50">
+										<th scope="row" class="py-1 text-left font-normal text-dark-400">Memory</th>
+										<td class="text-dark-200">{mib(evidence.memory.p50)}</td>
+										<td class="text-dark-200">{mib(evidence.memory.p95)}</td>
+										<td class="text-dark-200">{mib(evidence.memory.p99)}</td>
+										<td class="text-dark-200">{mib(evidence.memory.max)}</td>
+									</tr>
+								{/if}
+							</tbody>
+						</table>
+					</div>
 				{/if}
 				{#if evidence.riskFactors.length}
 					<p class="text-xs text-dark-400">Risk factors: <span class="text-dark-200">{evidence.riskFactors.join(', ')}</span></p>
