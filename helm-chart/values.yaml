@@ -584,7 +584,43 @@ sources:
   #     greenkube.carbon_aware: { enabled: false }
   #     vpa: { enabled: auto }
   # Do not put credentials here: this map is rendered into the ConfigMap.
+  # Connector settings (docs/sources/): krr and push { max_age_hours },
+  # kubecost { url, version, window, cluster_id, paths, ... }.
   settings: {}
+  # Robusta KRR (docs/sources/krr.md). Reports pushed to
+  # POST /api/v1/sources/krr/reports (from CI or this job) become signals.
+  krr:
+    # Optional job mode: a CronJob runs KRR and pushes its JSON report.
+    job:
+      enabled: false
+      schedule: "17 3 * * *"
+      # KRR strategy (`krr <strategy>`); `simple` is CPU p95, memory max + 15%.
+      strategy: simple
+      # Pinned by digest (multi-arch index of the tag).
+      image:
+        repository: robustadev/krr
+        tag: v1.31.1
+        digest: sha256:835bf3b6fec4d8f27d96d236a36542bd87bfcb4f12f3537f8dce7f886916ed9c
+      # Prometheus URL for KRR (`-p`); empty lets KRR discover it in the cluster.
+      prometheusUrl: ""
+      # Extra KRR arguments, e.g. ["--namespace", "shop", "--history_duration", "168"].
+      extraArgs: []
+      # Secret holding a GreenKube API key with scope signals:write (required).
+      apiKeySecret:
+        name: ""
+        key: api-key
+      activeDeadlineSeconds: 3600
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 2Gi
+      # Create the job's ServiceAccount and read-only ClusterRole; set false
+      # and serviceAccountName to bring your own.
+      rbac:
+        create: true
+      serviceAccountName: ""
 
 # ---------------------------------------------------------------------------
 # Impact Model (docs/methodology/impact-model.md)
