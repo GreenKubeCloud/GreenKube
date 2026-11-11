@@ -31,60 +31,42 @@ def refresh_applied_recommendation(
     observed_record: RecommendationRecord,
     observed_at: datetime | None = None,
 ) -> RecommendationRecord:
-    """Refresh an applied recommendation from a newer generated observation.
+    """Refresh an applied recommendation when a scan regenerates the same identity.
 
-    The original recommendation remains the baseline for realized savings, while
-    live resource observations update the actual value currently in effect. This
-    lets future savings attribution decrease when a rightsized request drifts
-    back up, without rewriting savings already written to the ledger.
+    For rightsizing, only ``updated_at`` changes: ``current_*`` stays the
+    immutable pre-change baseline, and ``actual_*`` stays the live value that
+    apply detection (or the operator) recorded once the change reached the
+    cluster, together with the savings derived from it.
+
+    A scan is not a live observation: analyzers read requests from the hourly
+    usage rollup, whose latest bucket still carries the pre-change request for
+    up to an hour after a rollout. Copying the regenerated ``current_*`` into
+    ``actual_*`` reverted the recorded value to the one that was replaced, so
+    merged changes showed identical before and after values and their savings
+    dropped to zero. Drift after a change is the drift monitor's job (C8),
+    measured from the cluster, not from a regenerated recommendation.
     """
-
+    del observed_record  # A regenerated recommendation is advice, not a live observation.
     updates: dict = {"updated_at": observed_at or datetime.now(timezone.utc)}
-
-    if applied_record.type == RecommendationType.RIGHTSIZING_CPU:
-        actual_cpu = observed_record.current_cpu_request_millicores
-        if actual_cpu is None:
-            return applied_record.model_copy(update=updates)
-
-        carbon_saved, cost_saved = estimate_realized_savings(
-            applied_record,
-            ApplyRecommendationRequest(actual_cpu_request_millicores=actual_cpu),
-        )
-        updates.update(
-            actual_cpu_request_millicores=actual_cpu,
-            carbon_saved_co2e_grams=carbon_saved,
-            cost_saved=cost_saved,
-        )
+    if applied_record.type in _KEEP_SAVINGS_ON_REFRESH:
+        # Rightsizing: the regenerated advice never rewrites the applied change.
+        # Orphaned resources: the identity is the resource itself, so a regenerated
+        # observation means its deletion is pending, not that the issue reappeared.
         return applied_record.model_copy(update=updates)
 
-    if applied_record.type == RecommendationType.RIGHTSIZING_MEMORY:
-        actual_memory = observed_record.current_memory_request_bytes
-        if actual_memory is None:
-            return applied_record.model_copy(update=updates)
-
-        carbon_saved, cost_saved = estimate_realized_savings(
-            applied_record,
-            ApplyRecommendationRequest(actual_memory_request_bytes=actual_memory),
-        )
-        updates.update(
-            actual_memory_request_bytes=actual_memory,
-            carbon_saved_co2e_grams=carbon_saved,
-            cost_saved=cost_saved,
-        )
-        return applied_record.model_copy(update=updates)
-
-    if applied_record.type in (
-        RecommendationType.ORPHANED_PERSISTENT_VOLUME,
-        RecommendationType.ORPHANED_LOAD_BALANCER,
-    ):
-        # Orphaned resource recommendations are uniquely identified by the
-        # resource itself: a regenerated observation means the resource is
-        # still present (its deletion is pending), not that the issue
-        # reappeared. Keep the realized savings baseline intact.
-        return applied_record.model_copy(update=updates)
-
+    # Any other applied recommendation generated again means the issue is back.
     updates.update(carbon_saved_co2e_grams=0.0, cost_saved=0.0)
     return applied_record.model_copy(update=updates)
+
+
+_KEEP_SAVINGS_ON_REFRESH = frozenset(
+    {
+        RecommendationType.RIGHTSIZING_CPU,
+        RecommendationType.RIGHTSIZING_MEMORY,
+        RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+        RecommendationType.ORPHANED_LOAD_BALANCER,
+    }
+)
 
 
 def _resolved_savings_value(

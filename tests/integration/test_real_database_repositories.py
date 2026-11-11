@@ -714,28 +714,34 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     assert savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
     assert savings.total_cost_saved == pytest.approx(2.0)
 
-    drifted_observation = record.model_copy(
+    # A later scan regenerating the same identity (from the hourly rollup, which
+    # can still carry the pre-change request) never rewrites the applied change.
+    regenerated = record.model_copy(
         update={
-            "description": "Observed after drift",
+            "description": "Regenerated after the change",
             "current_cpu_request_millicores": 400,
             "recommended_cpu_request_millicores": 250,
         }
     )
-    assert await repo.upsert_recommendations([drifted_observation]) == 1
+    assert await repo.upsert_recommendations([regenerated]) == 1
     assert await repo.get_active_recommendations(namespace="prod") == []
+    kept = await repo.get_recommendation_by_id(applied.id)
+    assert kept is not None
+    assert kept.actual_cpu_request_millicores == 300
+    assert kept.current_cpu_request_millicores == applied.current_cpu_request_millicores
 
     refreshed_savings = await repo.get_savings_summary(
         namespace="prod", start=now - timedelta(hours=1), end=now + timedelta(hours=1)
     )
     assert refreshed_savings.applied_count == 1
-    assert refreshed_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
-    assert refreshed_savings.total_cost_saved == pytest.approx(1.4)
+    assert refreshed_savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
+    assert refreshed_savings.total_cost_saved == pytest.approx(2.0)
 
     future_savings = await repo.get_savings_summary(
         namespace="prod", start=now + timedelta(days=30), end=now + timedelta(days=31)
     )
     assert future_savings.applied_count == 1
-    assert future_savings.total_carbon_saved_co2e_grams == pytest.approx(16.8)
+    assert future_savings.total_carbon_saved_co2e_grams == pytest.approx(30.0)
 
     ignored_seed = _recommendation_record(
         pod_name="worker-pod",
