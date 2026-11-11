@@ -21,6 +21,8 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import LiteralScalarString
 
+from greenkube.automation.actions import CONTAINER_RESOURCES, ActionKindError
+from greenkube.automation.actions.container_resources import container_operations
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     AutomationErrorCode,
@@ -51,8 +53,8 @@ from greenkube.gitops.planning.kustomize import (
 )
 from greenkube.gitops.planning.raw_manifest import (
     _POD_SPEC_PATHS,
-    _WORKLOAD_API_VERSIONS,
     RawManifestPlanError,
+    _action_kind,
     _apply_operations,
     _containers,
     _find_container,
@@ -781,16 +783,16 @@ def _validate_common_request(
         or action.target.name != source.workload_name
     ):
         raise error_type("action target must match the resolved workload binding")
-    supported_versions = _WORKLOAD_API_VERSIONS.get(action.target.kind)
-    if supported_versions is None or action.target.api_version not in supported_versions:
-        raise error_type(f"unsupported workload kind or API version: {action.target.api_version}/{action.target.kind}")
-    if not action.operations or any(not isinstance(item, SetContainerResources) for item in action.operations):
-        raise error_type("only explicit per-container rightsizing operations are supported")
-    operations = [item for item in action.operations if isinstance(item, SetContainerResources)]
-    if len({item.container for item in operations}) != len(operations):
-        raise error_type("each container may have only one per-container rightsizing operation")
-    if any(not item.resources.requests and not item.resources.limits for item in operations):
-        raise error_type("each rightsizing operation must set at least one resource quantity")
+    spec, _ = _action_kind(action, error_type)
+    if spec is not CONTAINER_RESOURCES:
+        raise error_type(f"Helm planning maps container resources only; {spec.title} actions are unsupported")
+    try:
+        support = spec.renderer_support(expected_renderer, action.operations)
+        operations = container_operations(action.operations)
+    except ActionKindError as exc:
+        raise error_type(str(exc)) from exc
+    if not support.ok:
+        raise error_type(support.reason or f"{expected_renderer.value} planning cannot express this action")
     try:
         root = _snapshot_root(snapshot)
         snapshot_files = _snapshot_file_map(snapshot)

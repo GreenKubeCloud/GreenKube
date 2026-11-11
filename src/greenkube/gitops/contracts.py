@@ -12,7 +12,20 @@ from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    StrictInt,
+    StrictStr,
+    ValidatorFunctionWrapHandler,
+    WrapSerializer,
+    WrapValidator,
+    field_validator,
+    model_validator,
+)
 
 from greenkube.gitops.sha import SHA256_DIGEST
 
@@ -345,7 +358,20 @@ class ContainerResources(ContractModel):
         return values
 
 
-class SetContainerResources(ContractModel):
+class TypedOperation(ContractModel):
+    """Base of every typed action operation (``op`` discriminates the action kind).
+
+    Built-in operations are listed in ``ActionOperation``; an action kind registered in
+    ``greenkube.automation.actions`` adds its own operation model with
+    ``register_operation_model`` without changing this module.
+    """
+
+    def conflict_key(self) -> str | None:
+        """Identity of what the operation changes; two operations of one action may not share it."""
+        return None
+
+
+class SetContainerResources(TypedOperation):
     op: Literal["set_container_resources"] = "set_container_resources"
     container: str = Field(min_length=1)
     resources: ContainerResources
@@ -357,12 +383,15 @@ class SetContainerResources(ContractModel):
             raise ValueError("container must be a non-blank name without surrounding whitespace")
         return value
 
+    def conflict_key(self) -> str | None:
+        return f"container {self.container!r}"
 
-class DeleteResource(ContractModel):
+
+class DeleteResource(TypedOperation):
     op: Literal["delete_resource"] = "delete_resource"
 
 
-class AddHorizontalPodAutoscaler(ContractModel):
+class AddHorizontalPodAutoscaler(TypedOperation):
     op: Literal["add_hpa"] = "add_hpa"
     min_replicas: int = Field(ge=1)
     max_replicas: int = Field(ge=1)
@@ -375,9 +404,58 @@ class AddHorizontalPodAutoscaler(ContractModel):
         return self
 
 
+_BUILTIN_OPERATION_MODELS: dict[str, type[TypedOperation]] = {
+    "set_container_resources": SetContainerResources,
+    "delete_resource": DeleteResource,
+    "add_hpa": AddHorizontalPodAutoscaler,
+}
+#: Operation models of action kinds registered at runtime (H0), keyed by ``op``.
+_EXTENSION_OPERATION_MODELS: dict[str, type[TypedOperation]] = {}
+
+
+def register_operation_model(op: str, model: type[TypedOperation]) -> None:
+    """Let ``ActionPlanV3`` parse and persist the typed operation of a registered action kind."""
+    if not isinstance(op, str) or not op.strip():
+        raise ValueError("operation names must be non-blank strings")
+    if not isinstance(model, type) or not issubclass(model, TypedOperation):
+        raise TypeError("operation models must subclass TypedOperation")
+    builtin = _BUILTIN_OPERATION_MODELS.get(op)
+    if builtin is not None:
+        if builtin is not model:
+            raise ValueError(f"operation {op!r} is a built-in operation")
+        return
+    existing = _EXTENSION_OPERATION_MODELS.get(op)
+    if existing is not None and existing is not model:
+        raise ValueError(f"operation {op!r} is already registered")
+    _EXTENSION_OPERATION_MODELS[op] = model
+
+
+def unregister_operation_model(op: str) -> None:
+    """Remove a runtime operation model (tests only; built-ins cannot be removed)."""
+    _EXTENSION_OPERATION_MODELS.pop(op, None)
+
+
+def _validate_operation(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    if isinstance(value, TypedOperation) and type(value) in _EXTENSION_OPERATION_MODELS.values():
+        return value
+    if isinstance(value, Mapping):
+        model = _EXTENSION_OPERATION_MODELS.get(str(value.get("op")))
+        if model is not None:
+            return model.model_validate(dict(value))
+    return handler(value)
+
+
+def _serialize_operation(value: Any, handler: SerializerFunctionWrapHandler, info: SerializationInfo) -> Any:
+    if isinstance(value, TypedOperation) and type(value) in _EXTENSION_OPERATION_MODELS.values():
+        return value.model_dump(mode=info.mode)
+    return handler(value)
+
+
 ActionOperation = Annotated[
     SetContainerResources | DeleteResource | AddHorizontalPodAutoscaler,
     Field(discriminator="op"),
+    WrapValidator(_validate_operation),
+    WrapSerializer(_serialize_operation),
 ]
 
 
@@ -396,11 +474,14 @@ class ActionPlanV3(ContractModel):
             recommendation_id <= 0 for recommendation_id in self.recommendation_ids
         ):
             raise ValueError("recommendation_ids must be unique positive integers")
-        containers = [
-            operation.container for operation in self.operations if isinstance(operation, SetContainerResources)
-        ]
-        if len(set(containers)) != len(containers):
-            raise ValueError("each container may have only one resource operation")
+        keys: set[str] = set()
+        for operation in self.operations:
+            key = operation.conflict_key()
+            if key is None:
+                continue
+            if key in keys:
+                raise ValueError(f"each {key} may have only one resource operation")
+            keys.add(key)
         return self
 
 
