@@ -291,12 +291,13 @@ Released requests only remove cost and emissions from the bill when nodes are re
 | Karpenter disruption budget of `0` nodes, always active, for consolidation | 0.0 |
 | Any of the above with blockers | × 0.5 |
 
-Blockers are pods annotated `karpenter.sh/do-not-disrupt: "true"` (or the legacy `karpenter.sh/do-not-evict`) or `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, nodes annotated `karpenter.sh/do-not-disrupt` or `cluster-autoscaler.kubernetes.io/scale-down-disabled`, PodDisruptionBudgets with `disruptionsAllowed: 0` selecting pods of the pool, a scheduled zero disruption budget, and a Cluster Autoscaler that reports itself unhealthy.
+Blockers are pods annotated `karpenter.sh/do-not-disrupt: "true"` (or the legacy `karpenter.sh/do-not-evict`) or `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, nodes annotated `karpenter.sh/do-not-disrupt` or `cluster-autoscaler.kubernetes.io/scale-down-disabled`, PodDisruptionBudgets with `disruptionsAllowed: 0` selecting pods of the pool, a scheduled zero disruption budget, a Karpenter `DisruptionBlocked` event on the pool (its NodePool, one of its NodeClaims or nodes), and a Cluster Autoscaler that reports itself unhealthy. Karpenter `Unconsolidatable` events are listed in the reasons without changing the factor.
 
 Inputs and their sources:
 
 - the Cluster Autoscaler status ConfigMap `kube-system/cluster-autoscaler-status`. Its presence means the autoscaler runs; its health is parsed defensively from the text or YAML status;
 - Karpenter NodePools (`spec.disruption.consolidationPolicy` and `budgets`) and the `karpenter.sh/nodepool` label of nodes;
+- when Karpenter runs, NodeClaims (claim → pool) and the `DisruptionBlocked`/`Unconsolidatable` events (core `events`, `list`); events that cannot be read are reported as such, never as "no blocker";
 - running pods, nodes and PodDisruptionBudgets.
 
 The controller reads them from its collection cycle, at most every 10 minutes, inside the cluster only (the chart's ClusterRole already grants these reads). A projection uses the hours-weighted factor of the pools its samples ran on; nodes the context does not know use the Cluster Autoscaler (or fixed-node) pool. The projection records the factor, `realization_factor_source: realization_context`, `realization_reasons` (rendered with the recommendation evidence) and the pools used (`realization_pools`).

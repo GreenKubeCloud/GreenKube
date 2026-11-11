@@ -4,7 +4,9 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 
 - Code: `src/greenkube/signals/` (model, SDK, adapters, runner, registry, contract checks).
 - Example package: [`examples/greenkube-source-example`](../examples/greenkube-source-example).
-- API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals` ([API reference](api.md)).
+- API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals`, and the push endpoints `POST /api/v1/signals` and `POST /api/v1/sources/krr/reports` ([API reference](api.md)).
+- Connectors: [VPA and Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [NodePools and autoscalers](sources/nodepool.md).
+- Public signal schema: [`schemas/signal.v1alpha1.json`](../schemas/signal.v1alpha1.json) and [`schemas/signal-batch.v1alpha1.json`](../schemas/signal-batch.v1alpha1.json).
 - Configuration: `sources.pluginsEnabled`, `sources.settings` ([configuration](configuration.md#recommendation-sources-sources)).
 
 ## Concepts
@@ -27,6 +29,7 @@ SourceSignal(
     source_id="acme",                      # must be your source's id
     source_version="1.4.0",
     source_ref="shop/api-vpa",             # your own reference (object name, report id)
+    engine_family=None,                    # set when several sources relay one engine (vpa for VPA and Goldilocks)
     target=TargetRef.for_kind(ctx.cluster_uid, "Deployment", "api", namespace="shop", container="web"),
     capability=Capability.CONTAINER_REQUESTS,
     kind="RIGHTSIZING",                    # finding kind; built-ins use the v1 type (RIGHTSIZING_CPU...)
@@ -48,6 +51,7 @@ SourceSignal(
 - GreenKube's Impact Model computes the savings shown to users. `source_estimate` is only kept to compare your claim with the model.
 - Never invent values you do not have: optional fields stay `None` (an `HpaProposal` without bounds is valid).
 - Deletions (`DeletionProposal`) are review-only in this release: GreenKube never opens a deletion PR.
+- `engine_family` names the recommendation engine behind the advice when several sources relay the same one: consensus counts one vote per engine (`signal.engine`, the family or else the source id). Goldilocks and user VPAs both carry `engine_family: vpa`.
 
 ## Writing a source
 
@@ -129,8 +133,13 @@ Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`
 | `greenkube.carbon_aware` | native | placement | `greenkube` | Advisory. |
 | `greenkube.nodes` | native | node_pool | `greenkube` | Over-provisioned nodes. |
 | `greenkube.orphaned_pv`, `greenkube.orphaned_lb` | native | cleanup | `greenkube` | Review only. |
-| `greenkube.nodepool` | native | node_pool | `karpenter` | GreenKube heuristic over Karpenter NodePools (not Karpenter's advice). |
-| `vpa` | oss | container_requests | `vpa` | VPAs in recommendation mode. |
+| `greenkube.nodepool` | native | node_pool | `karpenter` | GreenKube heuristic over Karpenter NodePools (not Karpenter's advice), plus high-risk advisory NodePool policy signals ([details](sources/nodepool.md)). |
+| `vpa` | oss | container_requests | `vpa` | VPAs in recommendation mode; signals of Goldilocks-created VPAs carry `source_id: goldilocks` ([details](sources/goldilocks.md)). |
+| `krr` | oss | container_requests | — | Robusta KRR reports pushed to `POST /api/v1/sources/krr/reports` ([details](sources/krr.md)). |
+| `kubecost` | commercial | container_requests, cleanup, node_pool | — | Kubecost savings APIs ([details](sources/kubecost.md)). |
+| `push` | custom | all | — | Batches pushed to `POST /api/v1/signals` by `push:<client>` ([details](sources/push.md)). |
+
+`krr`, `kubecost` and `push` emit signals only: they create no v1 recommendation and reach recommendations only through consensus. `krr` and `push` replay what was pushed over HTTP (the inbox, migration `0070`) into each scan, so pushed advice goes through the same runner, validation and storage as everything else. Built-in sources may emit signals under another source id declared in `also_emits` (`vpa` emits `goldilocks`; `push` emits `push:<client>`); plugins may not.
 
 Native analyzers run through the analyzer adapter (`AnalyzerSource`), VPA and the NodePool heuristic through the v1 connector adapter (`RecommendationSourceAdapter`); their internals are unchanged and they keep emitting the same v1 recommendations. All native analyzers form the v1 source `greenkube` in `optimization_runs`: when one of them fails, `greenkube` is incomplete for that run and none of its recommendations go stale.
 
@@ -175,9 +184,5 @@ The repository's own suite is `tests/sources/contract.py` (`SourceContract` mixi
 
 | Item | Build on |
 |---|---|
-| **E6 consensus** | Signals per target and capability: `source_signals` (`target_key`, `capability`, `last_seen_at`, `last_run_id`) and each source's latest complete run (`SignalRepository.latest_runs()`). Replace `dedup.arbitrate()` inside `OptimizationEngine.collect()`, which already holds every `SourceReport` (signals plus v1 recommendations). Use `AlgorithmInfo.name` to count one vote per engine (`vpa-recommender`). `recommendation_from_signal()` turns a chosen signal into the v1 flat fields. |
+| **E6 consensus** | Signals per target and capability: `source_signals` (`target_key`, `capability`, `last_seen_at`, `last_run_id`) and each source's latest complete run (`SignalRepository.latest_runs()`). Replace `dedup.arbitrate()` inside `OptimizationEngine.collect()`, which already holds every `SourceReport` (signals plus v1 recommendations). Use `signal.engine` (`engine_family`, else the source id) to count one vote per engine: VPA and Goldilocks signals share `engine_family: vpa`. `recommendation_from_signal()` turns a chosen signal into the v1 flat fields. |
 | **E7 identity and revisions** | `TargetRef.key()` and `Capability` give `fingerprint_v4 = sha256(cluster_uid, target.key(), capability)`. Signals already link to the v1 identity through `provenance.legacy_fingerprint` (column `recommendation_fingerprint`); add `recommendation_signals(recommendation_id, revision, signal_id)` next to it. |
-| **G1 Goldilocks** | Register a `goldilocks` source (same VPA collector, VPAs labelled `creator=Fairwinds`, `source=goldilocks`) and let `vpa` skip those VPAs: the runner only accepts signals that carry the emitting source's id. Put `lowerBound`/`upperBound`/`uncappedTarget` in `raw` and set `algorithm.name="vpa-recommender"`. |
-| **G2 KRR** | A `krr` source with settings (`mode`, `strategy`, `history`) and `limits.min_interval_seconds` for its schedule. In push mode, store reports and let `collect()` read the latest one. |
-| **G3 Kubecost** | A `kubecost` source (tier `commercial`): `discover()` probes the version and picks the versioned path map; request sizing → `ContainerResourcesProposal`, abandoned workloads → `DeletionProposal`, cluster sizing → `NodePoolProposal`/`AdvisoryProposal`. |
-| **G6 push API** | `POST /api/v1/signals` validates `SourceSignal` (the `signals:write` scope is already reserved for `/api/v1/signals`), uses `source_id="push:<client>"` (reserved prefix) and writes a `SourceRunRecord` plus its signals with `SignalRepository.record_run()`, honouring the batch's `complete` flag. Publish the JSON Schema from `SourceSignal.model_json_schema()`. |
