@@ -109,8 +109,9 @@ The most useful ones:
 | `E2E_ALLOW_REGRESSION` | `0` | `1` records a verdict other than `verified`/`passed` without failing the run |
 | `E2E_STATE_DIR` | `$TMPDIR/greenkube-e2e` | Port-forward logs and the evidence of each step |
 
-The sample namespace is always `greenkube-e2e-apps`: the sample manifests, the
-Argo CD destination and the Flux overlay declare it.
+The sample namespace is always `greenkube-e2e-apps`: the Argo CD sample
+manifests and destination declare it, and the Flux Kustomization's
+`targetNamespace` sets it for the Flux sample.
 
 The scripts can also run one at a time, in this order: `build-image.sh`,
 `setup-repo.sh`, `setup-gitops.sh`, `install.sh`, `loop.sh argocd`,
@@ -164,9 +165,12 @@ through the Gitea contents API. `hack/e2e/setup-gitops.sh` creates the namespace
 `oversized-web` requests `400m` CPU and `384Mi` memory; `oversized-worker`
 requests `300m` and `256Mi`. Both use almost nothing.
 
-The Flux overlay declares `namespace: greenkube-e2e-apps`, the same namespace as
-the Kustomization's `targetNamespace`. GreenKube plans a Flux `targetNamespace`
-only in that case; without it the recommendation reports `unsupported_source`.
+The Flux overlay is a plain Kustomize overlay without a namespace: the
+Kustomization's `targetNamespace` puts the worker in `greenkube-e2e-apps`.
+GreenKube renders the overlay the way Flux builds it (with `targetNamespace`,
+`namePrefix` and `nameSuffix` applied) to find the live workload, and writes the
+patch selector with the name and namespace the workload has inside the overlay,
+before those transformers run (see [Flux Kustomizations](../automation.md#flux-kustomizations)).
 
 ### 3. The loop
 
@@ -183,10 +187,10 @@ api() { curl -fsS -H "Authorization: Bearer $GREENKUBE_API_KEY" -H 'Content-Type
 |---|---|
 | Automation ready | `api /automation/status` → `ready: true`, `token_configured: true` |
 | Binding | `api /gitops/bindings` → `greenkube-e2e-apps/oversized-web` is `resolved` to the sample repository |
-| Collection and recommendation | `api /optimization/runs -X POST -d '{"namespace":"greenkube-e2e-apps"}'` queues a scan; `api '/recommendations/active?namespace=greenkube-e2e-apps'` lists the `RIGHTSIZING_CPU`/`RIGHTSIZING_MEMORY` recommendations; `api /recommendations/<id>/apply-pr/eligibility` → `eligible: true` once 6 samples are in (3–5 minutes) |
+| Collection and recommendation | `api /optimization/runs -X POST -d '{"namespace":"greenkube-e2e-apps"}'` queues a scan; `api '/recommendations/active?namespace=greenkube-e2e-apps'` lists the `RIGHTSIZING_CPU`/`RIGHTSIZING_MEMORY` recommendations; each one's `eligibility.can_open_pr` becomes `true` once 6 samples are in (3–5 minutes) |
 | Plan preview | `api /automation/plans -X POST -d '{"recommendation_ids":[<ids>]}'` → status `validated`, a `sha256:` digest and the diff |
 | Approval | `api /automation/plans/<plan_id>/approve -X POST -d '{"digest":"sha256:…"}'` → an `operation_id` |
-| Pull request | `api /automation/operations/<operation_id>` → `succeeded`; `api /automation/pull-requests` gives the PR number and URL |
+| Pull request | `api /automation/plans/<plan_id>` → `operation_status: succeeded` (plan `pr_open`); `api /automation/pull-requests` gives the PR number and URL |
 | Merge | Gitea API `POST /repos/greenkube/greenkube-e2e-quickstart/pulls/<n>/merge` with `{"Do":"merge"}` (or the Gitea UI) |
 | GitOps sync | Argo CD Application `status.sync.revision` equals the merge commit and is `Synced`/`Healthy` (Flux: Kustomization `lastAppliedRevision`) |
 | Sync confirmation | `api /automation/plans/<plan_id>` → `merged`, then `synced` |
@@ -231,7 +235,7 @@ error stops the run at once.
 |---|---|
 | Image build fails while downloading Helm or Kustomize | The Dockerfile fetches pinned renderer binaries from `get.helm.sh` and GitHub releases; retry later, or rerun with `GK_SKIP_BUILD=1` to reuse an image already in Minikube |
 | No recommendation after 10 minutes | Prometheus URL and scrape of cAdvisor/kube-state-metrics; `kubectl -n greenkube logs deploy/greenkube -c greenkube` |
-| Recommendation not eligible | `policy_result.checks` in the eligibility response: confidence grows with the number of samples |
+| Recommendation not eligible | `eligibility.blockers` on the recommendation (`code`, `message`, `fix`; `warming_up` gives `eligible_at`): confidence grows with the number of samples. A rejected plan preview lists the failed gates in `policy_result.checks` |
 | Binding not resolved | The provider `apiBaseUrl` host must be the host of the Argo CD/Flux repository URL, and the repository must be in `repositoryAllowlist` |
 | Plan stays `merged` | The GitOps controller has not synced the merge commit yet; check the Application or Kustomization |
 | PR link unreachable from the browser | The quickstart sets `automation.providers[].webBaseUrl` to `http://localhost:3000` (`GITEA_WEB_URL`): run `kubectl -n gitea port-forward svc/gitea-http 3000`, or set it to your browser-facing Gitea origin |

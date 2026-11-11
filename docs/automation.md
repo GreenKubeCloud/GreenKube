@@ -155,7 +155,7 @@ Only CPU and memory rightsizing recommendations currently have GitOps action pla
 | Argo CD Helm with a remote chart (Helm repository, OCI, or another Git repository) | No | The chart is not in the snapshot; fails closed. |
 | Argo CD Helm with inline `valuesObject` / `parameters` | No | Fails closed; move values to a Git-managed values file. |
 | Argo CD multi-source Helm | Partial | Only when the chart is local to the values repository; source indices are handled server-side. A remote chart source fails closed. |
-| Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. |
+| Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. The overlay is rendered as Flux builds it: `spec.targetNamespace`, `namePrefix` and `nameSuffix` are applied to the root Kustomization for the render only (see below). |
 | Flux HelmRelease with local same-revision Git chart | Yes | Renders `valuesFiles`, `valuesFrom`, and inline values, then applies the managed post-renderer edit. |
 | Flux HelmRelease `chartRef` to a Git-backed HelmChart | Yes | The HelmChart must exist in the same immutable snapshot. |
 | Flux HelmRelease with remote HelmRepository/OCI chart | No | The chart artifact is not in the snapshot; fails closed. |
@@ -163,6 +163,15 @@ Only CPU and memory rightsizing recommendations currently have GitOps action pla
 | Manual binding resolution | Yes | An operator can select one server-provided candidate for an ambiguous/unresolved binding. |
 
 When discovery cannot choose a single owner, the binding is `ambiguous`, `unresolved`, or `blocked` and plans fail closed. The **Automation & GitOps** page lists actionable bindings and their safe candidate provenance. Manual resolutions are generation-bound, expire at `automation.bindingTtl` (default 30 minutes), and are written to the audit trail.
+
+### Flux Kustomizations
+
+Flux writes `spec.targetNamespace` (and `spec.namePrefix`/`spec.nameSuffix`) into the root Kustomization before `kustomize build`, so the deployed workload rarely has the namespace written in the manifests. GreenKube plans these overlays as follows:
+
+- It renders the overlay with the same overrides, for validation only (they are never written to Git), and requires exactly one rendered workload with the live identity. `targetNamespace` must equal the workload's namespace.
+- Kustomize applies an overlay's patches before its own namespace and name transformers, so the patch selector names the workload as it enters the overlay: GreenKube renders the overlay once more without `namespace`, `namePrefix` and `nameSuffix` and requires exactly one match. A namespace-less manifest is selected as namespace `default`, which is how Kustomize matches it.
+- It fails closed when the result is ambiguous or cannot be reproduced: `namePrefix` or `nameSuffix` set both on the Flux Kustomization and in the overlay; Flux `spec.patches`, `spec.images` or `spec.components` (applied after GreenKube's patch); `spec.postBuild` substitution variables in the workload's name, namespace, container names or container resources (values from `substituteFrom` are not visible to GreenKube; other fields are substituted the same way before and after the patch and are not a blocker); a namespace-less workload without `targetNamespace`.
+- Kustomize rollback renders the overlay the same way.
 
 ## Plan lifecycle
 
@@ -184,7 +193,7 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 
 Plan statuses: `draft`, `validated`, `approved`, `applying`, `pr_open`, `merged`, `synced`, `applied`, `sync_failed`, `closed`, `stale`, `failed`, `needs_mapping`, `ambiguous`, `rejected`, `superseded`.
 
-Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Poll an operation through `GET /api/v1/automation/operations/{operation_id}`.
+Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Follow an operation through `GET /api/v1/automation/plans/{plan_id}` (`operation_id`, `operation_status`); `GET /api/v1/automation/operations/{operation_id}` is deprecated.
 
 ## Approval and policy
 
