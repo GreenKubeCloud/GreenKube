@@ -544,6 +544,46 @@ def test_flux_kustomization_maps_inventory_source_and_artifact_revision():
     assert source.evidence["inventory_id"] == "apps_v1_Deployment_prod_payments-api"
 
 
+def test_flux_kustomization_reports_the_fields_that_change_its_build():
+    kustomization = _fixture("flux-kustomization.yaml")
+    kustomization["spec"].update(
+        {
+            "targetNamespace": "prod",
+            "namePrefix": "eu-",
+            "nameSuffix": "-v2",
+            "postBuild": {"substitute": {"cluster": "eu-1"}},
+            "patches": [{"patch": "- op: remove\n  path: /spec/replicas", "target": {"kind": "Deployment"}}],
+            "images": [{"name": "payments-api", "newTag": "1.2.3"}],
+            "components": ["../../components/tracing"],
+        }
+    )
+
+    config = discover_flux_kustomization(
+        kustomization,
+        [_fixture("flux-gitrepository.yaml")],
+        cluster="prod",
+        provider_id="github-main",
+    )[0].renderer_config
+
+    assert config["target_namespace"] == "prod"
+    assert (config["name_prefix"], config["name_suffix"], config["post_build"]) == ("eu-", "-v2", True)
+    # Recorded so that the Kustomize planner fails closed on them.
+    assert config["patches"] == kustomization["spec"]["patches"]
+    assert config["images"] == kustomization["spec"]["images"]
+    assert config["components"] == ["../../components/tracing"]
+
+
+def test_flux_kustomization_without_build_overrides_keeps_a_minimal_renderer_config():
+    config = discover_flux_kustomization(
+        _fixture("flux-kustomization.yaml"),
+        [_fixture("flux-gitrepository.yaml")],
+        cluster="prod",
+        provider_id="github-main",
+    )[0].renderer_config
+
+    assert not {"name_prefix", "name_suffix", "post_build", "patches", "images", "components"} & set(config)
+
+
 def test_flux_candidate_carries_controller_and_source_generations():
     kustomization = _fixture("flux-kustomization.yaml")
     kustomization["metadata"].update({"uid": "kustomization-uid", "generation": 11})
