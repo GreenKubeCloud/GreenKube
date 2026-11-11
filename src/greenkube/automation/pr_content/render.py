@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from greenkube.automation.actions import operation_kind_of
 from greenkube.automation.pr_content import formatting as fmt
 from greenkube.automation.pr_content.model import (
     PullRequestContext,
@@ -35,7 +36,6 @@ from greenkube.gitops.contracts import (
     AddHorizontalPodAutoscaler,
     ControllerKind,
     DeleteResource,
-    SetContainerResources,
 )
 from greenkube.models.metrics import RecommendationRecord
 
@@ -397,16 +397,15 @@ def _changes(context: PullRequestContext) -> str:
             f"`{plan.rollback_of_plan_id}` was applied:"
         )
         for operation in plan.action.operations:
-            if isinstance(operation, SetContainerResources):
+            spec = operation_kind_of(operation)
+            if spec is None:
+                continue
+            section = spec.pr_section([operation])
+            for subject in sorted(spec.subjects([operation])):
                 applied = ", ".join(
-                    f"{kind}.{name} {value}"
-                    for kind, values in (
-                        ("requests", operation.resources.requests),
-                        ("limits", operation.resources.limits),
-                    )
-                    for name, value in sorted(values.items())
+                    f"{change.field} {change.proposed}" for change in section.changes if change.subject == subject
                 )
-                lines.append(f"- container `{operation.container}`: reverts {applied or 'the planned values'}")
+                lines.append(f"- {spec.pr_subject} `{subject}`: reverts {applied or 'the planned values'}")
         return "\n".join(lines)
     changes = resource_changes(context)
     if changes:
@@ -770,7 +769,8 @@ def _rollback(context: PullRequestContext, settings: PullRequestRenderSettings) 
         return "\n".join(lines)
     lines.append("- Revert this pull request; the GitOps controller syncs the previous values.")
     automated = plan.source.renderer in PLANNABLE_RENDERERS and all(
-        isinstance(operation, SetContainerResources) for operation in plan.action.operations
+        (spec := operation_kind_of(operation)) is not None and spec.supports_rollback([operation])
+        for operation in plan.action.operations
     )
     if automated:
         link = settings.link(f"changes/{plan.plan_id}")

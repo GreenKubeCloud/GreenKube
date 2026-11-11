@@ -5,13 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from greenkube.automation.actions import operation_kind_of
 from greenkube.automation.pr_content.model import PullRequestContext, highest_risk, resource_changes
-from greenkube.gitops.contracts import AddHorizontalPodAutoscaler, DeleteResource, SetContainerResources
+from greenkube.gitops.contracts import AddHorizontalPodAutoscaler, DeleteResource
 
 BASE_LABEL = "greenkube"
 RELIABILITY_LABEL = "reliability"
-_ACTION_CAPABILITIES = {
-    SetContainerResources: "rightsizing",
+#: Capability labels of operations that no registered action kind owns yet (registered
+#: kinds label themselves with ``ActionKindSpec.pr_label``, H0).
+_UNREGISTERED_CAPABILITIES: dict[type, str] = {
     DeleteResource: "cleanup",
     AddHorizontalPodAutoscaler: "autoscaling",
 }
@@ -64,7 +66,8 @@ def plan_capabilities(context: PullRequestContext) -> list[str]:
             _append(capabilities, capability.replace("_", "-"))
     if not capabilities:
         for operation in context.plan.action.operations:
-            capability = _ACTION_CAPABILITIES.get(type(operation))
+            spec = operation_kind_of(operation)
+            capability = spec.pr_label if spec is not None else _UNREGISTERED_CAPABILITIES.get(type(operation))
             if capability is not None:
                 _append(capabilities, capability)
     return capabilities

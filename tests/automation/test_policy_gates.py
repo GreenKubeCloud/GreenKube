@@ -283,7 +283,9 @@ async def test_bindings_discovered_before_the_split_keep_the_aggregated_gate():
 
 
 def test_missing_evidence_setting_parses_from_policy_json_and_is_validated():
-    assert AutomationPolicyConfig().missing_evidence == "warn"
+    # One install, no profiles: live gates fail closed unless told otherwise (D13).
+    assert AutomationPolicyConfig().missing_evidence == "fail"
+    assert AutomationPolicyConfig.from_json("{}").missing_evidence == "fail"
     assert AutomationPolicyConfig.from_json(json.dumps({"missingEvidence": "fail"})).missing_evidence == "fail"
     assert (
         AutomationPolicyConfig.from_json(json.dumps({"missingEvidence": "fail"})).public_values()["missingEvidence"]

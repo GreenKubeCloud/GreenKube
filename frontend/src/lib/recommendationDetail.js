@@ -144,14 +144,29 @@ function vote(item) {
 	};
 }
 
+/** Why a vote was not counted: another vote of its engine, or its push client already voted. */
+export function uncountedReason(item, votes = []) {
+	if (!item || item.counted) return '';
+	const sameFamily = votes.some((other) => other !== item && other.family && other.family === item.family);
+	if (sameFamily) return 'Same engine as another source, not counted';
+	if (item.sourceId?.startsWith('push:')) return 'This push client already voted, not counted';
+	return 'Not counted';
+}
+
+function strings(value) {
+	return Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item) : [];
+}
+
 /**
  * Consensus across sources (Recommendation v2, E6/E7): `{policy, resource,
  * value, chosen_from, agreement, contested, reasons, spread, independent_votes,
  * votes}`. Returns null for a v1 record so the page hides the section entirely.
  */
-export function consensusOf(rec) {
-	const consensus = rec?.consensus;
+export function consensusOf(rec, v2 = null) {
+	// GET /api/v2/recommendations/{id} first: the record the consensus engine wrote.
+	const consensus = v2?.consensus && typeof v2.consensus === 'object' ? v2.consensus : rec?.consensus;
 	if (!consensus || typeof consensus !== 'object') return null;
+	const sourceIds = strings(consensus.source_ids).length ? strings(consensus.source_ids) : strings(v2?.source_ids);
 	const spread = consensus.spread && typeof consensus.spread === 'object' ? consensus.spread : {};
 	const resource = typeof consensus.resource === 'string' ? consensus.resource : null;
 	const votes = Array.isArray(consensus.votes) ? consensus.votes : Array.isArray(rec.signals) ? rec.signals : [];
@@ -164,7 +179,8 @@ export function consensusOf(rec) {
 		contested: consensus.contested === true,
 		reasons: Array.isArray(consensus.reasons) ? consensus.reasons.filter((item) => typeof item === 'string') : [],
 		independentVotes: finite(consensus.independent_votes),
-		revision: finite(rec.revision),
+		revision: finite(v2?.revision) ?? finite(rec?.revision),
+		sourceIds,
 		spread: Object.entries(spread)
 			.filter(([, values]) => values && typeof values === 'object')
 			.map(([name, values]) => ({
@@ -176,6 +192,32 @@ export function consensusOf(rec) {
 				}))
 			})),
 		votes: votes.map(vote).filter(Boolean)
+	};
+}
+
+/**
+ * Revisions of a v2 recommendation (E7): the current one, newer advice queued
+ * behind an open plan, and the history (newest first).
+ */
+export function revisionsOf(v2) {
+	if (!v2 || typeof v2 !== 'object') return null;
+	const history = (Array.isArray(v2.revisions) ? v2.revisions : [])
+		.filter((item) => item && typeof item === 'object' && finite(item.revision) !== null)
+		.map((item) => {
+			const snapshot = item.snapshot && typeof item.snapshot === 'object' ? item.snapshot : {};
+			return {
+				revision: item.revision,
+				state: typeof item.state === 'string' ? item.state : 'unknown',
+				createdAt: item.created_at ?? null,
+				cpuRequest: finite(snapshot.recommended_cpu_request_millicores),
+				memoryRequest: finite(snapshot.recommended_memory_request_bytes)
+			};
+		});
+	return {
+		revision: finite(v2.revision),
+		queuedRevision: finite(v2.queued_revision),
+		queued: history.find((item) => item.state === 'queued') ?? null,
+		history
 	};
 }
 

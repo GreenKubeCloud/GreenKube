@@ -230,3 +230,37 @@ class TestConfiguration:
         assert Config(RECOMMENDATION_CONSENSUS_POLICY="Trust-Weighted").RECOMMENDATION_CONSENSUS_POLICY == "weighted"
         with pytest.raises(ValueError):
             Config(RECOMMENDATION_CONSENSUS_POLICY="loudest")
+
+
+class TestEngineFamiliesAndPushCaps:
+    def test_the_signal_engine_family_field_is_the_vote_unit(self):
+        # G1 sets engine_family on the signal itself; consensus must read it.
+        relayed = _cpu_signal("push:relay", 260, algorithm="relay").model_copy(update={"engine_family": "vpa"})
+        assert engine_family(relayed) == "vpa"
+
+    def test_one_counted_vote_per_push_client(self):
+        first = _cpu_signal("push:ci", 200, algorithm="a").model_copy(update={"engine_family": "a"})
+        second = _cpu_signal("push:ci", 210, algorithm="b").model_copy(update={"engine_family": "b"})
+        outcome = combine(_ballots(first, second, _cpu_signal("krr", 250)), ConsensusPolicy.SAFEST)
+        assert outcome.consensus.independent_votes == 2
+        assert sorted(vote.source_id for vote in outcome.consensus.votes if vote.counted) == ["krr", "push:ci"]
+
+    def test_a_pushed_ballot_never_stands_for_another_sources_family(self):
+        relay = _cpu_signal("push:relay", 900).model_copy(update={"engine_family": "vpa"})
+        outcome = combine(_ballots(relay, _cpu_signal("vpa", 300, algorithm="vpa-recommender")))
+        assert outcome.consensus.value == 300 and outcome.consensus.independent_votes == 1
+
+    def test_pushed_deletions_alone_are_not_admissible(self):
+        def deletion(source_id: str) -> SourceSignal:
+            return SourceSignal(
+                source_id=source_id,
+                target=TargetRef.for_kind(CLUSTER, "Deployment", "old", namespace="shop"),
+                capability=Capability.CLEANUP,
+                kind="ZOMBIE_POD",
+                proposal=DeletionProposal(reason="idle"),
+                algorithm=AlgorithmInfo(name=source_id),
+            )
+
+        assert consolidate(_ballots(deletion("push:a"), deletion("push:b"))) == []
+        [outcome] = consolidate(_ballots(deletion("push:a"), deletion("greenkube.zombie")))
+        assert set(outcome.consensus.source_ids) == {"push:a", "greenkube.zombie"}

@@ -13,7 +13,6 @@ vi.mock('$lib/api.js', async () => {
 
 import * as api from '$lib/api.js';
 import {
-	CHANGE_SCAN_PAGES,
 	changeTarget,
 	latestMeasurement,
 	measurementRows,
@@ -36,20 +35,19 @@ describe('resolveChange', () => {
 		expect(api.listChanges).not.toHaveBeenCalled();
 	});
 
-	it('finds the change of a plan id among recent changes (PR deep link /ledger?change={plan_id})', async () => {
+	it('asks the server for the change of a plan id (PR deep link /ledger?change={plan_id})', async () => {
 		api.getChange.mockImplementation(async (id) => {
 			if (id === 'chg-7') return { change_id: 'chg-7', plan_id: 'plan-7' };
 			throw notFound();
 		});
-		api.listChanges
-			.mockResolvedValueOnce({ items: [{ change_id: 'chg-1', plan_id: 'plan-1' }], next_cursor: 'c1' })
-			.mockResolvedValueOnce({ items: [{ change_id: 'chg-7', plan_id: 'plan-7' }], next_cursor: null });
+		api.listChanges.mockResolvedValueOnce({ items: [{ change_id: 'chg-7', plan_id: 'plan-7' }], next_cursor: null });
 
 		const change = await resolveChange('plan-7');
 
 		expect(change).toEqual({ change_id: 'chg-7', plan_id: 'plan-7' });
-		expect(api.listChanges).toHaveBeenCalledTimes(2);
-		expect(api.listChanges.mock.calls[1][0].cursor).toBe('c1');
+		// One filtered request, never a scan of recent changes.
+		expect(api.listChanges).toHaveBeenCalledTimes(1);
+		expect(api.listChanges.mock.calls[0][0]).toMatchObject({ planId: 'plan-7', limit: 1 });
 	});
 
 	it('looks the plan up first when asked and falls back to a change id', async () => {
@@ -60,12 +58,19 @@ describe('resolveChange', () => {
 		expect(api.listChanges).toHaveBeenCalledTimes(1);
 	});
 
-	it('stops after a bounded number of pages and returns null when nothing matches', async () => {
+	it('ignores a change of another plan when an older server ignores the filter', async () => {
 		api.getChange.mockRejectedValue(notFound());
 		api.listChanges.mockResolvedValue({ items: [{ change_id: 'x', plan_id: 'other' }], next_cursor: 'more' });
 
 		await expect(resolveChange('plan-missing')).resolves.toBeNull();
-		expect(api.listChanges).toHaveBeenCalledTimes(CHANGE_SCAN_PAGES);
+		expect(api.listChanges).toHaveBeenCalledTimes(1);
+	});
+
+	it('treats an id the server rejects as a plan id (422) as not found', async () => {
+		api.getChange.mockRejectedValue(notFound());
+		api.listChanges.mockRejectedValue(new api.ApiError('Invalid plan id.', 422));
+
+		await expect(resolveChange('not a plan')).resolves.toBeNull();
 	});
 
 	it('propagates server errors instead of reporting a missing change', async () => {

@@ -41,6 +41,7 @@ from greenkube.automation.plan_runtime import (
 )
 from greenkube.automation.plan_worker import GitProviderTarget, RegistryPlanProviderResolver
 from greenkube.automation.plans import AutomationPlanError, AutomationPlanService, GitBlobFile
+from greenkube.automation.policy import AutomationPolicyConfig as _PolicyConfig
 from greenkube.automation.rollback import ONE_TIME_HELM_VALUES_MAPPING_EVIDENCE_KEY
 from greenkube.core.optimization.applied_detector import K8sWorkloadReader
 from greenkube.gitops.contracts import (
@@ -65,6 +66,9 @@ from greenkube.gitops.snapshots import RepositorySnapshot, SnapshotLimits
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, WorkloadBinding
+
+#: These tests run without live discovery evidence; the default fails closed (D13).
+WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
 
 TOKEN = "never-log-this-provider-token"
 REVISION = "a" * 40
@@ -903,6 +907,7 @@ async def test_api_plan_service_uses_only_persisted_recommendation_and_resolved_
     snapshot_resolver = SnapshotResolver()
     plan_service = PlanService()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1052,6 +1057,7 @@ async def test_single_requested_recommendation_resolves_full_persisted_group():
 
     recommendation_repository = Recommendations()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, recommendation_repository),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1164,6 +1170,7 @@ async def test_api_plan_service_snapshots_helm_sources_and_dispatches_to_plan_se
 
     plan_service = PlanService()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1197,6 +1204,7 @@ async def test_runtime_plan_service_forwards_transition_audit_metadata():
             return None
 
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, object()),
         binding_repository=cast(Any, object()),
         cluster="prod",
@@ -1394,6 +1402,7 @@ spec:
     plan_service = PlanService()
     snapshot_resolver = SnapshotResolver()
     unconfigured_service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1417,6 +1426,7 @@ spec:
     assert kustomize_rollback_renderer(SimpleNamespace(planners={})) is None
 
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",
@@ -1696,6 +1706,7 @@ spec:
     )
     snapshot_resolver = SnapshotResolver()
     service = RuntimePlanService(
+        policy_config=WARN_ON_MISSING_EVIDENCE,
         recommendation_repository=cast(Any, Recommendations()),
         binding_repository=Bindings(),
         cluster="prod",

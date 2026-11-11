@@ -262,6 +262,9 @@ class RecommendationV2(BaseModel):
     lifecycle: RecommendationLifecycle = Field(default_factory=RecommendationLifecycle)
     source: str = "greenkube"
     sources: List[str] = Field(default_factory=list)
+    #: Every source id behind the recommendation (``goldilocks``, ``krr``, ``push:<client>``...),
+    #: the chosen one first: provenance badges. ``sources`` keeps the reconciliation units.
+    source_ids: List[str] = Field(default_factory=list)
     description: str = ""
     reason: str = ""
     priority: str = "medium"
@@ -352,6 +355,9 @@ def to_v2(
         ),
         source=_text(record.source) or "greenkube",
         sources=list(record.sources),
+        source_ids=list(consensus.source_ids)
+        if consensus is not None and consensus.source_ids
+        else list(record.sources),
         description=record.description,
         reason=record.reason,
         priority=record.priority,

@@ -1,4 +1,4 @@
-"""Keep one GreenKube status comment up to date on merged plan PRs (roadmap J5).
+"""Keep one GreenKube status comment up to date on plan PRs (roadmap J5).
 
 The publisher only reads state other components already persist: the PR
 record (merge and sync, written by the lifecycle reconciler and the sync
@@ -9,6 +9,11 @@ never changes that state.
 Every publication renders the whole comment. A body identical to the last one
 published for the plan costs no provider call; otherwise the provider edits
 the comment that starts with the GreenKube marker, or creates it once.
+
+Merged PRs get the comment within the lookback window. An **open** PR gets it
+only when newer advice is queued behind its plan (E7): "newer advice available"
+then shows before the merge. Each open plan is checked at most once per
+``open_check_interval`` and every cycle shares one cap on provider writes.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from greenkube.automation.git.base import CommentUpsertResult, GitProviderCapability
 from greenkube.automation.pr_content.lifecycle import (
@@ -39,6 +44,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_FEEDBACK_LOOKBACK_DAYS = 30
 #: Plans whose comment needs a provider call in one reconciliation cycle, at most.
 MAX_PUBLICATIONS_PER_CYCLE = 25
+#: An open plan PR is checked for newer advice at most this often.
+DEFAULT_OPEN_CHECK_INTERVAL = timedelta(minutes=15)
+#: PR record statuses of a PR that is still open (not merged, not closed).
+_OPEN_STATUSES = {"open", "pending"}
 _CONTROLLER_LABELS = {
     ControllerKind.ARGOCD: "Argo CD",
     ControllerKind.FLUX_KUSTOMIZATION: "Flux Kustomization",
@@ -64,6 +73,17 @@ class FeedbackPullRequestRepository(Protocol):
         self,
         *,
         merged_since: datetime,
+        limit: int,
+        after_id: int | None = None,
+    ) -> Sequence[PullRequestRecord]: ...
+
+
+class OpenPullRequestRepository(Protocol):
+    """Open plan PRs (the PR poller's listing), used to report newer advice before the merge."""
+
+    async def list_pollable_pull_requests(
+        self,
+        *,
         limit: int,
         after_id: int | None = None,
     ) -> Sequence[PullRequestRecord]: ...
@@ -111,6 +131,7 @@ class PullRequestFeedbackPublisher:
         lookback_days: int = DEFAULT_FEEDBACK_LOOKBACK_DAYS,
         clock: Callable[[], datetime] | None = None,
         cache_size: int = 2048,
+        open_check_interval: timedelta = DEFAULT_OPEN_CHECK_INTERVAL,
     ) -> None:
         self.pull_request_repository = pull_request_repository
         self.plan_repository = plan_repository
@@ -124,6 +145,10 @@ class PullRequestFeedbackPublisher:
         self.cache_size = cache_size
         self._published: OrderedDict[str, str] = OrderedDict()
         self._after_id: int | None = None
+        self.open_check_interval = open_check_interval
+        self._open_after_id: int | None = None
+        #: When each open plan was last checked for newer advice (bounded like ``_published``).
+        self._open_checked: OrderedDict[str, datetime] = OrderedDict()
 
     async def publish(self, plan_id: str) -> FeedbackOutcome:
         """Bring the plan's status comment up to date; never raises for unknown plans."""
@@ -136,6 +161,9 @@ class PullRequestFeedbackPublisher:
             return FeedbackOutcome.SKIPPED
         recommendations = await self._recommendations(plan)
         state = await self.lifecycle_state(plan, record, recommendations)
+        if state.pr_status in _OPEN_STATUSES and not state.newer_advice:
+            # Before the merge, the comment only carries newer advice (E7): nothing to say yet.
+            return FeedbackOutcome.SKIPPED
         body = render_lifecycle_comment(state, self.settings)
         digest = comment_digest(body)
         if self._published.get(plan_id) == digest:
@@ -164,7 +192,8 @@ class PullRequestFeedbackPublisher:
         }.get(result, FeedbackOutcome.UNCHANGED)
 
     async def reconcile_once(self, *, limit: int = MAX_PULL_REQUEST_POLL_BATCH_SIZE) -> FeedbackCycleSummary:
-        """Refresh the comments of PRs merged within the lookback window (one bounded page)."""
+        """Refresh the comments of PRs merged within the lookback window, then of open PRs with
+        newer advice (one bounded page each, one shared cap on provider writes)."""
         since = self.clock() - timedelta(days=self.lookback_days)
         records = await self.pull_request_repository.list_feedback_pull_requests(
             merged_since=since, limit=limit, after_id=self._after_id
@@ -175,6 +204,9 @@ class PullRequestFeedbackPublisher:
         ids = [record.id for record in records if isinstance(record.id, int)]
         self._after_id = max(ids) if len(records) == limit and ids else None
         plan_ids = list(dict.fromkeys(record.plan_id for record in records if record.plan_id))
+        for plan_id in await self._open_plan_ids(limit):
+            if plan_id not in plan_ids:
+                plan_ids.append(plan_id)
         counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0, "errors": 0}
         provider_writes = 0
         for plan_id in plan_ids:
@@ -192,6 +224,39 @@ class PullRequestFeedbackPublisher:
             key = outcome.value if outcome.value in counts else "skipped"
             counts[key] += 1
         return FeedbackCycleSummary(plans=len(plan_ids), **counts)
+
+    async def _open_plan_ids(self, limit: int) -> list[str]:
+        """Open plan PRs due for a newer-advice check (none without the E7 hook)."""
+        if self.newer_advice is None or not callable(
+            getattr(self.pull_request_repository, "list_pollable_pull_requests", None)
+        ):
+            return []
+        lister = cast(OpenPullRequestRepository, self.pull_request_repository).list_pollable_pull_requests
+        try:
+            records = list(await lister(limit=limit, after_id=self._open_after_id))
+            if not records and self._open_after_id is not None:
+                self._open_after_id = None
+                records = list(await lister(limit=limit))
+        except Exception as error:
+            logger.warning("Could not list open plan pull requests (%s).", type(error).__name__)
+            return []
+        ids = [record.id for record in records if isinstance(record.id, int)]
+        self._open_after_id = max(ids) if len(records) == limit and ids else None
+        now = self.clock()
+        due: list[str] = []
+        for record in records:
+            plan_id = record.plan_id
+            if not plan_id or _status(record.status) not in _OPEN_STATUSES or plan_id in due:
+                continue
+            checked = self._open_checked.get(plan_id)
+            if checked is not None and now - checked < self.open_check_interval:
+                continue
+            self._open_checked[plan_id] = now
+            self._open_checked.move_to_end(plan_id)
+            due.append(plan_id)
+        while len(self._open_checked) > self.cache_size:
+            self._open_checked.popitem(last=False)
+        return due
 
     async def notify(self, plan_id: str) -> None:
         """Best-effort publication after a lifecycle event (sync observed, outcome decided)."""

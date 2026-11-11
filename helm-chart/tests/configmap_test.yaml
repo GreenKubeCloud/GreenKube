@@ -566,6 +566,41 @@ tests:
           path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
           value: "0"
 
+  - it: should set the drift monitor defaults (C8)
+    asserts:
+      - equal:
+          path: data.CHANGE_DRIFT_THRESHOLD
+          value: "0.5"
+      - equal:
+          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
+          value: "3"
+
+  - it: should reflect custom drift monitor settings (C8)
+    set:
+      config.recommendations.changeMeasurement.driftThreshold: 0.3
+      config.recommendations.changeMeasurement.driftSustainedDays: 5
+    asserts:
+      - equal:
+          path: data.CHANGE_DRIFT_THRESHOLD
+          value: "0.3"
+      - equal:
+          path: data.CHANGE_DRIFT_SUSTAINED_DAYS
+          value: "5"
+
+  - it: should reject a drift threshold outside (0, 1]
+    set:
+      config.recommendations.changeMeasurement.driftThreshold: 0
+    asserts:
+      - failedTemplate: {}
+
+  - it: should fail closed on missing policy evidence even without automation.policy values (D13)
+    set:
+      automation.policy: null
+    asserts:
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"missingEvidence":"fail"'
+
   - it: should not render legacy single-provider git settings
     asserts:
       - isNull:

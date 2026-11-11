@@ -5,6 +5,9 @@
  * why the others do not and how to fix them. These helpers only normalize the
  * payload defensively (an older server answers 404, a newer one may add
  * fields) and keep the banner dismissal for the current browser tab.
+ *
+ * The tests run these helpers on JSON generated from the FastAPI app
+ * (`tests/fixtures/api`, written by `tests/api/test_ui_contract_fixtures.py`).
  */
 import { get, writable } from 'svelte/store';
 
@@ -46,15 +49,54 @@ function normalizeFix(fix) {
 	return { text: text(fix.text), snippet: text(fix.snippet), uiAction: normalizeUiAction(fix.ui_action) };
 }
 
-/** Route a few well-known UI actions to the place on this app that performs them. */
+/**
+ * The in-app actions `fix.ui_action` names, exactly the ids the server emits
+ * (`UiAction` in `api/routers/setup.py`; a backend test keeps both lists equal).
+ */
 const UI_ACTIONS = {
 	allowlist_repositories: { label: 'Review repository suggestions', href: '/setup#repository-suggestions' },
-	allow_repositories: { label: 'Review repository suggestions', href: '/setup#repository-suggestions' },
-	resolve_bindings: { label: 'Resolve workload bindings', href: '/automation' },
-	sign_in: { label: 'Account settings', href: '/settings/account' },
-	create_api_key: { label: 'Create an API key', href: '/settings/api-keys' },
-	view_sources: { label: 'Open recommendation sources', href: '/sources' }
+	open_sources: { label: 'Open recommendation sources', href: '/sources' }
 };
+
+/**
+ * Readable text of the capability reasons the readiness reconciler stores
+ * (`automation/readiness.py`); an unknown code is shown as is.
+ */
+export const CAPABILITY_REASONS = {
+	controller_not_ready: 'Waiting for the controller to report readiness.',
+	discovery_not_run: 'GitOps discovery has not run yet.',
+	no_gitops_controller: 'No Argo CD or Flux installation was found.',
+	delivery_paused: 'Paused by automation.policy.pauseDelivery: no pull request is opened.',
+	credentials_missing: 'No Git credentials are mounted.',
+	credentials_host_ambiguous: 'The Git token is not bound to a host (add the host key to the Secret).',
+	credentials_host_mismatch: "The Git token's host matches no discovered repository.",
+	no_repository_discovered: 'No repository was discovered yet.',
+	not_allowlisted: 'No discovered repository is allowlisted yet.',
+	provider_unknown: 'The Git provider of the repositories could not be inferred.',
+	github_app_not_supported: 'GitHub App credentials are not supported yet; use a token.',
+	webhook_secret_missing: 'No webhook secret: changes are polled.',
+	renderer_not_configured: 'No isolated renderer is configured.',
+	renderer_unreachable: 'The isolated renderer does not answer.',
+	renderer_egress_unenforced: "The renderer's egress-deny NetworkPolicy is not enforced."
+};
+
+/** Readable text of a capability reason code. */
+export function capabilityReason(reason) {
+	const code = text(reason);
+	return CAPABILITY_REASONS[code] ?? code;
+}
+
+/**
+ * How a capability state reads: the server's states are `active`, `dormant`
+ * and `pending`; delivery paused by policy is its own word.
+ */
+export function capabilityDisplay(cap) {
+	if (cap?.reason === 'delivery_paused') return { label: 'paused', tone: 'yellow', icon: '⏸' };
+	if (isCapabilityActive(cap?.state)) return { label: 'active', tone: 'green', icon: '✓' };
+	if (cap?.state === 'pending') return { label: 'pending', tone: 'blue', icon: '…' };
+	if (!cap?.state || cap.state === 'unknown') return { label: 'unknown', tone: 'dark', icon: '?' };
+	return { label: String(cap.state).replaceAll('_', ' '), tone: 'yellow', icon: '!' };
+}
 
 /**
  * `ui_action` is optional: a known action id, an in-app path, or
@@ -109,17 +151,21 @@ export function normalizeSetupStatus(payload) {
 	const checks = Array.isArray(payload.checks) ? payload.checks.map(normalizeCheck) : [];
 	const capabilities = CAPABILITIES.map(({ id, label }) => {
 		const cap = payload.capabilities?.[id];
+		const reason = text(cap?.reason);
 		return {
 			id,
 			label,
 			state: text(cap?.state) || 'unknown',
-			reason: text(cap?.reason)
+			reason,
+			reasonText: capabilityReason(reason)
 		};
 	});
 	return {
 		complete: payload.complete,
 		checks,
 		capabilities,
+		// automation.policy.pauseDelivery: the controller runs, delivery is off by policy.
+		deliveryPaused: capabilities.some((cap) => cap.id === 'delivery' && cap.reason === 'delivery_paused'),
 		actionCount: checks.filter((check) => check.status === 'action_needed' || check.status === 'blocked').length
 	};
 }
@@ -136,9 +182,9 @@ export function groupChecks(checks = []) {
 	return groups.filter((group) => group.checks.length > 0);
 }
 
-/** Capability state words the UI treats as active. */
+/** Whether a capability is active: the server reports `active`, `dormant` or `pending` (F12). */
 export function isCapabilityActive(state) {
-	return ['active', 'ok', 'enabled', 'ready'].includes(String(state).toLowerCase());
+	return String(state).toLowerCase() === 'active';
 }
 
 /** Normalized repository suggestions (F2). */
@@ -153,6 +199,21 @@ export function normalizeSuggestions(payload) {
 			inferredFrom: text(item.inferred_from),
 			allowlisted: item.allowlisted === true
 		}));
+}
+
+/**
+ * The `POST /automation/repositories/allowlist` answer:
+ * `{added, allowlisted: [repo_url], values_snippet}` (the Helm values a
+ * GitOps-managed install commits).
+ */
+export function normalizeAllowlistResult(result, requested = 0) {
+	const allowed = Array.isArray(result?.allowlisted) ? result.allowlisted.filter((url) => typeof url === 'string') : [];
+	const count = allowed.length || requested;
+	return {
+		allowlisted: allowed,
+		snippet: text(result?.values_snippet),
+		message: `${count} ${count === 1 ? 'repository was' : 'repositories were'} added to the allowlist.`
+	};
 }
 
 /** Pluralized call to action, e.g. "Allow these 3 repositories". */

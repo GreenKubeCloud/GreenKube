@@ -13,6 +13,10 @@ the others (the former ``dedup.arbitrate``).
 * Sources that run the same engine vote once (:func:`engine_family`):
   Goldilocks runs the VPA recommender, so Goldilocks and VPA on the same VPA
   object are one vote, never two.
+* Pushed signals (``push:<client>``) are capped: one counted vote per push
+  client, a pushed ballot never stands for an engine family another source
+  also voted in, and pushed signals alone never produce a deletion
+  (:func:`admissible_ballots`).
 * A :class:`ConsensusPolicy` picks the consolidated proposal:
 
   ``safest`` (default)
@@ -42,6 +46,7 @@ This module is pure: it never reads storage or configuration.
 from __future__ import annotations
 
 import json
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -49,7 +54,14 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from greenkube.signals.model import Capability, ContainerResourcesProposal, SourceSignal, proposal_identity
+from greenkube.signals.model import (
+    Capability,
+    ContainerResourcesProposal,
+    DeletionProposal,
+    SignalOrigin,
+    SourceSignal,
+    proposal_identity,
+)
 
 
 class ConsensusPolicy(StrEnum):
@@ -67,6 +79,8 @@ POLICY_ALIASES: Dict[str, ConsensusPolicy] = {
     "source-priority": ConsensusPolicy.PRIORITY,
 }
 
+logger = logging.getLogger(__name__)
+
 #: Agreement below which a consensus is contested.
 CONTESTED_AGREEMENT = 0.5
 #: Agreement at or above which a consensus of several independent sources raises confidence.
@@ -78,6 +92,8 @@ AGREEMENT_CONFIDENCE_BONUS = 1.1
 ALGORITHM_ENGINE_FAMILIES: Dict[str, str] = {"vpa-recommender": "vpa"}
 #: Engine of well-known sources.
 SOURCE_ENGINE_FAMILIES: Dict[str, str] = {"goldilocks": "vpa"}
+#: Source id prefix of the signals pushed through ``POST /api/v1/signals`` (G6).
+PUSH_SOURCE_PREFIX = "push:"
 
 #: v1 finding kind of each consolidated container request resource.
 REQUEST_RESOURCE_KINDS: Dict[str, str] = {
@@ -112,19 +128,28 @@ def parse_policy(value: Any) -> ConsensusPolicy:
 def engine_family(signal: SourceSignal) -> str:
     """The engine a signal comes from; signals of one engine on one target are a single vote.
 
-    In order: an explicit ``engine_family`` (attribute of the algorithm, or
-    ``algorithm.params["engine_family"]``), the engine of a well-known
+    In order: the signal's ``engine_family`` (G1: the VPA connector sets
+    ``vpa`` on VPA and Goldilocks signals; a push client may declare the
+    engine it relays), an explicit ``engine_family`` of the algorithm (attribute
+    or ``algorithm.params["engine_family"]``), the engine of a well-known
     algorithm (``vpa-recommender`` is ``vpa``), the engine of a well-known
     source (``goldilocks`` is ``vpa``), else the source id itself.
     """
     algorithm = signal.algorithm
-    explicit = getattr(algorithm, "engine_family", None) or algorithm.params.get("engine_family")
+    explicit = (
+        signal.engine_family or getattr(algorithm, "engine_family", None) or algorithm.params.get("engine_family")
+    )
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip().lower()
     by_algorithm = ALGORITHM_ENGINE_FAMILIES.get(algorithm.name.strip().lower())
     if by_algorithm:
         return by_algorithm
     return SOURCE_ENGINE_FAMILIES.get(signal.source_id, signal.source_id)
+
+
+def is_pushed(signal: SourceSignal) -> bool:
+    """Whether a signal was pushed by an external client (``push:<client>``, G6)."""
+    return signal.provenance.origin == SignalOrigin.PUSH or signal.source_id.startswith(PUSH_SOURCE_PREFIX)
 
 
 def _direction(value: Optional[int], current: Optional[int]) -> Optional[str]:
@@ -163,6 +188,14 @@ class Ballot:
     @property
     def numeric(self) -> bool:
         return self.resource is not None and self.value is not None
+
+    @property
+    def pushed(self) -> bool:
+        return is_pushed(self.signal)
+
+    @property
+    def deletion(self) -> bool:
+        return isinstance(self.signal.proposal, DeletionProposal)
 
     @property
     def direction(self) -> Optional[str]:
@@ -262,9 +295,12 @@ class Consensus(BaseModel):
     reasons: List[str] = Field(default_factory=list)
     #: Per resource: ``{source_id: value}``.
     spread: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    #: Independent votes (one per engine family).
+    #: Independent votes (one per engine family, one per push client).
     independent_votes: int = 1
     votes: List[ConsensusVote] = Field(default_factory=list)
+    #: Every source id that voted on the group, the chosen one first (provenance badges:
+    #: ``goldilocks``, ``krr``, ``push:<client>``...), family duplicates included.
+    source_ids: List[str] = Field(default_factory=list)
     #: Sources that did not complete the scan and whose last known proposal (``{source_id: value}``)
     #: still supports the record (E8). Filled by the engine, never by :func:`combine`.
     last_known: Dict[str, int] = Field(default_factory=dict)
@@ -338,24 +374,54 @@ def _reverse_text(text: str) -> Tuple[int, ...]:
 
 
 def _representatives(ballots: Sequence[Ballot], priorities: Mapping[str, int]) -> List[Ballot]:
-    """One ballot per engine family: a VPA object seen by VPA and Goldilocks is one vote."""
+    """One ballot per engine family, and at most one counted ballot per push client.
+
+    A VPA object seen by VPA and Goldilocks is one vote. A pushed ballot never
+    stands for a family another source voted in (a client relaying VPA advice
+    adds no vote and cannot replace VPA's value), and a push client counts once
+    whatever engine families its signals declare.
+    """
     by_family: "OrderedDict[str, List[Ballot]]" = OrderedDict()
     for ballot in ballots:
         by_family.setdefault(ballot.family, []).append(ballot)
     representatives = []
+    pushed_clients: set = set()
     for members in by_family.values():
-        representatives.append(
-            max(
-                members,
-                key=lambda ballot: (
-                    ballot.payload is not None,
-                    _priority(ballot, priorities),
-                    ballot.value if ballot.value is not None else 0,
-                    _reverse_text(ballot.source_id),
-                ),
-            )
+        representative = max(
+            members,
+            key=lambda ballot: (
+                not ballot.pushed,
+                ballot.payload is not None,
+                _priority(ballot, priorities),
+                ballot.value if ballot.value is not None else 0,
+                _reverse_text(ballot.source_id),
+            ),
         )
+        if representative.pushed:
+            if representative.source_id in pushed_clients:
+                continue
+            pushed_clients.add(representative.source_id)
+        representatives.append(representative)
     return representatives
+
+
+def admissible_ballots(ballots: Sequence[Ballot]) -> List[Ballot]:
+    """The ballots of one group that may take part in its consensus.
+
+    Pushed signals alone never produce a deletion: a pushed deletion counts
+    only as support for a deletion another (non-pushed) source proposes on
+    the same target. Everything else is admissible.
+    """
+    if any(ballot.deletion and not ballot.pushed for ballot in ballots):
+        return list(ballots)
+    admitted = [ballot for ballot in ballots if not (ballot.deletion and ballot.pushed)]
+    if len(admitted) != len(ballots):
+        logger.info(
+            "Ignoring %d pushed deletion signal(s) on %s: no other source proposes the deletion.",
+            len(ballots) - len(admitted),
+            ballots[0].group_key[0],
+        )
+    return admitted
 
 
 def _upper_weighted_median(pairs: Sequence[Tuple[int, float]]) -> int:
@@ -398,6 +464,7 @@ def combine(
         chosen, consensus = _numeric(representatives, ballots, policy, priorities, weight_for)
     else:
         chosen, consensus = _categorical(representatives, ballots, policy, priorities, weight_for)
+    consensus.source_ids = _unique([chosen.source_id, *(ballot.source_id for ballot in ballots)])
     return ConsensusOutcome(
         key=ballots[0].group_key,
         consensus=consensus,
@@ -538,8 +605,10 @@ def consolidate(
     priorities: Optional[Mapping[str, int]] = None,
     weight_for: Optional[Callable[[Ballot], float]] = None,
 ) -> List[ConsensusOutcome]:
-    """One consensus per group of ballots."""
-    return [
-        combine(members, policy, priorities=priorities, weight_for=weight_for)
-        for members in group_ballots(ballots).values()
-    ]
+    """One consensus per group of ballots (pushed-only deletions are dropped, :func:`admissible_ballots`)."""
+    outcomes = []
+    for members in group_ballots(ballots).values():
+        admitted = admissible_ballots(members)
+        if admitted:
+            outcomes.append(combine(admitted, policy, priorities=priorities, weight_for=weight_for))
+    return outcomes

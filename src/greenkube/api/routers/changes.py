@@ -2,7 +2,7 @@
 """Applied changes and their measurements (roadmap C1, C2).
 
 Endpoints (prefix ``/api/v2``):
-  GET /changes                               - Changes, newest first (?namespace=&state=&limit=&cursor=)
+  GET /changes                               - Changes, newest first (?namespace=&state=&plan_id=&limit=&cursor=)
   GET /changes/{change_id}                   - One change: state, baseline snapshot and lifecycle events
   GET /changes/{change_id}/measurements      - Decided measurements of a change, oldest first
 
@@ -113,6 +113,13 @@ def _parse_cursor(cursor: Optional[str]) -> Optional[tuple[datetime, str]]:
 async def list_changes(
     namespace: Optional[str] = Depends(validate_namespace),
     state: Optional[List[MeasurementState]] = Query(None, description="Filter by lifecycle state (repeatable)."),
+    plan_id: Optional[str] = Query(
+        None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+        description="Only the changes of this GitOps plan (the ledger link of a pull request).",
+    ),
     limit: int = Query(50, ge=1, le=MAX_LIMIT),
     cursor: Optional[str] = Query(None, max_length=200, description="next_cursor of the previous page."),
     repo: ChangeRepository = Depends(get_changes_repository),
@@ -125,6 +132,7 @@ async def list_changes(
             states=[item.value for item in state] if state else None,
             limit=limit + 1,
             before=before,
+            plan_id=plan_id,
         )
     except Exception as exc:
         logger.error("Could not list changes: %s", exc)

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, get_args
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -43,6 +43,10 @@ Category = Literal[
     "evidence",
 ]
 CheckStatus = Literal["ok", "action_needed", "blocked", "not_applicable", "pending"]
+#: In-app actions a fix may point to; the UI routes each one (``UI_ACTIONS`` in
+#: ``frontend/src/lib/setup.js``, kept equal by ``tests/api/test_ui_contract_fixtures.py``).
+UiAction = Literal["allowlist_repositories", "open_sources"]
+UI_ACTIONS = get_args(UiAction)
 
 DOCS = "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs"
 #: A plan executor heartbeat older than this is stale (matches the automation status route).
@@ -55,7 +59,7 @@ SUMMARY_CAPABILITIES = ("discovery", "delivery", "sync_tracking", "measurement")
 class SetupFix(BaseModel):
     text: str
     snippet: Optional[str] = None
-    ui_action: Optional[str] = None
+    ui_action: Optional[UiAction] = None
 
 
 class SetupCheck(BaseModel):
@@ -89,7 +93,7 @@ def _check(
     docs: str,
     *,
     snippet: Optional[str] = None,
-    ui_action: Optional[str] = None,
+    ui_action: Optional[UiAction] = None,
 ) -> SetupCheck:
     return SetupCheck(
         id=check_id,

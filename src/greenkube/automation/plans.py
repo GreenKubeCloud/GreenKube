@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable, Mapping
+import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -28,6 +29,7 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
+from greenkube.gitops.planning.digest import RENDERER_EGRESS_UNENFORCED_WARNING, with_plan_warnings
 from greenkube.gitops.planning.helm import (
     FluxHelmReleasePlanError,
     FluxHelmReleasePlanner,
@@ -70,6 +72,9 @@ _REPLANABLE_STATUSES = frozenset(
 # Unapproved previews a newer request for the same workload replaces instead of 409 (D6, BUG-48).
 SUPERSEDABLE_PREVIEW_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED})
 _CANCELLABLE_PREVIEW_STATUSES = SUPERSEDABLE_PREVIEW_STATUSES
+
+
+logger = logging.getLogger(__name__)
 
 
 class AutomationPlanError(RuntimeError):
@@ -132,6 +137,7 @@ class AutomationPlanService:
         operation_enqueuer: PlanOperationEnqueuer | None = None,
         plan_ttl: timedelta = timedelta(minutes=30),
         clock: Callable[[], datetime] | None = None,
+        renderer_egress_unenforced: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         if plan_ttl <= timedelta(0):
             raise ValueError("plan_ttl must be positive")
@@ -151,6 +157,8 @@ class AutomationPlanService:
         self.operation_enqueuer = operation_enqueuer
         self.plan_ttl = plan_ttl
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        #: True when the readiness reconciler last saw the renderer's egress canary connect (F6).
+        self.renderer_egress_unenforced = renderer_egress_unenforced
 
     async def create_plan(
         self,
@@ -183,6 +191,30 @@ class AutomationPlanService:
             record_automation_plan(status, source.renderer.value, elapsed(timer))
             if status == "failed":
                 record_automation_failure("plan")
+
+    async def _with_renderer_warnings(self, file_plan: Any, action: ActionPlanV3, source: WorkloadSource) -> Any:
+        """Kustomize and Helm plans carry ``renderer_egress_unenforced`` when the canary connected (F6).
+
+        Raw-manifest plans never call the renderer. A probe that cannot be read
+        adds nothing: the warning reports a known state, it never blocks.
+        """
+        probe = self.renderer_egress_unenforced
+        if probe is None or not isinstance(file_plan, FilePlan):
+            return file_plan
+        try:
+            unenforced = await probe()
+        except Exception as exc:
+            logger.debug("Renderer egress state unreadable (%s); no warning added.", type(exc).__name__)
+            return file_plan
+        if not unenforced:
+            return file_plan
+        return with_plan_warnings(
+            file_plan,
+            [RENDERER_EGRESS_UNENFORCED_WARNING],
+            action=action,
+            source=source,
+            error_type=ValueError,
+        )
 
     async def preview_plan(
         self,
@@ -297,6 +329,8 @@ class AutomationPlanService:
             except (RawManifestPlanError, ValidationError) as exc:
                 raise _planner_error(exc) from exc
 
+        if source.renderer is not RendererKind.RAW:
+            file_plan = await self._with_renderer_warnings(file_plan, action, source)
         if not file_plan.validation.passed:
             raise AutomationPlanError(
                 AutomationErrorCode.RENDER_VALIDATION_FAILED,

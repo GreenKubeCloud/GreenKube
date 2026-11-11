@@ -6,8 +6,11 @@ import { get } from 'svelte/store';
 import {
 	SETUP_BANNER_DISMISSED_KEY,
 	allowLabel,
+	capabilityDisplay,
+	capabilityReason,
 	groupChecks,
 	isCapabilityActive,
+	normalizeAllowlistResult,
 	normalizeCheck,
 	normalizeSetupStatus,
 	normalizeSuggestions,
@@ -15,6 +18,13 @@ import {
 	setupBannerDismissed
 } from '$lib/setup.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
+// Generated from the FastAPI app by tests/api/test_ui_contract_fixtures.py.
+import INCOMPLETE from '../fixtures/api/setup_status_incomplete.json';
+import HOST_MISMATCH from '../fixtures/api/setup_status_host_mismatch.json';
+import PAUSED from '../fixtures/api/setup_status_paused.json';
+import COMPLETE from '../fixtures/api/setup_status_complete.json';
+import SUGGESTIONS from '../fixtures/api/repository_suggestions.json';
+import ALLOWLIST from '../fixtures/api/repository_allowlist.json';
 
 export const SETUP_STATUS = {
 	complete: false,
@@ -135,9 +145,74 @@ describe('suggestions', () => {
 		expect(allowLabel(1)).toBe('Allow this repository');
 	});
 
-	it('treats active-like capability states as active', () => {
+	it('reads only the active state as active (the server reports active, dormant or pending)', () => {
 		expect(isCapabilityActive('active')).toBe(true);
 		expect(isCapabilityActive('dormant')).toBe(false);
+		expect(isCapabilityActive('pending')).toBe(false);
+		expect(isCapabilityActive('ready')).toBe(false);
+	});
+});
+
+describe('the real API responses', () => {
+	const fixtures = { INCOMPLETE, HOST_MISMATCH, PAUSED, COMPLETE };
+
+	it('normalizes every generated setup status', () => {
+		for (const [name, payload] of Object.entries(fixtures)) {
+			const status = normalizeSetupStatus(payload);
+			expect(status, name).not.toBeNull();
+			expect(status.checks.length, name).toBeGreaterThan(0);
+			expect(status.capabilities.map((cap) => cap.id)).toEqual(['discovery', 'delivery', 'sync_tracking', 'measurement']);
+			// Every category the server emits is a known group (none lands in "Other").
+			expect(groupChecks(status.checks).map((group) => group.id)).not.toContain('other');
+		}
+		expect(normalizeSetupStatus(COMPLETE).complete).toBe(true);
+		expect(normalizeSetupStatus(COMPLETE).actionCount).toBe(0);
+		expect(normalizeSetupStatus(INCOMPLETE).actionCount).toBe(4);
+	});
+
+	it('routes every ui_action the server emits to an in-app page', () => {
+		const actions = Object.values(fixtures)
+			.flatMap((payload) => payload.checks)
+			.map((check) => check.fix?.ui_action)
+			.filter(Boolean);
+		expect(new Set(actions)).toEqual(new Set(['allowlist_repositories', 'open_sources']));
+		for (const action of actions) expect(normalizeUiAction(action).href).toMatch(/^\//);
+		expect(normalizeUiAction('open_sources')).toEqual({ label: 'Open recommendation sources', href: '/sources' });
+	});
+
+	it('explains the credentials host checks and capability reasons', () => {
+		const delivery = (payload) => normalizeSetupStatus(payload).capabilities.find((cap) => cap.id === 'delivery');
+		expect(delivery(INCOMPLETE).reason).toBe('credentials_host_ambiguous');
+		expect(delivery(INCOMPLETE).reasonText).toContain('not bound to a host');
+		expect(delivery(HOST_MISMATCH).reasonText).toContain('matches no discovered repository');
+		expect(capabilityReason('something_new')).toBe('something_new');
+		const credentials = normalizeSetupStatus(INCOMPLETE).checks.find((check) => check.id === 'git_credentials');
+		expect(credentials.fix.snippet).toContain('stringData');
+	});
+
+	it('reads delivery paused by policy from the capabilities (no automation status needed)', () => {
+		const paused = normalizeSetupStatus(PAUSED);
+		expect(paused.deliveryPaused).toBe(true);
+		expect(capabilityDisplay(paused.capabilities.find((cap) => cap.id === 'delivery'))).toEqual({
+			label: 'paused',
+			tone: 'yellow',
+			icon: '⏸'
+		});
+		expect(normalizeSetupStatus(INCOMPLETE).deliveryPaused).toBe(false);
+		expect(capabilityDisplay({ state: 'active' }).label).toBe('active');
+		expect(capabilityDisplay({ state: 'pending', reason: 'controller_not_ready' }).tone).toBe('blue');
+	});
+
+	it('normalizes the suggestions and the allowlist answer', () => {
+		const list = normalizeSuggestions(SUGGESTIONS);
+		expect(list.map((item) => [item.repoUrl, item.providerType, item.allowlisted])).toEqual([
+			['https://github.com/acme/gitops.git', 'github', true],
+			['https://gitea.example.com/platform/apps.git', 'gitea', false]
+		]);
+		const result = normalizeAllowlistResult(ALLOWLIST, 1);
+		expect(result.snippet).toBe('automation:\n  repositoryAllowlist:\n    - platform/apps\n');
+		expect(result.message).toBe('1 repository was added to the allowlist.');
+		expect(normalizeAllowlistResult(undefined, 2).message).toBe('2 repositories were added to the allowlist.');
 	});
 });
 

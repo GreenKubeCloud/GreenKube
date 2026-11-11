@@ -12,7 +12,7 @@ Any tool, script or vendor can contribute advice to GreenKube by pushing signals
 | `complete` | Required. `true`: the batch is the client's full current advice and replaces every signal it pushed before. `false`: the batch adds or refreshes signals and keeps the others. |
 | `signals` | At most 5,000 signals. |
 
-A pushed signal is a `SourceSignal` without the fields the server computes (`schema_version`, `signal_id`, `source_id`, `provenance`, `fetched_at`): `target`, `capability`, `kind`, `proposal`, `algorithm`, and optionally `evidence`, `observed_window`, `confidence`, `source_estimate`, `source_ref`, `source_version`, `engine_family` and `raw` (trimmed to 8 KiB). `target.cluster_uid` may be left out; a signal about another cluster than this GreenKube's is rejected.
+A pushed signal is a `SourceSignal` without the fields the server computes (`schema_version`, `signal_id`, `source_id`, `provenance`, `fetched_at`): `target`, `capability`, `kind`, `proposal`, `algorithm`, and optionally `evidence`, `observed_window`, `confidence`, `source_estimate`, `source_ref`, `source_version`, `engine_family` and `raw` (trimmed to 8 KiB). A client counts as at most one consensus vote per target and finding, and `engine_family` cannot multiply its votes: a client that relays another engine's advice (for example `engine_family: vpa`) joins that engine's single vote. Pushed deletions never become recommendations on their own: another source must propose the deletion too. `target.cluster_uid` may be left out; a signal about another cluster than this GreenKube's is rejected.
 
 ## How it runs
 

@@ -299,7 +299,7 @@ Discovery also supplies live workload labels, rollout state, controller suspend/
 - `fail` rejects the plan with `policy_evidence_missing`.
 - `warn` allows it and adds a warning to `policy_result.warnings`.
 
-The chart defaults to `fail`.
+The default is `fail`, in the chart and in Python (an unset `missingEvidence` in `GITOPS_POLICY_JSON` fails closed too).
 
 ## Pull-request options
 
@@ -406,6 +406,8 @@ Labels, reviewers and the validation status are added after the PR is open and r
 
 The comment is posted once and then edited, never duplicated: it starts with the marker `<!-- greenkube:lifecycle v1 -->`, and GreenKube edits the marked comment that its own identity wrote. That identity is the token's user (`GET /user`) or, when the token may not read its own profile, the author of the PR, which GreenKube opened. A marked comment written by anyone else is never adopted or edited, so nobody can have GreenKube's status written into a comment they control, and a human comment is never overwritten. If the token changes to another user, the new user posts one new status comment and keeps it up to date. A body identical to the one last published costs no provider call. The sync step is posted as soon as the sync observer records it; applied, measuring and outcome are refreshed by the leader controller every 5 minutes for PRs merged within `lifecycleLookbackDays` (at most 25 comment writes per cycle). Outcomes come from change measurement; with change measurement off, from the interim verifier.
 
+**Newer advice available** (E7). A recommendation never changes under an open plan: a scan that computes different advice queues it as the next revision, and the plan keeps the revision it pinned. The status comment then says "Newer advice available" with the new values, after the merge and also **before** it: the leader controller checks each open plan PR for queued advice at most every 15 minutes (on the same cycle and the same 25-writes cap) and posts the status comment only when there is newer advice, so open PRs without news get no comment. Close the PR and open a new preview to apply the newer advice.
+
 Comments and statuses need a token that can write PR comments and commit statuses (GitHub: `Pull requests` and `Commit statuses` write; GitLab: `api`; Gitea: `write:repository` and `write:issue`, plus `read:user` so GreenKube can read its own identity; without it, the PR author is used).
 
 ## Provider API cost
@@ -506,7 +508,6 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 - The planned-change check for a later commit compares only the files the plan edited, parsed as YAML or JSON. A later commit that overrides the planned values from another file (for example a second Helm values file) is not detected at sync time; apply detection then never matches the live workload and the plan stays `synced`. Files that no longer parse, or whose base content no longer matches the plan, never confirm a later commit.
 - Gitea does not support draft PRs or team reviewers; GitLab does not support team reviewers. Configure only supported options. High-risk plans on Gitea are marked with a `WIP:` title instead of a draft.
 - CODEOWNERS team owners are requested only on GitHub; on GitLab and Gitea only user owners become reviewers (GitLab resolves usernames to numeric user IDs through its user API).
-- The "newer advice available" note of the status comment is a publisher hook; it shows only once recommendation revisions (E7) are wired to it.
-- If the CNI does not enforce NetworkPolicy, keep the renderer disabled unless you have independently validated an equivalent egress boundary.
+- If the CNI does not enforce NetworkPolicy, Kustomize and Helm plans carry the `renderer_egress_unenforced` warning until the egress boundary is enforced (a NetworkPolicy-enforcing CNI or `renderer.egressFirewall.enabled`). Raw-manifest plans never call the renderer.
 
 See the [API reference](api.md) for plan, GitOps, and webhook endpoints.

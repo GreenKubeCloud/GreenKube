@@ -18,7 +18,9 @@
 	>
 		<p>
 			<span class="font-semibold">Setup is not complete.</span>
-			{#if count > 0}
+			{#if status.deliveryPaused}
+				Delivery is paused by policy (automation.policy.pauseDelivery): no pull request is opened.
+			{:else if count > 0}
 				{count} {count === 1 ? 'check needs' : 'checks need'} your attention before GreenKube can open pull requests.
 			{:else}
 				Some checks are still pending.

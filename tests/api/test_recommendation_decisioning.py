@@ -203,6 +203,8 @@ class TestEligibilityWithAutomation:
     def automation_client(self, decision_client, monkeypatch):
         config = get_config().model_copy(update={"AUTOMATION_ENABLED": True, "AUTOMATION_MODE": "inline"})
         monkeypatch.setattr("greenkube.api.routers.recommendations.get_config", lambda: config)
+        # No live discovery evidence in this fixture; the default fails closed (D13).
+        monkeypatch.setenv("GITOPS_POLICY_JSON", '{"missingEvidence": "warn"}')
         gitops = MagicMock()
         gitops.list_workload_bindings = AsyncMock(
             return_value=[

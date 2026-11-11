@@ -82,7 +82,8 @@ def _matches(record: RecommendationRecord, capability: Optional[str], source: Op
         return False
     if source:
         own = str(getattr(record.source, "value", record.source) or "")
-        if source != own and source not in record.sources:
+        provenance = record.consensus.get("source_ids") if isinstance(record.consensus, dict) else None
+        if source != own and source not in record.sources and source not in (provenance or []):
             return False
     return True
 

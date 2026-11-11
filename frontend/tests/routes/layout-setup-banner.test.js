@@ -13,6 +13,9 @@ import { clearCsrfToken } from '$lib/api.js';
 import { currentUser } from '$lib/stores.js';
 import { SETUP_BANNER_DISMISSED_KEY, setupBannerDismissed, setupStatus } from '$lib/setup.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
+import INCOMPLETE_FIXTURE from '../fixtures/api/setup_status_incomplete.json';
+import PAUSED_FIXTURE from '../fixtures/api/setup_status_paused.json';
+import COMPLETE_FIXTURE from '../fixtures/api/setup_status_complete.json';
 
 const ADMIN = {
 	authenticated: true,
@@ -25,23 +28,8 @@ const ADMIN = {
 	csrf_token: 'csrf-1'
 };
 
-const INCOMPLETE = {
-	complete: false,
-	checks: [
-		{ id: 'prometheus', category: 'data_sources', title: 'Prometheus', status: 'ok', reason: '', fix: null, docs_url: '' },
-		{
-			id: 'git-credentials',
-			category: 'credentials',
-			title: 'Git credentials',
-			status: 'action_needed',
-			reason: 'No token for github.com.',
-			fix: { text: 'Create the greenkube-git-credentials Secret.' },
-			docs_url: ''
-		},
-		{ id: 'renderer', category: 'renderer', title: 'Renderer', status: 'blocked', reason: 'Not reachable.', fix: {}, docs_url: '' }
-	],
-	capabilities: {}
-};
+// Generated from the FastAPI app (tests/api/test_ui_contract_fixtures.py).
+const INCOMPLETE = INCOMPLETE_FIXTURE;
 
 function ok(body, status = 200) {
 	return { ok: true, status, json: () => Promise.resolve(body) };
@@ -89,7 +77,7 @@ describe('setup banner', () => {
 
 		const banner = await screen.findByTestId('setup-banner');
 		expect(banner).toHaveTextContent('Setup is not complete.');
-		expect(banner).toHaveTextContent('2 checks need your attention');
+		expect(banner).toHaveTextContent('4 checks need your attention');
 		expect(screen.getByRole('link', { name: 'Open the setup checklist' })).toHaveAttribute('href', '/setup');
 	});
 
@@ -103,8 +91,16 @@ describe('setup banner', () => {
 		expect(sessionStorage.getItem(SETUP_BANNER_DISMISSED_KEY)).toBe('true');
 	});
 
+	it('says when delivery is paused by policy', async () => {
+		installServer(PAUSED_FIXTURE);
+		render(Layout);
+
+		const banner = await screen.findByTestId('setup-banner');
+		expect(banner).toHaveTextContent('Delivery is paused by policy (automation.policy.pauseDelivery)');
+	});
+
 	it('is hidden once the setup is complete', async () => {
-		installServer({ ...INCOMPLETE, complete: true });
+		installServer(COMPLETE_FIXTURE);
 		render(Layout);
 
 		await waitFor(() => expect(get(setupStatus)?.complete).toBe(true));

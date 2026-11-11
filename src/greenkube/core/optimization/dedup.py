@@ -43,7 +43,7 @@ from greenkube.signals.consensus import (
     parse_policy,
 )
 from greenkube.signals.mapping import recommendation_from_signal, signal_from_recommendation
-from greenkube.signals.model import SourceSignal
+from greenkube.signals.model import Capability, SourceSignal
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -110,10 +110,14 @@ def entries_for_reports(reports: Sequence["SourceReport"], cluster_uid: str = "d
     A built-in source (VPA, native analyzers, the NodePool heuristic) reports
     v1 recommendations and their signals: each recommendation is paired with
     its signal (same v1 fingerprint) so the consensus keeps the source's
-    algorithm and engine family (``vpa-recommender``). A signal-only source
-    (third-party connector, pushed signals) contributes its signals alone,
-    under its own source id: it becomes a recommendation only through
-    consensus, and a plugin can never claim a built-in source's identity.
+    algorithm and engine family (``vpa-recommender``). The container-resources
+    signals of a built-in source that back no v1 recommendation (one per VPA
+    object: a Goldilocks VPA next to a user VPA, two VPAs that disagree, an
+    increase) vote too, without a v1 base, under the source's reconciliation
+    unit; their engine family keeps a VPA object seen twice to one vote. A
+    signal-only source (third-party connector, pushed signals) contributes its
+    signals alone, under its own source id: it becomes a recommendation only
+    through consensus, and a plugin can never claim a built-in source's identity.
     """
     entries: List[SignalEntry] = []
     for report in reports:
@@ -123,6 +127,7 @@ def entries_for_reports(reports: Sequence["SourceReport"], cluster_uid: str = "d
             for signal in report.signals:
                 by_fingerprint.setdefault((signal.provenance.legacy_fingerprint, signal.kind), signal)
             fetched_at = report.run.finished_at
+            paired: set = set()
             for rec in report.recommendations:
                 key = (legacy_fingerprint(rec), _type_value(rec))
                 signal = by_fingerprint.get(key)
@@ -130,11 +135,22 @@ def entries_for_reports(reports: Sequence["SourceReport"], cluster_uid: str = "d
                     signal = signal_from_recommendation(
                         rec, source_id=report.source_id, cluster_uid=cluster_uid, fetched_at=fetched_at
                     )
+                paired.add(signal.signal_id)
                 entries.append((signal, _source_value(rec) or unit, rec))
+            for signal in report.signals:
+                if signal.signal_id in paired or signal.capability not in _PER_OBJECT_CAPABILITIES:
+                    continue
+                paired.add(signal.signal_id)
+                entries.append((signal, unit, None))
             continue
         for signal in report.signals:
             entries.append((signal, report.source_id, None))
     return entries
+
+
+#: Capabilities whose built-in signals vote even without a v1 recommendation (per-VPA-object
+#: container advice). Advisory signals of other capabilities (NodePool policy, G5) stay signals.
+_PER_OBJECT_CAPABILITIES = frozenset({Capability.CONTAINER_REQUESTS, Capability.CONTAINER_LIMITS})
 
 
 def consensus_refiner(context: Any) -> Refine:
