@@ -208,6 +208,7 @@ data:
   RECOMMENDATION_VPA_ENABLED: {{ if hasKey . "vpaEnabled" }}{{ .vpaEnabled | toString | quote }}{{ else }}"true"{{ end }}
   RECOMMENDATION_KARPENTER_ENABLED: {{ if hasKey . "karpenterEnabled" }}{{ .karpenterEnabled | toString | quote }}{{ else }}"true"{{ end }}
   RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
+  RECOMMENDATION_CONSENSUS_POLICY: {{ .consensusPolicy | default "safest" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}

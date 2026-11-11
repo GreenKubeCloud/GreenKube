@@ -203,5 +203,5 @@ class TestNodePoolContract(SourceContract):
         assert signal.target.key() == "contract-cluster/karpenter.sh.NodePool/_/default"
         # v1 consumers keep seeing the historical source name and capability.
         [rec] = batch.recommendations
-        assert rec.source.value == "karpenter"
+        assert rec.source == "karpenter"
         assert rec.capability is not None and rec.capability.value == "node_pool"

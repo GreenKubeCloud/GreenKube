@@ -104,7 +104,7 @@ Each finished run records:
 
 | Field | Meaning |
 |---|---|
-| `recommendation_count` | Recommendations written by the run (an incomplete source's last known advice that was kept instead of a lower-priority replacement is not counted). |
+| `recommendation_count` | Recommendations written by the run (a last known record kept while one of its sources is incomplete is not counted). |
 | `sources` | Per-source health: `succeeded`, `incomplete`, `failed` (with `error`, e.g. `timeout`) or `unavailable`, plus the number of recommendations and the duration. |
 | `failed_source_count` | Sources that failed or returned a partial result. A run with some failed sources is still `succeeded` (degraded, with `error` naming them); it is `failed` only when every attempted source failed, or when loading metrics or persisting failed. |
 | `new_count`, `changed_count`, `resolved_count`, `unchanged_count` | Diff against the active set of the scanned scope just before the run (for a namespaced run, that namespace only; cluster-scoped output of such a run is not counted). *Changed* means the proposal changed (winning source, current or recommended requests, schedule, node); projected-savings drift alone is not a change. *Resolved* recommendations became `stale`. |
@@ -115,7 +115,7 @@ Each finished run records:
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
 2. `OptimizationEngine.run_scan()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers.
 3. Enabled **sources** ([Source SDK](sources.md)) run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes, a source failing three times in a row is skipped for 15 minutes, and each source's run and signals are recorded (`source_runs`, `source_signals`, `GET /api/v1/sources`). A source that raises or times out is recorded as `failed` and the scan continues with the others. Each native analyzer is its own source (`greenkube.rightsizing_cpu`...); together they form the v1 source `greenkube`, which is incomplete for the run when one of them fails, so none of its recommendations go stale. The native analyzers run (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
-4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
+4. Every source's **signals** are combined by **consensus** into one recommendation per target, capability and type (see [Consensus across sources](#consensus-across-sources)): no source's proposal is dropped unseen, every supporting source is recorded in `sources` and in the per-source spread, and third-party or pushed signals become recommendations only through this step.
 5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with its risk-adjusted expected value (EV, see below). Before persisting, the scan folds each source's measured track record into the score.
 6. Recommended CPU and memory requests are floored to configured minimums.
 7. The scan converts recommendations to `RecommendationRecord` objects, upserts active records, reconciles missing active records as stale (per source, see below) and records the run outcome.
@@ -124,7 +124,43 @@ The controller is the only process that runs and persists scans; the API reads p
 
 ## Sources, Evidence And Ranking
 
-**Sources.** Each recommendation carries `source` (`greenkube`, `vpa`, `karpenter`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` provenance list and a `capability` (used for arbitration). The VPA and Karpenter connectors are enabled by default (`RECOMMENDATION_VPA_ENABLED`, `RECOMMENDATION_KARPENTER_ENABLED`) and skip cleanly when their CRDs are absent; source precedence is controlled by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`).
+**Sources.** Each recommendation carries `source` (the source whose proposal the consensus chose: `greenkube`, `vpa`, `karpenter`, or the id of a signal-only source such as `krr` or `push:<client>`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` list of every supporting source (the chosen one first), a `consensus` block and a `capability`. The VPA and Karpenter connectors are enabled by default (`RECOMMENDATION_VPA_ENABLED`, `RECOMMENDATION_KARPENTER_ENABLED`) and skip cleanly when their CRDs are absent; source precedence is controlled by `RECOMMENDATION_SOURCE_PRIORITY` (default `vpa,karpenter,greenkube`): it decides the `priority` consensus policy and breaks ties under the others.
+
+### Consensus across sources
+
+Several sources can propose a change to the same target: VPA, KRR and GreenKube's own analyzer may each size the CPU request of one container. The engine groups their signals by target, capability and finding kind (a signal proposing CPU and memory votes in both groups) and the consensus engine (`greenkube.signals.consensus`) picks one value per group with the policy `RECOMMENDATION_CONSENSUS_POLICY`:
+
+| Policy | Rule |
+|---|---|
+| `safest` (default) | The least aggressive value: the highest proposed request, for decreases and increases alike. |
+| `median` | The median per resource (the upper median for an even count, so the value is one a source proposed). |
+| `weighted` (alias `trust-weighted`) | The upper median weighted by each source's measured realization rate (the Beta mean of its [track record](#sources-evidence-and-ranking)); without a track record every source weighs the same. |
+| `priority` (alias `source-priority`) | The highest `RECOMMENDATION_SOURCE_PRIORITY` source wins: the behavior before consensus. |
+
+Proposals that are not numeric (schedules, deletions, HPA settings) are compared by what they advise: the proposal supported by most independent sources wins, ties go to the higher-priority source.
+
+**Engine families.** Sources that run the same engine vote once. Goldilocks runs the VPA recommender, so Goldilocks and VPA on the same VPA object are one vote (`engine_family` `vpa`, from `algorithm.name = "vpa-recommender"`, the source id `goldilocks`, or an explicit `algorithm.params.engine_family`). Both stay listed as supporting sources.
+
+**Consensus block.** Each recommendation stores `consensus`: `policy`, the `resource` and `value` chosen, `chosen_from` (the sources proposing that value), `agreement` = 1 − (max − min) / max over the independent proposals (the share of independent support for non-numeric proposals), `contested`, its `reasons`, `spread` (per resource, `{source_id: value}`), `independent_votes` and every vote with its signal id and whether it was counted. Example with VPA 300m, KRR 250m and GreenKube 280m under `safest`: the value is 300m and the agreement 0.83 ("vpa 300m · krr 250m · greenkube 280m → 300m"). The block is also copied into the evidence (`evidence.consensus`).
+
+- **Agreement ≥ 0.8** between two or more independent sources raises the confidence by 10% (capped at 1), recorded as the `consensus_agreement` confidence factor.
+- **Contested** (agreement below 0.5, or sources proposing opposite directions) adds the eligibility warning `consensus_contested`, which names the disagreement: a contested recommendation is never approved automatically.
+
+**Projections.** When the chosen value is the chosen source's own proposal, its projection is kept. When the consensus restates a value on another source's recommendation (for example KRR's value on GreenKube's record), the change is projected again with the same Impact Model; a source's own savings claim is never copied, and a value that cannot be projected keeps no projection.
+
+**Signal-only sources.** A third-party connector or a pushed signal has no v1 recommendation of its own: it becomes a recommendation only through consensus, under its own source id, and goes through the same enrichment (evidence, risk, eligibility) as any other recommendation.
+
+**No empty changes.** A request recommendation whose consolidated value equals the current request is not emitted. Under `safest`, a source that reports the current value for a container (KRR reports a value for every container) therefore means "keep it": there is no recommendation, and reconciliation handles an existing record as usual. The same applies when the minimum floor (`RECOMMENDATION_MIN_CPU_MILLICORES`, `RECOMMENDATION_MIN_MEMORY_BYTES`) lands on the current request.
+
+### Identity and revisions
+
+Every recommendation has a cluster-qualified identity, `fingerprint_v4` = SHA-256 of the cluster (`CLUSTER_NAME`), the target key (`cluster/group.Kind/namespace/name[/container]`), the capability and the finding kind. The finding kind is part of the identity because CPU and memory requests of one container are still separate records sharing the `container_requests` capability; once one record carries both (roadmap H1) the identity reduces to the target and the capability. The fingerprint does not depend on the source or on the proposed value.
+
+`revision` starts at 1 and increases each time the consolidated proposal changes (the proposed values, schedule or typed proposal, not the observed requests, projections or wording). The replaced proposal is kept in `recommendation_revisions` (`superseded`, with the proposal, the consensus and a v1 snapshot). The 20 most recent superseded revisions of a recommendation are kept, plus any revision a plan pins; older ones are pruned.
+
+A recommendation never changes under an open plan (action status `plan_ready`, `pr_open`, `merged` or `sync_pending`, or the `pr_open` status): a scan that computes different advice stores it as the next revision with state `queued`, and the record keeps the revision the plan implements. Each persisted plan pins `(recommendation_id, revision)` (`recommendation_plan_pins`); the plan's pull-request status comment then shows "Newer advice available" with the newer revision and its values. Once the plan is closed, the next scan promotes the queued advice to the record. A scan that still sees the target refreshes the frozen record's `expires_at`, so it does not expire while its plan is open. The revising write is conditional on no plan being open, so a plan opened between the scan's read and its write still freezes the record. `GET /api/v2/recommendations/{id}` lists the revisions and `queued_revision`.
+
+Rows written before revisions (migration `0068`) start at revision 1; the scan fills their `target`, `proposal` and `fingerprint_v4` from their flat columns, and readers derive the same values meanwhile.
 
 **Evidence.** Every recommendation embeds a `RecommendationEvidence` block: observation window and coverage, current vs proposed requests, CPU/memory distribution (avg, p50, p90, p95, p99, max), restart count, OOM kills (`oom_events`) and CPU throttling ratio (`cpu_throttling_ratio`) over the lookback (from the scan's usage summary; `null` when no source reported them), expected savings and method, confidence with factors, risk level with factors, rollback conditions, a `patch` action plan and `expires_at`. Retrieve the full block from `GET /api/v1/recommendations/{id}`; it is also rendered in the dashboard's evidence panel.
 
@@ -282,9 +318,15 @@ Ignored records are left untouched by normal upsert so a user decision is not ov
 
 At the end of each scan, reconciliation compares the latest generated identities with currently active records. An active record missing from the generated set becomes `stale` **only when every source that supported it** (its `sources` provenance, or its `source` for older rows) completed the scan. A source that failed, timed out, was unavailable or reported an incomplete result never causes staleness and never blocks persistence of the other sources: its previous recommendations stay active as "last known" until it completes again or their TTL expires. Recommendations from a source that is no longer configured reconcile normally.
 
-When the arbitration winner of an active recommendation (for example VPA) did not complete, a lower-priority source re-emitting the same target (for example native rightsizing) does not overwrite the last known advice, so proposals do not flap during a transient connector outage.
+When a source that supported an active recommendation (for example KRR) did not complete and is missing from the new consensus, its last known vote (kept in the record's `consensus.votes`) still counts, so the consensus does not flap during a transient connector outage, but it never holds back safer advice. A higher request is always the safer one (a smaller decrease, or an increase that protects reliability):
 
-A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and keep suppressing the native replacement for their targets, until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
+- when the new proposal of the remaining sources is at least the last known one (for example native rightsizing now asks for 400m, or for an increase, where the record said 280m), the new proposal is written;
+- under `safest`, when every incomplete supporter's last known value is at most the new proposal, `safest` of the new and last known votes is the new proposal, which is written;
+- otherwise (the new proposal is more aggressive than what the last known votes support, or the proposal is not numeric) the last known record stays until the source completes again or the record expires.
+
+A record written this way keeps the incomplete sources in `sources` and their last known values in `consensus.last_known` (`{source_id: value}`).
+
+A source that stays unavailable is treated the same way. For example, if the VPA CRD is removed while `RECOMMENDATION_VPA_ENABLED=true`, the VPA recommendations stay active, and their last known VPA votes keep counting in the consensus for their targets (a more aggressive native value does not replace them), until `RECOMMENDATION_TTL_DAYS` expires them. Disable the source when you remove its backend so its recommendations reconcile on the next scan. The run's `sources` list shows the source as `unavailable` meanwhile.
 
 Connectors that degrade gracefully (return a partial list instead of raising) report an incomplete result by setting `last_collect_complete = False` on the source instance during `collect()`. The engine resets the flag to `True` before every `collect()` call, so a connector only sets it when the current call is partial.
 
@@ -460,6 +502,7 @@ Recommendation behavior is configured through environment variables in `src/gree
 | `RECOMMENDATION_VPA_ENABLED` | `config.recommendations.vpaEnabled` | `true` (CRD auto-detected) |
 | `RECOMMENDATION_KARPENTER_ENABLED` | `config.recommendations.karpenterEnabled` | `true` (CRD auto-detected) |
 | `RECOMMENDATION_SOURCE_PRIORITY` | `config.recommendations.sourcePriority` | `vpa,karpenter,greenkube` |
+| `RECOMMENDATION_CONSENSUS_POLICY` | `config.recommendations.consensusPolicy` | `safest` (`median`, `weighted`, `priority`) |
 | `RECOMMENDATION_TTL_DAYS` | `config.recommendations.ttlDays` | `14` |
 | `RECOMMENDATION_RANKING_PROFILE` | `config.recommendations.rankingProfile` | `balanced` |
 | `RECOMMENDATION_RANKING_WEIGHTS` | `config.recommendations.rankingWeights` | `""` (deprecated, ignored) |
@@ -498,7 +541,9 @@ The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes 
 | Analyzers | `src/greenkube/core/optimization/analyzers/` |
 | Source SDK (signals, runner, registry, contract checks) | `src/greenkube/signals/`, `src/greenkube/api/routers/sources.py`, `src/greenkube/storage/{sqlite,postgres}/signal_repository.py` |
 | Sources (native, VPA, NodePool) | `src/greenkube/core/optimization/providers/`, `registry.py` |
-| Dedup / arbitration / provenance | `src/greenkube/core/optimization/dedup.py` |
+| Consensus engine | `src/greenkube/signals/consensus.py` |
+| Consolidation, dedup, provenance | `src/greenkube/core/optimization/dedup.py` |
+| Recommendation v2, revisions, plan pins | `src/greenkube/models/recommendation_v2.py`, `src/greenkube/storage/recommendation_revisions.py`, `src/greenkube/core/recommendation_revisions.py`, `src/greenkube/api/routers/recommendations_v2.py` |
 | Evidence, risk, ranking | `src/greenkube/core/optimization/evidence.py`, `risks.py`, `scoring.py`, `enrich.py` |
 | Lifecycle, apply detection, verification | `src/greenkube/core/optimization/lifecycle.py`, `applied_detector.py`, `verifier.py` |
 | VPA discovery | `src/greenkube/collectors/vpa_collector.py`, `src/greenkube/utils/k8s_quantities.py` |

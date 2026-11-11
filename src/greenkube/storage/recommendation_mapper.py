@@ -14,10 +14,10 @@ from greenkube.models.metrics import (
     EffortLevel,
     RecommendationCapability,
     RecommendationRecord,
-    RecommendationSource,
     RecommendationStatus,
     RecommendationType,
     RiskLevel,
+    coerce_recommendation_source,
 )
 
 
@@ -74,11 +74,9 @@ def sources_from_json(value: Any) -> List[str]:
     return []
 
 
-def _as_source(value: Any) -> RecommendationSource:
-    try:
-        return RecommendationSource(value)
-    except ValueError:
-        return RecommendationSource.GREENKUBE
+def _as_source(value: Any) -> Any:
+    """A built-in source, or the id of a signal-only source chosen by consensus (E6)."""
+    return coerce_recommendation_source(value)
 
 
 def _as_capability(value: Any) -> Optional[RecommendationCapability]:
@@ -197,7 +195,16 @@ RECORD_COLUMNS: tuple = (
     "savings_realized",
     "created_at",
     "updated_at",
+    "target",
+    "proposal",
+    "consensus",
+    "revision",
+    "fingerprint_v4",
 )
+
+#: Recommendation v2 columns refreshed with the proposal (E4, E6). ``revision``
+#: is only ever changed by the repository's revision logic (E7).
+V2_UPSERT_COLUMNS: tuple = ("target", "proposal", "consensus", "fingerprint_v4")
 
 #: Columns refreshed in place when an active recommendation is upserted.
 ACTIVE_UPSERT_COLUMNS: tuple = (
@@ -236,7 +243,7 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "requires_restart",
     "impact",
     "value_score",
-)
+) + V2_UPSERT_COLUMNS
 
 
 def record_values(record: RecommendationRecord, encode_datetime=lambda value: value) -> dict:
@@ -313,6 +320,11 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "savings_realized": record.savings_realized,
         "created_at": _dt(record.created_at),
         "updated_at": _dt(record.updated_at),
+        "target": to_json(record.target),
+        "proposal": to_json(record.proposal),
+        "consensus": to_json(record.consensus),
+        "revision": record.revision,
+        "fingerprint_v4": record.fingerprint_v4,
     }
 
 
@@ -381,4 +393,14 @@ def row_to_record(row: Any) -> RecommendationRecord:
         savings_realized=_as_bool(_get(row, "savings_realized")),
         created_at=_as_datetime(row["created_at"]) or datetime.now(timezone.utc),
         updated_at=_as_datetime(_get(row, "updated_at")),
+        target=_as_dict(_get(row, "target")),
+        proposal=_as_dict(_get(row, "proposal")),
+        consensus=_as_dict(_get(row, "consensus")),
+        revision=max(1, int(_get(row, "revision", 1) or 1)),
+        fingerprint_v4=_get(row, "fingerprint_v4"),
     )
+
+
+def _as_dict(value: Any) -> Optional[dict]:
+    parsed = from_json(value)
+    return parsed if isinstance(parsed, dict) else None

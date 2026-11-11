@@ -123,3 +123,5 @@ class RecommendationEvidence(BaseModel):
     rollback_conditions: List[RollbackCondition] = Field(default_factory=list)
     expires_at: Optional[datetime] = None
     generated_by: str = "greenkube"
+    #: Consensus across sources (roadmap E6): policy, agreement, contested flag and per-source spread.
+    consensus: Optional[dict[str, Any]] = None

@@ -65,7 +65,7 @@ class TestKarpenterSource:
         rec = recs[0]
         assert rec.type == RecommendationType.OVERPROVISIONED_NODE
         assert rec.capability == RecommendationCapability.NODE_POOL
-        assert rec.source.value == "karpenter"
+        assert rec.source == "karpenter"
         assert rec.source_ref == "default"
         assert rec.target_node == "nodepool/default"
         assert rec.potential_savings_cost is not None

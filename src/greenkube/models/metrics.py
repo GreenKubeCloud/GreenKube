@@ -6,11 +6,12 @@ single source of truth for our data structures, ensuring type safety and
 consistency across all modules (collectors, calculators, reporters).
 """
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from greenkube.gitops.contracts import ActionPlanV3
 from greenkube.models.evidence import RecommendationEvidence
@@ -128,6 +129,33 @@ class RecommendationSource(str, Enum):
     GREENKUBE = "greenkube"
     VPA = "vpa"
     KARPENTER = "karpenter"
+
+
+#: Source ids a recommendation may carry besides the built-in ones (``krr``, ``acme.krr``, ``push:ci``).
+_SOURCE_ID = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
+
+
+def coerce_recommendation_source(value: Any) -> Any:
+    """A built-in source as :class:`RecommendationSource`, another valid source id as text.
+
+    Signal-only sources (third-party connectors, pushed signals) become
+    recommendations through consensus (roadmap E6) and keep their own id;
+    anything else falls back to ``greenkube``.
+    """
+    if isinstance(value, RecommendationSource):
+        return value
+    text = str(getattr(value, "value", value) or "").strip()
+    try:
+        return RecommendationSource(text)
+    except ValueError:
+        pass
+    lowered = text.lower()
+    return lowered if _SOURCE_ID.match(lowered) else RecommendationSource.GREENKUBE
+
+
+def source_text(value: Any) -> str:
+    """The text of a recommendation source (enum or plain id)."""
+    return str(getattr(value, "value", value) or "")
 
 
 class RecommendationCapability(str, Enum):
@@ -342,13 +370,17 @@ class Recommendation(BaseModel):
     cron_schedule: Optional[str] = Field(None, description="Suggested cron schedule for off-peak scaling.")
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
     # Source and provenance
-    source: RecommendationSource = Field(
-        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    source: Union[RecommendationSource, str] = Field(
+        RecommendationSource.GREENKUBE,
+        description=(
+            "Source whose proposal the consensus chose: a built-in source (greenkube, vpa, karpenter) or the "
+            "source id of a signal-only source (krr, kubecost, push:<client>)."
+        ),
     )
     source_ref: Optional[str] = Field(None, description="Connector-specific reference (e.g. '<namespace>/<vpa-name>').")
     sources: List[str] = Field(
         default_factory=list,
-        description="All sources that observed this issue (provenance, highest priority first).",
+        description="All sources that support this recommendation (the chosen source first).",
     )
     superseded_by: Optional[str] = Field(
         None, description="Source that won arbitration for this capability, when it differs from source."
@@ -397,6 +429,20 @@ class Recommendation(BaseModel):
             "delivery_modes, blockers [{code, message, fix}] and warnings. Never persisted."
         ),
     )
+    # Recommendation v2 (roadmap E4, E6)
+    fingerprint_v4: Optional[str] = Field(
+        None, description="Cluster-qualified identity: sha256(cluster_uid, target.key(), capability, kind)."
+    )
+    target: Optional[dict] = Field(None, description="Canonical TargetRef of the recommendation (v2).")
+    proposal: Optional[dict] = Field(None, description="Consolidated typed proposal (v2); the flat fields mirror it.")
+    consensus: Optional[dict] = Field(
+        None, description="How the consolidated proposal was chosen across sources (policy, agreement, spread)."
+    )
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_source(cls, value: Any) -> Any:
+        return coerce_recommendation_source(value)
 
     @model_validator(mode="after")
     def _derive_capability(self) -> "Recommendation":
@@ -436,9 +482,22 @@ class RecommendationRecord(BaseModel):
     target_node: Optional[str] = Field(None, description="Target node for node-level recommendations.")
     identity_version: int = Field(3, description="Identity algorithm version.")
     fingerprint: Optional[str] = Field(None, description="Stable v2 recommendation identity fingerprint.")
+    # Recommendation v2 (roadmap E4, E6, E7)
+    fingerprint_v4: Optional[str] = Field(
+        None, description="Cluster-qualified identity: sha256(cluster_uid, target.key(), capability, kind)."
+    )
+    revision: int = Field(
+        1, ge=1, description="Revision of the consolidated proposal; increases when the proposal changes (E7)."
+    )
+    target: Optional[dict] = Field(None, description="Canonical TargetRef of the recommendation (v2).")
+    proposal: Optional[dict] = Field(None, description="Consolidated typed proposal (v2); the flat fields mirror it.")
+    consensus: Optional[dict] = Field(
+        None, description="How the consolidated proposal was chosen across sources (policy, agreement, spread)."
+    )
     # Source and provenance
-    source: RecommendationSource = Field(
-        RecommendationSource.GREENKUBE, description="Connector that produced this recommendation."
+    source: Union[RecommendationSource, str] = Field(
+        RecommendationSource.GREENKUBE,
+        description="Source whose proposal the consensus chose (built-in source or signal-only source id).",
     )
     source_ref: Optional[str] = Field(None, description="Connector-specific reference.")
     sources: List[str] = Field(default_factory=list, description="All sources that observed this issue.")
@@ -522,6 +581,11 @@ class RecommendationRecord(BaseModel):
     )
     updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
 
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_source(cls, value: Any) -> Any:
+        return coerce_recommendation_source(value)
+
     @model_validator(mode="after")
     def _derive_capability(self) -> "RecommendationRecord":
         if self.capability is None:
@@ -578,6 +642,10 @@ class RecommendationRecord(BaseModel):
             recommended_memory_request_bytes=rec.recommended_memory_request_bytes,
             cron_schedule=rec.cron_schedule,
             target_node=rec.target_node,
+            fingerprint_v4=rec.fingerprint_v4,
+            target=dict(rec.target) if rec.target is not None else None,
+            proposal=dict(rec.proposal) if rec.proposal is not None else None,
+            consensus=dict(rec.consensus) if rec.consensus is not None else None,
             source=rec.source,
             source_ref=rec.source_ref,
             sources=list(rec.sources),

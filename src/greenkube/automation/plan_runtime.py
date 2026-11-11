@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -110,6 +111,8 @@ from greenkube.storage.base_plan_operation_repository import PlanOperationReposi
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
 from greenkube.utils.time import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SUPPORTED_PROVIDER_TYPES = frozenset({"github", "gitlab", "gitea"})
@@ -414,12 +417,13 @@ class RuntimePlanService:
             )
         if values_mapping is not None:
             source = _with_one_time_helm_values_mapping(action, source, values_mapping)
+        revisions = await self._recommendation_revisions(action.recommendation_ids)
 
         try:
             snapshot = await self._snapshot_resolver.create_snapshot(source)
             try:
                 try:
-                    return await self._plan_service.create_plan(
+                    plan = await self._plan_service.create_plan(
                         action,
                         source,
                         snapshot,
@@ -427,6 +431,8 @@ class RuntimePlanService:
                         change_set_id=change_set_id,
                         actor=actor,
                     )
+                    await self._pin_revisions(plan, revisions)
+                    return plan
                 except AutomationPlanError as exc:
                     if exc.code is not AutomationErrorCode.NEEDS_CHART_MAPPING or exc.mapping_options is not None:
                         raise
@@ -446,6 +452,29 @@ class RuntimePlanService:
                 AutomationErrorCode.PROVIDER_NOT_READY,
                 "the repository snapshot is unavailable or exceeds configured planning limits",
             ) from exc
+
+    async def _recommendation_revisions(self, recommendation_ids: Sequence[int]) -> dict[int, int]:
+        """Revision of each recommendation the plan is built from (E7)."""
+        revisions: dict[int, int] = {}
+        for recommendation_id in recommendation_ids:
+            record = await self._recommendation_repository.get_recommendation_by_id(recommendation_id)
+            if record is not None:
+                revisions[recommendation_id] = int(getattr(record, "revision", 1) or 1)
+        return revisions
+
+    async def _pin_revisions(self, plan: Plan, revisions: Mapping[int, int]) -> None:
+        """Pin ``(recommendation_id, revision)`` on the plan; newer advice is then reported on its PR."""
+        pin = getattr(self._recommendation_repository, "pin_plan_revisions", None)
+        if not callable(pin) or not revisions:
+            return
+        try:
+            await cast(Any, pin)(
+                plan.plan_id, {rec_id: revisions[rec_id] for rec_id in plan.recommendation_ids if rec_id in revisions}
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not pin the recommendation revisions of plan %s (%s).", plan.plan_id, type(exc).__name__
+            )
 
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune expired rendered content and terminal outbox rows while retaining plan metadata."""

@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Collection, List, Optional
+from typing import Any, Collection, Dict, List, Mapping, Optional
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -1014,6 +1014,29 @@ class RecommendationRepository(ABC):
             A RecommendationSavingsSummary with totals and per-namespace breakdown.
         """
         pass
+
+    # Recommendation revisions (roadmap E4, E7). SQL repositories implement
+    # these; the defaults keep other implementations (test fakes) working.
+
+    async def get_revisions(self, rec_id: int) -> List[Any]:
+        """``RecommendationRevision`` rows the record no longer carries, newest first."""
+        return []
+
+    async def get_queued_revisions(self, rec_ids: Collection[int]) -> Dict[int, Any]:
+        """The queued ``RecommendationRevision`` of each record waiting behind an open plan."""
+        return {}
+
+    async def pin_plan_revisions(self, plan_id: str, pins: Mapping[int, int]) -> Dict[int, int]:
+        """Record ``{recommendation_id: revision}`` implemented by a plan; the first pin wins."""
+        return dict(pins)
+
+    async def get_plan_pins(self, plan_id: str) -> Dict[int, int]:
+        """``{recommendation_id: revision}`` pinned by a plan."""
+        return {}
+
+    async def backfill_v2_fields(self, cluster_uid: str, batch_size: int = 500) -> int:
+        """Fill the v2 columns of rows written before them; returns the number of rows filled."""
+        return 0
 
     async def get_applied_recommendations_stats(self) -> List[dict]:
         """Return aggregated applied-recommendation stats for Prometheus gauge updates.

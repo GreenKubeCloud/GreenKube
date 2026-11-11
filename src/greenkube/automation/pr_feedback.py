@@ -359,6 +359,12 @@ def create_pull_request_feedback_publisher(
         from greenkube.storage.change_repository import ChangeRepository
 
         change_repository = ChangeRepository(db_manager)
+    newer_advice = None
+    if recommendation_repository is not None:
+        # Recommendation revisions newer than the plan's pin (E7).
+        from greenkube.core.recommendation_revisions import newer_advice_hook
+
+        newer_advice = newer_advice_hook(recommendation_repository)
     return PullRequestFeedbackPublisher(
         pull_request_repository=pull_request_repository,
         plan_repository=plan_repository,
@@ -366,5 +372,6 @@ def create_pull_request_feedback_publisher(
         recommendation_repository=recommendation_repository,
         change_repository=change_repository,
         settings=PullRequestRenderSettings.from_config(config),
+        newer_advice=newer_advice,
         lookback_days=int(getattr(config, "GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS", DEFAULT_FEEDBACK_LOOKBACK_DAYS)),
     )

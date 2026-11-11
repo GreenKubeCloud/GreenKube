@@ -205,6 +205,10 @@ CODES: Dict[str, Tuple[str, str]] = {
         "This change increases resources to protect reliability; it costs money.",
         "Review the incident risk it avoids against its cost.",
     ),
+    "consensus_contested": (
+        "Sources disagree on this change: it is never approved automatically.",
+        "Review the per-source spread in the evidence before opening the pull request.",
+    ),
 }
 
 
@@ -561,6 +565,14 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
     value = getattr(record, "value", None)
     if isinstance(value, Mapping) and value.get("lane") == "reliability":
         warnings.append(_entry("reliability_change"))
+    consensus = getattr(record, "consensus", None)
+    if isinstance(consensus, Mapping) and consensus.get("contested"):
+        # Contested advice blocks auto-approval (E6); a human can still open the PR.
+        reasons = "; ".join(str(reason) for reason in consensus.get("reasons") or [])
+        message = (
+            f"Sources disagree on this change ({reasons}): it is never approved automatically." if reasons else None
+        )
+        warnings.append(_entry("consensus_contested", message))
 
     blockers = _dedupe(blockers)
     can_open_pr = not blockers

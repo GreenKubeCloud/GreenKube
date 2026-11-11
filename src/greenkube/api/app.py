@@ -51,6 +51,7 @@ from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
 from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plans as plans_router
+from greenkube.api.routers import recommendations_v2 as recommendations_v2_router
 from greenkube.api.routers import signals as signals_router
 from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
@@ -367,6 +368,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])
     app.include_router(webhooks_router.router, prefix="/api/v1", tags=["Webhooks"])
     app.include_router(changes_router.router, prefix="/api/v2", tags=["Changes"])
+    app.include_router(recommendations_v2_router.router, prefix="/api/v2", tags=["Recommendations v2"])
     app.include_router(auth_router.router, prefix="/api/v1", tags=["Authentication"])
 
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)

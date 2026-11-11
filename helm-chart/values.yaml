@@ -511,6 +511,10 @@ config:
     karpenterEnabled: true
     # Source precedence used to arbitrate conflicts (highest priority first).
     sourcePriority: vpa,karpenter,greenkube
+    # How the proposals of several sources on one target are combined:
+    # safest (least aggressive value, default) | median | weighted (median
+    # weighted by each source's measured track record) | priority (sourcePriority wins).
+    consensusPolicy: safest
     # --- Ranking & review ---
     # Time-to-live of a recommendation before it is considered expired (days).
     ttlDays: 14

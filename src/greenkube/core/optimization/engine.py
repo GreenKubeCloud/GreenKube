@@ -19,6 +19,7 @@ recommendations stale. Each source's run and signals are recorded in
 
 import asyncio
 import logging
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
@@ -26,12 +27,21 @@ from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tup
 from greenkube.core.optimization.actions import build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.context_builder import ContextBuilder
-from greenkube.core.optimization.dedup import finalize_recommendations
+from greenkube.core.optimization.dedup import (
+    RESOURCE_FIELDS,
+    apply_consensus_assessment,
+    consensus_policy,
+    consensus_refiner,
+    entries_for_reports,
+    finalize_entries,
+    track_record_weights,
+)
 from greenkube.core.optimization.enrich import enrich_recommendations, rescore_with_track_record
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
-from greenkube.core.optimization.registry import build_signal_sources, cluster_uid, parse_source_priority
-from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff
+from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
+from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
+from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
 from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
 from greenkube.models.optimization_run import (
     OptimizationRun,
@@ -41,7 +51,9 @@ from greenkube.models.optimization_run import (
     SourceRunOutcome,
     SourceRunStatus,
 )
+from greenkube.models.recommendation_v2 import with_v2_fields
 from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
+from greenkube.signals.consensus import KIND_REQUEST_RESOURCES, ConsensusPolicy
 from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
 from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 
@@ -57,6 +69,9 @@ logger = logging.getLogger(__name__)
 SOURCE_PROBE_TIMEOUT_SECONDS = 30.0
 #: Bound on one source's collection; a hung connector must not stall the scan.
 SOURCE_COLLECT_TIMEOUT_SECONDS = 300.0
+
+#: Cluster uids whose v2 backfill completed, per recommendation repository (E4).
+_V2_BACKFILLED: "weakref.WeakKeyDictionary[object, set]" = weakref.WeakKeyDictionary()
 
 
 @dataclass
@@ -162,14 +177,25 @@ class OptimizationEngine:
             optimization=context,
         )
 
-    async def collect(self, context: OptimizationContext) -> GenerationResult:
-        """Runs every source in isolation and finalizes the combined output."""
+    async def collect(
+        self, context: OptimizationContext, track_record: Optional["TrackRecordBook"] = None
+    ) -> GenerationResult:
+        """Runs every source in isolation and builds one recommendation per target by consensus (E6).
+
+        ``track_record`` weighs the sources under the ``weighted`` policy (I3);
+        without it every source weighs the same.
+        """
         previous = await self._previous_source_runs()
         reports = await self.runner.run_all(self.sources, self.collect_context(context), previous)
-        recs: List[Recommendation] = [rec for report in reports for rec in report.recommendations]
-        finalized = finalize_recommendations(recs, self.config)
+        finalized = finalize_entries(
+            entries_for_reports(reports, self.cluster_uid),
+            self.config,
+            refine=consensus_refiner(context),
+            weight_for=track_record_weights(track_record),
+        )
+        enriched = apply_consensus_assessment(enrich_recommendations(finalized, context, self.config), self.config)
         return GenerationResult(
-            enrich_recommendations(finalized, context, self.config),
+            enriched,
             legacy_outcomes(reports),
             reports,
         )
@@ -256,7 +282,10 @@ class OptimizationEngine:
                 len(context.metrics) + len(context.container_metrics),
                 _peak_resident_memory_bytes(),
             )
-            generation = await self.collect(context)
+            track_record = None
+            if consensus_policy(self.config) is ConsensusPolicy.WEIGHTED:
+                track_record = await load_track_record(reco_repo)
+            generation = await self.collect(context, track_record)
             outcomes = generation.source_outcomes
             reports = generation.source_reports
             await self.record_source_runs(reports, run)
@@ -379,8 +408,9 @@ class OptimizationEngine:
         """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
 
         Returns the diff against the active set of the scanned scope and the
-        recommendations actually written (an incomplete winner's last known
-        advice is kept instead of a lower-priority replacement). Raises on
+        recommendations actually written (a last known record is kept instead
+        of a more aggressive proposal while one of its sources is incomplete,
+        see :meth:`_preserve_last_known`). Raises on
         repository errors so the run can be recorded as failed.
         """
         # Expire actives whose TTL elapsed before reconciling so they are not
@@ -392,16 +422,15 @@ class OptimizationEngine:
         except Exception as e:
             logger.warning("Failed to expire overdue recommendations: %s", e)
 
+        await self._backfill_v2_fields(reco_repo)
         previous = await self._active_snapshot(reco_repo, namespace)
         kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
-        records = [RecommendationRecord.from_recommendation(r) for r in kept]
+        records = [self._record(r) for r in kept]
         if records:
             await reco_repo.upsert_recommendations(records)
             await self._attach_persisted_actions(kept, reco_repo, namespace)
             action_records = [
-                RecommendationRecord.from_recommendation(recommendation)
-                for recommendation in kept
-                if recommendation.action is not None
+                self._record(recommendation) for recommendation in kept if recommendation.action is not None
             ]
             if action_records:
                 await reco_repo.upsert_recommendations(action_records)
@@ -414,6 +443,32 @@ class OptimizationEngine:
         # cluster-scoped record it emits is outside the baseline, not "new".
         in_scope = records if namespace is None else [record for record in records if record.namespace == namespace]
         return compute_diff(previous, in_scope, incomplete_sources), kept
+
+    def _record(self, recommendation: Recommendation) -> RecommendationRecord:
+        """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
+        return with_v2_fields(RecommendationRecord.from_recommendation(recommendation), self.cluster_uid)
+
+    async def _backfill_v2_fields(self, reco_repo: "RecommendationRepository") -> None:
+        """Give rows written before Recommendation v2 their v2 columns (once per repository and cluster).
+
+        The engine writes the v2 columns with every record, so one successful
+        pass per process is enough; rows whose v2 view cannot be derived are
+        not scanned again on every scan.
+        """
+        try:
+            done = _V2_BACKFILLED.setdefault(reco_repo, set())
+        except TypeError:
+            done = set()
+        if self.cluster_uid in done:
+            return
+        try:
+            filled = await reco_repo.backfill_v2_fields(self.cluster_uid)
+        except Exception as exc:
+            logger.warning("Could not backfill the v2 recommendation columns (%s).", type(exc).__name__)
+            return
+        done.add(self.cluster_uid)
+        if isinstance(filled, int) and filled:
+            logger.info("Backfilled the v2 columns of %d recommendation(s).", filled)
 
     @staticmethod
     async def _active_snapshot(
@@ -435,35 +490,48 @@ class OptimizationEngine:
         previous: List[RecommendationRecord],
         incomplete_sources: FrozenSet[str],
     ) -> List[Recommendation]:
-        """Keep an incomplete higher-priority source's last known advice.
+        """Account for the last known vote of a supporting source that is incomplete (E6, E8).
 
-        When the arbitration winner of an active recommendation did not
-        complete this run, a lower-priority source re-emitting the same target
-        must not overwrite it; otherwise the advice would flap between
-        connectors on every transient outage.
+        When a source that supported an active recommendation did not complete
+        this run, it is missing from the new consensus. Its last known
+        proposal (stored in the record's consensus votes) still counts, so the
+        advice does not flap with every transient outage of one connector, but
+        it never holds back a safer value:
+
+        * the new proposal is at least the previous one (a higher request, or
+          an increase replacing a decrease): the new recommendation is written;
+        * under ``safest``, every incomplete supporter's last known value is at
+          most the new proposal: ``safest`` of the new and last known votes is
+          the new proposal, which is written;
+        * otherwise (the new proposal is more aggressive than what the last
+          known votes support, or a non-numeric proposal) the last known
+          record stays until that source completes again (or expires).
+
+        A written recommendation keeps the incomplete sources among its
+        supporting sources, with their last known values in ``consensus.last_known``.
         """
         if not incomplete_sources or not previous:
             return recommendations
-        priorities: Dict[str, int] = parse_source_priority(getattr(self.config, "RECOMMENDATION_SOURCE_PRIORITY", None))
         previous_by_fp = {record.fingerprint: record for record in previous if record.fingerprint}
+        policy = consensus_policy(self.config)
         kept: List[Recommendation] = []
         for recommendation in recommendations:
             fingerprint = RecommendationRecord.from_recommendation(recommendation).fingerprint
             before = previous_by_fp.get(fingerprint) if fingerprint else None
             if before is not None:
-                old_source = _enum_text(before.source)
-                new_source = _enum_text(recommendation.source)
-                if (
-                    old_source != new_source
-                    and old_source in incomplete_sources
-                    and priorities.get(old_source, 0) > priorities.get(new_source, 0)
-                ):
-                    logger.info(
-                        "Keeping last known '%s' recommendation %s while that source is incomplete.",
-                        old_source,
-                        fingerprint,
-                    )
-                    continue
+                previous_support = supporting_sources(before.source, before.sources)
+                current_support = supporting_sources(recommendation.source, recommendation.sources)
+                missing = sorted((previous_support - current_support) & set(incomplete_sources))
+                if missing:
+                    merged = _with_last_known_votes(recommendation, before, missing, policy)
+                    if merged is None:
+                        logger.info(
+                            "Keeping last known recommendation %s while %s is incomplete.",
+                            fingerprint,
+                            ", ".join(missing),
+                        )
+                        continue
+                    recommendation = merged
             kept.append(recommendation)
         return kept
 
@@ -520,16 +588,83 @@ class OptimizationEngine:
             recommendation.patch = RecommendationPatchV2.model_validate(patch) if patch is not None else None
 
 
+def _last_known_values(before: RecommendationRecord, missing: Sequence[str], resource: str) -> Dict[str, int]:
+    """``{source_id: value}`` of the incomplete sources' votes in ``before``'s consensus."""
+    consensus = before.consensus if isinstance(before.consensus, dict) else {}
+    if consensus.get("resource") != resource:
+        return {}
+    values: Dict[str, int] = {}
+    for vote in consensus.get("votes") or []:
+        if not isinstance(vote, dict) or vote.get("source") not in missing:
+            continue
+        value = vote.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            source_id = str(vote.get("source_id") or vote.get("source"))
+            values[source_id] = max(int(value), values.get(source_id, int(value)))
+    return values
+
+
+def _with_last_known_votes(
+    recommendation: Recommendation,
+    before: RecommendationRecord,
+    missing: Sequence[str],
+    policy: ConsensusPolicy,
+) -> Optional[Recommendation]:
+    """``recommendation`` supported by the incomplete sources' last known votes, or None to keep ``before``.
+
+    A higher request is always the safer one (a smaller decrease, or an
+    increase that protects reliability), so the new proposal is written when
+    it is not more aggressive than what the last known votes support.
+    """
+    resource = KIND_REQUEST_RESOURCES.get(str(getattr(recommendation.type, "value", recommendation.type)))
+    if resource is None:
+        return None
+    _current_field, proposed_field = RESOURCE_FIELDS[resource]
+    new_value = getattr(recommendation, proposed_field)
+    old_value = getattr(before, proposed_field)
+    if new_value is None or old_value is None:
+        return None
+    last_known = _last_known_values(before, missing, resource)
+    known_units = {
+        vote.get("source")
+        for vote in (before.consensus or {}).get("votes") or []
+        if isinstance(vote, dict) and vote.get("source_id") in last_known
+    }
+    every_vote_known = all(unit in known_units for unit in missing)
+    safer_or_equal = int(new_value) >= int(old_value)
+    safest_holds = (
+        policy is ConsensusPolicy.SAFEST
+        and every_vote_known
+        and all(value <= int(new_value) for value in last_known.values())
+    )
+    if not (safer_or_equal or safest_holds):
+        return None
+    sources = list(recommendation.sources or [])
+    for unit in missing:
+        if unit not in sources:
+            sources.append(unit)
+    update: Dict[str, object] = {"sources": sources}
+    if isinstance(recommendation.consensus, dict):
+        consensus = {**recommendation.consensus, "last_known": last_known}
+        update["consensus"] = consensus
+        if recommendation.evidence is not None and recommendation.evidence.consensus is not None:
+            update["evidence"] = recommendation.evidence.model_copy(update={"consensus": consensus})
+    logger.info(
+        "Recommendation %s follows the new proposal (%s) while %s is incomplete; last known votes: %s.",
+        before.fingerprint,
+        new_value,
+        ", ".join(missing),
+        last_known or "unknown",
+    )
+    return recommendation.model_copy(update=update)
+
+
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:
     """A run fails only when every source that was attempted failed or was incomplete."""
     attempted = [o for o in outcomes if o.status != SourceRunStatus.UNAVAILABLE]
     if attempted and not any(o.status == SourceRunStatus.SUCCEEDED for o in attempted):
         return OptimizationRunStatus.FAILED
     return OptimizationRunStatus.SUCCEEDED
-
-
-def _enum_text(value) -> str:
-    return str(value.value if hasattr(value, "value") else value)
 
 
 def _error_text(exc: BaseException) -> str:

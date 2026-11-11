@@ -143,6 +143,17 @@ class TestEligibility:
         assert result["recommendation_ids"] == [7]
         assert result["eligible_at"] is None
 
+    def test_contested_consensus_is_a_warning_that_names_the_disagreement(self):
+        contested = {"policy": "safest", "contested": True, "reasons": ["agreement 0.25 is below 0.5"]}
+        result = assess_eligibility(_record(consensus=contested), _ctx())
+        assert result["can_open_pr"] is True
+        [warning] = [item for item in result["warnings"] if item["code"] == "consensus_contested"]
+        assert "agreement 0.25 is below 0.5" in warning["message"]
+        assert warning["fix"]
+
+        agreed = assess_eligibility(_record(consensus={"policy": "safest", "contested": False}), _ctx())
+        assert "consensus_contested" not in [item["code"] for item in agreed["warnings"]]
+
     def test_every_blocker_has_a_message_and_a_fix(self):
         result = assess_eligibility(
             _record(status=RecommendationStatus.IGNORED, risk_level=RiskLevel.HIGH, confidence=0.1),
