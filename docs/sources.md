@@ -5,6 +5,7 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 - Code: `src/greenkube/signals/` (model, SDK, adapters, runner, registry, contract checks).
 - Example package: [`examples/greenkube-source-example`](../examples/greenkube-source-example).
 - API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals` ([API reference](api.md)).
+- UI: the **Sources** page lists every source with its status, last run, counts, track record and recent runs ([Web UI](ui.md#sources)).
 - Configuration: `sources.pluginsEnabled`, `sources.settings` ([configuration](configuration.md#recommendation-sources-sources)).
 
 ## Concepts

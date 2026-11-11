@@ -266,6 +266,8 @@ automation:
     lifecycleLookbackDays: 30
 ```
 
+The deep links open the [recommendation detail, change and ledger pages](ui.md#pull-request-deep-links) of the UI.
+
 **Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`. The verb follows the action (`rightsize`, `raise resources of`, `autoscale`, `delete`, or `revert …` for rollbacks). Titles are at most 72 characters: the resource details, then the CO₂e figure, are dropped before the title is cut, and the full summary is always in the body. `titlePrefix` sets the conventional-commit prefix; an empty prefix drops it.
 
 **Body.** The built-in template renders these sections:
