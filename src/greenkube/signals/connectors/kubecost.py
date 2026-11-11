@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Mapping, Optional, Tuple
 
@@ -60,6 +61,7 @@ from greenkube.signals.sdk import (
     SourceLimits,
     SourceSettings,
     SourceTier,
+    WorkloadInventory,
 )
 from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
 
@@ -97,6 +99,40 @@ _CONTROLLER_KINDS = {
 }
 _KIND_BY_RESOURCE = {"cpu": "RIGHTSIZING_CPU", "memory": "RIGHTSIZING_MEMORY"}
 _MIB = 1024 * 1024
+#: Generated owner names: ReplicaSet ``<deployment>-<pod-template-hash>``, Job ``<cronjob>-<schedule time>``.
+_GENERATED_OWNER = {
+    "ReplicaSet": (("Deployment", "Rollout"), re.compile(r"[a-z0-9]{1,10}")),
+    "Job": (("CronJob",), re.compile(r"[0-9]{1,12}")),
+}
+#: Keys a node-group sizing answer may name its cluster under.
+_CLUSTER_KEYS = ("clusterId", "clusterID", "cluster")
+
+
+def resolve_owner(inventory: WorkloadInventory, namespace: str, kind: str, name: str) -> Tuple[str, str]:
+    """The top controller of a generated owner, through the workload inventory.
+
+    Kubecost reports a pod's direct owner: a ReplicaSet of a Deployment, or a
+    Job of a CronJob. GreenKube targets the controller that owns it when the
+    inventory knows one whose generated child name matches; otherwise the
+    owner is kept as reported.
+    """
+    rule = _GENERATED_OWNER.get(kind)
+    if rule is None or inventory.find(namespace, kind, name):
+        return kind, name
+    parents, suffix = rule
+    matches = sorted(
+        {
+            (target.kind, target.name)
+            for target in inventory.targets
+            if target.namespace == namespace
+            and target.kind in parents
+            and name.startswith(f"{target.name}-")
+            and suffix.fullmatch(name[len(target.name) + 1 :])
+        },
+        key=lambda match: len(match[1]),
+        reverse=True,
+    )
+    return matches[0] if matches else (kind, name)
 
 
 class KubecostSettings(SourceSettings):
@@ -225,6 +261,8 @@ class KubecostSource(Source):
         super().__init__(settings, deps)
         self.transport = transport
         self.major: Optional[str] = None
+        #: Cluster ids named in the answers of the current collection.
+        self._clusters_seen: set[str] = set()
 
     @property
     def options(self) -> KubecostSettings:
@@ -322,6 +360,7 @@ class KubecostSource(Source):
         diagnostics: List[Diagnostic] = []
         signals: List[SourceSignal] = []
         complete = True
+        self._clusters_seen = set()
         async with self._client() as client:
             payload, failed = await self._get(
                 client,
@@ -352,7 +391,7 @@ class KubecostSource(Source):
                 payload, failed = await self._get(client, "node_group_sizing", {"window": options.window}, diagnostics)
                 complete = complete and not failed
                 if payload is not None:
-                    signals.extend(self.node_group_signals(payload, ctx, now, window))
+                    signals.extend(self.node_group_signals(payload, ctx, now, window, diagnostics))
         if ctx.namespace is not None:
             signals = [signal for signal in signals if signal.target.namespace == ctx.namespace]
         return SourceBatch(signals=signals, complete=complete, diagnostics=diagnostics)
@@ -366,9 +405,10 @@ class KubecostSource(Source):
     ) -> List[Mapping[str, Any]]:
         """Entries about this cluster: ``cluster_id`` when set; a single-cluster answer otherwise."""
         wanted = self.options.cluster_id
+        clusters = {str(entry.get(key)) for entry in entries if entry.get(key)}
+        self._clusters_seen |= clusters
         if wanted:
             return [entry for entry in entries if str(entry.get(key) or "") in ("", wanted)]
-        clusters = {str(entry.get(key)) for entry in entries if entry.get(key)}
         if len(clusters) > 1:
             diagnostics.append(
                 Diagnostic(
@@ -424,6 +464,7 @@ class KubecostSource(Source):
             latest = _mapping(entry.get("latestKnownRequest"))
             savings = _mapping(entry.get("monthlySavings"))
             efficiency = _mapping(entry.get("currentEfficiency"))
+            kind, name = resolve_owner(ctx.inventory, namespace, kind, name)
             target = TargetRef.for_kind(ctx.cluster_uid, kind, name, namespace=namespace, container=container)
             for resource, rec_kind in _KIND_BY_RESOURCE.items():
                 proposed = _quantity(resource, recommended.get(resource))
@@ -498,6 +539,7 @@ class KubecostSource(Source):
             kind = _CONTROLLER_KINDS.get(str(owner.get("kind") or "").lower()) if owner else None
             owner_name = owner.get("name") if owner else None
             if kind and isinstance(owner_name, str) and owner_name:
+                kind, owner_name = resolve_owner(ctx.inventory, namespace, kind, owner_name)
                 target = TargetRef.for_kind(ctx.cluster_uid, kind, owner_name, namespace=namespace)
             else:
                 target = TargetRef.for_kind(ctx.cluster_uid, "Pod", pod, namespace=namespace)
@@ -558,23 +600,58 @@ class KubecostSource(Source):
         return signals
 
     def node_group_signals(
-        self, payload: Any, ctx: CollectContext, now: datetime, window: TimeWindow
+        self,
+        payload: Any,
+        ctx: CollectContext,
+        now: datetime,
+        window: TimeWindow,
+        diagnostics: List[Diagnostic],
     ) -> List[SourceSignal]:
+        """One cluster-level advisory when Kubecost sees savings in resizing this cluster's node groups.
+
+        Not emitted when the answer cannot be attributed to this cluster (it
+        names another cluster than ``cluster_id``, or Kubecost reports several
+        clusters and ``cluster_id`` is not set), nor without a positive saving.
+        """
         data = _unwrap(payload)
         if not data:
             return []
+        named = None
         savings = None
         if isinstance(data, Mapping):
+            named = next(
+                (str(data[key]) for key in _CLUSTER_KEYS if isinstance(data.get(key), str) and data[key]), None
+            )
             for key in ("totalMonthlySavings", "monthlySavings", "savings"):
                 savings = _number(data.get(key))
                 if savings is not None:
                     break
+        wanted = self.options.cluster_id
+        clusters = self._clusters_seen | ({named} if named else set())
+        if (wanted and named and named != wanted) or (not wanted and len(clusters) > 1):
+            diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="node_group_sizing_other_cluster",
+                    message="Kubecost's node-group sizing cannot be attributed to this cluster; set "
+                    "SOURCES_CONFIG.kubecost.cluster_id to this cluster's id",
+                )
+            )
+            return []
+        if savings is None or savings <= 0:
+            diagnostics.append(
+                Diagnostic(
+                    code="node_group_sizing_no_savings",
+                    message="Kubecost's node-group sizing reports no positive monthly saving: nothing to advise",
+                )
+            )
+            return []
         # The proposal text is part of the signal identity: keep figures out of it.
         text = (
             "Kubecost suggests resizing the cluster's node groups; "
             "review its node-group sizing before changing node pools."
         )
-        summary = text if savings is None else f"{text} Kubecost estimates {savings:.2f} USD per month."
+        summary = f"{text} Kubecost estimates {savings:.2f} USD per month."
         return [
             SourceSignal(
                 source_id=KUBECOST_SOURCE_ID,
@@ -586,7 +663,7 @@ class KubecostSource(Source):
                 algorithm=self._algorithm("kubecost.node_group_sizing", window, {"window": self.options.window}),
                 evidence=SignalEvidence(summary=summary, data={"risk_class": "high"}),
                 observed_window=window,
-                source_estimate={"monthly_savings": savings, "currency": "USD"} if savings is not None else None,
+                source_estimate={"monthly_savings": savings, "currency": "USD"},
                 provenance=SignalProvenance(origin=SignalOrigin.ADAPTER),
                 raw=trim_raw(data if isinstance(data, dict) else {"data": data}),
                 fetched_at=now,

@@ -11,11 +11,17 @@ import httpx
 import pytest
 
 from greenkube.core.config import Config
-from greenkube.signals.connectors.kubecost import KubecostSettings, KubecostSource, probe_version
-from greenkube.signals.model import AdvisoryProposal, Capability, ContainerResourcesProposal, DeletionProposal
+from greenkube.signals.connectors.kubecost import KubecostSettings, KubecostSource, probe_version, resolve_owner
+from greenkube.signals.model import (
+    AdvisoryProposal,
+    Capability,
+    ContainerResourcesProposal,
+    DeletionProposal,
+    TargetRef,
+)
 from greenkube.signals.registry import SourceRegistry
 from greenkube.signals.runtime import SourceRunner, SourceRunStatus
-from greenkube.signals.sdk import SourceDeps, SourceHealthStatus
+from greenkube.signals.sdk import CollectContext, SourceDeps, SourceHealthStatus, WorkloadInventory
 from tests.sources.contract import CLUSTER, SourceContract, collect_context  # pyrefly: ignore[missing-import]
 
 FIXTURES = Path(__file__).parent / "fixtures" / "kubecost"
@@ -163,6 +169,66 @@ class TestKubecost3:
             _source(server, cluster_id="prod-eu", paths={"node_group_sizing": "/model/savings/clusterSizingETL"})
         )
         assert any(s.capability == Capability.NODE_POOL for s in report.signals)
+
+
+def _inventory_context(*targets: TargetRef) -> CollectContext:
+    context = collect_context(None)
+    context.inventory = WorkloadInventory(targets=list(targets))
+    return context
+
+
+class TestAttribution:
+    """Owners are resolved to their controller; cluster-level advice is never guessed."""
+
+    async def test_abandoned_replicaset_owner_resolves_to_its_deployment(self):
+        server = FakeKubecost("v2")
+        for entry in server.answers["abandonedWorkloads"]:
+            entry["owners"] = [{"name": "legacy-report-5c7d9f8b4", "kind": "replicaset"}]
+        deployment = TargetRef.for_kind(CLUSTER, "Deployment", "legacy-report", namespace="batch", container="main")
+
+        report = await SourceRunner().run(_source(server), _inventory_context(deployment))
+
+        [cleanup] = [s for s in report.signals if s.capability == Capability.CLEANUP]
+        assert (cleanup.target.kind, cleanup.target.name) == ("Deployment", "legacy-report")
+        assert cleanup.evidence.data["pods"] == ["legacy-report-5c7d9-abcde", "legacy-report-5c7d9-fghij"]
+
+    def test_resolve_owner_keeps_what_the_inventory_cannot_resolve(self):
+        inventory = WorkloadInventory(
+            targets=[
+                TargetRef.for_kind(CLUSTER, "Deployment", "api", namespace="shop", container="web"),
+                TargetRef.for_kind(CLUSTER, "Deployment", "api-gateway", namespace="shop", container="web"),
+                TargetRef.for_kind(CLUSTER, "CronJob", "nightly", namespace="batch", container="job"),
+            ]
+        )
+        assert resolve_owner(inventory, "shop", "ReplicaSet", "api-gateway-7d9f8c6b5") == ("Deployment", "api-gateway")
+        assert resolve_owner(inventory, "shop", "ReplicaSet", "api-7d9f8c6b5") == ("Deployment", "api")
+        assert resolve_owner(inventory, "batch", "Job", "nightly-29012345") == ("CronJob", "nightly")
+        assert resolve_owner(inventory, "other", "ReplicaSet", "api-7d9f8c6b5") == ("ReplicaSet", "api-7d9f8c6b5")
+        assert resolve_owner(inventory, "shop", "ReplicaSet", "api-Not_A_Hash") == ("ReplicaSet", "api-Not_A_Hash")
+        assert resolve_owner(inventory, "shop", "Deployment", "api") == ("Deployment", "api")
+
+    async def test_node_group_sizing_of_a_federated_kubecost_needs_cluster_id(self):
+        report = await _run(_source(FakeKubecost("v3")))
+
+        assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert "node_group_sizing_other_cluster" in {d.code for d in report.run.diagnostics}
+
+    async def test_node_group_sizing_naming_another_cluster_is_skipped(self):
+        server = FakeKubecost("v3")
+        server.answers["nodeGroupSizing"]["data"]["clusterId"] = "staging"
+        report = await _run(_source(server, cluster_id="prod-eu"))
+
+        assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert "node_group_sizing_other_cluster" in {d.code for d in report.run.diagnostics}
+
+    @pytest.mark.parametrize("savings", [0, None])
+    async def test_node_group_sizing_without_positive_savings_is_not_advice(self, savings):
+        server = FakeKubecost("v2")
+        server.answers["clusterSizingETL"]["data"]["totalMonthlySavings"] = savings
+        report = await _run(_source(server))
+
+        assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert "node_group_sizing_no_savings" in {d.code for d in report.run.diagnostics}
 
 
 class TestFailures:

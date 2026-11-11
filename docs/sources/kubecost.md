@@ -7,8 +7,8 @@ GreenKube reads Kubecost's savings APIs and turns them into signals (roadmap G3)
 | Kubecost | Signal |
 |---|---|
 | Request sizing: `GET /model/savings/requestSizingV2` with `window`, `algorithmCPU`, `algorithmRAM`, `qCPU`, `qRAM`, `targetCPUUtilization`, `targetRAMUtilization`, `filter` | `ContainerResourcesProposal` per container and resource (`RIGHTSIZING_CPU`/`RIGHTSIZING_MEMORY`), decreases and increases; `monthlySavings` in `source_estimate`; the query parameters in `algorithm.params` |
-| Abandoned workloads: `GET /model/savings/abandonedWorkloads?days=` | `DeletionProposal`, capability `cleanup`, kind `ABANDONED_WORKLOAD`, one per owner workload |
-| Cluster / node-group sizing | `AdvisoryProposal` about the cluster, capability `node_pool`, kind `NODE_GROUP_SIZING`, `risk_class: high` |
+| Abandoned workloads: `GET /model/savings/abandonedWorkloads?days=` | `DeletionProposal`, capability `cleanup`, kind `ABANDONED_WORKLOAD`, one per owner workload. A generated owner (a Deployment's ReplicaSet, a CronJob's Job) is resolved to its controller through the workload inventory when GreenKube knows it |
+| Cluster / node-group sizing | `AdvisoryProposal` about the cluster, capability `node_pool`, kind `NODE_GROUP_SIZING`, `risk_class: high`. Only with a positive monthly saving (`node_group_sizing_no_savings` otherwise), and only when the answer is about this cluster: skipped (`node_group_sizing_other_cluster`) when it names another cluster than `cluster_id`, or when Kubecost reports several clusters and `cluster_id` is not set |
 
 **Abandoned workloads are review-only.** Kubecost's only evidence is low network traffic. The signal says so (`evidence.data.basis: network_traffic`, the traffic rates, `deletion_requires_review: true`), and GreenKube's deletion-safety rules still decide: the minimum unused duration (`DELETION_MIN_UNUSED_DAYS`), dependency evidence and `deletion_requires_review`. A Kubecost finding alone never deletes anything.
 
