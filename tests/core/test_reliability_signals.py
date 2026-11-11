@@ -169,7 +169,13 @@ async def test_scan_signals_are_per_target_container_and_count_duplicates_once()
     # Every query merges duplicate series of one container with max, over the lookback.
     signal_queries = [q for q in query.queries if not q.startswith("count(")]
     assert all(q.startswith("max by (namespace, pod, container)") for q in signal_queries)
-    assert all(f"[{14 * 86400}s]" in q for q in signal_queries)
+    assert all(f"[{14 * 86400}s" in q for q in signal_queries)
+    # An OOM kill is a restart whose termination reason, at that restart's step, is OOMKilled:
+    # never every restart of a lookback that saw one OOM kill.
+    (ksm,) = [q for q in signal_queries if "last_terminated_reason" in q]
+    assert "sum_over_time((" in ksm and f"[{14 * 86400}s:5m]" in ksm
+    assert "increase(kube_pod_container_status_restarts_total[5m])" in ksm
+    assert "max_over_time(" not in ksm
 
 
 @pytest.mark.asyncio

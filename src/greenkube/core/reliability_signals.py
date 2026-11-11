@@ -5,8 +5,8 @@ The usage rollup holds usage and requests only. Before the analyzers run, the
 scan fills each :class:`~greenkube.models.workload_usage.WorkloadUsageSummary`
 with what rightsizing needs to size increases and to judge decreases:
 
-* ``oom_kill_count``: container restarts over the lookback whose last
-  termination was ``OOMKilled`` (kube-state-metrics), or cAdvisor
+* ``oom_kill_count``: container restarts over the lookback whose termination,
+  at the 5-minute step of the restart, was ``OOMKilled`` (kube-state-metrics), or cAdvisor
   ``container_oom_events_total`` when larger; 0 when kube-state-metrics is
   scraped and reports none, None when it is not.
 * ``throttling_ratio``: throttled / total CFS periods over the lookback
@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 QueryFunction = Callable[[str, datetime], Awaitable[Optional[List[Dict[str, Any]]]]]
 
 _CONTAINERS = 'container!="",container!="POD"'
+#: Resolution at which restarts are matched with their termination reason.
+OOM_STEP = "5m"
 
 #: Environment variables that configure a JVM.
 JVM_ENV_VARS = frozenset(
@@ -166,10 +168,13 @@ async def read_prometheus_signals(
 
     ksm_present = await query("count(kube_pod_container_status_restarts_total)", at)
     signals.oom_known = bool(ksm_present) and any((_value(item) or 0) > 0 for item in ksm_present or [])
+    # Count only the restarts of a step whose last termination, at that step, is OOMKilled:
+    # a liveness-probe restart after an older OOM kill in the lookback is not an OOM kill.
     ksm_oom = await query(
-        "max by (namespace, pod, container) (round(increase(kube_pod_container_status_restarts_total"
-        f"[{window}])) > 0 and on (namespace, pod, container) max_over_time("
-        f'kube_pod_container_status_last_terminated_reason{{reason="OOMKilled"}}[{window}]) > 0)',
+        "max by (namespace, pod, container) (sum_over_time(("
+        f"(round(increase(kube_pod_container_status_restarts_total[{OOM_STEP}])) > 0) "
+        "and on (namespace, pod, container) "
+        f'(kube_pod_container_status_last_terminated_reason{{reason="OOMKilled"}} > 0))[{window}:{OOM_STEP}]))',
         at,
     )
     cadvisor_oom = await query(
