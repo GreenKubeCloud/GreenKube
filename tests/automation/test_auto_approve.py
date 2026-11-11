@@ -203,3 +203,21 @@ async def test_a_refused_approval_keeps_the_preview_and_explains_why():
     assert (await maybe_auto_approve(approver, rollback, [_record()], actor="a", policy=POLICY, may_approve=True))[
         1
     ] == ["rollback_plan"]
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_approval_failure_leaves_the_preview_for_the_click():
+    plan = _validated_plan()
+    approver = _Approver()
+    approver.plan = plan
+
+    async def broken(plan_id: str, digest: str, *, actor: str = "system"):
+        raise RuntimeError("revision resolver unavailable")
+
+    approver.approve_plan = broken  # type: ignore[method-assign]
+
+    result, blockers = await maybe_auto_approve(
+        approver, plan, [_record()], actor="user:alice", policy=POLICY, may_approve=True
+    )
+
+    assert result is plan and blockers == ["auto_approve_failed"]

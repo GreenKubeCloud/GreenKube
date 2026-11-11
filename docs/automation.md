@@ -232,7 +232,9 @@ All three modes then follow the same lifecycle: `pr_open` → `merged` → `sync
 webhooks, then the controller sync and apply detection. The controller also links, at the PR poll interval, a pull
 request opened from the plan branch without any report. An approved `patch` or `ci` plan waits for its pull request
 up to 7 days after the preview TTL, then becomes `stale` (cancel it earlier to preview the workload again). GreenKube
-never deletes the branch of an externally delivered plan.
+never deletes the branch of an externally delivered plan. If recording a verified report fails midway (for example a
+database error), the report answers `503 delivery_not_recorded` and the plan returns to `approved`; retry the report.
+Should the plan stay `applying`, the next report, or the controller after 5 idle minutes, resumes the recording.
 
 **Patch.** With `GREENKUBE_API_URL` and a `GREENKUBE_API_KEY` (`read` scope; never passed on the command line):
 
@@ -288,7 +290,8 @@ A preview is auto-approved only when:
 
 Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
 `rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
-`consensus_contested`, `decrease_without_native_evidence`, or the approval's error code (for example `delivery_paused`).
+`consensus_contested`, `decrease_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
+`auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
 
 ## Create and validate a pull request
 

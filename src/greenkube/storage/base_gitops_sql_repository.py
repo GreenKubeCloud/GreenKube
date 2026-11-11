@@ -1770,15 +1770,27 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         _validate_list_limit(limit)
         if not statuses:
             return []
+        from greenkube.automation.delivery import EXTERNAL_DELIVERY_GRACE
+
         expired = "expires_at <= ?" if self._postgres else "julianday(expires_at) <= julianday(?)"
+        in_grace = "expires_at > ?" if self._postgres else "julianday(expires_at) > julianday(?)"
         placeholders = ", ".join("?" for _ in statuses)
+        # Approved patch/ci plans wait EXTERNAL_DELIVERY_GRACE longer (F4, effective_expiry):
+        # they are excluded here, not after the LIMIT, so they cannot fill every batch.
         query = f"""
             SELECT * FROM automation_plans
             WHERE status IN ({placeholders}) AND expires_at IS NOT NULL AND {expired}
+              AND NOT (status = ? AND COALESCE(delivery_mode, 'direct') IN ('patch', 'ci') AND {in_grace})
             ORDER BY expires_at, plan_id
             LIMIT ?
         """
-        params: list[Any] = [*(status.value for status in statuses), self._db_datetime(now), limit]
+        params: list[Any] = [
+            *(status.value for status in statuses),
+            self._db_datetime(now),
+            PlanStatus.APPROVED.value,
+            self._db_datetime(now - EXTERNAL_DELIVERY_GRACE),
+            limit,
+        ]
         async with self.db_manager.connection_scope() as connection:
             rows = await self._fetch(connection, query, params)
             return [record.plan for record in await self._plan_records_from_rows(connection, rows)]

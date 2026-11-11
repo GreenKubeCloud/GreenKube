@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,8 @@ from greenkube.gitops.snapshots.models import (
 )
 from greenkube.storage.base_gitops_repository import AutomationPlanRepository
 from greenkube.utils.time import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
 _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
@@ -1228,4 +1231,9 @@ async def maybe_auto_approve(
         approved = await approver.approve_plan(plan.plan_id, plan.digest, actor=f"autoapprove:{actor}"[:128])
     except AutomationPlanError as error:
         return plan, [error.code.value]
+    except Exception as error:
+        # The preview already exists: an unexpected failure (provider, resolver, store)
+        # must not turn its creation into a 500; it simply waits for the click.
+        logger.warning("Auto-approval of plan %s failed (%s).", plan.plan_id, type(error).__name__)
+        return plan, ["auto_approve_failed"]
     return approved, []

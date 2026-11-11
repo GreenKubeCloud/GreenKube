@@ -2141,6 +2141,9 @@ class PlanWorker:
         if head_sha is not None and actual_head.lower() != head_sha.lower():
             raise _not_verified("head_sha is not the head commit of the pull request.")
         branch = plan_branch_name(plan)
+        # The head repository is not compared: a fork's branch of the same name is accepted
+        # because the head commit below must hold exactly the approved plan, and the merge
+        # is verified on the plan repository's base branch.
         linked_by: str | None = "branch" if head_ref == branch else None
         if linked_by is None and plan.delivery_mode == "patch":
             body_value = raw.get("body") if isinstance(raw.get("body"), str) else raw.get("description")
