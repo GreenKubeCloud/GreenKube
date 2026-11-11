@@ -458,6 +458,12 @@ config:
     rightsizingHeadroom: 1.2
     # Recommend a request increase when p99 usage exceeds this share of the request.
     rightsizingIncreaseThreshold: 0.9
+    # One increase step is capped at this multiple of the current request unless
+    # OOM kills back it; the next scan re-evaluates once the step is applied.
+    rightsizingMaxIncreaseFactor: 2.0
+    # Minutes after a container (re)start left out of usage percentiles (startup
+    # spikes such as WAL replay, JIT or cache fill do not size requests). 0 disables.
+    rightsizingWarmupMinutes: 10
     # Observed coverage (days) required before a request decrease is recommended.
     minDecreaseCoverageDays: 7
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
