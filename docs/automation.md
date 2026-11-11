@@ -184,7 +184,7 @@ curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
   jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}, eligibility}'
 ```
 
-While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at`. **Preview plan** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint is deprecated (see [API](api.md)). If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at`. **Preview plan** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 
@@ -269,7 +269,7 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 
 Plan statuses: `draft`, `validated`, `approved`, `applying`, `pr_open`, `merged`, `synced`, `applied`, `sync_failed`, `closed`, `stale`, `failed`, `needs_mapping`, `ambiguous`, `rejected`, `superseded`.
 
-Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Follow an operation through `GET /api/v1/automation/plans/{plan_id}` (`operation_id`, `operation_status`); `GET /api/v1/automation/operations/{operation_id}` is deprecated.
+Plan operations are durable and idempotent: `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled`. Follow an operation through `GET /api/v1/automation/plans/{plan_id}` (`operation_id`, `operation_status`); the former `GET /api/v1/automation/operations/{operation_id}` route was removed.
 
 ## Approval and policy
 

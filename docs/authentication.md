@@ -146,12 +146,13 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 |---|---|
 | `read` | Every `GET` under `/api/v1` and `/api/v2` (changes and measurements) |
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
-| `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` and the compatibility endpoint `POST /api/v1/recommendations/{id}/apply-pr` (including its `dry_run` form) |
+| `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` |
+| `plans:deliver` | Report that an approved plan was delivered outside GreenKube (`POST /api/v1/automation/plans/{id}/delivery`, `patch` and `ci` delivery modes). A CI job needs `read` + `plans:deliver` only |
 | `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)) and `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 
-User roles map to the same scopes: `viewer` (`read`, `metrics:read`), `operator` (adds `write` and `approve`) and
+User roles map to the same scopes: `viewer` (`read`, `metrics:read`), `operator` (adds `write`, `approve` and `plans:deliver`) and
 `admin` (everything). The bootstrap account is an `admin`; more accounts and SSO roles arrive with roadmap F16.
 
 ### Prometheus

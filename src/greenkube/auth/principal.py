@@ -21,6 +21,7 @@ class Scope(StrEnum):
     WRITE = "write"
     APPROVE = "approve"
     SIGNALS_WRITE = "signals:write"
+    PLANS_DELIVER = "plans:deliver"
     METRICS_READ = "metrics:read"
     ADMIN = "admin"
 
@@ -39,7 +40,7 @@ class Role(StrEnum):
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     Role.VIEWER.value: frozenset({Scope.READ.value, Scope.METRICS_READ.value}),
     Role.OPERATOR.value: frozenset(
-        {Scope.READ.value, Scope.WRITE.value, Scope.APPROVE.value, Scope.METRICS_READ.value}
+        {Scope.READ.value, Scope.WRITE.value, Scope.APPROVE.value, Scope.PLANS_DELIVER.value, Scope.METRICS_READ.value}
     ),
     Role.ADMIN.value: ALL_SCOPES,
 }
@@ -87,13 +88,11 @@ ANONYMOUS = Principal(kind="anonymous", name="anonymous", role=Role.ADMIN.value,
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-# Mutations that approve a plan and queue its pull request. The compatibility
-# endpoint ``apply-pr`` approves the validated digest itself, so it needs
-# ``approve`` too (a ``dry_run`` call included: the scope table sees paths only).
-_APPROVE_PATHS = (
-    re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),
-    re.compile(r"^/api/v1/recommendations/[^/]+/apply-pr$"),
-)
+# Mutations that approve a plan and queue its pull request.
+_APPROVE_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),)
+# Reports that a plan was delivered outside GreenKube (``patch`` and ``ci`` modes, roadmap F4):
+# a CI job holds ``read`` + ``plans:deliver``, never ``write`` or ``approve``.
+_DELIVERY_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/delivery$"),)
 _ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users", "/api/v1/automation/repositories/allowlist")
 # Endpoints any authenticated principal may call for itself.
 SELF_SERVICE_PATHS = frozenset({"/api/v1/auth/me"})
@@ -104,7 +103,7 @@ def required_scope(method: str, path: str) -> str | None:
     """Return the scope a request needs, or ``None`` when authentication suffices.
 
     The table is coarse on purpose: reads need ``read``, mutations ``write``,
-    plan approvals (including ``apply-pr``) ``approve``, signal pushes ``signals:write``, the Prometheus
+    plan approvals ``approve``, delivery reports ``plans:deliver``, signal pushes ``signals:write``, the Prometheus
     endpoint ``metrics:read``, and user or API-key administration ``admin``.
     """
     method = method.upper()
@@ -120,6 +119,8 @@ def required_scope(method: str, path: str) -> str | None:
         return Scope.READ.value
     if any(pattern.match(path) for pattern in _APPROVE_PATHS):
         return Scope.APPROVE.value
+    if any(pattern.match(path) for pattern in _DELIVERY_PATHS):
+        return Scope.PLANS_DELIVER.value
     return Scope.WRITE.value
 
 

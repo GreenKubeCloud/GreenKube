@@ -1,28 +1,27 @@
-"""Compatibility routes backed by the server-resolved GitOps plan workflow."""
+"""Automation status and pull-request read routes.
+
+The former compatibility routes ``/recommendations/{id}/apply-pr``, ``/apply-pr/eligibility`` and
+``/automation/operations/{id}`` were removed after their deprecation release (roadmap F5, M4):
+use ``/automation/plans`` and the recommendations' ``eligibility`` field.
+"""
 
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Coroutine, List
+from typing import Any, List
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
-    get_authenticated_actor,
     get_automation_plan_service,
     get_gitops_binding_repository,
     get_pull_request_repository,
     get_recommendation_repository,
 )
-from greenkube.api.routers.plans import _domain_error_response
 from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
-from greenkube.automation.plans import AutomationPlanError
-from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
-from greenkube.models.metrics import ApplyPrRequest, ApplyPrResponse, PullRequestRecord, PullRequestStatus
+from greenkube.models.metrics import PullRequestRecord
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, GitOpsRepository
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
@@ -30,112 +29,6 @@ from greenkube.utils.time import ensure_utc
 
 router = APIRouter()
 WORKER_STALE_AFTER = timedelta(seconds=120)
-
-# Compatibility routes superseded by /automation/plans (roadmap M4, F5). They keep working
-# this release and announce their removal (RFC 9745 Deprecation, RFC 8594 Sunset).
-LEGACY_ROUTE_HEADERS = {
-    "Deprecation": "@1796947200",  # 2026-12-11, v0.4.0
-    "Sunset": "Fri, 29 Jan 2027 00:00:00 GMT",  # v0.5.0
-    "Link": '</api/v1/automation/plans>; rel="successor-version"',
-}
-
-
-class _DeprecatedRoute(APIRoute):
-    """Adds the legacy-route deprecation headers to every response, errors included."""
-
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        handler = super().get_route_handler()
-
-        async def deprecated_handler(request: Request) -> Response:
-            try:
-                response = await handler(request)
-            except HTTPException as error:
-                raise HTTPException(
-                    error.status_code, error.detail, headers={**(error.headers or {}), **LEGACY_ROUTE_HEADERS}
-                ) from error
-            response.headers.update(LEGACY_ROUTE_HEADERS)
-            return response
-
-        return deprecated_handler
-
-
-legacy_router = APIRouter(route_class=_DeprecatedRoute)
-
-
-@legacy_router.post("/recommendations/{rec_id}/apply-pr", response_model=None, deprecated=True)
-async def apply_recommendation_pr(
-    rec_id: int,
-    response: Response,
-    http_request: Request,
-    request: ApplyPrRequest | None = None,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-) -> ApplyPrResponse | dict[str, object] | JSONResponse:
-    """Keep the legacy request shape without requiring source annotations."""
-    if service is None:
-        return _service_unavailable()
-    audit_actor = get_authenticated_actor(http_request)
-    request = request or ApplyPrRequest()
-    try:
-        existing_pr: PullRequestRecord | None = None
-        if request.dry_run:
-            plan = await service.preview_plan([rec_id])
-        else:
-            open_prs = [
-                item for item in await pr_repo.get_open_pull_requests(rec_id) if item.status is PullRequestStatus.OPEN
-            ]
-            if len(open_prs) > 1:
-                raise AutomationPlanError(
-                    AutomationErrorCode.PLAN_STALE,
-                    "multiple open pull requests already exist for this recommendation",
-                )
-            if open_prs:
-                existing_pr = open_prs[0]
-                if not existing_pr.plan_id:
-                    raise AutomationPlanError(
-                        AutomationErrorCode.PLAN_STALE,
-                        "an open pull request exists without a linked automation plan",
-                    )
-                plan = await service.read_plan(existing_pr.plan_id)
-                if plan is None:
-                    raise AutomationPlanError(
-                        AutomationErrorCode.PLAN_STALE,
-                        "an open pull request exists but its automation plan is unavailable",
-                    )
-            else:
-                plan = await service.prepare_plan([rec_id], actor=audit_actor)
-        if request.base_branch and request.base_branch != plan.source.ref:
-            raise AutomationPlanError(
-                AutomationErrorCode.UNSUPPORTED_SOURCE,
-                "base_branch overrides are not accepted; use the GitOps-resolved source ref.",
-            )
-        if request.dry_run:
-            return _compatibility_preview(plan)
-        if existing_pr is not None:
-            return _compatibility_pull_request(plan, existing_pr)
-
-        existing_pr = await pr_repo.get_pull_request_by_plan_id(plan.plan_id)
-        if existing_pr is not None and existing_pr.status is PullRequestStatus.OPEN:
-            return _compatibility_pull_request(plan, existing_pr)
-
-        operation = await service.read_operation_for_plan(plan.plan_id)
-        if operation is None:
-            if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED} or plan.digest is None:
-                raise AutomationPlanError(
-                    AutomationErrorCode.PLAN_STALE,
-                    f"plan cannot be queued from status {plan.status.value}",
-                )
-            plan = await service.approve_plan(plan.plan_id, plan.digest, actor=audit_actor)
-            operation = await service.read_operation_for_plan(plan.plan_id)
-        if operation is None:
-            return _service_unavailable(
-                "The plan was approved but no durable operation was created; inspect the plan worker configuration."
-            )
-        response.status_code = status.HTTP_202_ACCEPTED
-        return _compatibility_operation_response(plan, operation, rec_id, audit_actor)
-    except AutomationPlanError as error:
-        return _domain_error_response(error)
 
 
 @router.get("/recommendations/{rec_id}/pull-requests", response_model=List[PullRequestRecord])
@@ -149,36 +42,6 @@ async def list_recommendation_pull_requests(
     if record is None:
         raise HTTPException(status_code=404, detail=f"Recommendation {rec_id} not found.")
     return _externalize_pull_request_urls(await pr_repo.get_pull_requests_for_recommendation(rec_id))
-
-
-@legacy_router.get("/recommendations/{rec_id}/apply-pr/eligibility", deprecated=True)
-async def recommendation_pr_eligibility(
-    rec_id: int,
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-):
-    """Check whether the GitOps plan service can prepare this recommendation."""
-    if service is None:
-        return {"eligible": False, "reason": "The GitOps plan service is not configured."}
-    try:
-        plan = await service.preview_plan([rec_id])
-    except AutomationPlanError as error:
-        result: dict[str, object] = {"eligible": False, "reason": error.detail, "code": error.code.value}
-        if error.policy_result is not None:
-            result["policy_result"] = error.policy_result
-        return result
-    if plan.status not in {PlanStatus.DRAFT, PlanStatus.VALIDATED}:
-        return {"eligible": False, "reason": f"An automation plan is already {plan.status.value}."}
-    if await pr_repo.get_open_pull_requests(rec_id):
-        return {"eligible": False, "reason": "A pull request is already open for this recommendation."}
-    return {
-        "eligible": True,
-        "plan_id": plan.plan_id,
-        "repo": public_repository_url(plan.source.repo_url),
-        "path": plan.source.path,
-        "branch": plan.source.ref,
-        "policy_result": plan.policy_result,
-    }
 
 
 @router.get("/automation/pull-requests", response_model=List[PullRequestRecord])
@@ -479,110 +342,3 @@ def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[Pul
             )
         )
     return externalized
-
-
-@legacy_router.get("/automation/operations/{operation_id}", deprecated=True)
-async def get_automation_operation(
-    operation_id: str,
-    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
-    pr_repo: PullRequestRepository = Depends(get_pull_request_repository),
-):
-    """Expose plan-operation state through the legacy operation endpoint."""
-    if service is None:
-        return _service_unavailable()
-    operation = await service.read_operation(operation_id)
-    if operation is None:
-        raise HTTPException(status_code=404, detail=f"Automation operation {operation_id} not found.")
-    plan = await service.read_plan(operation.plan_id)
-    if plan is None:
-        raise HTTPException(status_code=404, detail=f"Automation plan {operation.plan_id} not found.")
-    pull_request = await pr_repo.get_pull_request_by_plan_id(operation.plan_id)
-    return _operation_response(operation, plan, pull_request)
-
-
-router.include_router(legacy_router)
-
-
-def _compatibility_preview(plan: Plan) -> ApplyPrResponse:
-    if plan.file_plan is None:
-        raise AutomationPlanError(
-            AutomationErrorCode.RENDER_VALIDATION_FAILED,
-            "the GitOps plan has no validated file diff",
-        )
-    return ApplyPrResponse(
-        status="dry_run",
-        policy_result=plan.policy_result,
-        provider=plan.source.provider_id,
-        repo=public_repository_url(plan.source.repo_url),
-        base_branch=plan.source.ref,
-        path=plan.source.path,
-        patch=plan.action.model_dump(mode="json"),
-        diff=plan.file_plan.diff,
-        message="Validated GitOps plan preview; no Git changes were made.",
-    )
-
-
-def _compatibility_pull_request(plan: Plan, pull_request: PullRequestRecord) -> ApplyPrResponse:
-    pull_request = _externalize_pull_request_urls([pull_request])[0]
-    return _compatibility_preview(plan).model_copy(
-        update={
-            "status": "pr_open",
-            "head_branch": pull_request.head_branch,
-            "pr_url": pull_request.pr_url,
-            "message": "A pull request for this recommendation is already open.",
-            "pull_request": pull_request,
-        }
-    )
-
-
-def _compatibility_operation_response(
-    plan: Plan,
-    operation: Operation,
-    recommendation_id: int,
-    actor: str,
-) -> dict[str, object]:
-    return {
-        "status": operation.status.value,
-        "operation_id": operation.operation_id,
-        "plan_id": plan.plan_id,
-        "recommendation_id": recommendation_id,
-        "idempotency_key": operation.idempotency_key,
-        "fingerprint": plan.digest,
-        "actor": actor,
-        "policy_result": plan.policy_result,
-    }
-
-
-def _operation_response(
-    operation: Operation,
-    plan: Plan,
-    pull_request: PullRequestRecord | None,
-) -> dict[str, object]:
-    if pull_request is not None:
-        pull_request = _externalize_pull_request_urls([pull_request])[0]
-    return {
-        "id": operation.operation_id,
-        "operation_id": operation.operation_id,
-        "plan_id": operation.plan_id,
-        "recommendation_id": plan.recommendation_ids[0],
-        "recommendation_ids": plan.recommendation_ids,
-        "status": operation.status.value,
-        "idempotency_key": operation.idempotency_key,
-        "fingerprint": plan.digest,
-        "preview_digest": plan.digest,
-        "commit_digest": operation.commit_sha,
-        "attempts": operation.attempts,
-        "error": operation.last_error,
-        "result": {"plan_status": plan.status.value},
-        "pr_url": pull_request.pr_url if pull_request is not None else None,
-        "policy_result": plan.policy_result,
-    }
-
-
-def _service_unavailable(
-    detail: str = "Server-side automation plan service is not configured.",
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"code": "plan_service_unavailable", "detail": detail},
-    )

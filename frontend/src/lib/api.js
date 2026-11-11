@@ -526,15 +526,6 @@ export function getAutomationPlan(planId) {
 }
 
 /**
- * Read the execution state of one plan operation.
- * @param {string} operationId
- * @returns {Promise<Object>}
- */
-export function getAutomationOperation(operationId) {
-	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`);
-}
-
-/**
  * Approve a previously previewed plan using the digest returned by the API.
  * @param {string} planId
  * @param {string} digest

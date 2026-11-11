@@ -13,7 +13,6 @@
 		unignoreRecommendation,
 		createAutomationPlan,
 		getAutomationPlan,
-		getAutomationOperation,
 		approveAutomationPlan,
 		cancelAutomationPlan,
 		discardAutomationPlan,
@@ -737,20 +736,13 @@
 			planPollTimer = null;
 			planPolling = true;
 			try {
-				const response = preview.operationId
-					? await getAutomationOperation(preview.operationId)
-					: await getAutomationPlan(preview.planId);
+				// The plan carries its operation state (operation_id, operation_status), so one
+				// endpoint is polled; the legacy /automation/operations route was removed (F5).
+				const response = await getAutomationPlan(preview.planId);
 				if (generation !== planPollGeneration || prModal !== modal) return;
-				prPlan = preview.operationId
-					? {
-							...prPlan,
-							operation_id: response?.operation_id ?? preview.operationId,
-							operation_status: response?.status ?? prPlan?.operation_status,
-							status: response?.result?.plan_status ?? prPlan?.status
-						}
-					: response?.plan ?? response;
+				prPlan = response?.plan ?? response;
 				planPollingError = '';
-				if (String(response?.result?.plan_status ?? '').toLowerCase() === 'pr_open') {
+				if (planPresentation(prPlan).status === 'pr_open') {
 					await refreshOpenPullRequests();
 				}
 			} catch {

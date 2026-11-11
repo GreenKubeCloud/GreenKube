@@ -352,7 +352,6 @@ All recommendation API paths are under `/api/v1`.
 | `PATCH` | `/recommendations/{id}/apply` | Marks a recommendation as `applied`, stores actual CPU or memory values when supplied and freezes the verification baseline; only `active` or `pr_open` records can be applied (`409` otherwise). Optional `carbon_saved_co2e_grams` / `cost_saved` are *user-declared* annual savings: they must be finite and at most 10× the projection (`422` otherwise); negative values are accepted and flagged. They accrue with method `user_declared` and are never reported as measured. |
 | `PATCH` | `/recommendations/{id}/ignore` | Marks an `active`, `stale` or `expired` recommendation as `ignored` and stores the optional `reason`; `409` for an open PR or an applied change. |
 | `DELETE` | `/recommendations/{id}/ignore` | Restores an ignored recommendation to `active`; `409` for any other status. |
-| `POST` | `/recommendations/{id}/apply-pr` | **Deprecated** (Sunset 2027-01-29; use `/automation/plans`). Compatibility route to the validated GitOps plan path. `dry_run=true` returns the plan diff; a normal request approves and queues that plan. |
 | `GET` | `/recommendations/{id}/pull-requests` | Lists the pull-request attempts and their status for a recommendation. |
 | `GET` | `/automation/status` | Reports secret-free automation readiness, worker heartbeat, queue depth, discovery freshness, renderer configuration, and provider capability/preflight state. |
 

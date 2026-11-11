@@ -26,7 +26,6 @@ vi.mock('$lib/api.js', () => ({
 	unignoreRecommendation: vi.fn(),
 	createAutomationPlan: vi.fn(),
 	getAutomationPlan: vi.fn(),
-	getAutomationOperation: vi.fn(),
 	approveAutomationPlan: vi.fn(),
 	cancelAutomationPlan: vi.fn(),
 	previewAutomationPlanRollback: vi.fn()
@@ -127,11 +126,6 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.getRecommendationSavings.mockResolvedValue({});
 		api.createAutomationPlan.mockRejectedValue(planPreviewUnavailable());
 		api.getAutomationPlan.mockResolvedValue(validatedPlan);
-		api.getAutomationOperation.mockResolvedValue({
-			operation_id: 'operation-1',
-			status: 'running',
-			result: { plan_status: 'applying' }
-		});
 		api.approveAutomationPlan.mockResolvedValue({ status: 'queued', operation_id: 'operation-1' });
 		api.cancelAutomationPlan.mockResolvedValue({ ...validatedPlan, status: 'stale' });
 		api.previewAutomationPlanRollback.mockResolvedValue({
@@ -456,10 +450,11 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			operation_id: 'operation-1',
 			operation_status: 'queued'
 		});
-		api.getAutomationOperation.mockResolvedValueOnce({
+		api.getAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			status: 'applying',
 			operation_id: 'operation-1',
-			status: 'running',
-			result: { plan_status: 'applying' }
+			operation_status: 'running'
 		});
 
 		render(RecommendationsPage);
@@ -476,7 +471,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 				await vi.advanceTimersByTimeAsync(3000);
 			});
 
-			expect(api.getAutomationOperation).toHaveBeenCalledWith('operation-1');
+			expect(api.getAutomationPlan).toHaveBeenCalledWith('pln-101');
 			expect(screen.getByText(/Operation status: Running/)).toBeInTheDocument();
 			expect(screen.getByText('Plan lifecycle: Creating the pull request')).toBeInTheDocument();
 		} finally {
@@ -495,10 +490,11 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			operation_id: 'operation-1',
 			operation_status: 'queued'
 		});
-		api.getAutomationOperation.mockResolvedValueOnce({
+		api.getAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			status: 'pr_open',
 			operation_id: 'operation-1',
-			status: 'succeeded',
-			result: { plan_status: 'pr_open' }
+			operation_status: 'succeeded'
 		});
 		api.getOpenPullRequests
 			.mockResolvedValueOnce([])
@@ -534,12 +530,13 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation([101, 102])]);
 		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
 		api.approveAutomationPlan.mockResolvedValueOnce(approvedPlan);
-		api.getAutomationOperation
+		api.getAutomationPlan
 			.mockRejectedValueOnce(new Error('worker credential hidden-secret'))
 			.mockResolvedValueOnce({
+				...validatedPlan,
+				status: 'applying',
 				operation_id: 'operation-1',
-				status: 'running',
-				result: { plan_status: 'applying' }
+				operation_status: 'running'
 			});
 
 		render(RecommendationsPage);
@@ -564,7 +561,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			expect(
 				screen.queryByText('Operation status could not be refreshed; automatic polling will retry.')
 			).not.toBeInTheDocument();
-			expect(api.getAutomationOperation).toHaveBeenCalledTimes(2);
+			expect(api.getAutomationPlan).toHaveBeenCalledTimes(2);
 		} finally {
 			await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 			vi.clearAllTimers();

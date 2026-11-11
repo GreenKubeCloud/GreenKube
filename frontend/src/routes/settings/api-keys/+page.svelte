@@ -10,6 +10,7 @@
 		{ value: 'read', label: 'read', help: 'Read every API resource.' },
 		{ value: 'write', label: 'write', help: 'Scans, ignore/restore, mark applied, plan previews.' },
 		{ value: 'approve', label: 'approve', help: 'Approve plans (opens pull requests).' },
+		{ value: 'plans:deliver', label: 'plans:deliver', help: 'CI delivery: report the PR opened for an approved plan.' },
 		{ value: 'signals:write', label: 'signals:write', help: 'Push recommendation signals.' },
 		{ value: 'metrics:read', label: 'metrics:read', help: 'Prometheus scrape of /prometheus/metrics only.' },
 		{ value: 'admin', label: 'admin', help: 'Everything, including API keys.' }

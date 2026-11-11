@@ -14,9 +14,8 @@ from greenkube.auth.tokens import csrf_token_for, new_api_key, parse_api_key
         ("POST", "/api/v1/optimization/runs", "write"),
         ("PATCH", "/api/v1/recommendations/1/ignore", "write"),
         ("POST", "/api/v1/automation/plans/abc/approve", "approve"),
-        ("POST", "/api/v1/recommendations/7/apply-pr", "approve"),
-        ("GET", "/api/v1/recommendations/7/apply-pr/eligibility", "read"),
-        ("POST", "/api/v1/recommendations/7/apply-pr/eligibility", "write"),
+        ("POST", "/api/v1/automation/plans/abc/delivery", "plans:deliver"),
+        ("GET", "/api/v1/automation/plans/abc/patch", "read"),
         ("POST", "/api/v1/signals", "signals:write"),
         ("GET", "/api/v1/auth/api-keys", "admin"),
         ("POST", "/api/v1/auth/api-keys", "admin"),
@@ -36,6 +35,7 @@ def test_roles_and_admin_scope():
 
     assert viewer.has_scope("read") and not viewer.has_scope("write")
     assert operator.has_scope("approve") and not operator.has_scope("admin")
+    assert operator.has_scope("plans:deliver") and not viewer.has_scope("plans:deliver")
     assert key.has_scope("signals:write")
     assert viewer.actor == "user:v" and key.actor == "apikey:k" and ANONYMOUS.actor == "anonymous"
 
