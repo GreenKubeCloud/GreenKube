@@ -413,6 +413,30 @@ class TestContainerBoundedByItsPod:
         assert proposal is not None and proposal.evidence == []
         assert proposal.proposed == math.ceil(590 * 1.2) * MIB
 
+    def test_sub_mebibyte_noise_does_not_block_a_decrease(self):
+        # Recorded on Minikube (e2e sample oversized-web, 384Mi requested): the Metrics API
+        # container working set (p99 6.7MiB) sits 0.9MiB above the pod cgroup's (5.8MiB),
+        # 15% in relative terms, so the decrease was dropped as contradicting data.
+        container = _summary(
+            memory_request=384 * MIB,
+            memory=_stats(avg=6773418, p95=7041024, p99=7041024, peak=7041024),
+            cpu_request=10,
+            cpu=_stats(avg=0, p95=0, p99=0, peak=0),
+        )
+        pod = _summary(
+            container_name="",
+            memory_request=384 * MIB,
+            memory=_stats(avg=6513384, p95=6127616, p99=6127616, peak=7335936),
+        )
+        proposal = memory_proposal(_config(RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS=1), container, pod)
+        assert proposal is not None and proposal.direction == "decrease"
+        assert proposal.evidence == []
+        # A few millicores of difference are noise too.
+        cpu_container = _summary(cpu_request=400, cpu=_stats(avg=3, p95=4, p99=4, peak=5))
+        cpu_pod = _summary(container_name="", cpu=_stats(avg=1, p95=1, p99=1, peak=2))
+        cpu = cpu_proposal(_config(RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS=1), cpu_container, cpu_pod)
+        assert cpu is not None and cpu.direction == "decrease"
+
     def test_bounding_needs_pod_samples(self):
         stats = _stats(900 * MIB, 1000 * MIB, 1050 * MIB, 1072 * MIB)
         empty = UsageStats(sample_count=0, avg=0, p50=0, p90=0, p95=0, p99=0, max=0)

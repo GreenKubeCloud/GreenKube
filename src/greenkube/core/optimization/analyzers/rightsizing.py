@@ -61,6 +61,11 @@ DEFAULT_MAX_INCREASE_FACTOR = 2.0
 POD_LEVEL_USAGE_ONLY = "pod_level_usage_only"
 #: A container statistic may exceed its pod's by this share (different sample sets) before it is bounded.
 POD_CONSISTENCY_TOLERANCE = 0.05
+#: Absolute slack on top of the relative tolerance: the Metrics API and cAdvisor sample at
+#: different instants, so a small container can sit a mebibyte (or a few millicores) above
+#: its pod without contradicting it (e2e: 6.7MiB container in a 5.8MiB pod blocked a
+#: 384Mi -> 16Mi decrease).
+POD_CONSISTENCY_SLACK = {"cpu": 5.0, "memory": 4.0 * MIB}
 #: Evidence flag of an increase sized from the pod's statistics because the container's contradicted them.
 CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 
@@ -166,20 +171,21 @@ def _threshold(config: "Config") -> float:
 
 
 def bounded_by_pod(
-    stats: Optional["UsageStats"], pod_stats: Optional["UsageStats"]
+    stats: Optional["UsageStats"], pod_stats: Optional["UsageStats"], slack: float = 0.0
 ) -> Tuple[Optional["UsageStats"], bool]:
     """A container's increase statistics, bounded by its pod-level statistics.
 
     A container runs inside its pod's cgroup: per replica, its usage can never
     exceed the pod's. When the container's p99 or maximum is above the pod's by
-    more than :data:`POD_CONSISTENCY_TOLERANCE`, the container data contradicts
-    the pod cgroup (e.g. a Metrics API working set that counts page cache), so
-    every statistic is bounded by the pod's. Returns ``(stats, bounded)``.
+    more than :data:`POD_CONSISTENCY_TOLERANCE` plus ``slack`` (absolute, in the
+    statistic's unit), the container data contradicts the pod cgroup (e.g. a
+    Metrics API working set that counts page cache), so every statistic is
+    bounded by the pod's. Returns ``(stats, bounded)``.
     """
     if stats is None or pod_stats is None or pod_stats.sample_count <= 0:
         return stats, False
     tolerance = 1 + POD_CONSISTENCY_TOLERANCE
-    if stats.p99 <= pod_stats.p99 * tolerance and stats.max <= pod_stats.max * tolerance:
+    if stats.p99 <= pod_stats.p99 * tolerance + slack and stats.max <= pod_stats.max * tolerance + slack:
         return stats, False
     bounded = replace(
         stats,
@@ -200,7 +206,7 @@ def _increase_stats(
     if not summary.container_name or pod_summary is None or pod_summary is summary:
         return stats, []
     pod_stats = pod_summary.cpu if resource == "cpu" else pod_summary.memory
-    bounded, was_bounded = bounded_by_pod(stats, pod_stats)
+    bounded, was_bounded = bounded_by_pod(stats, pod_stats, POD_CONSISTENCY_SLACK[resource])
     return bounded, [CONTAINER_USAGE_EXCEEDS_POD] if was_bounded else []
 
 
