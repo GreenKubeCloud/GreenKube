@@ -28,6 +28,7 @@ from greenkube.automation.actions.base import (
     AppliedVerdict,
     InverseConflictError,
     InverseUnsupportedError,
+    PrFieldChange,
     PrSection,
     RiskClass,
     Support,
@@ -85,6 +86,7 @@ class ContainerResourcesSpec(ActionKindSpec):
     risk_class: ClassVar[RiskClass] = "low"
     measurement_strategy: ClassVar[str] = "container_resources"
     pr_label: ClassVar[str] = "rightsizing"
+    pr_subject: ClassVar[str] = "container"
     title: ClassVar[str] = "per-container rightsizing"
     description: ClassVar[str] = "container resources"
 
@@ -280,6 +282,7 @@ class ContainerResourcesSpec(ActionKindSpec):
     def pr_section(self, operations: Sequence[TypedOperation], recommendation: Any = None) -> PrSection:
         del recommendation
         lines: list[str] = []
+        changes: list[PrFieldChange] = []
         for operation in container_operations(operations):
             parts = [
                 f"{section} {name}={value}"
@@ -290,7 +293,16 @@ class ContainerResourcesSpec(ActionKindSpec):
                 for name, value in values.items()
             ]
             lines.append(f"{operation.container}: {', '.join(parts)}")
-        return PrSection(label=self.pr_label, title="Container resources", lines=tuple(lines))
+            # Requests then limits, each sorted by resource name: the order of the PR's Changes table.
+            changes.extend(
+                PrFieldChange(subject=operation.container, field=f"{section}.{name}", proposed=value)
+                for section, values in (
+                    ("requests", operation.resources.requests),
+                    ("limits", operation.resources.limits),
+                )
+                for name, value in sorted(values.items())
+            )
+        return PrSection(label=self.pr_label, title="Container resources", lines=tuple(lines), changes=tuple(changes))
 
 
 CONTAINER_RESOURCES = ContainerResourcesSpec()

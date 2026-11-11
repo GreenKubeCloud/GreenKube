@@ -7,12 +7,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from greenkube.automation.actions import operation_kind_of
 from greenkube.automation.pr_content.template import DEFAULT_TEMPLATE, load_template
 from greenkube.gitops.contracts import (
     AddHorizontalPodAutoscaler,
     DeleteResource,
     Plan,
-    SetContainerResources,
 )
 from greenkube.models.metrics import RecommendationRecord
 from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
@@ -175,21 +175,21 @@ def resource_changes(context: PullRequestContext) -> list[ResourceChange]:
     plan = context.plan
     changes: list[ResourceChange] = []
     for operation in plan.action.operations:
-        if not isinstance(operation, SetContainerResources):
+        # Each action kind lists the fields it sets (H0): no per-operation-type branching here.
+        spec = operation_kind_of(operation)
+        if spec is None:
             continue
-        for kind, values in (("requests", operation.resources.requests), ("limits", operation.resources.limits)):
-            for resource, quantity in sorted(values.items()):
-                proposed = _parse_quantity(resource, quantity)
-                current = _current_value(context, operation.container, kind, resource)
-                change = ResourceChange(
-                    container=operation.container,
-                    field=f"{kind}.{resource}",
-                    proposed_text=quantity,
-                    current=current,
-                    proposed=proposed,
-                )
-                if not change.unchanged:
-                    changes.append(change)
+        for field_change in spec.pr_section([operation]).changes:
+            kind, _, resource = field_change.field.partition(".")
+            change = ResourceChange(
+                container=field_change.subject,
+                field=field_change.field,
+                proposed_text=field_change.proposed,
+                current=_current_value(context, field_change.subject, kind, resource),
+                proposed=_parse_quantity(resource, field_change.proposed),
+            )
+            if not change.unchanged:
+                changes.append(change)
     return changes
 
 

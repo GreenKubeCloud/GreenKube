@@ -91,12 +91,26 @@ class AppliedVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class PrFieldChange:
+    """One field a kind's operations set, as the pull request shows it (``requests.cpu`` -> ``250m``)."""
+
+    #: Sub-resource the field belongs to (a container name), as in :meth:`ActionKindSpec.subjects`.
+    subject: str
+    #: Dotted field name (``requests.cpu``, ``limits.memory``).
+    field: str
+    #: The value the operation writes, as written to the manifest.
+    proposed: str
+
+
+@dataclass(frozen=True, slots=True)
 class PrSection:
-    """What a kind contributes to the pull request: label, title and change lines."""
+    """What a kind contributes to the pull request: label, title, change lines and structured changes."""
 
     label: str
     title: str
     lines: tuple[str, ...] = field(default_factory=tuple)
+    #: The fields the operations set, in the order the pull request lists them.
+    changes: tuple[PrFieldChange, ...] = field(default_factory=tuple)
 
 
 class ActionKindSpec:
@@ -113,6 +127,8 @@ class ActionKindSpec:
     measurement_strategy: ClassVar[str] = "none"
     #: Pull-request label (``pr_content`` category) and the noun used in validation messages.
     pr_label: ClassVar[str] = "change"
+    #: Noun of the kind's sub-resources in pull-request text ("container").
+    pr_subject: ClassVar[str] = "resource"
     #: Short human name of the kind ("per-container rightsizing").
     title: ClassVar[str] = "change"
     #: What the kind changes, used in validation messages ("container resources").
