@@ -340,6 +340,10 @@ class Config(BaseSettings):
     RECOMMENDATION_KARPENTER_ENABLED: bool = True
     # Source precedence for capability arbitration, highest priority first.
     RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
+    # How the proposals of several sources on one target are combined (roadmap
+    # E6): safest (least aggressive), median, weighted (track-record weighted
+    # median) or priority (RECOMMENDATION_SOURCE_PRIORITY wins).
+    RECOMMENDATION_CONSENSUS_POLICY: str = "safest"
     # Source SDK (roadmap E5, docs/sources.md). Load third-party sources
     # registered under the `greenkube.sources` Python entry points.
     SOURCES_PLUGINS_ENABLED: bool = True
@@ -569,6 +573,13 @@ class Config(BaseSettings):
         if normalized not in {"keep", "remove_cpu", "memory_equals_request"}:
             raise ValueError("RECOMMENDATION_LIMITS_POLICY must be keep, remove_cpu or memory_equals_request")
         return normalized
+
+    @field_validator("RECOMMENDATION_CONSENSUS_POLICY", mode="after")
+    @classmethod
+    def _validate_recommendation_consensus_policy(cls, value: str) -> str:
+        from greenkube.signals.consensus import parse_policy
+
+        return parse_policy(value).value
 
     @field_validator("RECOMMENDATION_MAX_METRIC_ROWS", mode="after")
     @classmethod

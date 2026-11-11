@@ -244,6 +244,20 @@ tests:
           path: data.RIGHTSIZING_WARMUP_MINUTES
           value: "10"
 
+  - it: should default the consensus policy to safest
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CONSENSUS_POLICY
+          value: "safest"
+
+  - it: should render a configured consensus policy
+    set:
+      config.recommendations.consensusPolicy: median
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CONSENSUS_POLICY
+          value: "median"
+
   - it: should let the increase cap and the warm-up be configured, including a disabled warm-up
     set:
       config.recommendations.rightsizingMaxIncreaseFactor: 3
