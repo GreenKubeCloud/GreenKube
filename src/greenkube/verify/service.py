@@ -43,7 +43,7 @@ from greenkube.models.verification import HealthGateResult, HealthGateStatus, Me
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate
-from greenkube.verify.confounders import ConfounderDetector, confidence_score
+from greenkube.verify.confounders import ConfounderDetector, PoolContext, PoolNode, PoolSample, confidence_score
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     Allocation,
@@ -82,6 +82,12 @@ LOAD_DRIVER_RETRY = timedelta(hours=24)
 #: Key of the snapshot's ``collector_versions`` (and of the measurement's
 #: ``counterfactual_params``) listing the load drivers that could not be read.
 UNAVAILABLE_DRIVERS_KEY = "load_drivers_unavailable"
+#: Node pools are sampled from the node snapshots this often over each window (pool confounders, C4).
+POOL_SAMPLE_INTERVAL = timedelta(hours=6)
+#: Pod rows read after another change's rollout to see which nodes its workload ran on.
+POOL_NEIGHBOUR_LOOKUP = timedelta(hours=2)
+#: At most this many other changes in the measurement are checked for pool membership.
+POOL_MAX_OTHER_CHANGES = 50
 
 
 class MeasurementReadError(RuntimeError):
@@ -165,6 +171,7 @@ class ChangeMeasurementService:
         config: Any = None,
         load_reader: Optional[PrometheusRangeReader] = None,
         pull_request_repo: Any = None,
+        node_repo: Any = None,
         clock: Optional[Callable[[], datetime]] = None,
     ):
         from greenkube.core.config import get_config
@@ -187,6 +194,8 @@ class ChangeMeasurementService:
         self.resolver = LoadDriverResolver(load_reader, min_coverage=self.settings.min_coverage)
         self.detector = ConfounderDetector()
         self.pull_request_repo = pull_request_repo
+        #: Node snapshots (pool confounders, C4); without it the pool checks are skipped.
+        self.node_repo = node_repo
         self._clock = clock
 
     # ------------------------------------------------------------------
@@ -234,6 +243,85 @@ class ChangeMeasurementService:
         except Exception as exc:
             raise MeasurementReadError(f"metrics of {'/'.join(target.key)} could not be read: {exc}") from exc
         return [row for row in rows or [] if target_key(row) == target.key]
+
+    async def _pool_samples(self, window: TimeWindow) -> List[Tuple[datetime, List[Any]]]:
+        """Active nodes every :data:`POOL_SAMPLE_INTERVAL` over ``window`` (node snapshots, SCD2)."""
+        samples: List[Tuple[datetime, List[Any]]] = []
+        moment = ensure_utc(window.start)
+        end = ensure_utc(window.end)
+        while moment < end:
+            try:
+                nodes = await self.node_repo.get_latest_snapshots_before(moment)
+            except Exception as exc:
+                raise MeasurementReadError(f"node snapshots at {moment.isoformat()} could not be read: {exc}") from exc
+            samples.append((moment, list(nodes or [])))
+            moment += POOL_SAMPLE_INTERVAL
+        return samples
+
+    async def _pool_context(
+        self, change: ChangeEvent, plan: WindowPlan, post_rows: Sequence[Any]
+    ) -> Optional[PoolContext]:
+        """The workload's node pools over both windows and the changes that landed in them (C4).
+
+        The pools are those of the nodes the workload's pods ran on during the
+        post-window; nodes without a pool label are not grouped (no pool check).
+        A failed read raises :class:`MeasurementReadError`, so the decision waits.
+        """
+        workload_nodes = {getattr(row, "node", None) for row in post_rows} - {None}
+        if self.node_repo is None or not workload_nodes:
+            return None
+        pre = await self._pool_samples(plan.pre)
+        post = await self._pool_samples(plan.post)
+        pools = sorted(
+            {
+                node.node_pool
+                for _, nodes in pre + post
+                for node in nodes
+                if node.name in workload_nodes and node.node_pool
+            }
+        )
+        if not pools:
+            return None
+
+        def in_pools(samples: List[Tuple[datetime, List[Any]]]) -> Tuple[PoolSample, ...]:
+            # A sample without any node of the pools predates the node snapshots: it is no data.
+            built = (
+                PoolSample(
+                    at=moment,
+                    nodes=tuple(
+                        PoolNode(
+                            name=node.name,
+                            pool=node.node_pool,
+                            instance_type=node.instance_type,
+                            cpu_cores=float(node.cpu_capacity_cores or 0.0),
+                        )
+                        for node in nodes
+                        if node.node_pool in pools
+                    ),
+                )
+                for moment, nodes in samples
+            )
+            return tuple(sample for sample in built if sample.nodes)
+
+        pre_samples, post_samples = in_pools(pre), in_pools(post)
+        pool_nodes = {node.name for sample in pre_samples + post_samples for node in sample.nodes}
+        neighbours: List[ChangeEvent] = []
+        try:
+            landed = await self.changes.changes_landed_between(
+                ensure_utc(change.baseline_window_end), ensure_utc(plan.post.end), limit=POOL_MAX_OTHER_CHANGES
+            )
+        except Exception as exc:
+            raise MeasurementReadError(f"changes landed during the measurement could not be read: {exc}") from exc
+        for other in landed:
+            if other.change_id == change.change_id or other.target.key == change.target.key:
+                continue
+            completed = ensure_utc(other.rollout_completed_at)
+            rows = await self._read_workload(
+                other.target, TimeWindow(start=completed, end=completed + POOL_NEIGHBOUR_LOOKUP)
+            )
+            if {getattr(row, "node", None) for row in rows} & pool_nodes:
+                neighbours.append(other)
+        return PoolContext(pools=tuple(pools), pre=pre_samples, post=post_samples, other_changes=tuple(neighbours))
 
     async def _collect_load(
         self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[Any], *, retry_until: datetime, now: datetime
@@ -822,6 +910,7 @@ class ChangeMeasurementService:
         load = self.resolver.resolve(change, plan.pre, plan.post, pre_load, post_load)
         others = [item for item in await self.changes.changes_for_workload(*change.target.key)]
         observations = await self.changes.spec_observations(*change.target.key, since=plan.pre.start)
+        pool = await self._pool_context(change, plan, post_rows)
         confounders = self.detector.detect(
             change,
             plan,
@@ -830,6 +919,7 @@ class ChangeMeasurementService:
             pre=snapshot.hours,
             post=post_buckets,
             load=load,
+            pool=pool,
         )
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
         projections = {

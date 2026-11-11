@@ -333,6 +333,8 @@ async def run_recommendation_lifecycle() -> None:
             measurement_repo=get_savings_measurement_repository(),
         )
         # Change measurement (C1-C5): the detector records changes, run_due measures them.
+        from ..core.factory import get_node_repository as _node_repo
+
         changes = ChangeMeasurementService(
             lifecycle,
             combined_repo,
@@ -340,6 +342,7 @@ async def run_recommendation_lifecycle() -> None:
             verifier=verifier,
             load_reader=load_reader,
             pull_request_repo=_pr_repo(),
+            node_repo=_node_repo(),
         )
         try:
             detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo(), change_recorder=changes)

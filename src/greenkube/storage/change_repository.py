@@ -329,6 +329,15 @@ class ChangeRepository:
         )
         return await self._changes(rows)
 
+    async def changes_landed_between(self, start: datetime, end: datetime, *, limit: int = 200) -> List[ChangeEvent]:
+        """Changes whose rollout completed in ``(start, end)``, oldest first (pool confounders, C4)."""
+        rows = await self._select(
+            "SELECT * FROM change_events WHERE rollout_completed_at > ? AND rollout_completed_at < ? "
+            "ORDER BY rollout_completed_at, change_id LIMIT ?",
+            [self._ts(start), self._ts(end), int(limit)],
+        )
+        return await self._changes(rows)
+
     async def change_ids_for_recommendations(self, recommendation_ids: Sequence[int]) -> Dict[int, str]:
         if not recommendation_ids:
             return {}
